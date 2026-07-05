@@ -77,10 +77,12 @@ function liveRoomRow(id: string, body: string, timestamp: string): LiveRoomMessa
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe("useChannelMamPaging.loadMessages — bootstrap race (#675)", () => {
@@ -209,6 +211,179 @@ describe("useChannelMamPaging.loadMessages — bootstrap race (#675)", () => {
     expect(matches).toHaveLength(1);
     expect(messages.value).toHaveLength(2);
     expect(matches[0]!.body).toBe("live during bootstrap");
+  });
+});
+
+describe("bootstrap failure keeps live arrivals (#675 review)", () => {
+  test("a failed MAM query does not wipe a live message that arrived during the await", async () => {
+    const mamPage = deferred<never>();
+    const xmppClient = {
+      queryMamPage: mock(async () => mamPage.promise),
+      fetchRoomPins: mock(async () => []),
+    } as unknown as BrowserXmppClient;
+
+    const messages = ref<TimelineMessage[]>([]);
+    const pendingEchoClientIds = new Set<string>();
+    const paging = useChannelMamPaging({
+      session: ref(session),
+      xmppClient: ref(xmppClient),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("space_room"),
+      currentChannel: ref(channel),
+      messages,
+      firstUnseenId: ref<string | null>(null),
+      timelineEl: ref(null),
+      scrollDirection: ref("bottom"),
+      pinnedEdgeScroller: { cancelSettleLock: () => {} },
+      actionError: ref(""),
+      clearActionError: () => {},
+      normalizeError: (e) => String(e),
+      pendingEchoClientIds,
+      appendQueuedMessages: (timeline) => timeline,
+      roomJidForChannel: () => "space_room@muc.example.com",
+      scrollToPinnedEdgeAndPin: async () => true,
+      persistLastSeen: () => {},
+    });
+
+    const loadPromise = paging.loadMessages("space", "space_room");
+    await Promise.resolve();
+
+    const live = mapLiveRoomMessageToTimeline(
+      session,
+      liveRoomRow("live-1", "live during bootstrap", "2026-07-01T10:05:00.000Z"),
+    );
+    messages.value = insertLiveMessage(messages.value, live, pendingEchoClientIds).messages;
+
+    mamPage.reject(new Error("mam unavailable"));
+    await expect(loadPromise).resolves.toBe("failed");
+
+    expect(messages.value.some((m) => m.id === "live-1")).toBe(true);
+  });
+});
+
+describe("bootstrap merge keeps the unread divider anchored (#675 review)", () => {
+  test("live arrivals during the load do not shift the divider past unread history", async () => {
+    // unreadAtLoad was counted before the load; a foreign live message
+    // arriving during the await extends the timeline tail and must be
+    // counted as unread too — otherwise the divider lands K rows too
+    // new and genuinely-unread history renders as read.
+    const mamRows = [
+      archivedRoomRow("arch-1", "read earlier", "2026-07-01T09:00:00.000Z"),
+      archivedRoomRow("arch-2", "unread at load", "2026-07-01T09:30:00.000Z"),
+    ];
+    const mamPage = deferred<{ messages: LiveRoomMessage[]; firstArchiveId: string; complete: boolean }>();
+
+    const xmppClient = {
+      queryMamPage: mock(async () => mamPage.promise),
+      fetchRoomPins: mock(async () => []),
+    } as unknown as BrowserXmppClient;
+
+    const messages = ref<TimelineMessage[]>([]);
+    const firstUnseenId = ref<string | null>(null);
+    const pendingEchoClientIds = new Set<string>();
+    const paging = useChannelMamPaging({
+      session: ref(session),
+      xmppClient: ref(xmppClient),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("space_room"),
+      currentChannel: ref(channel),
+      messages,
+      firstUnseenId,
+      timelineEl: ref(null),
+      scrollDirection: ref("bottom"),
+      pinnedEdgeScroller: { cancelSettleLock: () => {} },
+      actionError: ref(""),
+      clearActionError: () => {},
+      normalizeError: (e) => String(e),
+      pendingEchoClientIds,
+      appendQueuedMessages: (timeline) => timeline,
+      roomJidForChannel: () => "space_room@muc.example.com",
+      scrollToPinnedEdgeAndPin: async () => true,
+      persistLastSeen: () => {},
+    });
+
+    const loadPromise = paging.loadMessages("space", "space_room", 1);
+    await Promise.resolve();
+
+    const live = mapLiveRoomMessageToTimeline(
+      session,
+      liveRoomRow("live-1", "live during bootstrap", "2026-07-01T10:05:00.000Z"),
+    );
+    messages.value = insertLiveMessage(messages.value, live, pendingEchoClientIds).messages;
+
+    mamPage.resolve({ messages: mamRows, firstArchiveId: "arch-1", complete: true });
+    await expect(loadPromise).resolves.toBe("loaded");
+
+    // arch-2 was the one unread message at load time; the live arrival
+    // is also unread — the divider anchors at arch-2, not at live-1.
+    expect(firstUnseenId.value).toBe("arch-2");
+  });
+});
+
+describe("bootstrap merge keeps archive-applied corrections (#675 review)", () => {
+  test("re-inserting the live original does not clobber a corrected body (XEP-0308)", async () => {
+    // The MAM page contains the original AND its correction — the built
+    // timeline row carries the corrected body. The live copy of the
+    // (uncorrected) original merged during the await must not overwrite
+    // it.
+    const original = archivedRoomRow("live-1", "original body", "2026-07-01T10:05:00.000Z");
+    const correction = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "mam-corr-1",
+      stanza_id: "corr-1",
+      stanza_id_by: "space_room@muc.example.com",
+      body: "corrected body",
+      replaces_id: "live-1",
+      timestamp: "2026-07-01T10:05:30.000Z",
+    })! as LiveRoomMessage;
+    const mamPage = deferred<{ messages: LiveRoomMessage[]; firstArchiveId: string; complete: boolean }>();
+
+    const xmppClient = {
+      queryMamPage: mock(async () => mamPage.promise),
+      fetchRoomPins: mock(async () => []),
+    } as unknown as BrowserXmppClient;
+
+    const messages = ref<TimelineMessage[]>([]);
+    const pendingEchoClientIds = new Set<string>();
+    const paging = useChannelMamPaging({
+      session: ref(session),
+      xmppClient: ref(xmppClient),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("space_room"),
+      currentChannel: ref(channel),
+      messages,
+      firstUnseenId: ref<string | null>(null),
+      timelineEl: ref(null),
+      scrollDirection: ref("bottom"),
+      pinnedEdgeScroller: { cancelSettleLock: () => {} },
+      actionError: ref(""),
+      clearActionError: () => {},
+      normalizeError: (e) => String(e),
+      pendingEchoClientIds,
+      appendQueuedMessages: (timeline) => timeline,
+      roomJidForChannel: () => "space_room@muc.example.com",
+      scrollToPinnedEdgeAndPin: async () => true,
+      persistLastSeen: () => {},
+    });
+
+    const loadPromise = paging.loadMessages("space", "space_room");
+    await Promise.resolve();
+
+    const live = mapLiveRoomMessageToTimeline(
+      session,
+      liveRoomRow("live-1", "original body", "2026-07-01T10:05:00.000Z"),
+    );
+    messages.value = insertLiveMessage(messages.value, live, pendingEchoClientIds).messages;
+
+    mamPage.resolve({ messages: [original, correction], firstArchiveId: "mam-1", complete: true });
+    await expect(loadPromise).resolves.toBe("loaded");
+
+    const row = messages.value.find(
+      (m) => m.id === "live-1" || (m.wireIds ?? []).includes("live-1"),
+    );
+    expect(row).toBeDefined();
+    expect(row!.body).toBe("corrected body");
+    expect(row!.isEdited).toBe(true);
   });
 });
 

@@ -51,6 +51,31 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
   if (!Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
     delete updated.linkPreviews;
   }
+  // XEP-0308: a redelivered copy of the pre-correction original (SM
+  // replay, or the #675 bootstrap re-insert racing a MAM page that
+  // already applied the correction) must not roll the row's content
+  // back — the applied correction stays authoritative.
+  if (existing.isEdited && !incoming.isEdited) {
+    updated.body = existing.body;
+    updated.isEdited = true;
+    if (existing.markup) updated.markup = existing.markup;
+    else delete updated.markup;
+    if (existing.references) updated.references = existing.references;
+    else delete updated.references;
+    if (Object.prototype.hasOwnProperty.call(existing, "linkPreviews")) {
+      updated.linkPreviews = existing.linkPreviews;
+    } else {
+      delete updated.linkPreviews;
+    }
+    if (existing.extensionAnnotations) {
+      updated.extensionAnnotations = existing.extensionAnnotations;
+      if (existing.extensionBodyFallback) updated.extensionBodyFallback = true;
+      else delete updated.extensionBodyFallback;
+    } else {
+      delete updated.extensionAnnotations;
+      delete updated.extensionBodyFallback;
+    }
+  }
   if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
   else delete updated.wireIds;
   // #1182: the reconciled row is only still identity-less if both sides were.

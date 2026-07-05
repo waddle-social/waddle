@@ -209,9 +209,19 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         feedTimeline,
         getMdsDisplayedCandidates(mdsKey),
       );
+      // #675: unreadAtLoad was counted before the load; foreign live
+      // arrivals during the await extend the timeline tail and are
+      // unread too — without counting them the divider lands that many
+      // rows too new. When unreadAtLoad is 0 the mid-load arrival
+      // behaves like a post-load arrival (no divider).
+      const liveUnreadDuringLoad = liveDuringLoad.filter(
+        (m) => isFeedVisible(m) && !m.isSelf,
+      ).length;
+      const unreadForDivider =
+        unreadAtLoad > 0 ? unreadAtLoad + liveUnreadDuringLoad : 0;
       firstUnseenId.value = firstUnseenIdAfterDisplayedState(
         feedTimeline,
-        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadForDivider),
         displayed,
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
@@ -234,9 +244,10 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       return "loaded";
     } catch (e) {
       if (requestId !== messageRequestId) return "aborted";
-      const queuedOnly = appendQueuedMessages([], roomJid);
-      messages.value = queuedOnly;
-      actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
+      // #675: messages.value already holds the queued rows plus any
+      // live message merged during the failed await — keep them
+      // instead of resetting to queued-only.
+      actionError.value = messages.value.length > 0 ? "" : normalizeError(e);
       isLoadingMessages.value = false;
       return "failed";
     }

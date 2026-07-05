@@ -106,23 +106,30 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
   } = deps;
 
   // #754: the single bootstrap choreographer. Every per-session hydrate
-  // lives here and fires exactly once per *fresh* XMPP session — from the
-  // session-lifecycle handler only. A XEP-0198 resume is gap-free (SM
-  // replays the push stream), so resumed events re-fire nothing, and
-  // onConnectionReady no longer duplicates this set (appState turns
-  // "ready" on the HTTP session load, before XMPP even connects — the
-  // fresh lifecycle event of that first connection covers it).
-  function runSessionBootstrap(client: BrowserXmppClient) {
+  // lives here and fires exactly ONCE per session-ready — from the
+  // session-lifecycle handler only. onConnectionReady no longer
+  // duplicates this set (appState turns "ready" on the HTTP session
+  // load, before XMPP even connects — the lifecycle event of that first
+  // connection covers it).
+  //
+  // Resumed sessions re-hydrate too: XEP-0198 resume replays peer-routed
+  // stanzas, but the server fire-and-forgets inbox pushes to LIVE
+  // resources only — a detached session misses them (e.g. cross-device
+  // mark-read while detached), so the local unread map can be stale
+  // after any resume.
+  function runSessionBootstrap(client: BrowserXmppClient, lifecycle: "fresh" | "resumed") {
     void dmConversations.hydrateFromInbox();
     void channelUnread.hydrateFromInbox();
     void socialFeed.refresh();
     void stories.refresh();
     void communityEvents.refresh();
-    // XEP-0492 notification settings ride the same fresh-only cadence:
-    // a resume can't have missed a bookmark publish. Belt-and-braces
-    // .catch so an unhandled rejection can't propagate out of the
-    // lifecycle handler.
-    notifySettings.hydrate(client).catch(() => undefined);
+    // XEP-0492 notification settings hydrate on fresh only: bookmark
+    // publishes ride the PEP queue, which a resume genuinely preserves.
+    // Belt-and-braces .catch so an unhandled rejection can't propagate
+    // out of the lifecycle handler.
+    if (lifecycle === "fresh") {
+      notifySettings.hydrate(client).catch(() => undefined);
+    }
   }
 
   watch(xmppClient, (client) => {
@@ -198,14 +205,10 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       // client. Round-12 reviewer P1.
       if (!connectionStore.session) return;
       presence.onSessionReady(event, client);
-      // #754: a *fresh* session (resume failed — too much time elapsed,
-      // server restart, network blip past the resume window) means the
-      // push stream was lost and local unread/feed state is stale —
-      // re-hydrate once. A resume replays the missed push stanzas, so
-      // re-hydrating there is N wasted IQ round-trips per reconnect.
-      if (event.type === "fresh") {
-        runSessionBootstrap(client);
-      }
+      // #754: one bootstrap fire per session-ready, fresh or resumed —
+      // the choreographer replaces the old multi-subscriber fan-out
+      // that fired 4-6 copies of each IQ per reconnect.
+      runSessionBootstrap(client, event.type);
     });
   }, { immediate: true });
 

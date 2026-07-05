@@ -217,7 +217,14 @@ function makeHarness() {
 }
 
 describe("session bootstrap choreography (#754)", () => {
-  test("a resumed session-ready fires no bootstrap hydrates (XEP-0198 resume is gap-free)", async () => {
+  test("a resumed session-ready re-hydrates each surface exactly once (inbox pushes are not SM-replayed)", async () => {
+    // XEP-0198 resume replays peer-routed stanzas, but the server
+    // fire-and-forgets inbox pushes to live resources only — a detached
+    // session misses them (e.g. cross-device mark-read while detached),
+    // so a resume must still re-hydrate. The #754 fix is ONE fire per
+    // session-ready, not zero on resume. XEP-0492 notification settings
+    // stay fresh-only: bookmark publishes ride the PEP queue, which a
+    // resume genuinely preserves.
     const h = makeHarness();
     await nextTick();
 
@@ -225,11 +232,11 @@ describe("session bootstrap choreography (#754)", () => {
     await flushAsync();
 
     expect(h.counts()).toEqual({
-      dmInbox: 0,
-      channelInbox: 0,
-      socialFeed: 0,
-      stories: 0,
-      communityEvents: 0,
+      dmInbox: 1,
+      channelInbox: 1,
+      socialFeed: 1,
+      stories: 1,
+      communityEvents: 1,
       notifySettings: 0,
     });
     // Presence re-assertion is per-session-ready and must keep firing.

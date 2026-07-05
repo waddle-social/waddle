@@ -150,9 +150,16 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
         feedTimeline,
         getMdsDisplayedCandidates(mdsKey),
       );
+      // #675: count foreign live DMs that arrived during the await as
+      // unread too, mirroring the channel-side divider adjustment.
+      const liveUnreadDuringLoad = liveDuringLoad.filter(
+        (m) => isFeedVisible(m) && !m.isSelf,
+      ).length;
+      const unreadForDivider =
+        unreadAtLoad > 0 ? unreadAtLoad + liveUnreadDuringLoad : 0;
       firstUnseenId.value = firstUnseenIdAfterDisplayedState(
         feedTimeline,
-        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadForDivider),
         displayed,
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
@@ -168,10 +175,13 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     } catch {
       if (requestId !== messageRequestId) return "aborted";
       console.warn("Could not load DM conversation");
-      const queuedOnly = appendQueuedMessages([], peerJid);
-      messages.value = queuedOnly;
+      // #675: messages.value already holds the queued rows plus any
+      // live DM merged during the failed await — keep them instead of
+      // resetting to queued-only.
       loadErrorPeerJid.value = peerJid;
-      loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
+      loadErrorMessage.value = dmLoadErrorMessage(peerJid, {
+        queuedOnly: messages.value.length > 0,
+      });
       actionError.value = loadErrorMessage.value;
       isLoadingMessages.value = false;
       return "failed";
