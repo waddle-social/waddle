@@ -16,17 +16,20 @@
 //! lands with the Phase 3 ownership control plane; Phase 2's only control-plane
 //! traffic is this slot heartbeat.
 
+use super::NodeId;
 use crate::db::{Database, DatabaseError};
 use async_trait::async_trait;
 use std::time::Duration;
 
 /// Per-process leaseholder identity. `node_id`/`node_epoch` are freshly
 /// generated on every process start and never reused, so a restarted pod never
-/// looks like its former self holding a slot.
+/// looks like its former self holding a slot. Both are typed values
+/// (typed-payloads rule); serialization to TEXT happens only at the SQL
+/// parameter boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseIdentity {
-    pub node_id: String,
-    pub node_epoch: String,
+    pub node_id: NodeId,
+    pub node_epoch: uuid::Uuid,
 }
 
 /// A successfully leased keypair-pool slot (index into the enrolled pool).
@@ -126,10 +129,11 @@ impl PostgresKeypairSlotLease {
                    OR clustering_keypair_slots.expired
                    OR clustering_keypair_slots.heartbeat < now() - (? || ' milliseconds')::interval
                 "#,
+                // Storage boundary: typed identity serializes to TEXT here.
                 crate::db_params![
                     i64::from(slot_index),
-                    identity.node_id.clone(),
-                    identity.node_epoch.clone(),
+                    identity.node_id.as_str().to_string(),
+                    identity.node_epoch.to_string(),
                     lease_ttl.as_millis().to_string(),
                 ],
             )
@@ -170,7 +174,7 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
         // Scan slots, starting at an offset derived from this node's id so
         // concurrently-starting pods don't all contend on slot 0 first. The
         // CAS guarantees correctness regardless of scan order.
-        let start = (stable_offset(&identity.node_id) % pool_size) as u32;
+        let start = (stable_offset(identity.node_id.as_str()) % pool_size) as u32;
         let pool = pool_size as u32;
         for step in 0..pool {
             let slot_index = (start + step) % pool;
@@ -206,8 +210,8 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
                 "#,
                 crate::db_params![
                     i64::from(slot.slot_index),
-                    identity.node_id.clone(),
-                    identity.node_epoch.clone(),
+                    identity.node_id.as_str().to_string(),
+                    identity.node_epoch.to_string(),
                     lease_ttl.as_millis().to_string(),
                 ],
             )
@@ -232,8 +236,8 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
             "#,
             crate::db_params![
                 i64::from(slot.slot_index),
-                identity.node_id.clone(),
-                identity.node_epoch.clone(),
+                identity.node_id.as_str().to_string(),
+                identity.node_epoch.to_string(),
             ],
         )
         .await?;
@@ -272,8 +276,8 @@ mod tests {
 
     fn ident() -> LeaseIdentity {
         LeaseIdentity {
-            node_id: uuid::Uuid::new_v4().to_string(),
-            node_epoch: uuid::Uuid::new_v4().to_string(),
+            node_id: NodeId::generate(),
+            node_epoch: uuid::Uuid::new_v4(),
         }
     }
 

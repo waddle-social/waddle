@@ -17,7 +17,12 @@ use std::net::IpAddr;
 pub async fn resolve_bootstrap_peers(seeds: &[ClusteringBootstrapConfig]) -> Vec<Multiaddr> {
     let mut peers: Vec<Multiaddr> = Vec::new();
     for seed in seeds {
-        let host_port = format!("{}:{}", seed.dns_name, seed.port);
+        // IPv6 literals are stored unbracketed and must be re-bracketed for
+        // the `host:port` lookup form (`[::1]:7900`).
+        let host_port = match seed.dns_name.parse::<IpAddr>() {
+            Ok(IpAddr::V6(v6)) => format!("[{v6}]:{}", seed.port),
+            _ => format!("{}:{}", seed.dns_name, seed.port),
+        };
         let resolved = match tokio::net::lookup_host(&host_port).await {
             Ok(addrs) => addrs,
             Err(error) => {
@@ -63,5 +68,18 @@ mod tests {
     fn builds_ipv6_tcp_multiaddr() {
         let ma = tcp_multiaddr(IpAddr::V6(Ipv6Addr::LOCALHOST), 7900);
         assert_eq!(ma.to_string(), "/ip6/::1/tcp/7900");
+    }
+
+    // An IPv6-literal seed (stored unbracketed by the config parser) must be
+    // re-bracketed for lookup; an IP literal resolves without touching DNS.
+    #[tokio::test]
+    async fn resolves_ipv6_literal_seed() {
+        let peers = resolve_bootstrap_peers(&[ClusteringBootstrapConfig {
+            dns_name: "::1".to_string(),
+            port: 7900,
+        }])
+        .await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].to_string(), "/ip6/::1/tcp/7900");
     }
 }

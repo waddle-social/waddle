@@ -140,7 +140,8 @@ pub struct ClusteringConfig {
     /// ephemeral TCP address (`/ip4/0.0.0.0/tcp/0`).
     pub listen_addrs: Vec<String>,
     /// Peer discovery seeds (`WADDLE_CLUSTERING_BOOTSTRAP_PEERS`, comma-
-    /// separated `host:port`). In production this is a single entry — the
+    /// separated `host:port`; bracket IPv6 literals as `[::1]:7900`). In
+    /// production this is a single entry — the
     /// Kubernetes headless Service name, which resolves to every ready pod;
     /// the multi-process harness lists one loopback entry per node. Empty =
     /// cold start with no bootstrap peers (dialing retries continuously; an
@@ -224,9 +225,11 @@ impl Default for ClusteringLeaseConfig {
     }
 }
 
-/// One peer-discovery seed: a DNS name (A/AAAA-resolved to one or more peer
-/// IPs — the headless Service resolves to every ready pod) plus the TCP port
-/// those peers listen on for the swarm transport.
+/// One peer-discovery seed: a DNS name or IP literal (A/AAAA-resolved to one
+/// or more peer IPs — the headless Service resolves to every ready pod) plus
+/// the TCP port those peers listen on for the swarm transport. IPv6 literals
+/// are stored unbracketed (`::1`); the resolver re-brackets them for the
+/// `host:port` lookup form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusteringBootstrapConfig {
     pub dns_name: String,
@@ -339,11 +342,42 @@ impl ClusteringConfig {
                 .map(str::trim)
                 .filter(|entry| !entry.is_empty())
                 .map(|entry| {
-                    let (dns_name, port) = entry.rsplit_once(':').ok_or_else(|| {
-                        format!(
-                            "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' must be host:port"
-                        )
-                    })?;
+                    // IPv6 literals must be bracketed (`[::1]:7900`): the
+                    // resolver takes `host:port` strings, and an unbracketed
+                    // IPv6 host is ambiguous with the port separator — it
+                    // would parse "successfully" here and then never resolve,
+                    // retrying forever. Fail fast instead. Brackets are
+                    // stripped for storage; the resolver re-adds them.
+                    let (dns_name, port) = if let Some(rest) = entry.strip_prefix('[') {
+                        let (host, port) = rest.split_once("]:").ok_or_else(|| {
+                            format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' must be \
+                                 [ipv6]:port"
+                            )
+                        })?;
+                        if host.parse::<std::net::Ipv6Addr>().is_err() {
+                            return Err(format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' has an \
+                                 invalid bracketed IPv6 literal"
+                            ));
+                        }
+                        (host, port)
+                    } else {
+                        let (host, port) = entry.rsplit_once(':').ok_or_else(|| {
+                            format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' must be \
+                                 host:port"
+                            )
+                        })?;
+                        if host.contains(':') {
+                            return Err(format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}': IPv6 \
+                                 literals must be bracketed, e.g. [::1]:7900 — the \
+                                 unbracketed form never resolves"
+                            ));
+                        }
+                        (host, port)
+                    };
                     let port = port
                         .parse::<u16>()
                         .ok()
@@ -1100,7 +1134,20 @@ mod tests {
 
     #[test]
     fn clustering_rejects_malformed_bootstrap_entries() {
-        for bad in ["no-port", "host:0", ":7900", "host:notaport"] {
+        for bad in [
+            "no-port",
+            "host:0",
+            ":7900",
+            "host:notaport",
+            // Unbracketed IPv6: rsplit would "parse" it and then it never
+            // resolves — must fail fast at config time.
+            "::1:7900",
+            "fe80::1:7900",
+            // Bracketed but broken.
+            "[::1]",
+            "[::1]:0",
+            "[not-ipv6]:7900",
+        ] {
             let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", bad)])
                 .unwrap_err();
             assert!(
@@ -1108,6 +1155,28 @@ mod tests {
                 "entry '{bad}' must be rejected: {err}"
             );
         }
+    }
+
+    #[test]
+    fn clustering_parses_bracketed_ipv6_bootstrap_entries() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_BOOTSTRAP_PEERS",
+            "[::1]:7900, [fe80::1]:7901",
+        )])
+        .unwrap();
+        assert_eq!(
+            config.bootstrap_peers,
+            vec![
+                ClusteringBootstrapConfig {
+                    dns_name: "::1".to_string(),
+                    port: 7900,
+                },
+                ClusteringBootstrapConfig {
+                    dns_name: "fe80::1".to_string(),
+                    port: 7901,
+                },
+            ]
+        );
     }
 
     #[test]

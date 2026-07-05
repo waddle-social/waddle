@@ -257,10 +257,9 @@ async fn node_keypair(
 
     let lease = PostgresKeypairSlotLease::new(db.clone());
     lease.ensure_schema().await?;
-    // Storage boundary: the lease persists the id as TEXT.
     let node = LeaseIdentity {
-        node_id: node_id.as_str().to_string(),
-        node_epoch: uuid::Uuid::new_v4().to_string(),
+        node_id: node_id.clone(),
+        node_epoch: uuid::Uuid::new_v4(),
     };
     let pool_size = config.keypair_pool.len();
     let slot = lease
@@ -665,9 +664,22 @@ mod tests {
         // short-circuits asks whose target peer is the local node, so this
         // exercises registration, kademlia lookup, payload serde, and the
         // handler without a second process; the true cross-node round-trip is
-        // a Slice 6 harness case). Registration is async — poll briefly.
+        // a Slice 6 harness case). Registration is async — retry until the
+        // relay is discoverable so a slow CI runner cannot flake the test.
         let mut relay_handle = relay::RelayHandle::new(handle.node_id.clone());
-        let pong = relay_handle.ping().await.expect("relay answers ping");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let pong = loop {
+            match relay_handle.ping().await {
+                Ok(pong) => break pong,
+                Err(error) => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "relay never answered ping: {error}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
         assert_eq!(pong.node_id, handle.node_id);
 
         // Codec proof over the ask path: a thread-carrying message survives
