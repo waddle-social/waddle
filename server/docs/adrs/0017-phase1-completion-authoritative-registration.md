@@ -131,12 +131,29 @@ get-or-create/reaper split is a fast follow-up availability slice.
   > **Merge note (main #1106 "shared fan-out recipient pass").** Since this note
   > was written, `main` added `run_fanout_recipient_pass` in
   > `route_to_connection.rs`, which runs the recipient pass ONCE over the DM
-  > delivery set and writes each live target a `DirectFrame` (the per-target
-  > `deliver_peer_to_full` loop now only serves the non-DM / groupchat-reflection
-  > path). Slice 2 must cut over **both** the fan-out pass's per-target write AND
-  > the `deliver_peer_to_full` loop to `TrySendPeer`, with the disposition +
-  > headless-gate logic applied to the fan-out set. The selection feeding it is
-  > already actor-authoritative (Slice 1).
+  > delivery set and returns a `processed` wire copy for the CALLER to deliver
+  > (it does not itself deliver). Slice 2 must cut over the **two caller-side
+  > delivery loops**, both in `route_to_connection.rs`'s bare-JID `Err(bare)`
+  > arm, NOT `run_fanout_recipient_pass` itself:
+  >
+  > 1. **DM path** (`is_dm_message && !live_targets.is_empty()`, ~L397): the
+  >    `for full in &live_targets { registry.send_to(full, (*processed).clone()) }`
+  >    loop — a **blocking `DirectFrame`** send of the already-recipient-passed
+  >    stanza. Cut over to the actor's **`TrySendDirect`** (DirectFrame, not
+  >    PeerStanza — the pass already ran). `SendResult::NotConnected/ChannelClosed`
+  >    → `deliver_to_detached` today; map `BroadcastOutcome`/SendError per the
+  >    disposition rules below. `queue_processed_for_detached` for detached
+  >    targets is unchanged (SM registry, not the actor).
+  > 2. **Non-DM / groupchat + the `FanoutPassResult::Unavailable` fallback**
+  >    (~L474): the `for full in live_targets { deliver_peer_to_full(...) }` loop.
+  >    Cut `deliver_peer_to_full` over to **`TrySendPeer`** (PeerStanza).
+  >
+  > Both loops currently take `registry: &ConnectionRegistry`; thread
+  > `deps.user_registry` in and keep the DashMap path only for `None`-Deps
+  > (tests). The full-JID `Ok(full)` arm (~L271) also calls `deliver_peer_to_full`
+  > and must be cut over too. The selection feeding all of this is already
+  > actor-authoritative (Slice 1). NB: the DM `send_to` is *blocking* today, so
+  > the 1:1 backpressure change below applies to DM delivery as well.
 
 
   - **Backpressure decision (maintainer-visible behaviour change).** 1:1
