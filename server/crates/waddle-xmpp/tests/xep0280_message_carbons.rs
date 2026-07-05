@@ -59,3 +59,50 @@ fn xep0280_bodyless_chat_marker_is_eligible_for_carbons() {
     );
     assert!(should_copy_message(&msg));
 }
+
+// ---------------------------------------------------------------------
+// #1106 / XEP-0280 §6.3 — the whole RFC 6121 §8.5.2.1.1 delivery set is
+// the carbon exclusion set: "The receiving server MUST NOT send a
+// forwarded copy to the client(s) the original <message/> stanza was
+// addressed to, as these recipients receive the original <message/>
+// stanza."
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn xep0280_carbon_enumeration_excludes_whole_delivery_set() {
+    use jid::FullJid;
+    use waddle_xmpp::registry::ConnectionRegistry;
+
+    let registry = ConnectionRegistry::new();
+    let bare: jid::BareJid = "bob@localhost".parse().expect("bare jid");
+    let web: FullJid = "bob@localhost/web".parse().expect("full jid");
+    let phone: FullJid = "bob@localhost/phone".parse().expect("full jid");
+    let laptop: FullJid = "bob@localhost/laptop".parse().expect("full jid");
+
+    // All three resources online with carbons enabled; web + phone are
+    // the same-priority delivery set that received the original stanza,
+    // laptop is a lower-priority resource that only gets a carbon.
+    let (web_tx, _web_rx) = tokio::sync::mpsc::channel(4);
+    registry.register_with_carbons(web.clone(), web_tx, true);
+    let (phone_tx, _phone_rx) = tokio::sync::mpsc::channel(4);
+    registry.register_with_carbons(phone.clone(), phone_tx, true);
+    let (laptop_tx, _laptop_rx) = tokio::sync::mpsc::channel(4);
+    registry.register_with_carbons(laptop.clone(), laptop_tx, true);
+
+    let delivery_set = vec![web.clone(), phone.clone()];
+    let carbon_targets = registry.get_other_carbon_resources_for_user(&bare, &delivery_set);
+
+    assert!(
+        !carbon_targets.contains(&web),
+        "web received the original and must not get a forwarded copy"
+    );
+    assert!(
+        !carbon_targets.contains(&phone),
+        "phone received the original and must not get a forwarded copy"
+    );
+    assert_eq!(
+        carbon_targets,
+        vec![laptop],
+        "only the resource outside the delivery set gets the carbon"
+    );
+}

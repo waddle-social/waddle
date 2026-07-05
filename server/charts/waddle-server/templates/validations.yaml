@@ -39,6 +39,13 @@
 {{- fail "updateStrategy.type=RollingUpdate with a ReadWriteOnce PVC surges a second pod that deadlocks on Multi-Attach. Use updateStrategy.type=Recreate, switch to ReadWriteMany, or set persistence.allowUnsafeRwoScale=true if your storage backend supports concurrent attach." -}}
 {{- end -}}
 
+{{/*
+  NOTE: this replicaCount>1 + RWO-PVC guard is currently *shadowed* by the
+  unconditional `replicaCount > 1` fail above (Phase 4 gate) — it can only fire
+  once that gate is lifted. It is kept deliberately as the forward-looking
+  storage guard that becomes authoritative when Phase 4 unlocks multi-replica,
+  so it does not need to be re-derived then (Copilot review on PR #1177).
+*/ -}}
 {{- if and .Values.persistence.enabled (gt (int .Values.replicaCount) 1) (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
 {{- fail "replicaCount > 1 with persistence.accessModes containing ReadWriteOnce is usually unschedulable. Use ReadWriteMany/ReadOnlyMany, disable persistence, or set persistence.allowUnsafeRwoScale=true if your storage backend supports it." -}}
 {{- end -}}

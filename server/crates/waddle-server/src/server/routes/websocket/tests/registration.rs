@@ -228,10 +228,9 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     );
     assert!(conn.pending_resume_stream_id.is_none());
     assert!(conn.pending_resume_h.is_none());
-    assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(9),
-        vec!["<message id='m10'/>".to_string()]
-    );
+    let replay = conn.sm_state.get_stanzas_to_resend(9);
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].stanza_xml, "<message id='m10'/>");
     assert!(state
         .deps
         .protocol

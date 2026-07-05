@@ -25,6 +25,7 @@
 //! - `UnackedQueue` - Queue of unacknowledged outbound stanzas
 
 pub mod persistence;
+mod replay;
 mod session_registry;
 mod stanzas;
 #[cfg(test)]
@@ -32,6 +33,7 @@ mod stanzas_tests;
 mod state;
 mod unacked_queue;
 
+pub use replay::{stamp_replay_delay, ReplayStanza};
 pub use session_registry::{
     DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmClaimCompletion,
     SmRegistryError, SmSessionRegistry,

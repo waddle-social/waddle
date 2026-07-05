@@ -239,8 +239,9 @@ impl StreamManagementState {
     /// Get stanzas that need to be resent after resumption.
     ///
     /// `client_h` is the last sequence number the client acknowledged receiving.
-    /// Returns stanzas with sequence > client_h.
-    pub fn get_stanzas_to_resend(&self, client_h: u32) -> Vec<String> {
+    /// Returns stanzas with sequence > client_h, each paired with its
+    /// original receipt time for the XEP-0203 replay stamp.
+    pub fn get_stanzas_to_resend(&self, client_h: u32) -> Vec<super::ReplayStanza> {
         self.unacked_queue.get_unacked_after(client_h)
     }
 
@@ -431,7 +432,9 @@ mod tests {
         // for clients that still need it.
         let resend = state.get_stanzas_to_resend(0);
         assert_eq!(resend.len(), 3, "evicted seq=1 must be absent from replay");
-        assert!(!resend.iter().any(|xml| xml.contains("id='1'")));
+        assert!(!resend
+            .iter()
+            .any(|replay| replay.stanza_xml.contains("id='1'")));
     }
 
     #[test]

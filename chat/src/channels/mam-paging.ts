@@ -7,6 +7,7 @@ import type {
   LiveRoomMessage,
 } from "@/lib/xmpp-client";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import type { TimelineLoadResult } from "@/lib/timeline-load-result";
 import { findMessageById } from "@/lib/message-ids";
 import {
   isTopPinnedScrollDirection,
@@ -16,7 +17,8 @@ import {
   buildChannelTimelineFromMamResults,
   type TimelineBuildOptions,
 } from "@/channels/message-timeline-state";
-import { isFeedTimelineMessage } from "@/channels/timeline";
+import { applyForumContext, isFeedTimelineMessage } from "@/channels/timeline";
+import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import {
   firstUnseenIdAfterDisplayedState,
   firstUnseenIdFromUnreadCount,
@@ -112,12 +114,12 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
-  ) {
-    if (!session.value) return;
+  ): Promise<TimelineLoadResult> {
+    if (!session.value) return "aborted";
 
     const requestId = ++messageRequestId;
     const roomJid = roomJidForChannel(channelId);
-    if (!roomJid) return;
+    if (!roomJid) return "aborted";
     initialLatestPagePinned = false;
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
@@ -170,7 +172,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       ) {
-        return;
+        return "aborted";
       }
 
       const cursor = cursorFromLatestPage({
@@ -180,12 +182,26 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       });
       oldestArchiveId = cursor.oldestArchiveId;
       hasOlderMessages.value = cursor.hasOlderMessages;
-      const timelineWithQueue = appendQueuedMessages(
-        buildTimelineFromMamResults(mamResults, metadataSeed, {
-          seedExistingOnly: metadataSeed.length > 0,
-        }),
-        roomJid,
-      );
+      // #675: a live message merged into `messages.value` during the
+      // queryMamPage await must survive the rebuild. Re-insert each one
+      // through the same reconciliation as mergeLiveMessage, so a MAM copy
+      // of the same message (XEP-0359 id parity) merges instead of
+      // duplicating.
+      const liveDuringLoad = stripQueuedSelfMessages(messages.value);
+      let rebuilt = buildTimelineFromMamResults(mamResults, metadataSeed, {
+        seedExistingOnly: metadataSeed.length > 0,
+      });
+      for (const live of liveDuringLoad) {
+        rebuilt = insertLiveMessage(rebuilt, live, pendingEchoClientIds).messages;
+      }
+      // One forum-context pass after all re-inserts: nothing observes
+      // the intermediate timelines (messages.value is assigned below),
+      // so recomputing per insert — as the true live-merge path must —
+      // would be pure waste here.
+      if (liveDuringLoad.length > 0) {
+        rebuilt = applyForumContext(rebuilt, isForumChannel(currentChannel.value));
+      }
+      const timelineWithQueue = appendQueuedMessages(rebuilt, roomJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
@@ -197,31 +213,52 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         feedTimeline,
         getMdsDisplayedCandidates(mdsKey),
       );
+      // #675: unreadAtLoad was counted before the load; foreign live
+      // arrivals during the await extend the timeline tail and are
+      // unread too — without counting them the divider lands that many
+      // rows too new. When unreadAtLoad is 0 the mid-load arrival
+      // behaves like a post-load arrival (no divider).
+      const liveUnreadDuringLoad = liveDuringLoad.filter(
+        (m) => isFeedVisible(m) && !m.isSelf,
+      ).length;
+      const unreadForDivider =
+        unreadAtLoad > 0 ? unreadAtLoad + liveUnreadDuringLoad : 0;
       firstUnseenId.value = firstUnseenIdAfterDisplayedState(
         feedTimeline,
-        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadForDivider),
         displayed,
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
-        !pinned ||
         requestId !== messageRequestId ||
         (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       ) {
-        return;
+        // Superseded during the pin step: the timeline was rebuilt, but
+        // a newer request owns it now — callers must not react.
+        return "aborted";
+      }
+      if (!pinned) {
+        return "loaded";
       }
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) persistLastSeen(channelId, newest.id);
+      return "loaded";
     } catch (e) {
-      if (requestId === messageRequestId) {
-        const queuedOnly = appendQueuedMessages([], roomJid);
-        messages.value = queuedOnly;
-        actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
-        isLoadingMessages.value = false;
-      }
+      if (requestId !== messageRequestId) return "aborted";
+      // #675: messages.value already holds the queued rows plus any
+      // live message merged during the failed await — keep them
+      // instead of resetting to queued-only. The error stays suppressed
+      // only for queued self-sends (pre-existing behavior); a live
+      // arrival doesn't hide that history failed to load.
+      const hasQueuedRows = messages.value.some(
+        (m) => m.deliveryStatus === "queued" || m.deliveryStatus === "sending",
+      );
+      actionError.value = hasQueuedRows ? "" : normalizeError(e);
+      isLoadingMessages.value = false;
+      return "failed";
     }
   }
 

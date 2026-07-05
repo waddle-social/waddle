@@ -43,6 +43,13 @@ pub struct MessageContext<'a> {
     pub muc_occupancy: &'a MucOccupancy,
     /// Whether this dispatch represents a live client transport.
     pub has_live_transport: bool,
+    /// RFC 6121 §8.5.2.1.1 delivery-fanout set when this dispatch is
+    /// the single shared recipient pass for a bare-JID DM (#1106).
+    /// Empty on ordinary per-connection dispatches. The XEP-0280
+    /// carbons handler uses a non-empty set as the carbon exclusion
+    /// set (XEP-0280 §6.3 — every addressed client gets the original,
+    /// never a forwarded copy).
+    pub delivery_fanout: &'a [FullJid],
     /// Source of fresh, opaque XEP-0359 stanza-id values.
     pub id_gen: &'a dyn IdGenerator,
 }
@@ -59,6 +66,7 @@ impl<'a> MessageContext<'a> {
             carbons: env.carbons,
             muc_occupancy: env.muc_occupancy,
             has_live_transport: env.has_live_transport,
+            delivery_fanout: env.delivery_fanout,
             id_gen: env.id_gen,
         }
     }
@@ -84,6 +92,10 @@ pub struct MessageContextEnv<'a> {
     pub muc_occupancy: &'a MucOccupancy,
     /// Whether this dispatch represents a live client transport.
     pub has_live_transport: bool,
+    /// RFC 6121 §8.5.2.1.1 delivery-fanout set — see
+    /// [`MessageContext::delivery_fanout`]. Empty for ordinary
+    /// per-connection dispatches.
+    pub delivery_fanout: &'a [FullJid],
     /// Source of fresh, opaque XEP-0359 stanza-id values.
     pub id_gen: &'a dyn IdGenerator,
 }
@@ -112,6 +124,7 @@ mod tests {
             carbons: CarbonsState::Enabled,
             muc_occupancy: &occ,
             has_live_transport: true,
+            delivery_fanout: &[],
             id_gen: &gen,
         };
 

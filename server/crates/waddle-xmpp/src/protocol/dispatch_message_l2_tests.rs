@@ -123,6 +123,7 @@ fn build_ctx<'a>(
         carbons: CarbonsState::Disabled,
         muc_occupancy: occ,
         has_live_transport: true,
+        delivery_fanout: &[],
         id_gen: gen,
     };
     MessageContext::derive(env, msg)

@@ -1,5 +1,5 @@
 export { BrowserXmppClient } from "./client";
-export type { PubsubEvent } from "./client-events";
+export type { CatchupConversationFailure, PubsubEvent } from "./client-events";
 export type {
   DmBookmarkItem,
   NotifyMode,
@@ -26,6 +26,7 @@ export type {
   WasmAdminSpacesListResult,
 } from "./wasm-types";
 export {
+  bareJidKey,
   barePeerJid,
   jidDomain,
   jidDomainOrEmpty,

@@ -60,6 +60,15 @@ export type PubsubEvent = WasmPubsubEvent;
 
 type CatchupOutcome = "completed" | "aborted" | "failed";
 
+/**
+ * Reconnect catch-up failed for one conversation (#1180): the fresh
+ * lifecycle event reported this conversation as covered, so its
+ * consumer skipped the wholesale MAM reload — this event is the
+ * fallback signal to run that reload after the failed attempt
+ * (serialized, so the two fetches can no longer race).
+ */
+export type CatchupConversationFailure = { kind: "dm" | "room"; key: string };
+
 export type CatchupHookInfo = {
   conversations: number;
   processedConversations: number;
@@ -105,6 +114,7 @@ export type ClientEvents = {
   messageDeliveryFailure: [messageId: string];
   queuedMessageStatus: [messageId: string, status: "queued" | "sending"];
   sessionLifecycle: [event: SessionLifecycleEvent];
+  catchupFailure: [failure: CatchupConversationFailure];
   // Observe-only telemetry hooks (multi-listener, error-isolated via
   // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health
   // hooks (see docs/planning/hung-tab-investigation.md); the client

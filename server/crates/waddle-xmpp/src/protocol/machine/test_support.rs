@@ -35,6 +35,7 @@ pub fn ready_machine_with_id_gen(
         carbons: CarbonsState::Disabled,
         muc_occupancy: MucOccupancy::empty(),
         has_live_transport: true,
+        delivery_fanout: Vec::new(),
         id_gen,
         keepalive: KeepalivePolicy::new(KeepaliveConfig::default()),
     }

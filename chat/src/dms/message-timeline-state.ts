@@ -13,6 +13,7 @@ import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { type ArchiveMergeHooks, mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
+import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 
 export function fromLiveDmMessage(
   session: WaddleSession,
@@ -35,6 +36,7 @@ export function fromLiveDmMessage(
   if (msg.displayedMarkerRequested) tm.displayedMarkerRequested = true;
   if (msg.isRetracted) tm.isRetracted = true;
   if (msg.retractionId) tm.retractionId = msg.retractionId;
+  if (msg.synthesizedId) tm.synthesizedId = true;
   if (msg.wireIds?.length) tm.wireIds = msg.wireIds;
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;
@@ -193,6 +195,10 @@ export function buildDmTimelineFromMamResults(params: {
   const byId = new MessageIdIndex<TimelineMessage>();
   for (const message of existing) byId.add(message);
   const timeline = [...existing];
+  // #1182: rows whose primary id had to be fabricated (id-less live
+  // stanzas) can only reconcile by content. Each is consumable once so
+  // two identical archive hits can't both collapse into it.
+  const synthesizedRows = existing.filter((message) => message.synthesizedId);
   for (const raw of regular) {
     const tm = fromLiveDmMessage(session, raw, (id) => byId.get(id));
     // Look up via every wire alias, not just the primary id — when
@@ -201,11 +207,15 @@ export function buildDmTimelineFromMamResults(params: {
     // (on `tm.id` only) would miss the existing row and insert a
     // duplicate. Channel side has done this for a while; this is the
     // matching DM-side fix (Bug 5 in PR1).
-    const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
+    const idMatch = [tm.id, ...(tm.wireIds ?? [])]
       .map((id) => byId.get(id))
       .find((message): message is TimelineMessage => !!message);
+    const synthesizedMatch = idMatch ? undefined : findSynthesizedIdMergeTarget(synthesizedRows, tm);
+    if (synthesizedMatch) synthesizedRows.splice(synthesizedRows.indexOf(synthesizedMatch), 1);
+    const existingMessage = idMatch ?? synthesizedMatch;
     if (existingMessage) {
-      const merged = mergeRetractionTombstone(existingMessage, tm, dmArchiveMergeHooks);
+      let merged = mergeRetractionTombstone(existingMessage, tm, dmArchiveMergeHooks);
+      if (synthesizedMatch) merged = adoptArchiveIdentity(merged, tm);
       if (merged !== existingMessage) {
         const index = timeline.indexOf(existingMessage);
         if (index !== -1) timeline[index] = merged;

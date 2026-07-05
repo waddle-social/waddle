@@ -441,6 +441,14 @@ export function roomMessageFromArchived(
   const roomPrimaryId = message.id ?? stampedByRoom ?? message.mam_id;
   const roomWireIds = [message.id, message.origin_id, stampedByRoom]
     .filter((value): value is string => !!value && value !== roomPrimaryId);
+  // #1182: on the live path `mam_id` is fabricated by the dispatcher
+  // (`message.id ?? randomUUID`), so a stanza with no wire identity at all
+  // ends up keyed on a random UUID that the MAM copy can never match. Flag
+  // it for content-based reconciliation and don't let the fabricated UUID
+  // masquerade as an archive UID. `!message.id` is essential: a client-id-
+  // only stanza also satisfies `primary === mam_id` but has a real identity.
+  const synthesizedPrimary =
+    source === "live" && !message.id && roomPrimaryId === message.mam_id && roomWireIds.length === 0;
   if (activeRetractionTarget) {
     return {
       id: roomPrimaryId,
@@ -538,7 +546,7 @@ export function roomMessageFromArchived(
     );
   const base: LiveRoomMessage = {
     id: roomPrimaryId,
-    archiveId: message.mam_id,
+    ...(synthesizedPrimary ? { synthesizedId: true } : { archiveId: message.mam_id }),
     fromJid,
     roomJid,
     nick,
@@ -652,7 +660,12 @@ export function dmMessageFromArchived(
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
   const callThread = isSupportedDmCallThread(message.call_thread) ? message.call_thread : undefined;
   const callThreadEnded = message.call_thread_ended;
-  const dmWireIds = [message.id, message.origin_id]
+  // #1182: the user-server-injected XEP-0359 stanza-id is a real wire
+  // identity — the MAM copy is keyed on it (XEP-0313 servers use it as the
+  // archive UID) — so fold it into the aliases like the room path does
+  // with `stampedByRoom`. This both dedupes exactly and keeps such rows
+  // out of the synthesized-id content-match pool.
+  const dmWireIds = [message.id, message.origin_id, ownStanzaId?.id]
     .filter((value): value is string => !!value && value !== dmPrimaryId);
   // Alias a DM call-thread anchor by its sid so a same-session MAM backfill
   // collapses onto the synthesized live anchor (see `dm-call-anchor.ts`)
@@ -668,6 +681,12 @@ export function dmMessageFromArchived(
   // anyway, but the codec stays symmetric with the room path so a stray
   // foreign-server archive row can't manifest a bodyless DM ghost either.
   if (!message.body && !message.subject && !callThread && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.is_retracted) return null;
+  // #1182: see `roomMessageFromArchived` — a live stanza with no wire
+  // identity is keyed on a dispatcher-fabricated UUID; flag it for
+  // content-based reconciliation instead of claiming an archive UID.
+  // `!message.id` is essential (client-id-only also has primary === mam_id).
+  const synthesizedPrimary =
+    source === "live" && !message.id && dmPrimaryId === message.mam_id && dmWireIds.length === 0;
   const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
     associateDirectVideoPreviews(
       linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)),
@@ -675,7 +694,7 @@ export function dmMessageFromArchived(
     );
   const base: LiveDmMessage = {
     id: dmPrimaryId,
-    archiveId: message.mam_id,
+    ...(synthesizedPrimary ? { synthesizedId: true } : { archiveId: message.mam_id }),
     peerJid,
     fromJid,
     nick,

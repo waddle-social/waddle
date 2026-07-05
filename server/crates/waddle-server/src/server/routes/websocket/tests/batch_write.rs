@@ -319,7 +319,7 @@ async fn mam_results_are_recorded_like_any_stanza_for_counter_convergence() {
     assert_eq!(conn.sm_state.queue_len(), 5);
     let replay = conn.sm_state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 5);
-    assert_eq!(replay[0], live);
+    assert_eq!(replay[0].stanza_xml, live);
 }
 
 /// If the peer closes (or the socket dies) mid-batch, every countable
@@ -357,7 +357,7 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
     assert_eq!(conn.sm_state.queue_len(), 12);
     let replay = conn.sm_state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 12);
-    assert_eq!(replay[11], countable_message(12));
+    assert_eq!(replay[11].stanza_xml, countable_message(12));
     // Only 5 stanzas + 1 <r/> actually hit the wire.
     assert_eq!(sink_texts(&sink).len(), 6);
 }

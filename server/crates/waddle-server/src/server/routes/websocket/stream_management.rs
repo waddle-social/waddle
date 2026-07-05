@@ -221,7 +221,7 @@ fn handle_sm_enable(
 }
 
 async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'_>) -> Vec<String> {
-    use waddle_xmpp::stream_management::{SmFailed, SmResumed};
+    use waddle_xmpp::stream_management::{stamp_replay_delay, SmFailed, SmResumed};
 
     let SmCtx {
         phase,
@@ -377,9 +377,17 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // the main loop must NOT push them through `record_outbound` again.
     *suppress_sm_record_next_batch = true;
 
+    // Issue #1178: stamp each replayed stanza with a XEP-0203 <delay/>
+    // carrying its original receipt time, so clients sort it at its true
+    // timeline position instead of the drain time (XEP-0198 Acks-section
+    // redelivery stamping, applied to the <resumed/> replay by analogy).
+    let server_domain = state.deps.auth_state.xmpp_domain.as_str();
     let replay: Vec<String> = sm_state
         .get_stanzas_to_resend(resume.h)
         .into_iter()
+        .map(|entry| {
+            stamp_replay_delay(&entry.stanza_xml, server_domain, entry.original_receipt_at)
+        })
         .collect();
     info!(
         stream_id = %resume.previd,

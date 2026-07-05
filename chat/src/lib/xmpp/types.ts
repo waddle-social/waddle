@@ -12,12 +12,27 @@ export interface XmppStatusSnapshot {
 }
 
 /**
+ * Conversations the client's own reconnect catch-up will page via
+ * XEP-0313 after this session-ready (bare JIDs, keyed the same way as
+ * `ReconnectCatchup` cursors). Consumers whose active conversation is
+ * covered must NOT fire their own MAM reload — two concurrent fetches
+ * for the same conversation race on the timeline (#1180).
+ */
+type SessionCatchupCoverage = {
+  dmJids: readonly string[];
+  roomJids: readonly string[];
+};
+
+/**
  * XEP-0198 Stream Management session lifecycle:
  * - "resumed": the prior stream was resumed server-side, no gap.
  * - "fresh": a new session was bound (either first connect, or resume failed).
- *   Consumers may re-fetch MAM to close any gap.
+ *   Consumers may re-fetch MAM to close any gap — unless `catchup`
+ *   already covers the conversation.
  */
-export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
+export type SessionLifecycleEvent =
+  | { type: "resumed" }
+  | { type: "fresh"; catchup: SessionCatchupCoverage };
 
 export type MamPageParam =
   | { type: "latest"; start?: string }
@@ -136,6 +151,10 @@ export interface LiveRoomMessage {
   id: string;
   /** XEP-0313 archive UID from the MAM result envelope, when known. */
   archiveId?: string;
+  /** #1182: `id` is a fabricated UUID — the live stanza carried no wire
+   * identity at all (no client id, no XEP-0359 stanza-id/origin-id), so
+   * only content-based reconciliation can match it to its MAM copy. */
+  synthesizedId?: true;
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
@@ -222,6 +241,8 @@ export interface LiveDmMessage {
   id: string;
   /** XEP-0313 archive UID from the MAM result envelope, when known. */
   archiveId?: string;
+  /** #1182: `id` is a fabricated UUID — see `LiveRoomMessage.synthesizedId`. */
+  synthesizedId?: true;
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;

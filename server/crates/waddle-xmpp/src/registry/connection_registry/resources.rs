@@ -171,22 +171,24 @@ impl ConnectionRegistry {
     }
 
     /// Get all resources for a bare JID that have XEP-0280 Message Carbons
-    /// enabled, excluding a specific full JID.
+    /// enabled, excluding every full JID in `exclude_jids`.
     ///
     /// Per XEP-0280 §5, carbons must be enabled per-resource. The server must
     /// only deliver `<sent>` and `<received>` carbon copies to resources that
     /// have explicitly opted in via `<enable xmlns='urn:xmpp:carbons:2'/>`.
+    /// `exclude_jids` is the original stanza's delivery set (XEP-0280 §6.3:
+    /// clients addressed by the original MUST NOT also get a forwarded copy).
     pub fn get_other_carbon_resources_for_user(
         &self,
         bare_jid: &BareJid,
-        exclude_jid: &FullJid,
+        exclude_jids: &[FullJid],
     ) -> Vec<FullJid> {
         self.connections
             .iter()
             .filter(|entry| {
                 let jid = entry.key();
                 jid.to_bare() == *bare_jid
-                    && jid != exclude_jid
+                    && !exclude_jids.contains(jid)
                     && entry.value().is_carbons_enabled()
             })
             .map(|entry| entry.key().clone())

@@ -72,18 +72,26 @@ pub(crate) async fn register_test_connection(
         .protocol
         .connection_registry
         .register(jid.clone(), sender);
-    if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
-        let registered = crate::server::dual_registration::mirror_register(
-            &state.deps.protocol.user_registry,
-            jid.clone(),
-            entry,
-        )
-        .await;
-        assert!(
-            registered,
-            "test dual-registration should confirm the resource in the actor tree for {jid}"
-        );
-    }
+    // `register` always inserts, so the entry must be present — fail fast
+    // rather than silently skipping the actor mirror, which would leave the
+    // actor tree empty and mask a regression as the offline/headless path
+    // (Copilot review on PR #1177).
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(jid)
+        .expect("connection entry must exist immediately after register");
+    let registered = crate::server::dual_registration::mirror_register(
+        &state.deps.protocol.user_registry,
+        jid.clone(),
+        entry,
+    )
+    .await;
+    assert!(
+        registered,
+        "test dual-registration should confirm the resource in the actor tree for {jid}"
+    );
 }
 
 /// A self-contained [`waddle_sfu::LiveKitSfu`] for tests. Mints real

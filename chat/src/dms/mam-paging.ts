@@ -3,12 +3,14 @@ import type { BrowserXmppClient, LiveDmMessage } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import type { TimelineLoadResult } from "@/lib/timeline-load-result";
 import { findMessageById } from "@/lib/message-ids";
 import {
   isTopPinnedScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { buildDmTimelineFromMamResults } from "@/dms/message-timeline-state";
+import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import {
   firstUnseenIdAfterDisplayedState,
   firstUnseenIdFromUnreadCount,
@@ -93,8 +95,8 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     });
   }
 
-  async function loadMessages(peerJid: string, unreadAtLoad = 0) {
-    if (!session.value) return;
+  async function loadMessages(peerJid: string, unreadAtLoad = 0): Promise<TimelineLoadResult> {
+    if (!session.value) return "aborted";
     const requestId = ++messageRequestId;
     initialLatestPagePinned = false;
     isLoadingMessages.value = true;
@@ -118,7 +120,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
         : xmppClient.value
           ? await xmppClient.value.queryPersonalMam(peerJid, PAGE_SIZE)
           : [];
-      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
+      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
       loadErrorPeerJid.value = null;
       loadErrorMessage.value = "";
       const cursor = cursorFromLatestPage({
@@ -128,7 +130,16 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       });
       oldestArchiveId = cursor.oldestArchiveId;
       hasOlderMessages.value = cursor.hasOlderMessages;
-      const timeline = buildTimelineFromMamResults(mamResults);
+      // #675: a live DM merged into `messages.value` during the
+      // queryPersonalMamPage await must survive the rebuild. Re-insert each
+      // one through the same reconciliation as mergeLiveMessage, so a MAM
+      // copy of the same message (XEP-0359 id parity) merges instead of
+      // duplicating.
+      const liveDuringLoad = stripQueuedSelfMessages(messages.value);
+      let timeline = buildTimelineFromMamResults(mamResults);
+      for (const live of liveDuringLoad) {
+        timeline = insertLiveMessage(timeline, live, pendingEchoClientIds).messages;
+      }
       const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
@@ -139,27 +150,46 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
         feedTimeline,
         getMdsDisplayedCandidates(mdsKey),
       );
+      // #675: count foreign live DMs that arrived during the await as
+      // unread too, mirroring the channel-side divider adjustment.
+      const liveUnreadDuringLoad = liveDuringLoad.filter(
+        (m) => isFeedVisible(m) && !m.isSelf,
+      ).length;
+      const unreadForDivider =
+        unreadAtLoad > 0 ? unreadAtLoad + liveUnreadDuringLoad : 0;
       firstUnseenId.value = firstUnseenIdAfterDisplayedState(
         feedTimeline,
-        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadForDivider),
         displayed,
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
-      if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
+      // Superseded during the pin step: the timeline was rebuilt, but a
+      // newer request owns it now — callers must not react.
+      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
+      if (!pinned) return "loaded";
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) persistLastSeen(peerJid, newest.id);
+      return "loaded";
     } catch {
-      if (requestId === messageRequestId) {
-        console.warn("Could not load DM conversation");
-        const queuedOnly = appendQueuedMessages([], peerJid);
-        messages.value = queuedOnly;
-        loadErrorPeerJid.value = peerJid;
-        loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
-        actionError.value = loadErrorMessage.value;
-        isLoadingMessages.value = false;
-      }
+      if (requestId !== messageRequestId) return "aborted";
+      console.warn("Could not load DM conversation");
+      // #675: messages.value already holds the queued rows plus any
+      // live DM merged during the failed await — keep them instead of
+      // resetting to queued-only.
+      loadErrorPeerJid.value = peerJid;
+      // "Showing queued messages only" is claimed only when queued
+      // self-sends actually exist — a live arrival kept by the #675
+      // preservation is not a queued message.
+      loadErrorMessage.value = dmLoadErrorMessage(peerJid, {
+        queuedOnly: messages.value.some(
+          (m) => m.deliveryStatus === "queued" || m.deliveryStatus === "sending",
+        ),
+      });
+      actionError.value = loadErrorMessage.value;
+      isLoadingMessages.value = false;
+      return "failed";
     }
   }
 

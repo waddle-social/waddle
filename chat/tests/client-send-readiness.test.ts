@@ -166,6 +166,58 @@ describe("client send readiness", () => {
     }
   });
 
+  test("failed catch-up fallback reload keeps messages queued during the reload", async () => {
+    // #1180: the fallback restores the pre-reload snapshot when its own
+    // reload fails — but a message the user queued DURING that reload
+    // lives only in the outbound store + the catch's queued-only reset.
+    // The restore must merge it in, not clobber it away until echo.
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "queued-mid-reload",
+      createdAt: new Date().toISOString(),
+      peerJid: "bob@example.com",
+      body: "sent while the reload was in flight",
+    });
+    const client = {
+      queryPersonalMamPage: mock(async () => {
+        throw new Error("remote-server-timeout");
+      }),
+    } as unknown as BrowserXmppClient;
+    const actionError = ref("");
+    const originalConsoleWarn = console.warn;
+    console.warn = mock(() => undefined) as typeof console.warn;
+    try {
+      const dm = useDirectMessages(
+        ref<WaddleSession | null>(session()),
+        ref<BrowserXmppClient | null>(client),
+        ref("bob@example.com"),
+        String,
+        actionError,
+        () => {
+          actionError.value = "";
+        },
+      );
+      dm.messages.value = [
+        {
+          id: "dm-old",
+          author: "bob",
+          body: "earlier",
+          createdAt: "2024-01-01T00:00:00Z",
+          isSelf: false,
+        },
+      ];
+
+      dm.onCatchupFailed({ kind: "dm", key: "bob@example.com" });
+      await settleReconnectCatchup(6);
+
+      const ids = dm.messages.value.map((m) => m.id);
+      expect(ids).toContain("dm-old");
+      expect(ids).toContain("queued-mid-reload");
+    } finally {
+      console.warn = originalConsoleWarn;
+    }
+  });
+
   test("DM load failures keep queued messages visible with a retryable warning", async () => {
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",

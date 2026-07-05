@@ -114,6 +114,26 @@ pub async fn promote_session_unacked(
     summary
 }
 
+/// Extract the stamp of a `<delay/>` this server itself added to the
+/// stanza on a prior replay hop, if one is present.
+fn self_stamp_time(
+    message: &xmpp_parsers::message::Message,
+    server_domain: &str,
+) -> Option<DateTime<Utc>> {
+    message
+        .payloads
+        .iter()
+        .filter(|payload| {
+            waddle_xmpp::xep::xep0203::is_delay_element(payload)
+                && payload.attr("from") == Some(server_domain)
+        })
+        .find_map(|payload| {
+            waddle_xmpp::xep::xep0203::parse_delay_element(payload)
+                .ok()
+                .map(|info| info.stamp)
+        })
+}
+
 struct PromotionContext<'a> {
     online: &'a OnlineResources,
     blocklist: &'a Blocklist,
@@ -128,11 +148,23 @@ struct PromotionContext<'a> {
 async fn promote_one(
     message: xmpp_parsers::message::Message,
     sequence: u32,
-    ctx: PromotionContext<'_>,
+    mut ctx: PromotionContext<'_>,
 ) -> PromotedOutcome {
     if waddle_xmpp_core::mam::is_mam_query_response_message(&message) {
         waddle_xmpp::prometheus::increment_sm_promotion_not_promotable();
         return PromotedOutcome::NotPromotable;
+    }
+
+    // Multi-hop Q6 chain (issue #1178): a stanza this promoter already
+    // redelivered once carries our own `<delay/>` with the TRUE
+    // original receipt time, while the queue entry's receipt time is
+    // the (later) redelivery time. Prefer the self-stamp so the
+    // promoted `pending_delivery` row — and therefore every later
+    // flush of an Archived row, which rehydrates from MAM without any
+    // self-stamp — keeps the original time instead of drifting one
+    // hop later on each expiry.
+    if let Some(stamp) = self_stamp_time(&message, ctx.server_domain) {
+        ctx.original_receipt_fallback = stamp;
     }
 
     let routing: DmRouting = classify_dm_intake(&message, ctx.online, ctx.blocklist);
