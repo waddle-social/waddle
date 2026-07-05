@@ -3803,6 +3803,21 @@ async fn run_kick(
         }
     };
 
+    // The kick is durably applied in the room actor at this point:
+    // broadcast the 307 presences and run the SFU eviction BEFORE the
+    // fallible affiliation-revocation ask below, so an actor-
+    // infrastructure failure there can't strand an applied kick with
+    // no occupant notification and a live call session (#935 review).
+    for (recipient, presence) in applied.presence_updates {
+        let _ = connections
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
+    }
+    // Membership-scoped visibility (#935): a kick (307) ends the
+    // occupant's room membership, so their live SFU call
+    // participation ends with it.
+    evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+
     if revoke_members_only_member {
         sync_private_kick_affiliation_revocation(
             state,
@@ -3815,16 +3830,6 @@ async fn run_kick(
         )
         .await?;
     }
-
-    for (recipient, presence) in applied.presence_updates {
-        let _ = connections
-            .send_to(&recipient, Stanza::Presence(presence))
-            .await;
-    }
-    // Membership-scoped visibility (#935): a kick (307) ends the
-    // occupant's room membership, so their live SFU call
-    // participation ends with it.
-    evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
 
     Ok(ChannelsKickResult {
         occupant_jid: args.occupant_jid.clone(),

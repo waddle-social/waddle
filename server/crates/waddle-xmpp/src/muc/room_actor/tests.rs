@@ -2488,3 +2488,146 @@ async fn non_removing_admin_changes_report_no_moderation_removals() {
         "a role change that keeps the occupant must not evict their call session"
     );
 }
+
+#[tokio::test]
+async fn admin_set_error_after_ban_item_must_not_partially_apply() {
+    // #935 review finding: [ban X, demote sole owner A, promote C]
+    // passed the batch pre-validation (final state has owner C) but
+    // the mutation loop's per-step last-owner check erred AFTER the
+    // ban of X already mutated the room — X's removal and 301
+    // presences (and the SFU eviction contract built on them) were
+    // silently dropped. The set must be atomic: rejected before any
+    // mutation.
+    let actor = spawn_room_actor().await;
+    let owner_bare: BareJid = "owner@example.com".parse().expect("owner jid");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid("victim"),
+            nick: "victim".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("victim joins");
+    actor
+        .ask(ChangeAffiliation {
+            jid: owner_bare.clone(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("set owner");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![
+                AdminItem {
+                    jid: Some("victim@example.com".parse().expect("bare")),
+                    nick: None,
+                    affiliation: Some(Affiliation::Outcast),
+                    role: None,
+                    reason: None,
+                },
+                AdminItem {
+                    jid: Some(owner_bare.clone()),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                },
+                AdminItem {
+                    jid: Some("successor@example.com".parse().expect("bare")),
+                    nick: None,
+                    affiliation: Some(Affiliation::Owner),
+                    role: None,
+                    reason: None,
+                },
+            ],
+        })
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                AdminApplyError::CannotRemoveLastOwner
+            ))
+        ),
+        "order-sensitive batch is rejected up front"
+    );
+    let occupant = actor
+        .ask(GetOccupantByNick {
+            nick: "victim".to_string(),
+        })
+        .await
+        .expect("ask")
+        .expect("victim must still be an occupant — no partial application");
+    assert_eq!(occupant.affiliation, Affiliation::Member);
+}
+
+#[tokio::test]
+async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
+    // Order-valid counterpart of the atomicity test: promoting the
+    // successor BEFORE demoting the sole owner is accepted, and a ban
+    // in the same set still surfaces its removed sessions.
+    let actor = spawn_room_actor().await;
+    let owner_bare: BareJid = "owner@example.com".parse().expect("owner jid");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid("victim"),
+            nick: "victim".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("victim joins");
+    actor
+        .ask(ChangeAffiliation {
+            jid: owner_bare.clone(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("set owner");
+
+    let applied = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![
+                AdminItem {
+                    jid: Some("successor@example.com".parse().expect("bare")),
+                    nick: None,
+                    affiliation: Some(Affiliation::Owner),
+                    role: None,
+                    reason: None,
+                },
+                AdminItem {
+                    jid: Some(owner_bare.clone()),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                },
+                AdminItem {
+                    jid: Some("victim@example.com".parse().expect("bare")),
+                    nick: None,
+                    affiliation: Some(Affiliation::Outcast),
+                    role: None,
+                    reason: None,
+                },
+            ],
+        })
+        .await
+        .expect("order-valid batch applies");
+
+    assert_eq!(
+        applied.removed_by_moderation,
+        vec![test_full_jid("victim")],
+        "the ban in the batch surfaces its removed session"
+    );
+}

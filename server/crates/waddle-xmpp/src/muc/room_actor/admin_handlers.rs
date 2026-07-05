@@ -392,6 +392,13 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 .map(|entry| (entry.jid, entry.affiliation))
                 .collect();
             let current_owner_count = self.room.get_jids_by_affiliation(Affiliation::Owner).len();
+            // Pre-validation simulates the mutation loop step by step
+            // against an evolving affiliation map. It must reject
+            // every set the loop below would reject — the loop
+            // mutates the room (bans remove occupants) as it goes, so
+            // a mid-loop error would leave a partially-applied batch
+            // whose removals and 301 presences are silently dropped
+            // (#935 review). Erroring here keeps the set atomic.
             for item in &msg.items {
                 let Some(target_jid) = item.jid.as_ref() else {
                     continue;
@@ -399,7 +406,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 let Some(new_affiliation) = item.affiliation else {
                     continue;
                 };
-                let target_current_affiliation = self.room.get_affiliation(target_jid);
+                let target_current_affiliation = final_affiliations
+                    .get(target_jid)
+                    .copied()
+                    .unwrap_or(Affiliation::None);
                 let can_modify = match new_affiliation {
                     Affiliation::Owner | Affiliation::Admin => {
                         msg.sender_affiliation == Affiliation::Owner
@@ -425,6 +435,20 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     && new_affiliation != Affiliation::Owner
                 {
                     return Err(AdminApplyError::CannotAdminModifyOwner);
+                }
+                // Mirror of apply_affiliation_change's per-step
+                // last-owner guard: demoting the sole owner at this
+                // point in the sequence would fail mid-loop.
+                if new_affiliation != Affiliation::Owner
+                    && target_current_affiliation == Affiliation::Owner
+                {
+                    let sole_owner = final_affiliations
+                        .iter()
+                        .filter(|(_, affiliation)| **affiliation == Affiliation::Owner)
+                        .all(|(jid, _)| jid == target_jid);
+                    if sole_owner {
+                        return Err(AdminApplyError::CannotRemoveLastOwner);
+                    }
                 }
                 if new_affiliation == Affiliation::None {
                     final_affiliations.remove(target_jid);
