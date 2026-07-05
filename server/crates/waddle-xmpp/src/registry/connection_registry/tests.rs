@@ -774,3 +774,57 @@ fn test_try_send_to_load_reports_single_delivery_then_drops() {
     assert_eq!(delivered, 1);
     assert_eq!(dropped_full, 31);
 }
+
+/// ADR-0017 Phase 1 (Greptile P1 on PR #1177): the SM-expiry janitor must not
+/// evict a live REPLACEMENT session. `unregister_if_sm_stream_id` removes the
+/// entry only when its published SM stream id matches the expired session's, so
+/// a replacement S2 that rebound the same full JID after S1 detached survives
+/// S1's expiry — on BOTH the DashMap here and (via the caller's gated mirror)
+/// the actor tree.
+#[test]
+fn unregister_if_sm_stream_id_spares_a_replacement_session() {
+    use crate::pending_delivery::SmSessionId;
+
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    // S1 binds and publishes its SM stream id.
+    let (s1_tx, _s1_rx) = mpsc::channel(4);
+    registry.register(jid.clone(), s1_tx);
+    let s1_stream = SmSessionId::new("s1-stream".to_string());
+    registry
+        .get_entry(&jid)
+        .expect("s1 entry")
+        .set_sm_stream_id(Some(s1_stream.clone()));
+
+    // S2 rebinds the SAME full JID (replacing the DashMap entry) with its own
+    // SM stream id — the detach→rebind race the janitor must tolerate.
+    let (s2_tx, _s2_rx) = mpsc::channel(4);
+    registry.register(jid.clone(), s2_tx);
+    let s2_stream = SmSessionId::new("s2-stream".to_string());
+    registry
+        .get_entry(&jid)
+        .expect("s2 entry")
+        .set_sm_stream_id(Some(s2_stream.clone()));
+
+    // S1's expiry must NOT remove S2.
+    assert!(
+        registry
+            .unregister_if_sm_stream_id(&jid, &s1_stream)
+            .is_none(),
+        "S1's stream id no longer owns the entry; nothing must be removed"
+    );
+    assert!(
+        registry.is_connected(&jid),
+        "the replacement session S2 must survive S1's expiry"
+    );
+
+    // S2's own expiry removes it (matching stream id).
+    assert!(
+        registry
+            .unregister_if_sm_stream_id(&jid, &s2_stream)
+            .is_some(),
+        "a matching stream id removes the entry"
+    );
+    assert!(!registry.is_connected(&jid));
+}

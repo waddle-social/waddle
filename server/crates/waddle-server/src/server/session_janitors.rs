@@ -271,27 +271,34 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .protocol
                     .resumable_sessions
                     .remove(&session.stream_id);
+                // ADR-0017 Phase 1 (Greptile P1 on PR #1177): gate the DashMap
+                // removal on the EXPIRED session's own SM stream id, not a plain
+                // `unregister`. A plain unregister removes whatever currently
+                // holds the full JID — which is a live REPLACEMENT session S2 if
+                // it rebound the same resource after this session (S1) detached.
+                // The removed entry's `carbons_enabled` would then be S2's token,
+                // so the actor mirror below would evict S2's actor-tree entry
+                // too — and under Slice 1 the actor tree is the bare-JID
+                // selection source, so S2 would silently stop receiving
+                // messages. `unregister_if_sm_stream_id` removes only when the
+                // current entry is genuinely S1's (matching published stream id),
+                // so S2 is left untouched.
+                //
+                // For the common case, S1 already had its DashMap + actor
+                // entries pruned at detach time (`cleanup_connection_shutdown`),
+                // so this returns `None` and the mirror is skipped — the actor
+                // entry is already gone, not leaked.
                 let removed_entry = state
                     .deps
                     .protocol
                     .connection_registry
-                    .unregister(&session.jid);
-                // ADR-0017 Phase 1: mirror the unregister into the actor tree
-                // only when the DashMap actually removed an entry (Greptile
-                // review on PR #1177). Gating on the removal keeps the mirror
-                // consistent with every other teardown site and with the
-                // DashMap itself: if the janitor found nothing to remove
-                // (already superseded), it must not evict the actor-tree entry
-                // a newer session may have installed for the same JID.
-                //
-                // A session that reached the expiry janitor by detaching for
-                // XEP-0198 resume already had BOTH its DashMap and actor-tree
-                // entries pruned at detach time (`cleanup_connection_shutdown`
-                // now mirror-unregisters on the detach success arm), so
-                // `removed_entry` is `None` here for those and the skip is
-                // correct — the actor entry is already gone, not leaked. This
-                // arm still fires for a session that expired while its live
-                // routing entry was present (e.g. never detached).
+                    .unregister_if_sm_stream_id(
+                        &session.jid,
+                        &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone()),
+                    );
+                // Mirror the (S1-gated) unregister into the actor tree. The
+                // removed entry is guaranteed to be S1's, so its token cannot
+                // evict a replacement.
                 if let Some(entry) = removed_entry {
                     crate::server::dual_registration::mirror_unregister(
                         &state.deps.protocol.user_registry,

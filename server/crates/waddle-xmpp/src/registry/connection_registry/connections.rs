@@ -96,6 +96,35 @@ impl ConnectionRegistry {
         removed.map(|(_, entry)| entry)
     }
 
+    /// Unregister a connection only if its published XEP-0198 SM session id
+    /// matches `stream_id` — i.e. the current entry still belongs to that exact
+    /// SM session.
+    ///
+    /// Used by the SM-expiry janitor: an expired session S1 must not evict a
+    /// replacement session S2 that rebound the same full JID after S1 detached.
+    /// S2 carries a different (or no) published stream id, so the predicate
+    /// fails and nothing is removed. Returns the removed entry only when it is
+    /// genuinely S1's, so the caller's actor mirror is gated on S1's own token
+    /// too.
+    #[instrument(skip(self), fields(jid = %jid, stream_id = %stream_id))]
+    pub fn unregister_if_sm_stream_id(
+        &self,
+        jid: &FullJid,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Option<ConnectionEntry> {
+        let removed = self.connections.remove_if(jid, |_, entry| {
+            entry.sm_stream_id().as_ref() == Some(stream_id)
+        });
+        if removed.is_some() {
+            prometheus::decrement_connected_users();
+            self.presence_states.remove(jid);
+            debug!("Unregistered SM-owned connection at expiry");
+        } else {
+            debug!("Skipped expiry unregister: entry belongs to a different session or is absent");
+        }
+        removed.map(|(_, entry)| entry)
+    }
+
     /// Return the current entry only if it still belongs to the provided owner.
     pub fn entry_if_owner(
         &self,
