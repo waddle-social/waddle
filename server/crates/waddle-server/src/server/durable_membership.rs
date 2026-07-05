@@ -7,6 +7,7 @@
 //! candidates across deploys and actor respawns.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use jid::BareJid;
 use kameo::actor::ActorRef;
@@ -23,6 +24,14 @@ use crate::permissions::{
 /// owner/admin/member at either the channel or the space level all
 /// resolve to `Affiliation::Member`+.
 const MEMBER_RELATIONS: [&str; 3] = ["owner", "admin", "member"];
+
+/// Upper bound on each `ListSubjects` ask (S6). Hydration is the first
+/// message in a freshly spawned `RoomActor`'s mailbox, so an unbounded
+/// ask against a hung (not dead) [`PermissionActor`] would wedge the
+/// room — and the dormancy sweep behind it — forever. A timeout maps to
+/// the existing fail-open `Err` path. Magnitude matches the registry's
+/// `ROOM_REGISTRY_REPLY_TIMEOUT` (5s).
+const MEMBERSHIP_LOOKUP_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Durable membership source reading `permission_tuples` through the
 /// shared [`PermissionActor`].
@@ -41,6 +50,7 @@ impl PermissionDurableMembershipSource {
                 object,
                 relation: Relation::new(relation),
             })
+            .reply_timeout(MEMBERSHIP_LOOKUP_REPLY_TIMEOUT)
             .await
             .map_err(|error| {
                 XmppError::internal(format!("durable membership lookup failed: {error}"))

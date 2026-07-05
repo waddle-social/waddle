@@ -136,6 +136,28 @@ pub struct DisplacedPromotionDeps<'a> {
 /// them and the janitor retries, including its dead-letter cap);
 /// success confirms the drain, erasing the durable rows, and releases
 /// any pending_delivery claim held by the dead stream.
+/// Put a session whose promotion failed back into the SM registry
+/// (forced expired, durable state untouched) so the SM-expiry
+/// janitor's next `drain_expired` pass retries the promote → confirm
+/// chain without waiting for a restart. Best-effort: on registry
+/// failure the durable rows still survive and a restart retries.
+pub async fn reinsert_failed_session_for_retry(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    session: DetachedSession,
+) {
+    let stream_id = session.stream_id.clone();
+    let jid = session.jid.clone();
+    if let Err(error) = sm_registry.reinsert_for_retry(session).await {
+        tracing::warn!(
+            jid = %jid,
+            stream_id = %stream_id,
+            %error,
+            "failed to re-insert SM session for promotion retry; durable rows \
+             will only be retried after a restart"
+        );
+    }
+}
+
 pub async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
@@ -159,8 +181,9 @@ pub async fn promote_displaced_sessions(
                         error = %error,
                         record_error = %record_error,
                         "displaced SM session: blocklist load and failure recording both \
-                         failed; preserving durable rows for janitor retry"
+                         failed; preserving durable rows and re-inserting for janitor retry"
                     );
+                    reinsert_failed_session_for_retry(deps.sm_registry, session).await;
                     continue;
                 }
                 tracing::warn!(
@@ -168,9 +191,10 @@ pub async fn promote_displaced_sessions(
                     stream_id = %session.stream_id,
                     error = %error,
                     "displaced SM session: blocklist load failed; SKIPPING promotion to \
-                     preserve fail-closed XEP-0191 policy. Durable rows retry via the \
-                     SM-expiry janitor after restart."
+                     preserve fail-closed XEP-0191 policy. Re-inserted for retry on the \
+                     SM-expiry janitor's next pass."
                 );
+                reinsert_failed_session_for_retry(deps.sm_registry, session).await;
                 continue;
             }
         };
@@ -203,8 +227,9 @@ pub async fn promote_displaced_sessions(
                 stream_id = %session.stream_id,
                 storage_failed = summary.storage_failed,
                 "displaced SM session: promotion had storage failures; \
-                 preserving durable rows for janitor retry"
+                 preserving durable rows and re-inserting for janitor retry"
             );
+            reinsert_failed_session_for_retry(deps.sm_registry, session).await;
             continue;
         }
         deps.sm_registry.confirm_drained(&session.stream_id).await;

@@ -13,7 +13,6 @@ mod persistence_codec;
 mod resources;
 mod sequence;
 mod session;
-mod tombstone;
 mod trait_impl;
 mod traits;
 

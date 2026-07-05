@@ -1273,3 +1273,438 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
         .unwrap()
         .is_empty());
 }
+
+/// Persistence wrapper that pauses inside `store_session_atomic` for
+/// one designated stream so a test can deterministically interleave a
+/// displacement (`store_session` for the same JID under a different
+/// stream id) between a detached-append's durable snapshot write and
+/// its post-write in-memory recheck.
+struct GatedSnapshotPersistence {
+    inner: super::super::persistence::InMemorySmPersistence,
+    gate_stream: String,
+    armed: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
+}
+
+impl GatedSnapshotPersistence {
+    fn new(gate_stream: &str) -> Self {
+        Self {
+            inner: super::super::persistence::InMemorySmPersistence::new(),
+            gate_stream: gate_stream.to_string(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            reached: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistence {
+    async fn upsert_session(
+        &self,
+        session: super::super::persistence::PersistedSession,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.upsert_session(session).await
+    }
+
+    async fn get_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session(stream_id).await
+    }
+
+    async fn delete_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.delete_session(stream_id).await
+    }
+
+    async fn append_unacked(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.append_unacked(stanza).await
+    }
+
+    async fn ack_through(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        up_to_sequence: u32,
+    ) -> Result<u64, super::super::persistence::SmPersistenceError> {
+        self.inner.ack_through(stream_id, up_to_sequence).await
+    }
+
+    async fn delete_unacked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, super::super::persistence::SmPersistenceError> {
+        self.inner.delete_unacked(stream_id, sequences).await
+    }
+
+    async fn list_unacked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedUnackedStanza>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_unacked(stream_id).await
+    }
+
+    async fn list_expired_sessions(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_expired_sessions(now).await
+    }
+
+    async fn list_all_sessions(
+        &self,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_all_sessions().await
+    }
+
+    async fn store_session_atomic(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst)
+            && session.stream_id.as_str() == self.gate_stream
+        {
+            self.reached.notify_one();
+            self.proceed.notified().await;
+        }
+        self.inner.store_session_atomic(session, unacked).await
+    }
+}
+
+#[tokio::test]
+async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
+    // Regression: `update_detached_session_snapshot`'s fail-closed
+    // branch durably deleted the stream's rows when the session
+    // vanished from both maps between the stream-lock read and the
+    // post-write recheck. Displacement by `store_session` (which holds
+    // only the NEW stream's shard lock) is exactly such a removal —
+    // and displaced sessions follow the persist-until-confirmed
+    // contract: their durable rows must survive until
+    // `confirm_drained`. A crash mid-promotion after the fail-closed
+    // delete lost the whole queue.
+    let victim_jid: FullJid = "race@example.com/old".parse().unwrap();
+    let storage = std::sync::Arc::new(GatedSnapshotPersistence::new("stream-race-victim"));
+    let registry =
+        std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+
+    // Pick a displacing stream id on a DIFFERENT lock shard so the
+    // interleaving below cannot self-deadlock on a shared shard.
+    let victim_lock = registry.stream_lock("stream-race-victim").unwrap();
+    let displacing_id = (0..10_000)
+        .map(|i| format!("stream-race-new-{i}"))
+        .find(|candidate| {
+            let lock = registry.stream_lock(candidate).expect("stream lock");
+            !std::sync::Arc::ptr_eq(&lock, &victim_lock)
+        })
+        .expect("some candidate hashes to a different shard");
+
+    registry
+        .store_session(realistic_test_session_for_jid(
+            "stream-race-victim",
+            victim_jid.clone(),
+        ))
+        .await
+        .unwrap();
+
+    // Arm the gate, then run the detached-append snapshot; it pauses
+    // inside its durable write.
+    storage
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let append_registry = std::sync::Arc::clone(&registry);
+    let append = tokio::spawn(async move {
+        append_registry
+            .update_detached_session_snapshot(
+                "stream-race-victim",
+                |_| true,
+                |session| {
+                    session.record_detached_outbound(
+                        message_stanza_xml_with_id("race-append".to_string()),
+                        Utc::now(),
+                    );
+                },
+            )
+            .await
+    });
+    storage.reached.notified().await;
+    storage
+        .armed
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Same client fresh-binds under a new stream id: store_session
+    // displaces the victim from the in-memory maps (jid collision)
+    // while the append is parked mid-write.
+    let displaced = registry
+        .store_session(realistic_test_session_for_jid(&displacing_id, victim_jid))
+        .await
+        .unwrap();
+    assert_eq!(displaced.len(), 1, "victim must be displaced");
+
+    // Let the append finish; it must observe the loss of ownership...
+    storage.proceed.notify_one();
+    let updated = append.await.unwrap().unwrap();
+    assert!(!updated, "append must report the session as gone");
+
+    // ...WITHOUT durably deleting rows it no longer owns. Deletion is
+    // owned by confirm_drained / the janitor after promotion.
+    assert!(
+        storage
+            .get_session(&crate::pending_delivery::SmSessionId::new(
+                "stream-race-victim"
+            ))
+            .await
+            .unwrap()
+            .is_some(),
+        "displaced session's durable rows must survive until promotion confirms"
+    );
+}
+
+#[tokio::test]
+async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
+    // S5 regression: the scrub's in-map phases snapshot only the two
+    // in-memory maps. A stream that is off-map but still durable
+    // (displaced mid-promotion, janitor-drained mid-promotion, or a
+    // promotion-failure retry window) was unreachable — a retraction
+    // arriving in that window was resurrected at the next restart and
+    // promoted verbatim.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let session = realistic_test_session_for_jid(
+        "stream-offmap",
+        "user@example.com/resource".parse().unwrap(),
+    );
+    let mut session = session;
+    session.unacked_stanzas = vec![
+        DetachedUnackedStanza {
+            sequence: 6,
+            stanza_xml: realistic_dm_stanza_xml(
+                "alice@example.com/web",
+                "user@example.com/resource",
+                "retract-me",
+                "secret",
+            ),
+            original_receipt_at: Utc::now(),
+        },
+        DetachedUnackedStanza {
+            sequence: 7,
+            stanza_xml: realistic_dm_stanza_xml(
+                "alice@example.com/web",
+                "user@example.com/resource",
+                "keep-me",
+                "safe",
+            ),
+            original_receipt_at: Utc::now(),
+        },
+    ];
+    registry.store_session(session).await.unwrap();
+
+    // Simulate mid-promotion: the stream leaves memory (janitor drain /
+    // displacement) but its durable rows survive un-confirmed.
+    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(drained.len(), 1);
+
+    // Retraction arrives during the window.
+    let removed = registry
+        .scrub_unacked_for_tombstone("retract-me", "user@example.com")
+        .await
+        .unwrap();
+    assert_eq!(
+        removed, 1,
+        "durable-side sweep must scrub off-map streams' rows"
+    );
+
+    // Restart-style read: the retracted stanza must be gone, the
+    // non-matching one preserved.
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
+    let hydrated = restarted
+        .peek_session("stream-offmap")
+        .await
+        .unwrap()
+        .expect("session rehydrates");
+    assert_eq!(hydrated.unacked_stanzas.len(), 1);
+    assert!(
+        !hydrated
+            .unacked_stanzas
+            .iter()
+            .any(|entry| entry.stanza_xml.contains("secret")),
+        "retracted stanza must not survive the restart"
+    );
+    assert!(hydrated
+        .unacked_stanzas
+        .iter()
+        .any(|entry| entry.stanza_xml.contains("safe")));
+}
+
+#[tokio::test]
+async fn displace_stored_session_if_unclaimed_preserves_durable_rows() {
+    // S2 regression (ownership-moved detach path): when a cleanup
+    // loses the registry ownership race, the just-stored detached
+    // session must be removed from memory FOR PROMOTION — its durable
+    // rows must survive until the promote → confirm_drained chain, not
+    // be durably deleted up-front with the returned session discarded.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    registry
+        .store_session(realistic_test_session("stream-owner-moved"))
+        .await
+        .unwrap();
+
+    let displaced = registry
+        .displace_stored_session_if_unclaimed("stream-owner-moved")
+        .await
+        .unwrap()
+        .expect("unclaimed stored session must be displaced");
+    assert_eq!(displaced.stream_id, "stream-owner-moved");
+    assert_eq!(displaced.unacked_stanzas.len(), 2);
+
+    // Removed from the in-memory view...
+    assert!(registry
+        .peek_session("stream-owner-moved")
+        .await
+        .unwrap()
+        .is_none());
+    // ...but durable rows survive until the caller confirms promotion.
+    assert!(storage
+        .get_session(&crate::pending_delivery::SmSessionId::new(
+            "stream-owner-moved"
+        ))
+        .await
+        .unwrap()
+        .is_some());
+
+    registry.confirm_drained("stream-owner-moved").await;
+    assert!(storage
+        .get_session(&crate::pending_delivery::SmSessionId::new(
+            "stream-owner-moved"
+        ))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn displace_stored_session_if_unclaimed_leaves_claimed_sessions_alone() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(make_test_session("stream-claimed-keep"))
+        .await
+        .unwrap();
+    assert!(registry
+        .claim_session("stream-claimed-keep")
+        .await
+        .unwrap()
+        .is_some());
+
+    assert!(registry
+        .displace_stored_session_if_unclaimed("stream-claimed-keep")
+        .await
+        .unwrap()
+        .is_none());
+
+    // The in-flight resume claim is untouched.
+    assert!(registry
+        .complete_claim("stream-claimed-keep")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn reinsert_for_retry_makes_session_drainable_but_never_resumable() {
+    // S4 support: a session re-inserted after a promotion failure must
+    // be visible to the janitor's next `drain_expired` pass, must NOT
+    // be resumable on the wire (peek/claim), and must not touch
+    // durable state.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let session = realistic_test_session("stream-reinsert");
+    registry.store_session(session).await.unwrap();
+
+    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert!(registry.drain_expired().await.unwrap().is_empty());
+
+    // Promotion failed → re-insert for retry.
+    registry
+        .reinsert_for_retry(drained.into_iter().next().unwrap())
+        .await
+        .unwrap();
+
+    // Not resumable on the wire.
+    assert!(registry
+        .peek_session("stream-reinsert")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(registry
+        .claim_session("stream-reinsert")
+        .await
+        .unwrap()
+        .is_none());
+
+    // Drainable on the janitor's next pass, durable rows untouched.
+    let retried = registry.drain_expired().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].stream_id, "stream-reinsert");
+    assert!(storage
+        .get_session(&crate::pending_delivery::SmSessionId::new(
+            "stream-reinsert"
+        ))
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn claim_of_expired_session_keeps_it_drainable_for_promotion() {
+    // Regression: `claim_session` removed the session from the map and
+    // only THEN noticed it was expired, dropping a #1098-hydrated
+    // expired session from memory. A client auto-reconnecting with
+    // `<resume/>` before the janitor's first tick would make the
+    // session vanish — `drain_expired` scans only memory, so its
+    // unacked queue was stranded until the next restart.
+    let mut expired = make_test_session("stream-claim-expired");
+    expired.max_resume_time = Some(0);
+    let registry = InMemorySmSessionRegistry::new();
+    registry.store_session(expired).await.unwrap();
+
+    // Resume attempt: expired sessions are never claimable.
+    let claimed = registry
+        .claim_session("stream-claim-expired")
+        .await
+        .unwrap();
+    assert!(claimed.is_none(), "expired session must not be claimable");
+
+    // But the failed claim must NOT strand the queue: the janitor's
+    // next drain pass still sees the session for XEP-0198 §5 promotion.
+    let drained = registry.drain_expired().await.unwrap();
+    assert_eq!(
+        drained.len(),
+        1,
+        "expired session must remain drainable after a rejected claim"
+    );
+    assert_eq!(drained[0].stream_id, "stream-claim-expired");
+    assert_eq!(drained[0].unacked_stanzas.len(), 3);
+}

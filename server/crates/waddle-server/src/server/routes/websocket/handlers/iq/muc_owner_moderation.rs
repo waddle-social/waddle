@@ -498,6 +498,31 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                             "XEP-0425 moderation: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
                         ),
                     }
+                    // F2: promotion (#1097/#1098) parks unacked copies
+                    // in pending_delivery — scrub that layer with the
+                    // same keys or the moderated content delivers
+                    // verbatim at the recipient's next login.
+                    match state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .scrub_for_tombstone(target_id, &room_jid_str)
+                        .await
+                    {
+                        Ok(removed) if removed > 0 => debug!(
+                            room = %room_jid,
+                            target = target_id,
+                            removed,
+                            "XEP-0425 moderation: scrubbed pending_delivery rows"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => warn!(
+                            room = %room_jid,
+                            target = target_id,
+                            %error,
+                            "XEP-0425 moderation: pending_delivery scrub_for_tombstone failed; moderated content may still deliver at next login"
+                        ),
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => warn!(

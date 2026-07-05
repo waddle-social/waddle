@@ -316,3 +316,115 @@ async fn record_pushed_at_is_idempotent_per_row() {
     let rows = store.list(&bare("alice@example.com")).await.unwrap();
     assert_eq!(rows[0].outbound_sequence, Some(12));
 }
+
+fn transient_dm_row(recipient: &str, from: &str, wire_id: &str, body: &str) -> PendingRow {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some(from.parse::<jid::Jid>().expect("jid"));
+    m.id = Some(xmpp_parsers::message::Id(wire_id.to_string()));
+    m.type_ = xmpp_parsers::message::MessageType::Chat;
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+    PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: bare(recipient),
+        original_receipt_at: Utc::now(),
+        payload: PendingPayload::Transient(Box::new(m)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    }
+}
+
+#[tokio::test]
+async fn scrub_for_tombstone_removes_matching_transient_row_only() {
+    // F2: promotion (#1097/#1098) parks unacked stanzas in pending
+    // delivery; a XEP-0424/0425 retraction must scrub the inline
+    // (Transient) copy or the retracted content delivers verbatim at
+    // the recipient's next login.
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    store
+        .insert(transient_dm_row(
+            "alice@example.com",
+            "bob@elsewhere/x",
+            "retract-me",
+            "secret",
+        ))
+        .await
+        .unwrap();
+    store
+        .insert(transient_dm_row(
+            "alice@example.com",
+            "bob@elsewhere/x",
+            "keep-me",
+            "safe",
+        ))
+        .await
+        .unwrap();
+    // Same wire id, different conversation: scope guard must keep it.
+    store
+        .insert(transient_dm_row(
+            "carol@example.com",
+            "bob@elsewhere/x",
+            "retract-me",
+            "unrelated",
+        ))
+        .await
+        .unwrap();
+
+    let removed = store
+        .scrub_for_tombstone("retract-me", "alice@example.com")
+        .await
+        .unwrap();
+    assert_eq!(removed, 1, "exactly the in-scope matching row is removed");
+
+    let alice_rows = store.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(alice_rows.len(), 1);
+    match &alice_rows[0].payload {
+        PendingPayload::Transient(m) => {
+            assert_eq!(m.id.as_ref().map(|id| id.0.as_str()), Some("keep-me"));
+        }
+        _ => panic!("expected Transient"),
+    }
+    assert_eq!(
+        store.list(&bare("carol@example.com")).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn scrub_for_tombstone_removes_matching_archived_pointer_row() {
+    // Archived rows are MAM pointers keyed by (stanza-id, archive-by).
+    // A retraction tombstones the MAM row itself; the pending pointer
+    // must go too so the next-login flush doesn't push a stub for a
+    // message the recipient never saw.
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    store
+        .insert(archived_row("alice@example.com", "archive-1"))
+        .await
+        .unwrap();
+    store
+        .insert(archived_row("alice@example.com", "archive-2"))
+        .await
+        .unwrap();
+    // Same archive id, different archive owner: out of scope.
+    store
+        .insert(archived_row("carol@example.com", "archive-1"))
+        .await
+        .unwrap();
+
+    let removed = store
+        .scrub_for_tombstone("archive-1", "alice@example.com")
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    let alice_rows = store.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(alice_rows.len(), 1);
+    match &alice_rows[0].payload {
+        PendingPayload::Archived(r) => assert_eq!(r.id.as_str(), "archive-2"),
+        _ => panic!("expected Archived"),
+    }
+    assert_eq!(
+        store.list(&bare("carol@example.com")).await.unwrap().len(),
+        1
+    );
+}

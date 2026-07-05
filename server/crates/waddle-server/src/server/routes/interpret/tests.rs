@@ -2866,6 +2866,93 @@ async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_room_stanza_id()
     }
 }
 
+#[tokio::test]
+async fn xep_0424_groupchat_retraction_scrubs_pending_delivery_rows() {
+    // F2: promotion (#1097/#1098) parks undelivered copies in
+    // pending_delivery. The retraction arm must scrub that layer with
+    // the same keys as the SM-queue scrub, or the retracted content
+    // (Transient rows) / a tombstone stub (Archived pointers) delivers
+    // at the recipient's next login.
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+    };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
+    deps.pending_delivery_storage = Some(&pending);
+
+    let room: jid::BareJid = "retract-pending@muc.example.com".parse().expect("room");
+    let archive_pk = "room-stamp-uuid-PPP";
+    let wire_id = "alice-orig-3";
+    seed_groupchat_archive_row(&mam, &room, archive_pk, wire_id).await;
+
+    // A promoted Archived pointer row for an offline member, keyed by
+    // the room's XEP-0359 stamp (archive id == wire stanza-id
+    // invariant), plus an unrelated row that must survive.
+    let recipient: jid::BareJid = "offline@example.com".parse().expect("jid");
+    pending
+        .insert(PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Archived(waddle_xmpp_core::xep0359::StanzaId::new(
+                archive_pk,
+                jid::Jid::from(room.clone()),
+            )),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert");
+    pending
+        .insert(PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Archived(waddle_xmpp_core::xep0359::StanzaId::new(
+                "unrelated-stamp",
+                jid::Jid::from(room.clone()),
+            )),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert");
+
+    let mut retraction = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
+    retraction.id = Some(xmpp_parsers::message::Id("retract-stanza-2".to_string()));
+    retraction.from = Some(format!("{room}/alice").parse().expect("room/nick"));
+    retraction.type_ = XmppMessageType::Groupchat;
+    retraction
+        .payloads
+        .push(waddle_xmpp::xep::xep0424::build_retract_element(archive_pk));
+
+    let events = vec![OutboundEvent::ApplyGroupchatRetractionTombstone {
+        room: room.clone(),
+        target_message_id: archive_pk.to_string(),
+        retraction_message: Box::new(retraction),
+    }];
+    let _outcome = interpret(events, &deps).await;
+
+    let rows = pending.list(&recipient).await.expect("list");
+    assert_eq!(
+        rows.len(),
+        1,
+        "retraction must scrub the matching pending row; unrelated rows survive"
+    );
+    match &rows[0].payload {
+        PendingPayload::Archived(r) => assert_eq!(r.id.as_str(), "unrelated-stamp"),
+        other => panic!("expected surviving Archived row, got {other:?}"),
+    }
+}
+
 fn message_thread_id(message: &Message) -> Option<String> {
     message
         .thread

@@ -317,10 +317,24 @@ impl InMemorySmSessionRegistry {
             return Ok(true);
         }
 
-        // Fail closed if a future path removes the session without taking the
-        // stream lock. The snapshot was already written durably, so erase it
-        // rather than allowing restart to resurrect an already-consumed stream.
-        self.persist_delete_session(stream_id).await?;
+        // The session vanished from both maps between the stream-lock
+        // read and this recheck. The only remover that does NOT take
+        // this stream's lock is displacement by `store_session` (jid
+        // collision / max_sessions eviction, which holds only the NEW
+        // stream's shard lock) — and displaced sessions follow the
+        // persist-until-confirmed contract (traits.rs): their durable
+        // rows must survive until the promote → confirm_drained chain
+        // erases them. The previous fail-closed `persist_delete_session`
+        // here (PR #486, guarding against hypothetical lock-free
+        // removers resurrecting an already-consumed stream) deleted a
+        // displaced session's rows mid-promotion, losing the queue on a
+        // crash. Every consuming path (take_session, complete_claim,
+        // confirm_drained) takes
+        // this stream lock, so the consumed-stream-resurrection concern
+        // cannot arise here; deletion stays owned by
+        // confirm_drained / the janitor. Worst case is an orphan
+        // snapshot row that restore_from_persistence rehydrates and the
+        // janitor later promotes — at-least-once, never data loss.
         Ok(false)
     }
 }

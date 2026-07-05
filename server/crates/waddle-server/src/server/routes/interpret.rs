@@ -528,6 +528,7 @@ async fn interpret_with_depth(
                 let tombstoned = apply_groupchat_retraction_tombstone(
                     mam_storage,
                     deps.sm_session_registry,
+                    deps.pending_delivery_storage,
                     &room,
                     &target_message_id,
                     &retraction_message,

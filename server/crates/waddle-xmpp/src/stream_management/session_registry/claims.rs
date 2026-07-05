@@ -166,6 +166,36 @@ impl InMemorySmSessionRegistry {
         Ok(drained)
     }
 
+    /// Re-insert a session whose XEP-0198 §5 promotion failed back
+    /// into the in-memory map, forced expired, WITHOUT touching
+    /// durable state (mirrors the #1098 hydrate-expired pattern).
+    ///
+    /// `drain_expired` scans only memory, so a promotion failure that
+    /// left the session out of the map would strand its durable rows
+    /// until the next restart — contradicting the janitor's "retried
+    /// on the next pass" contract. Forcing expiry keeps the session
+    /// non-resumable on the wire (peek/take/claim all gate on
+    /// `is_expired()`) while making the janitor's next tick retry the
+    /// promote → confirm chain; the persistent promotion-failure
+    /// counter still dead-letters runaway loops.
+    pub async fn reinsert_for_retry(
+        &self,
+        mut session: DetachedSession,
+    ) -> Result<(), SmRegistryError> {
+        let stream_lock = self.stream_lock(&session.stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+        session.max_resume_time = Some(0);
+        if let Some(past) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1))
+        {
+            session.detached_at = past;
+        }
+        self.sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .insert(session.stream_id.clone(), session);
+        Ok(())
+    }
+
     /// Atomically claim a resumable session for a single resume attempt.
     ///
     /// Claimed sessions stay writable by detached fanout so stanzas routed
@@ -185,6 +215,13 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         if session.is_expired() {
+            // Re-insert instead of dropping: a #1098-hydrated expired
+            // session must stay visible to the janitor's next
+            // `drain_expired` pass (which scans memory only) so its
+            // unacked queue still runs the XEP-0198 §5 promote →
+            // confirm chain. Dropping it here would strand the queue
+            // until the next restart.
+            sessions.insert(stream_id.to_string(), session);
             return Ok(None);
         }
         let mut claimed = self
@@ -327,34 +364,31 @@ impl InMemorySmSessionRegistry {
         Ok(outcome)
     }
 
-    /// Remove a stored detached session only if it has not been claimed by a
-    /// resume attempt.
-    pub async fn remove_stored_session_if_unclaimed(
+    /// Remove a stored detached session from the in-memory view only
+    /// if it has not been claimed by a resume attempt, WITHOUT
+    /// deleting its durable rows.
+    ///
+    /// Follows the displaced-session persist-until-confirmed contract
+    /// (issue #1097): the caller MUST run the XEP-0198 §5 promote →
+    /// [`Self::confirm_drained`] chain on the returned session — only
+    /// the confirm erases the durable rows. (The previous shape,
+    /// `remove_stored_session_if_unclaimed`, durably deleted up-front;
+    /// the ownership-moved detach path then discarded the returned
+    /// session, losing the unacked queue entirely.)
+    pub async fn displace_stored_session_if_unclaimed(
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
-        // Persist-first ordering: peek + abort if claimed, durably
-        // erase, then remove from in-memory. Same rationale as
-        // complete_claim — failure to durably erase aborts the
-        // operation so a transient storage error doesn't leave an
-        // orphan that restart resurrects.
-        let exists_unclaimed = {
-            let sessions = self
-                .sessions
-                .read()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let claimed = self
-                .claimed_sessions
-                .read()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            sessions.contains_key(stream_id) && !claimed.contains_key(stream_id)
-        };
-        if !exists_unclaimed {
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .contains_key(stream_id);
+        if claimed {
             return Ok(None);
         }
-        self.persist_delete_session(stream_id).await?;
         let removed = self
             .sessions
             .write()

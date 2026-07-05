@@ -151,6 +151,11 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                      record_promotion_failure also failed; preserving \
                                      session state for retry"
                                 );
+                                crate::sm_promotion::reinsert_failed_session_for_retry(
+                                    &state.deps.protocol.sm_session_registry,
+                                    session,
+                                )
+                                .await;
                                 continue;
                             }
                         };
@@ -180,6 +185,14 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                              preserve fail-closed XEP-0191 policy. Durable SM row will \
                              be retried on the next janitor pass."
                         );
+                        // Make the retry promise true: drain_expired scans only
+                        // memory, so the drained session must go back into the
+                        // map for the next tick to see it.
+                        crate::sm_promotion::reinsert_failed_session_for_retry(
+                            &state.deps.protocol.sm_session_registry,
+                            session,
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -226,6 +239,11 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 "SM janitor: record_promotion_failure failed; \
                                  preserving session state for retry"
                             );
+                            crate::sm_promotion::reinsert_failed_session_for_retry(
+                                &state.deps.protocol.sm_session_registry,
+                                session,
+                            )
+                            .await;
                             continue;
                         }
                     };
@@ -254,6 +272,11 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         "SM janitor: promotion had storage failures; \
                          preserving session state for retry"
                     );
+                    crate::sm_promotion::reinsert_failed_session_for_retry(
+                        &state.deps.protocol.sm_session_registry,
+                        session,
+                    )
+                    .await;
                     continue;
                 }
                 state
@@ -1092,7 +1115,11 @@ pub(crate) async fn sweep_dormant_rooms_once(
                 continue;
             }
         };
-        let is_dormant = match actor.ask(IsDormant).await {
+        // Bounded ask: a hung room actor (e.g. wedged on hydration) must
+        // only skip its own check — timeout lands in the existing
+        // warn-and-skip arm, treating the room as not-dormant (never reap
+        // on uncertainty).
+        let is_dormant = match actor.ask(IsDormant).reply_timeout(REAPER_ASK_TIMEOUT).await {
             Ok(value) => value,
             Err(error) => {
                 warn!(

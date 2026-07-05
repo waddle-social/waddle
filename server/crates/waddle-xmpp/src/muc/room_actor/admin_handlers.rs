@@ -501,11 +501,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 let applied = apply_affiliation_change(
                     &mut self.room,
                     &self.occupant_id_secret,
-                    target_jid,
+                    target_jid.clone(),
                     new_affiliation,
                     Some(&actor),
                     item.reason.as_deref(),
                 )?;
+                self.prune_durable_recipient_if_removed(&target_jid, new_affiliation);
                 if target_current_affiliation != new_affiliation {
                     self.admission_revision = self.admission_revision.saturating_add(1);
                 }
@@ -541,11 +542,12 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         let updates = apply_affiliation_change(
             &mut self.room,
             &self.occupant_id_secret,
-            msg.jid,
+            msg.jid.clone(),
             msg.affiliation,
             msg.actor.as_ref(),
             None,
         )?;
+        self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if previous_affiliation != msg.affiliation {
             self.admission_revision = self.admission_revision.saturating_add(1);
         }
@@ -588,6 +590,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .collect();
         for jid in occupied_jids {
             let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
+            self.prune_durable_recipient_if_removed(&jid, affiliation);
             if self.room.set_affiliation(jid, affiliation).is_some() {
                 self.admission_revision = self.admission_revision.saturating_add(1);
             }

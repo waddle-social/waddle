@@ -224,6 +224,27 @@ impl RoomActor {
             durable_member_recipients: Vec::new(),
         }
     }
+
+    /// Drop a JID from the spawn-time hydrated durable-recipient
+    /// mirror (#1135) when a runtime affiliation mutation removes its
+    /// membership (F1).
+    ///
+    /// Every affiliation-mutating handler must call this with the JID
+    /// and the *requested* affiliation — unconditionally, even when
+    /// `MucRoom::set_affiliation` reports no stored change, because a
+    /// hydrated-only member has no affiliation-list entry (its stored
+    /// affiliation is already `None`) yet still needs pruning from the
+    /// mirror. Pruning is respawn-consistent: re-hydration reads the
+    /// already-updated durable tuples, and a later re-grant to
+    /// `Member`+ is covered by the affiliation-list side of the
+    /// durable-recipient union in
+    /// [`snapshot_handlers::GetRoomSnapshot`].
+    fn prune_durable_recipient_if_removed(&mut self, jid: &BareJid, new_affiliation: Affiliation) {
+        if matches!(new_affiliation, Affiliation::None | Affiliation::Outcast) {
+            self.durable_member_recipients
+                .retain(|recipient| recipient != jid);
+        }
+    }
 }
 
 /// Hydrate this actor incarnation's durable-recipient set from the
@@ -581,6 +602,7 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         msg: ChangeAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if self
             .room
             .set_affiliation(msg.jid, msg.affiliation)

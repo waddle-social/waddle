@@ -1,3 +1,12 @@
+//! Shared XEP-0424 / XEP-0425 tombstone matching.
+//!
+//! One matcher, two consumers: the XEP-0198 SM session registry scrub
+//! (`stream_management::session_registry`) and the XEP-0160
+//! `pending_delivery` scrub (in-memory impl here, libSQL/Postgres impl
+//! in `waddle-server`). Keeping the per-stanza predicate in one place
+//! guarantees a retraction removes the SAME set of cached copies from
+//! every replay-capable store.
+
 /// Select the sequences of unacked outbound `<message/>` entries that
 /// match a XEP-0424 / XEP-0425 tombstone. Pure — takes a snapshot of
 /// `(sequence, stanza_xml)` pairs so the caller can parse OUTSIDE the
@@ -5,7 +14,26 @@
 /// returned `(stream_id, sequence)` pairs, which is safe even if the
 /// queue changed between snapshot and removal.
 ///
-/// A cached message matches iff:
+/// Parse errors and non-message frames are skipped silently — only
+/// matching messages are selected.
+pub fn matching_tombstone_sequences(
+    entries: &[(u32, String)],
+    target_id: &str,
+    archive_jid: &str,
+) -> Vec<u32> {
+    entries
+        .iter()
+        .filter(
+            |(_, stanza_xml)| match stanza_xml.parse::<minidom::Element>() {
+                Ok(el) => message_element_matches_tombstone(&el, target_id, archive_jid),
+                Err(_) => false,
+            },
+        )
+        .map(|(sequence, _)| *sequence)
+        .collect()
+}
+
+/// Per-stanza tombstone predicate. A cached message matches iff:
 ///   1. it is a `<message>` element,
 ///   2. its `from` or `to` attribute bare-equals `archive_jid` (scope
 ///      guard — prevents cross-conversation collateral damage when
@@ -15,27 +43,7 @@
 ///      (groupchat case where the retraction keyed by the room's
 ///      XEP-0359 stamp per the "archive id == wire stanza-id"
 ///      invariant).
-///
-/// Parse errors and non-message frames are skipped silently — only
-/// matching messages are selected.
-pub(super) fn matching_tombstone_sequences(
-    entries: &[(u32, String)],
-    target_id: &str,
-    archive_jid: &str,
-) -> Vec<u32> {
-    entries
-        .iter()
-        .filter(
-            |(_, stanza_xml)| match stanza_xml.parse::<minidom::Element>() {
-                Ok(el) => cached_message_matches_tombstone(&el, target_id, archive_jid),
-                Err(_) => false,
-            },
-        )
-        .map(|(sequence, _)| *sequence)
-        .collect()
-}
-
-fn cached_message_matches_tombstone(
+pub fn message_element_matches_tombstone(
     el: &minidom::Element,
     target_id: &str,
     archive_jid: &str,

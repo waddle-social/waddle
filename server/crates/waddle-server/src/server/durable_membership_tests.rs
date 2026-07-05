@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
@@ -36,6 +37,58 @@ async fn write_tuple(
 
 fn bare(value: &str) -> BareJid {
     value.parse().expect("valid bare JID")
+}
+
+/// Test-only wedge: a message whose handler never completes, so every
+/// subsequent ask sits behind it forever — simulating a hung (not dead)
+/// [`PermissionActor`].
+struct HangForever;
+
+impl kameo::message::Message<HangForever> for PermissionActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: HangForever,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        std::future::pending::<()>().await
+    }
+}
+
+/// S6: a hung permission actor must not wedge room hydration forever.
+/// Every `ListSubjects` ask is bounded by
+/// [`super::MEMBERSHIP_LOOKUP_REPLY_TIMEOUT`]; on timeout the source
+/// fails open with an `Err`, matching the ask-failure path. The outer
+/// 30s virtual-time budget comfortably exceeds the per-ask timeout, so
+/// without the bound this test fails (the ask never resolves).
+#[tokio::test]
+async fn hung_permission_actor_times_out_instead_of_hanging_hydration() {
+    let actor = spawn_test_permission_actor("durable-membership-hung-actor").await;
+    actor
+        .tell(HangForever)
+        .await
+        .expect("enqueue wedge message");
+
+    // Pause only after DB setup (the sqlx pool misbehaves under paused
+    // time); from here virtual time auto-advances past the reply timeout.
+    tokio::time::pause();
+
+    let source = PermissionDurableMembershipSource::new(actor);
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        source.list_durable_member_jids("w-1", "c-1"),
+    )
+    .await
+    .expect("hydration must complete within the reply-timeout budget");
+
+    let error = result.expect_err("hung permission actor must fail open with Err");
+    assert!(
+        error
+            .to_string()
+            .contains("durable membership lookup failed"),
+        "timeout maps to the existing fail-open internal error, got: {error}"
+    );
 }
 
 /// #1135: the production membership source must return every user

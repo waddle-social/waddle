@@ -1418,6 +1418,201 @@ async fn room_snapshot_includes_durable_member_recipients_from_same_actor_read()
     );
 }
 
+// ---------------------------------------------------------------------------
+// F1 — hydrated durable recipients must not survive membership removal.
+//
+// The spawn-time hydrated mirror (#1135) was only filtered against
+// `Affiliation::Outcast`, so every removal path that sets
+// `Affiliation::None` (group-DM leave, XEP-0045 admin removal, tuple
+// deletion) left the ex-member receiving inbox rows with preview text
+// until the actor respawned.
+// ---------------------------------------------------------------------------
+
+/// Fixed-list durable membership source for hydrating a room actor
+/// directly in tests (mirrors the registry-level fake in
+/// `room_registry_actor/tests.rs`).
+struct FixedMembershipSource {
+    members: Vec<BareJid>,
+}
+
+impl crate::muc::affiliation::DurableMembershipSource for FixedMembershipSource {
+    fn list_durable_member_jids(
+        &self,
+        _waddle_id: &str,
+        _channel_id: &str,
+    ) -> crate::muc::affiliation::DurableMembershipFuture<'_> {
+        let members = self.members.clone();
+        Box::pin(async move { Ok(members) })
+    }
+}
+
+async fn hydrate_durable_recipients(actor: &ActorRef<RoomActor>, members: Vec<BareJid>) {
+    actor
+        .ask(HydrateDurableRecipients {
+            source: std::sync::Arc::new(FixedMembershipSource { members }),
+        })
+        .await
+        .expect("hydrate durable recipients");
+}
+
+async fn snapshot_recipient_strings(actor: &ActorRef<RoomActor>) -> Vec<String> {
+    let snapshot = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: test_full_jid("observer"),
+        })
+        .await
+        .expect("snapshot");
+    snapshot
+        .durable_recipient_bare_jids
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn change_affiliation_to_none_prunes_hydrated_durable_recipient() {
+    let actor = spawn_room_actor().await;
+    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("remove membership");
+
+    assert!(
+        snapshot_recipient_strings(&actor).await.is_empty(),
+        "a hydrated durable recipient whose affiliation is set to None \
+         must stop receiving inbox fan-out immediately, not at respawn"
+    );
+}
+
+#[tokio::test]
+async fn change_affiliation_to_outcast_prunes_hydrated_durable_recipient() {
+    let actor = spawn_room_actor().await;
+    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban member");
+
+    assert!(
+        snapshot_recipient_strings(&actor).await.is_empty(),
+        "a banned hydrated durable recipient must drop out of fan-out"
+    );
+}
+
+#[tokio::test]
+async fn readded_member_reappears_in_durable_recipients_after_hydrated_prune() {
+    let actor = spawn_room_actor().await;
+    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("remove membership");
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("re-add membership");
+
+    assert_eq!(
+        snapshot_recipient_strings(&actor).await,
+        vec!["alice@example.com".to_string()],
+        "a re-added member must reappear via the affiliation-list side \
+         of the durable-recipient union"
+    );
+}
+
+#[tokio::test]
+async fn apply_affiliation_change_to_none_prunes_hydrated_durable_recipient() {
+    let actor = spawn_room_actor().await;
+    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ApplyAffiliationChange {
+            actor: None,
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("apply affiliation change");
+
+    assert!(
+        snapshot_recipient_strings(&actor).await.is_empty(),
+        "ApplyAffiliationChange to None must prune the hydrated mirror"
+    );
+}
+
+#[tokio::test]
+async fn apply_admin_items_removal_prunes_hydrated_durable_recipient() {
+    let actor = spawn_room_actor().await;
+    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(bare("alice@example.com")),
+                nick: None,
+                affiliation: Some(Affiliation::None),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await
+        .expect("apply admin items");
+
+    assert!(
+        snapshot_recipient_strings(&actor).await.is_empty(),
+        "the XEP-0045 admin batch removal path must prune the hydrated mirror"
+    );
+}
+
+#[tokio::test]
+async fn enforce_members_only_affiliations_prunes_hydrated_durable_recipient() {
+    let actor = spawn_room_actor().await;
+    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join alice");
+
+    // No durable affiliation tuples: the enforcement pass resolves
+    // every occupant to Affiliation::None.
+    actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: Vec::new(),
+        })
+        .await
+        .expect("enforce members-only");
+
+    assert!(
+        snapshot_recipient_strings(&actor).await.is_empty(),
+        "the members-only enforcement pass must prune hydrated \
+         recipients whose durable affiliation resolved to None"
+    );
+}
+
 #[tokio::test]
 async fn list_affiliations_filter_outcast_returns_only_outcasts() {
     let actor = spawn_room_actor().await;

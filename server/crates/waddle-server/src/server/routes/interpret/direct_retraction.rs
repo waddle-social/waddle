@@ -4,6 +4,9 @@ use super::*;
 pub(super) async fn apply_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    pending_storage: Option<
+        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+    >,
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
@@ -67,6 +70,7 @@ pub(super) async fn apply_retraction_tombstone(
             );
             scrub_unacked_for_tombstone(
                 sm_session_registry,
+                pending_storage,
                 target_wire_id,
                 &archive.to_string(),
                 "ApplyRetractionTombstone",
@@ -83,6 +87,7 @@ pub(super) async fn apply_retraction_tombstone(
             );
             scrub_unacked_for_tombstone(
                 sm_session_registry,
+                pending_storage,
                 target_wire_id,
                 &archive.to_string(),
                 "ApplyRetractionTombstone",
@@ -99,6 +104,7 @@ pub(super) async fn apply_retraction_tombstone(
     // in another conversation is not accidentally scrubbed (Codex P1).
     scrub_unacked_for_tombstone(
         sm_session_registry,
+        pending_storage,
         target_wire_id,
         &archive.to_string(),
         "ApplyRetractionTombstone",

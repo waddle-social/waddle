@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::core::InMemorySmSessionRegistry;
-use super::tombstone::matching_tombstone_sequences;
 use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
+use crate::tombstone::matching_tombstone_sequences;
 
 #[async_trait]
 impl SmSessionRegistry for InMemorySmSessionRegistry {
@@ -337,6 +337,80 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             };
             removed_total += removed_here;
         }
+
+        // Phase 4 (durable-side sweep): durable rows can exist for
+        // streams absent from BOTH in-memory maps — displaced
+        // mid-promotion, janitor-drained mid-promotion, or parked
+        // between a promotion failure and its retry re-insert
+        // (persist-until-confirmed contract). Those rows are invisible
+        // to phases 1-3, but a restart resurrects and promotes them,
+        // so a retraction landing in that window must scrub them too.
+        // COST NOTE: this enumerates every durable session + queue;
+        // scrubs are rare (retraction / moderation only), so a full
+        // listing is acceptable here.
+        if let Some(storage) = &self.persistence {
+            let stored = storage
+                .list_all_sessions_with_unacked()
+                .await
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+            for (persisted, unacked) in stored {
+                let stream_id = persisted.stream_id.as_str().to_string();
+                // Stream lock first: serializes with store_session /
+                // reinsert_for_retry so the off-map check and the
+                // durable delete are atomic with respect to a stream
+                // re-entering the maps.
+                let stream_lock = self.stream_lock(&stream_id)?;
+                let _stream_guard = stream_lock.lock().await;
+                let in_map = self
+                    .sessions
+                    .read()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                    .contains_key(&stream_id)
+                    || self
+                        .claimed_sessions
+                        .read()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                        .contains_key(&stream_id);
+                if in_map {
+                    // Already covered by the in-map phases above.
+                    continue;
+                }
+                let sequences: Vec<u32> = unacked
+                    .iter()
+                    .filter(|entry| {
+                        crate::tombstone::message_element_matches_tombstone(
+                            &entry.stanza.to_element(),
+                            target_id,
+                            archive_jid,
+                        )
+                    })
+                    .map(|entry| entry.sequence)
+                    .collect();
+                if sequences.is_empty() {
+                    continue;
+                }
+                match storage
+                    .delete_unacked(
+                        &crate::pending_delivery::SmSessionId::new(stream_id.clone()),
+                        &sequences,
+                    )
+                    .await
+                {
+                    Ok(deleted) => removed_total += deleted as usize,
+                    Err(error) => {
+                        durable_failures += 1;
+                        debug!(
+                            stream_id = %stream_id,
+                            error = %error,
+                            "tombstone scrub: durable-side delete_unacked failed for an \
+                             off-map stream; rows preserved and the caller's error path \
+                             surfaces the possible replay"
+                        );
+                    }
+                }
+            }
+        }
+
         if durable_failures > 0 {
             return Err(SmRegistryError::Internal(format!(
                 "tombstone scrub: durable delete_unacked failed for {durable_failures} \

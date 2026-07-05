@@ -58,6 +58,115 @@ fn detached_session_with_unacked(
     }
 }
 
+/// PendingDeliveryStorage whose `insert` always fails — simulates a
+/// down offline-storage backend for promotion-failure tests.
+struct AlwaysFailingPending;
+
+#[async_trait::async_trait]
+impl PendingDeliveryStorage for AlwaysFailingPending {
+    async fn insert(
+        &self,
+        _row: waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<
+        waddle_xmpp::pending_delivery::InsertOutcome,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        Err(
+            waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                "simulated backend failure".into(),
+            ),
+        )
+    }
+    async fn list(
+        &self,
+        _recipient: &BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        Ok(vec![])
+    }
+    async fn claim_for_session(
+        &self,
+        _recipient: &BareJid,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        Ok(vec![])
+    }
+    async fn delete_claimed(
+        &self,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn delete_row(
+        &self,
+        _id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn release_claim(
+        &self,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn release_row(
+        &self,
+        _id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn record_pushed_at(
+        &self,
+        _id: &waddle_xmpp::pending_delivery::PendingRowId,
+        _sequence: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn delete_acked_through(
+        &self,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
+        _sequence_max: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn list_orphaned_claims(
+        &self,
+        _live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+    ) -> Result<
+        Vec<(
+            waddle_xmpp::pending_delivery::PendingRowId,
+            waddle_xmpp::pending_delivery::SmSessionId,
+        )>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        Ok(vec![])
+    }
+    async fn count(
+        &self,
+        _recipient: &BareJid,
+    ) -> Result<u32, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn delete_older_than(
+        &self,
+        _cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+    async fn scrub_for_tombstone(
+        &self,
+        _target_id: &str,
+        _archive_jid: &str,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        Ok(0)
+    }
+}
+
 fn dm_xml(from: &str, to: &str, body: &str) -> String {
     let mut m = xmpp_parsers::message::Message::new(Some(to.parse::<jid::Jid>().unwrap()));
     m.from = Some(from.parse::<jid::Jid>().unwrap());
@@ -626,71 +735,6 @@ async fn storage_failure_records_storage_failed_not_dropped() {
     // lose the unacked stanza. The PromotionSummary must surface
     // a separate `storage_failed` counter so the caller can keep
     // the durable SM row for restart-time retry.
-    use async_trait::async_trait;
-    use waddle_xmpp::pending_delivery::storage::PendingStorageError;
-    use waddle_xmpp::pending_delivery::{InsertOutcome, PendingRow, PendingRowId, SmSessionId};
-
-    struct AlwaysFailingPending;
-    #[async_trait]
-    impl PendingDeliveryStorage for AlwaysFailingPending {
-        async fn insert(&self, _row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
-            Err(PendingStorageError::Other(
-                "simulated backend failure".into(),
-            ))
-        }
-        async fn list(&self, _recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
-            Ok(vec![])
-        }
-        async fn claim_for_session(
-            &self,
-            _recipient: &BareJid,
-            _session: &SmSessionId,
-        ) -> Result<Vec<PendingRow>, PendingStorageError> {
-            Ok(vec![])
-        }
-        async fn delete_claimed(&self, _session: &SmSessionId) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-        async fn delete_row(&self, _id: &PendingRowId) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-        async fn release_claim(&self, _session: &SmSessionId) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-        async fn release_row(&self, _id: &PendingRowId) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-        async fn record_pushed_at(
-            &self,
-            _id: &PendingRowId,
-            _sequence: u32,
-        ) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-        async fn delete_acked_through(
-            &self,
-            _session: &SmSessionId,
-            _sequence_max: u32,
-        ) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-        async fn list_orphaned_claims(
-            &self,
-            _live_sessions: &[SmSessionId],
-        ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
-            Ok(vec![])
-        }
-        async fn count(&self, _recipient: &BareJid) -> Result<u32, PendingStorageError> {
-            Ok(0)
-        }
-        async fn delete_older_than(
-            &self,
-            _cutoff: chrono::DateTime<chrono::Utc>,
-        ) -> Result<u64, PendingStorageError> {
-            Ok(0)
-        }
-    }
-
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
     let registry = ConnectionRegistry::new();
     let session = detached_session_with_unacked(
@@ -929,6 +973,237 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn ownership_moved_detach_promotes_displaced_queue_instead_of_dropping_it() {
+    // S2 regression (ownership-moved detach path): conn A dies; the
+    // same client fresh-binds on conn B BEFORE A's cleanup stores its
+    // detached session, so B's invalidation pass finds nothing. A's
+    // cleanup then stores, loses the `unregister_if_owner` race, and
+    // previously erased the stored session durably while discarding
+    // the returned queue. The displace + promote chain must instead
+    // land the queue in pending delivery and only then erase the rows.
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    assert!(sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-owner-moved",
+            full("alice@example.com/laptop"),
+            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "keep me")],
+        ))
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Ownership race lost → displace (memory only, rows preserved).
+    let displaced = sm_registry
+        .displace_stored_session_if_unclaimed("stream-owner-moved")
+        .await
+        .unwrap()
+        .expect("stored session must be displaced");
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-owner-moved"))
+        .await
+        .unwrap()
+        .is_some());
+
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    promote_displaced_sessions(
+        vec![displaced],
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: blocking.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    // No message lost, and confirm erased the durable rows.
+    assert_eq!(pending.count(&bare("alice@example.com")).await.unwrap(), 1);
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-owner-moved"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry() {
+    // S4 regression: a promotion failure preserved the durable rows
+    // but the session was already gone from the in-memory map, and
+    // `drain_expired` scans only memory — so the janitor's "retried on
+    // the next pass" promise was false and the queue was stranded
+    // until a restart. On failure the session must be re-inserted
+    // (forced expired) so the next drain retries, and the retry must
+    // succeed once storage recovers.
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::with_capacity(1)
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let mut oldest = detached_session_with_unacked(
+        "stream-retry",
+        full("alice@example.com/web"),
+        vec![dm_xml("bob@elsewhere/x", "alice@example.com", "retry me")],
+    );
+    oldest.detached_at = Instant::now() - std::time::Duration::from_secs(30);
+    assert!(sm_registry.store_session(oldest).await.unwrap().is_empty());
+    let displaced = sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-newer",
+            full("carol@example.com/web"),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(displaced.len(), 1);
+
+    // Promotion fails: pending-delivery backend is down.
+    let failing: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
+    let registry = ConnectionRegistry::new();
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    promote_displaced_sessions(
+        displaced,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &failing,
+            blocking_storage: blocking.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    // Durable rows preserved (existing contract)...
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-retry"))
+        .await
+        .unwrap()
+        .is_some());
+    // ...AND the session is drainable again without a restart.
+    let drained = sm_registry.drain_expired().await.unwrap();
+    assert_eq!(
+        drained.len(),
+        1,
+        "failed promotion must leave the session in memory for the janitor's next drain"
+    );
+    assert_eq!(drained[0].stream_id, "stream-retry");
+
+    // Storage recovers: the retry promotes and confirms.
+    let recovered: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let summary = promote_session_unacked(
+        &drained[0],
+        &registry,
+        &recovered,
+        &Blocklist::empty(),
+        "example.com",
+    )
+    .await;
+    assert_eq!(summary.queued, 1);
+    assert!(!summary.has_storage_failure());
+    sm_registry.confirm_drained("stream-retry").await;
+    assert_eq!(
+        recovered.count(&bare("alice@example.com")).await.unwrap(),
+        1
+    );
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-retry"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry() {
+    // S4 (blocklist-load branch): same retry contract as the storage-
+    // failure branch — fail-closed XEP-0191 skip must not strand the
+    // queue until restart.
+    use async_trait::async_trait;
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
+
+    struct FailingBlocking;
+    #[async_trait]
+    impl BlockingStorage for FailingBlocking {
+        async fn list_blocked_jids(
+            &self,
+            _user: &BareJid,
+        ) -> Result<Vec<BareJid>, BlockingStorageError> {
+            Err(BlockingStorageError::new(std::io::Error::other(
+                "simulated blocklist backend failure",
+            )))
+        }
+    }
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let jid = full("alice@example.com/phone");
+    assert!(sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-blocklist-retry",
+            jid.clone(),
+            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "held")],
+        ))
+        .await
+        .unwrap()
+        .is_empty());
+    let removed = sm_registry.invalidate_sessions_for_jid(&jid).await.unwrap();
+    assert_eq!(removed.len(), 1);
+
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let blocking = FailingBlocking;
+    promote_displaced_sessions(
+        removed,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: &blocking,
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-blocklist-retry"))
+        .await
+        .unwrap()
+        .is_some());
+    let drained = sm_registry.drain_expired().await.unwrap();
+    assert_eq!(
+        drained.len(),
+        1,
+        "blocklist-load failure must leave the session drainable for retry"
+    );
+    assert_eq!(drained[0].stream_id, "stream-blocklist-retry");
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
 }
 
 #[tokio::test]

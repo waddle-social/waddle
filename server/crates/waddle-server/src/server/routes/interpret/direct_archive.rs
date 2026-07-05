@@ -566,6 +566,7 @@ async fn apply_direct_retraction_tombstone(
             let tombstoned = apply_retraction_tombstone(
                 mam_storage,
                 deps.sm_session_registry,
+                deps.pending_delivery_storage,
                 archive_jid,
                 &retraction.retracts_id,
                 message,

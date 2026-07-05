@@ -582,6 +582,77 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn scrub_for_tombstone(
+        &self,
+        target_id: &str,
+        archive_jid: &str,
+    ) -> Result<u64, PendingStorageError> {
+        // Archived pointers: exact (stanza-id, archive-by) match —
+        // pure SQL. The MAM row was tombstoned, so the pointer must
+        // not flush a stub for a message the recipient never saw.
+        let mut removed = self
+            .execute(
+                "DELETE FROM pending_delivery \
+                 WHERE payload_kind = ? \
+                   AND archive_stanza_id = ? \
+                   AND archive_stanza_by = ?",
+                crate::db_params![
+                    PAYLOAD_KIND_ARCHIVED,
+                    target_id.to_string(),
+                    archive_jid.to_string(),
+                ],
+            )
+            .await?;
+        // Transient rows carry inline XML — match in Rust with the
+        // shared XEP-0424/0425 predicate, then delete by row_id.
+        // COST NOTE: scans every transient row; scrubs are rare
+        // (retraction / moderation only), so a full listing is
+        // acceptable — mirrors the SM registry's durable sweep.
+        let mut rows = self
+            .query(
+                "SELECT row_id, transient_xml FROM pending_delivery WHERE payload_kind = ?",
+                crate::db_params![PAYLOAD_KIND_TRANSIENT],
+            )
+            .await?;
+        let mut matched_ids: Vec<String> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            let transient_xml: Option<String> = row
+                .get(1)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            let Some(xml) = transient_xml else {
+                continue;
+            };
+            let Ok(element) = xml.parse::<xmpp_parsers::minidom::Element>() else {
+                // Undecodable rows are skipped, matching the shared
+                // matcher's parse-error semantics.
+                continue;
+            };
+            if waddle_xmpp::tombstone::message_element_matches_tombstone(
+                &element,
+                target_id,
+                archive_jid,
+            ) {
+                matched_ids.push(row_id);
+            }
+        }
+        for row_id in matched_ids {
+            removed += self
+                .execute(
+                    "DELETE FROM pending_delivery WHERE row_id = ?",
+                    crate::db_params![row_id],
+                )
+                .await?;
+        }
+        Ok(removed)
+    }
+
     fn sweep_internal_bookkeeping(&self) -> usize {
         sweep_recipient_locks(&self.recipient_locks)
     }
