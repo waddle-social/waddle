@@ -53,10 +53,14 @@ static PENDING_DELIVERY_AGED_OUT: AtomicU64 = AtomicU64::new(0);
 // healthy deployment; non-zero signals MAM corruption.
 static PENDING_DELIVERY_UNRESOLVED_POISON_PILL: AtomicU64 = AtomicU64::new(0);
 // `pending_delivery_archive_lookup_transient_failure`: flush hit a
-// transient MAM storage error resolving an Archived row and RELEASED
-// the row for retry instead of dropping it (issue #1122). Distinct
-// from the poison-pill counter: this one signals MAM storage
+// transient MAM storage error (Database outage — permanent decode
+// corruption takes the poison-pill path instead) resolving an
+// Archived row. The failure is batch-fatal: the failing row and every
+// remaining claimed row are RELEASED (FIFO preserved) and the flush
+// aborts; the client's next presence update retries (issue #1122).
+// Distinct from the poison-pill counter: this one signals MAM storage
 // availability problems, not archive corruption, and no mail is lost.
+// Incremented once per aborted flush, not once per released row.
 static PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE: AtomicU64 = AtomicU64::new(0);
 // `sm_promotion_storage_failed`: Q6 promotion encountered a
 // pending_delivery insert error and preserved the durable SM row for
@@ -603,7 +607,7 @@ pub fn render_metrics() -> String {
             "# HELP waddle_pending_delivery_unresolved_poison_pill_total Pending_delivery flushes that dropped a row because its MAM payload could not be resolved (corruption signal).\n",
             "# TYPE waddle_pending_delivery_unresolved_poison_pill_total counter\n",
             "waddle_pending_delivery_unresolved_poison_pill_total {pending_poison_pill}\n",
-            "# HELP waddle_pending_delivery_archive_lookup_transient_failure_total Pending_delivery flushes that hit a transient MAM storage error resolving an Archived row and released the row for retry instead of dropping it (issue #1122). Signals MAM storage availability problems, not corruption; no mail is lost.\n",
+            "# HELP waddle_pending_delivery_archive_lookup_transient_failure_total Pending_delivery flushes aborted by a transient MAM storage error resolving an Archived row: the failing row and the rest of the claimed batch are released (FIFO preserved) and the client's next presence update retries (issue #1122). Signals MAM storage availability problems, not corruption; no mail is lost.\n",
             "# TYPE waddle_pending_delivery_archive_lookup_transient_failure_total counter\n",
             "waddle_pending_delivery_archive_lookup_transient_failure_total {pending_archive_lookup_transient}\n",
             "# HELP waddle_sm_promotion_storage_failed_total Q6 promotion encountered a transient pending_delivery insert error; durable SM row preserved for retry.\n",

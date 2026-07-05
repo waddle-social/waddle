@@ -13,8 +13,15 @@ pub struct FlushOutcome {
     /// the row is deleted so the flush loop never wedges on it.
     pub unresolved: u32,
     /// Number of rows whose MAM lookup failed *transiently* (issue
-    /// #1122). These rows are NOT deleted — the claim is released so
-    /// the next flush retries once MAM storage recovers.
+    /// #1122), plus every later row in the same claimed batch: the
+    /// first transient failure is batch-fatal (see the Err arm in
+    /// [`flush_for_resource`]) so FIFO order is preserved and a MAM
+    /// outage isn't hammered once per remaining row. These rows are
+    /// NOT deleted — their claims are released, and the presence
+    /// handler resets the connection's offline-flush CAS when this
+    /// counter is non-zero so the client's next presence update
+    /// re-attempts the flush (another recovering resource can also
+    /// pick the rows up).
     pub deferred_transient: u32,
     /// Number of rows dropped because the recipient blocked the sender
     /// AFTER the row was inserted (XEP-0191 §2 step 4 flush-time
@@ -129,7 +136,8 @@ where
         return outcome;
     }
 
-    for row in claimed {
+    let mut rows = claimed.into_iter();
+    while let Some(row) = rows.next() {
         let payload = match materialize(&row, archive_resolver).await {
             Ok(Some(payload)) => payload,
             Ok(None) => {
@@ -157,27 +165,39 @@ where
                 // Issue #1122: the MAM lookup ERRORED — a transient
                 // storage failure, not a missing row. Deleting here
                 // would let a momentary MAM outage destroy queued
-                // offline mail. Release the claim instead so the next
-                // flush (this session's next presence transition, or
-                // another recovering resource) retries the lookup.
+                // offline mail. The failure is BATCH-FATAL:
+                // pending_delivery is FIFO (XEP-0160 §3 order of
+                // receipt), so delivering later rows while releasing
+                // this one would reorder the recipient's offline
+                // mail, and a hard MAM outage would otherwise cost
+                // one failing lookup per remaining archived row,
+                // awaited inline in the presence handler. Release
+                // this row and every remaining claimed row, then
+                // abort the flush. Retry fires on the client's next
+                // presence update — `maybe_flush_pending_delivery`
+                // resets the connection's offline-flush CAS when
+                // `deferred_transient > 0` — or via another
+                // recovering resource.
                 outcome.deferred_transient += 1;
                 waddle_xmpp::prometheus::increment_pending_delivery_archive_lookup_transient_failure();
                 warn!(
                     row_id = %row.id,
                     error = %error,
                     "pending_delivery archive lookup failed transiently; \
-                     releasing row for retry on the next flush"
+                     aborting flush batch and releasing this row and all \
+                     remaining claimed rows for retry"
                 );
-                if let Err(release_error) = storage.release_row(&row.id).await {
-                    warn!(
-                        row_id = %row.id,
-                        error = %release_error,
-                        "pending_delivery release_row (transient archive \
-                         failure) also failed; claim-expiry janitor will \
-                         release it once the session expires"
-                    );
+                release_row_or_warn(storage, &row.id, "transient archive failure").await;
+                for deferred in rows.by_ref() {
+                    outcome.deferred_transient += 1;
+                    release_row_or_warn(
+                        storage,
+                        &deferred.id,
+                        "transient archive failure (batch abort)",
+                    )
+                    .await;
                 }
-                continue;
+                break;
             }
         };
         // XEP-0191 §2 step 4 flush-time block re-evaluation
@@ -288,6 +308,25 @@ where
     outcome
 }
 
+/// Release a row's flush claim, downgrading a release failure to a
+/// warning: the claim-expiry janitor will release the row once the
+/// claiming session expires.
+async fn release_row_or_warn(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    row_id: &PendingRowId,
+    context: &'static str,
+) {
+    if let Err(error) = storage.release_row(row_id).await {
+        warn!(
+            row_id = %row_id,
+            error = %error,
+            context,
+            "pending_delivery release_row failed; claim-expiry janitor \
+             will release it once the session expires"
+        );
+    }
+}
+
 /// Resolves Archived `PendingRow` references against MAM.
 ///
 /// Production wiring uses [`MamArchiveResolver`] over a real
@@ -307,9 +346,12 @@ pub trait ArchiveResolver: Send + Sync {
     ///   unparseable preserved XML). The caller treats this as a
     ///   poison pill and deletes the `pending_delivery` row.
     /// - `Err(_)` — *transient* lookup failure (MAM storage outage).
-    ///   The caller releases the row's claim so the next flush
-    ///   retries; the queued message is never destroyed by a
-    ///   momentary outage.
+    ///   Batch-fatal for the caller: it releases this row's claim AND
+    ///   every remaining claimed row, then aborts the flush so FIFO
+    ///   order is preserved; the queued messages are never destroyed
+    ///   by a momentary outage. Permanent decode failures
+    ///   (`Serialization` / `InvalidQuery` row corruption) must be
+    ///   reported as `Ok(None)`, never as `Err(_)`.
     async fn resolve(
         &self,
         stanza_id: &StanzaId,
@@ -323,8 +365,12 @@ pub trait ArchiveResolver: Send + Sync {
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveResolveError {
     /// The MAM storage lookup itself failed (DB outage, timeout, …).
+    /// Carries only *retryable* storage errors: permanent decode
+    /// failures (`MamStorageError::Serialization` / `InvalidQuery`)
+    /// are mapped to `Ok(None)` poison pills by
+    /// [`MamArchiveResolver::resolve`] and never reach this variant.
     #[error("MAM storage lookup failed: {0}")]
-    Storage(#[from] waddle_xmpp::mam::storage::MamStorageError),
+    Storage(waddle_xmpp::mam::storage::MamStorageError),
 }
 
 /// MAM-backed resolver for production use.
@@ -352,10 +398,34 @@ impl ArchiveResolver for MamArchiveResolver {
             // Definitive miss: no archive row for this id. Poison
             // pill — the caller deletes the pending row.
             Ok(None) => return Ok(None),
+            // Permanent row-content corruption: the production lookup
+            // surfaces a bad timestamp/JID column
+            // (decode_sqlite_message_row / decode_postgres_message_row)
+            // as `Serialization`, and an unusable stored id as
+            // `InvalidQuery`. Retrying can never succeed, so these are
+            // genuine poison pills — `Ok(None)` deletes the row and
+            // fires the loud corruption counter instead of retrying
+            // forever under the "no mail lost" transient counter.
+            Err(
+                error @ (waddle_xmpp::mam::storage::MamStorageError::Serialization(_)
+                | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)),
+            ) => {
+                warn!(
+                    error = %error,
+                    archive_jid = %archive_bare,
+                    stanza_id = %stanza_id,
+                    "MAM row decode failed permanently during flush; treating as poison pill"
+                );
+                return Ok(None);
+            }
             // Transient storage failure (issue #1122): propagate the
-            // typed error so the caller RELEASES the row for retry
-            // instead of destroying queued mail during a MAM outage.
-            Err(error) => {
+            // typed error so the caller RELEASES the row (and the
+            // rest of the claimed batch) for retry instead of
+            // destroying queued mail during a MAM outage.
+            Err(
+                error @ (waddle_xmpp::mam::storage::MamStorageError::Database(_)
+                | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
+            ) => {
                 warn!(
                     error = %error,
                     archive_jid = %archive_bare,

@@ -1656,19 +1656,34 @@ use waddle_xmpp::mam::storage::{InMemoryMamStorage, MamStorage, MamStorageError}
 use waddle_xmpp_core::mam::ArchivedMessage;
 
 /// MAM storage wrapper that fails `get_message_by_archive_or_stanza_id`
-/// with a transient `Database` error for the first
-/// `failures_remaining` lookups, then delegates to the inner
+/// with a configurable error (default: transient `Database`) for the
+/// first `failures_remaining` lookups, then delegates to the inner
 /// in-memory storage. Every other operation delegates unconditionally.
 struct LookupOutageMamStorage {
     inner: InMemoryMamStorage,
     failures_remaining: AtomicU32,
+    make_error: fn() -> MamStorageError,
 }
 
 impl LookupOutageMamStorage {
     fn new(inner: InMemoryMamStorage, failures: u32) -> Self {
+        Self::with_error(inner, failures, || {
+            MamStorageError::Database("simulated transient MAM outage".to_string())
+        })
+    }
+
+    /// Like [`Self::new`] but failing lookups return the error produced
+    /// by `make_error` (e.g. `Serialization` to simulate a corrupt
+    /// archive row whose column decode fails on every attempt).
+    fn with_error(
+        inner: InMemoryMamStorage,
+        failures: u32,
+        make_error: fn() -> MamStorageError,
+    ) -> Self {
         Self {
             inner,
             failures_remaining: AtomicU32::new(failures),
+            make_error,
         }
     }
 }
@@ -1731,9 +1746,7 @@ impl MamStorage for LookupOutageMamStorage {
         if remaining > 0 {
             self.failures_remaining
                 .store(remaining - 1, Ordering::Release);
-            return Err(MamStorageError::Database(
-                "simulated transient MAM outage".to_string(),
-            ));
+            return Err((self.make_error)());
         }
         self.inner
             .get_message_by_archive_or_stanza_id(archive_jid, stanza_id)
@@ -2033,4 +2046,319 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
         .delete_acked_through(&sm_session, u32::MAX)
         .await
         .unwrap();
+}
+
+// ── Adversarial review R1 (#1122 follow-up): transient MAM failure is
+// batch-fatal. pending_delivery is FIFO (XEP-0160 §3 order of
+// receipt): releasing a failing Archived row while delivering later
+// rows would break delivery order, and a hard MAM outage would mean
+// one failing lookup per archived row awaited inline in the presence
+// handler. The first Err aborts the flush and releases everything
+// still undelivered.
+
+fn body_of(stanza: &waddle_xmpp::Stanza) -> String {
+    match stanza {
+        waddle_xmpp::Stanza::Message(m) => m
+            .bodies
+            .get("")
+            .map(|b| b.as_str().to_string())
+            .unwrap_or_default(),
+        other => panic!("expected Message replay, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserves_fifo() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(transient_row("alice@example.com", "first"))
+        .await
+        .unwrap();
+    storage
+        .insert(archived_row("alice@example.com", "archive-mid"))
+        .await
+        .unwrap();
+    storage
+        .insert(transient_row("alice@example.com", "third"))
+        .await
+        .unwrap();
+
+    let mam_inner = InMemoryMamStorage::new();
+    seed_archived_message(
+        &mam_inner,
+        "alice@example.com",
+        "archive-mid",
+        Some(valid_archived_stanza_xml("alice@example.com", "second")),
+    )
+    .await;
+    // Fail exactly the first lookup (the "archive-mid" row), then recover.
+    let mam: Arc<dyn MamStorage> = Arc::new(LookupOutageMamStorage::new(mam_inner, 1));
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let sm_session = SmSessionId::new("sm-stream-batch-abort");
+
+    let first = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+
+    assert_eq!(first.claimed, 3);
+    assert_eq!(
+        first.pushed, 1,
+        "row delivered before the failure stays delivered"
+    );
+    assert_eq!(
+        first.unresolved, 0,
+        "transient failure must never poison-pill"
+    );
+    assert_eq!(
+        first.deferred_transient, 2,
+        "failing row AND all later claimed rows are deferred"
+    );
+    assert_eq!(
+        body_of(&rx.try_recv().expect("first row delivered").stanza),
+        "first"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "batch aborted: no row after the failure is delivered in this flush"
+    );
+
+    // Nothing deleted; the failing row and its successors are released
+    // (re-claimable), the delivered row stays claimed for the SM ack.
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(rows.len(), 3, "no row deleted on transient failure");
+    let released = rows
+        .iter()
+        .filter(|r| r.flushed_in_session.is_none())
+        .count();
+    assert_eq!(released, 2, "failing + subsequent rows released for retry");
+
+    // Retry flush with MAM recovered: FIFO preserved — "second" is
+    // delivered before "third".
+    let second = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+    assert_eq!(second.claimed, 2);
+    assert_eq!(second.pushed, 2);
+    assert_eq!(second.deferred_transient, 0);
+    assert_eq!(second.unresolved, 0);
+    assert_eq!(
+        body_of(
+            &rx.try_recv()
+                .expect("archived row delivered on retry")
+                .stanza
+        ),
+        "second"
+    );
+    assert_eq!(
+        body_of(&rx.try_recv().expect("later row delivered on retry").stanza),
+        "third"
+    );
+}
+
+// ── Adversarial review R3 (#1122 follow-up): decode corruption is
+// permanent, not transient. The production lookup surfaces row-content
+// corruption (decode_sqlite_message_row / decode_postgres_message_row
+// on a bad timestamp/JID column) as MamStorageError::Serialization;
+// retrying can never succeed, so it must take the loud poison-pill
+// path — not the "no mail lost" transient counter.
+
+#[tokio::test]
+async fn flush_archived_row_serialization_error_is_poison_pill_not_transient() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(archived_row("alice@example.com", "archive-corrupt"))
+        .await
+        .unwrap();
+
+    let mam: Arc<dyn MamStorage> = Arc::new(LookupOutageMamStorage::with_error(
+        InMemoryMamStorage::new(),
+        u32::MAX,
+        || MamStorageError::Serialization("bad timestamp column".to_string()),
+    ));
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let sm_session = SmSessionId::new("sm-stream-corrupt-decode");
+
+    let outcome = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.unresolved, 1, "decode corruption is a poison pill");
+    assert_eq!(
+        outcome.deferred_transient, 0,
+        "decode corruption must NOT count as transient"
+    );
+    assert!(rx.try_recv().is_err(), "nothing deliverable");
+    assert_eq!(
+        storage.count(&bare("alice@example.com")).await.unwrap(),
+        0,
+        "corrupt row deleted, never released-and-retried forever"
+    );
+}
+
+#[tokio::test]
+async fn archive_resolver_maps_invalid_query_to_permanent_miss() {
+    // InvalidQuery, like Serialization, cannot succeed on retry — the
+    // resolver reports a definitive miss (poison pill), not Err.
+    let mam: Arc<dyn MamStorage> = Arc::new(LookupOutageMamStorage::with_error(
+        InMemoryMamStorage::new(),
+        u32::MAX,
+        || MamStorageError::InvalidQuery("unusable stored id".to_string()),
+    ));
+    let resolver = MamArchiveResolver { mam_storage: mam };
+    let recipient = bare("alice@example.com");
+    let stanza_id = StanzaId::new("archive-bad-query", jid::Jid::from(recipient));
+    let resolved = resolver
+        .resolve(&stanza_id)
+        .await
+        .expect("permanent decode failure must be Ok(None), not a retryable Err");
+    assert!(resolved.is_none());
+}
+
+// ── Adversarial review R2 (#1122 follow-up): deferred rows must be
+// retryable within a live session. `claim_offline_flush()` is a
+// once-per-connection CAS, so after a transient MAM blip the presence
+// handler resets it (when `deferred_transient > 0`) and the client's
+// next presence update re-attempts the flush.
+
+#[tokio::test]
+async fn reset_offline_flush_reopens_the_once_per_session_cas() {
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let entry = registry.get_entry(&resource).expect("registered entry");
+
+    assert!(entry.claim_offline_flush(), "first claim wins");
+    assert!(!entry.claim_offline_flush(), "CAS: second claim loses");
+    entry.reset_offline_flush();
+    assert!(
+        entry.claim_offline_flush(),
+        "reset re-opens the CAS for the next presence update"
+    );
+    assert!(!entry.claim_offline_flush(), "and it is again once-only");
+}
+
+#[tokio::test]
+async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
+    // Mirrors `maybe_flush_pending_delivery`: claim the CAS, flush
+    // (MAM outage → deferral), reset the CAS because
+    // `deferred_transient > 0`, then the next presence update's claim
+    // succeeds and the retry flush delivers.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(archived_row("alice@example.com", "archive-1"))
+        .await
+        .unwrap();
+
+    let mam_inner = InMemoryMamStorage::new();
+    seed_archived_message(
+        &mam_inner,
+        "alice@example.com",
+        "archive-1",
+        Some(valid_archived_stanza_xml(
+            "alice@example.com",
+            "after-the-blip",
+        )),
+    )
+    .await;
+    // Fail exactly the first lookup, then recover.
+    let mam: Arc<dyn MamStorage> = Arc::new(LookupOutageMamStorage::new(mam_inner, 1));
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let entry = registry.get_entry(&resource).expect("registered entry");
+    let sm_session = SmSessionId::new("sm-stream-cas-reset");
+
+    assert!(
+        entry.claim_offline_flush(),
+        "fresh session claims the flush"
+    );
+    let first = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+    assert_eq!(first.deferred_transient, 1);
+    assert_eq!(first.pushed, 0);
+
+    // The presence handler's contract: deferral re-opens the CAS.
+    entry.reset_offline_flush();
+    assert!(
+        entry.claim_offline_flush(),
+        "next presence update re-claims after a deferral"
+    );
+
+    let second = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+    assert_eq!(second.pushed, 1);
+    assert_eq!(second.deferred_transient, 0);
+    assert_eq!(
+        body_of(&rx.try_recv().expect("delivered on retry").stanza),
+        "after-the-blip"
+    );
 }

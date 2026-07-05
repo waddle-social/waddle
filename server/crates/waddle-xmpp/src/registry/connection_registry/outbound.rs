@@ -207,6 +207,19 @@ impl ConnectionEntry {
             .is_ok()
     }
 
+    /// Re-open the offline-flush CAS after a flush that deferred rows
+    /// on a transient MAM failure (issue #1122 follow-up). Without
+    /// this, [`Self::claim_offline_flush`] — once per connection —
+    /// would strand the released `pending_delivery` rows until a full
+    /// reconnect, potentially forever on a long-lived session. The
+    /// client's next presence update then re-claims and re-attempts
+    /// the flush, naturally rate-limited by presence traffic. Runs on
+    /// the same connection task that claimed the flush, so there is
+    /// no concurrent claimant to race with.
+    pub fn reset_offline_flush(&self) {
+        self.offline_flushed.store(false, Ordering::Release);
+    }
+
     /// Publish the XEP-0198 SM session id for this connection.
     /// Called by the websocket main loop after `<enable/>` (fresh
     /// SM session) and after `<resume/>` (continuation onto a
