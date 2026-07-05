@@ -68,6 +68,12 @@ async fn select_bare_jid_live_targets(
         return Vec::new();
     };
 
+    // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
+    // this `UserActor` is resolved here for selection and then re-resolved by
+    // `deliver_one_via_actor` per target — a second `GetUser` for the same bare
+    // JID on the DM path. A future refactor could return this `ActorRef`
+    // alongside the targets so delivery reuses it. Deferred (see the matching
+    // note in `routing.rs::deliver_one_via_actor`).
     let user_actor = match user_registry
         .ask(waddle_xmpp::registry::GetUser {
             bare_jid: bare.clone(),

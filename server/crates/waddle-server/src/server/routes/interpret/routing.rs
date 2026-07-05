@@ -358,6 +358,15 @@ async fn deliver_one_via_actor(
     stanza: &Stanza,
     kind: ActorSendKind,
 ) {
+    // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
+    // for a bare-JID DM this is the SECOND `GetUser` for the same bare JID —
+    // `select_bare_jid_live_targets` already resolved the `UserActor` during
+    // selection, then every target here re-resolves it. It's a cheap
+    // (HashMap-lookup, bounded) registry round-trip, but the delivery signature
+    // could thread the already-resolved `ActorRef` from selection to collapse it
+    // to one `GetUser` per bare JID. Deferred: keeping the self-contained
+    // GetUser+TrySend encapsulation is simpler than reworking the delivery path
+    // ahead of the Phase-2/3 changes that touch it anyway.
     let user_actor = match user_registry
         .ask(waddle_xmpp::registry::GetUser {
             bare_jid: target.to_bare(),
