@@ -7679,6 +7679,7 @@ dependencies = [
  "jsonwebtoken",
  "kameo",
  "libc",
+ "libp2p",
  "lru 0.18.0",
  "minidom",
  "object_store",

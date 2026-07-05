@@ -15,6 +15,17 @@ use crate::config::ClusteringConfig;
 use crate::db::DatabaseDriver;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "clustering")]
+mod behaviour;
+#[cfg(feature = "clustering")]
+mod dns;
+#[cfg(feature = "clustering")]
+mod identity;
+#[cfg(feature = "clustering")]
+mod metrics;
+#[cfg(feature = "clustering")]
+mod swarm;
+
 /// Startup failures for the clustering subsystem. The human-facing `Display`
 /// text is surfaced as the server-startup diagnostic.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +46,11 @@ pub enum ClusteringError {
          `clustering` cargo feature; rebuild with `--features clustering`"
     )]
     FeatureNotCompiled,
+
+    /// The owned libp2p swarm failed to build or start.
+    #[cfg(feature = "clustering")]
+    #[error(transparent)]
+    Swarm(#[from] swarm::SwarmError),
 }
 
 /// Conditionally start the clustering swarm subsystem.
@@ -46,7 +62,7 @@ pub enum ClusteringError {
 pub fn start_if_enabled(
     config: &ClusteringConfig,
     driver: DatabaseDriver,
-    _stop_token: &CancellationToken,
+    stop_token: &CancellationToken,
 ) -> Result<(), ClusteringError> {
     if !config.enabled {
         return Ok(());
@@ -57,7 +73,7 @@ pub fn start_if_enabled(
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = driver;
+        let _ = (driver, stop_token);
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -66,13 +82,15 @@ pub fn start_if_enabled(
         if driver != DatabaseDriver::Postgres {
             return Err(ClusteringError::RequiresPostgres { driver });
         }
+        // Slices 2–5 wire the keypair-slot lease, peer allowlist, remote codec,
+        // and supervised relay actors on top of this swarm.
+        let local_peer_id = swarm::spawn(config, stop_token.clone())?;
         tracing::info!(
+            %local_peer_id,
             listen_addrs = ?config.listen_addrs,
             request_timeout_ms = config.messaging.request_timeout.as_millis() as u64,
-            "ADR-0017 Phase 2: clustering enabled — owned libp2p swarm (discovery only)"
+            "ADR-0017 Phase 2: clustering swarm started (node discovery only)"
         );
-        // Slices 1–5 wire the owned swarm event loop, keypair-slot lease,
-        // peer allowlist, remote codec, and supervised relay actors here.
         Ok(())
     }
 }
