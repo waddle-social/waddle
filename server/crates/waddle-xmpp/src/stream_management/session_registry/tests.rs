@@ -1678,6 +1678,119 @@ async fn reinsert_for_retry_makes_session_drainable_but_never_resumable() {
 }
 
 #[tokio::test]
+async fn scrub_records_recent_tombstone_for_promotion_time_recheck() {
+    // R2 (round-2 review): a retraction racing an in-flight promotion
+    // finds the drained session in neither map and its pending row not
+    // yet inserted. The scrub must leave a recent-tombstone record the
+    // promotion path can re-check before inserting into pending
+    // delivery.
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .scrub_unacked_for_tombstone("retract-me", "user@example.com")
+        .await
+        .unwrap();
+
+    let keys = registry.recent_tombstones().unwrap();
+    assert_eq!(
+        keys,
+        vec![TombstoneKey {
+            target_id: "retract-me".to_string(),
+            archive_jid: "user@example.com".to_string(),
+        }],
+        "the scrub must record its tombstone identity for promotion-time re-check"
+    );
+}
+
+#[tokio::test]
+async fn recent_tombstones_evicts_entries_past_ttl() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stale = Instant::now() - (tombstones::RECENT_TOMBSTONE_TTL + Duration::from_secs(1));
+    registry
+        .record_recent_tombstone_at("old-target", "user@example.com", stale)
+        .unwrap();
+    registry
+        .record_recent_tombstone_at("fresh-target", "user@example.com", Instant::now())
+        .unwrap();
+
+    let keys = registry.recent_tombstones().unwrap();
+    assert_eq!(
+        keys,
+        vec![TombstoneKey {
+            target_id: "fresh-target".to_string(),
+            archive_jid: "user@example.com".to_string(),
+        }],
+        "entries older than the TTL must be evicted; fresh ones retained"
+    );
+}
+
+#[tokio::test]
+async fn recent_tombstones_bounds_entry_count() {
+    let registry = InMemorySmSessionRegistry::new();
+    for i in 0..(tombstones::MAX_RECENT_TOMBSTONES + 5) {
+        registry
+            .record_recent_tombstone_at(&format!("target-{i}"), "user@example.com", Instant::now())
+            .unwrap();
+    }
+    let keys = registry.recent_tombstones().unwrap();
+    assert_eq!(
+        keys.len(),
+        tombstones::MAX_RECENT_TOMBSTONES,
+        "the recent-tombstone record must stay bounded"
+    );
+    assert_eq!(
+        keys.last().map(|k| k.target_id.as_str()),
+        Some(format!("target-{}", tombstones::MAX_RECENT_TOMBSTONES + 4).as_str()),
+        "overflow must evict the oldest entries, keeping the newest"
+    );
+}
+
+#[tokio::test]
+async fn reinsert_for_retry_preserves_detached_at_for_eviction_ordering() {
+    // R3 (round-2 review): `reinsert_for_retry` used to reset
+    // `detached_at` to ≈now, so under a degraded backend a repeatedly
+    // failing session looked perpetually fresh and the max_sessions
+    // min-by-detached_at eviction kept sacrificing HEALTHY resumable
+    // sessions instead. The reinserted session must keep its original
+    // detach time so it sorts as the oldest eviction candidate.
+    let registry = InMemorySmSessionRegistry::with_capacity(2);
+
+    let mut failing =
+        make_test_session_for_jid("stream-failing", "alice@example.com/web".parse().unwrap());
+    failing.detached_at = Instant::now() - Duration::from_secs(100);
+    registry.reinsert_for_retry(failing).await.unwrap();
+
+    let mut healthy =
+        make_test_session_for_jid("stream-healthy", "bob@example.com/web".parse().unwrap());
+    healthy.detached_at = Instant::now() - Duration::from_secs(50);
+    assert!(registry.store_session(healthy).await.unwrap().is_empty());
+
+    // Capacity overflow: the eviction victim must be the genuinely
+    // oldest session (the reinserted one), not the healthy fresher one.
+    let displaced = registry
+        .store_session(make_test_session_for_jid(
+            "stream-newest",
+            "carol@example.com/web".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+    let displaced_ids: Vec<&str> = displaced.iter().map(|s| s.stream_id.as_str()).collect();
+    assert_eq!(
+        displaced_ids,
+        vec!["stream-failing"],
+        "the reinserted session must keep its original detached_at and \
+         be evicted before a fresher healthy session"
+    );
+    assert!(
+        registry
+            .peek_session("stream-healthy")
+            .await
+            .unwrap()
+            .is_some(),
+        "the healthy resumable session must survive the eviction"
+    );
+}
+
+#[tokio::test]
 async fn claim_of_expired_session_keeps_it_drainable_for_promotion() {
     // Regression: `claim_session` removed the session from the map and
     // only THEN noticed it was expired, dropping a #1098-hydrated

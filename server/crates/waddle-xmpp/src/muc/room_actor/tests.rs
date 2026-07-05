@@ -1428,11 +1428,35 @@ async fn room_snapshot_includes_durable_member_recipients_from_same_actor_read()
 // until the actor respawned.
 // ---------------------------------------------------------------------------
 
-/// Fixed-list durable membership source for hydrating a room actor
+/// Mutable durable membership source for hydrating a room actor
 /// directly in tests (mirrors the registry-level fake in
-/// `room_registry_actor/tests.rs`).
+/// `room_registry_actor/tests.rs`). Its member list can be updated
+/// mid-test to model the durable store changing (a GraphQL
+/// `persist_channel_affiliation` deleting channel tuples), and it can
+/// be armed to fail so the re-hydration failure path is exercisable.
 struct FixedMembershipSource {
-    members: Vec<BareJid>,
+    members: std::sync::Mutex<Vec<BareJid>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl FixedMembershipSource {
+    fn new(members: Vec<BareJid>) -> Self {
+        Self {
+            members: std::sync::Mutex::new(members),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Replace what the durable store reports — models tuple deletion
+    /// landing before the actor processes the affiliation change.
+    fn set_members(&self, members: Vec<BareJid>) {
+        *self.members.lock().expect("members lock") = members;
+    }
+
+    /// Make every subsequent query fail.
+    fn fail_queries(&self) {
+        self.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl crate::muc::affiliation::DurableMembershipSource for FixedMembershipSource {
@@ -1441,18 +1465,32 @@ impl crate::muc::affiliation::DurableMembershipSource for FixedMembershipSource 
         _waddle_id: &str,
         _channel_id: &str,
     ) -> crate::muc::affiliation::DurableMembershipFuture<'_> {
-        let members = self.members.clone();
-        Box::pin(async move { Ok(members) })
+        let fail = self.fail.load(std::sync::atomic::Ordering::SeqCst);
+        let members = self.members.lock().expect("members lock").clone();
+        Box::pin(async move {
+            if fail {
+                Err(crate::XmppError::internal(
+                    "simulated durable membership source failure",
+                ))
+            } else {
+                Ok(members)
+            }
+        })
     }
 }
 
-async fn hydrate_durable_recipients(actor: &ActorRef<RoomActor>, members: Vec<BareJid>) {
+async fn hydrate_durable_recipients(
+    actor: &ActorRef<RoomActor>,
+    members: Vec<BareJid>,
+) -> std::sync::Arc<FixedMembershipSource> {
+    let source = std::sync::Arc::new(FixedMembershipSource::new(members));
     actor
         .ask(HydrateDurableRecipients {
-            source: std::sync::Arc::new(FixedMembershipSource { members }),
+            source: std::sync::Arc::clone(&source) as _,
         })
         .await
         .expect("hydrate durable recipients");
+    source
 }
 
 async fn snapshot_recipient_strings(actor: &ActorRef<RoomActor>) -> Vec<String> {
@@ -1472,7 +1510,10 @@ async fn snapshot_recipient_strings(actor: &ActorRef<RoomActor>) -> Vec<String> 
 #[tokio::test]
 async fn change_affiliation_to_none_prunes_hydrated_durable_recipient() {
     let actor = spawn_room_actor().await;
-    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    let source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    // Channel-only member: the durable channel tuples were deleted
+    // before the affiliation change reaches the actor.
+    source.set_members(Vec::new());
 
     actor
         .ask(ChangeAffiliation {
@@ -1492,7 +1533,10 @@ async fn change_affiliation_to_none_prunes_hydrated_durable_recipient() {
 #[tokio::test]
 async fn change_affiliation_to_outcast_prunes_hydrated_durable_recipient() {
     let actor = spawn_room_actor().await;
-    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    // The source deliberately KEEPS alice: a ban is unambiguous, so the
+    // direct prune must be final without any re-hydration query (and
+    // the snapshot's Outcast filter backs it up).
+    let _source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
 
     actor
         .ask(ChangeAffiliation {
@@ -1511,7 +1555,8 @@ async fn change_affiliation_to_outcast_prunes_hydrated_durable_recipient() {
 #[tokio::test]
 async fn readded_member_reappears_in_durable_recipients_after_hydrated_prune() {
     let actor = spawn_room_actor().await;
-    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    let source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    source.set_members(Vec::new());
 
     actor
         .ask(ChangeAffiliation {
@@ -1539,7 +1584,8 @@ async fn readded_member_reappears_in_durable_recipients_after_hydrated_prune() {
 #[tokio::test]
 async fn apply_affiliation_change_to_none_prunes_hydrated_durable_recipient() {
     let actor = spawn_room_actor().await;
-    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    let source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    source.set_members(Vec::new());
 
     actor
         .ask(ApplyAffiliationChange {
@@ -1556,10 +1602,124 @@ async fn apply_affiliation_change_to_none_prunes_hydrated_durable_recipient() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// R1 (round-2 review) — revoking only the explicit CHANNEL grant must
+// not prune a user who remains durably entitled via the SPACE: the
+// hydration union covers channel AND space relations, so an
+// affiliation change to None re-runs hydration and the mirror
+// converges to the durable truth instead of guessing. Only a source
+// failure falls back to the prune (privacy beats availability — F1).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn space_entitled_member_survives_channel_grant_revocation() {
+    let actor = spawn_room_actor().await;
+    // The durable union still reports alice (space-level member) even
+    // after her explicit channel grant is deleted.
+    let _source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("revoke channel grant");
+
+    assert_eq!(
+        snapshot_recipient_strings(&actor).await,
+        vec!["alice@example.com".to_string()],
+        "a space-entitled member must stay a durable recipient when only \
+         the explicit channel grant is revoked"
+    );
+}
+
+#[tokio::test]
+async fn space_entitled_member_survives_admin_item_revocation() {
+    let actor = spawn_room_actor().await;
+    let _source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+
+    actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(bare("alice@example.com")),
+                nick: None,
+                affiliation: Some(Affiliation::None),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await
+        .expect("apply admin items");
+
+    assert_eq!(
+        snapshot_recipient_strings(&actor).await,
+        vec!["alice@example.com".to_string()],
+        "the XEP-0045 admin removal path must also converge to the \
+         durable truth for space-entitled members"
+    );
+}
+
+#[tokio::test]
+async fn space_entitled_member_survives_members_only_enforcement() {
+    let actor = spawn_room_actor().await;
+    let _source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join alice");
+
+    actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: Vec::new(),
+        })
+        .await
+        .expect("enforce members-only");
+
+    assert_eq!(
+        snapshot_recipient_strings(&actor).await,
+        vec!["alice@example.com".to_string()],
+        "members-only enforcement must not drop a member the durable \
+         union still reports (space entitlement)"
+    );
+}
+
+#[tokio::test]
+async fn rehydration_failure_keeps_revoked_jid_excluded() {
+    let actor = spawn_room_actor().await;
+    let source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    // The re-hydration query fails: fail toward NOT delivering to the
+    // removed jid — keep the prune (F1: privacy beats availability).
+    source.fail_queries();
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("revoke membership");
+
+    assert!(
+        snapshot_recipient_strings(&actor).await.is_empty(),
+        "when the re-hydration query fails, the None'd jid must stay \
+         excluded from durable fan-out"
+    );
+}
+
 #[tokio::test]
 async fn apply_admin_items_removal_prunes_hydrated_durable_recipient() {
     let actor = spawn_room_actor().await;
-    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    let source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    source.set_members(Vec::new());
 
     actor
         .ask(ApplyAdminItems {
@@ -1586,7 +1746,8 @@ async fn apply_admin_items_removal_prunes_hydrated_durable_recipient() {
 #[tokio::test]
 async fn enforce_members_only_affiliations_prunes_hydrated_durable_recipient() {
     let actor = spawn_room_actor().await;
-    hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    let source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
+    source.set_members(Vec::new());
     actor
         .ask(Join {
             nick: "alice".to_string(),

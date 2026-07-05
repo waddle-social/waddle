@@ -28,6 +28,11 @@ pub struct InMemorySmSessionRegistry {
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) stream_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
     pub(super) max_sessions: usize,
+    /// Recently applied XEP-0424/0425 tombstones, kept for the
+    /// promotion-time re-check (round-2 review R2). Bounded by
+    /// [`super::tombstones::RECENT_TOMBSTONE_TTL`] +
+    /// [`super::tombstones::MAX_RECENT_TOMBSTONES`].
+    pub(super) recent_tombstones: RwLock<Vec<super::tombstones::RecentTombstone>>,
     /// Optional durable backing store. When `None` the registry is
     /// strictly in-memory (legacy behaviour); production wiring sets
     /// this via [`Self::with_persistence`] before Arc-wrapping.
@@ -67,6 +72,7 @@ impl InMemorySmSessionRegistry {
             claimed_sessions: RwLock::new(HashMap::new()),
             stream_locks: new_stream_locks(),
             max_sessions: DEFAULT_MAX_SESSIONS,
+            recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
         }
     }
@@ -78,6 +84,7 @@ impl InMemorySmSessionRegistry {
             claimed_sessions: RwLock::new(HashMap::new()),
             stream_locks: new_stream_locks(),
             max_sessions,
+            recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
         }
     }
@@ -209,6 +216,44 @@ impl InMemorySmSessionRegistry {
         }
         storage
             .store_session_atomic(persisted, unacked_rows)
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
+    /// Durably delete the named unacked rows for a stream — exact
+    /// `(stream_id, sequence)` matches, idempotent for absent rows.
+    ///
+    /// Used by the Q6 promotion retry path (round-2 review R4): after
+    /// a PARTIAL promotion failure, the successfully promoted stanzas'
+    /// `pending_delivery` rows are already committed, so their
+    /// `sm_unacked` rows must be erased before the session is
+    /// re-inserted for retry — otherwise every janitor tick re-promotes
+    /// the whole queue and duplicates the already-queued stanzas.
+    /// Ordering is crash-safe: the pending row commits BEFORE its
+    /// `sm_unacked` row is deleted here, preserving at-least-once.
+    ///
+    /// Takes the stream lock so the delete serializes with
+    /// detached-append full snapshots that could otherwise resurrect
+    /// the rows. No in-memory mutation happens here — the caller owns
+    /// the drained session and drops the entries from its local copy.
+    pub async fn delete_unacked_sequences(
+        &self,
+        stream_id: &str,
+        sequences: &[u32],
+    ) -> Result<u64, SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(0);
+        };
+        if sequences.is_empty() {
+            return Ok(0);
+        }
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+        storage
+            .delete_unacked(
+                &crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
+                sequences,
+            )
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }

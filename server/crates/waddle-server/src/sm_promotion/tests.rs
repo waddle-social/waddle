@@ -275,6 +275,7 @@ async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -311,6 +312,7 @@ async fn promotes_to_pending_delivery_when_no_alt_resource() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -341,6 +343,7 @@ async fn dm_with_mam_payload_is_still_promoted_to_pending_delivery() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -389,6 +392,7 @@ async fn promotes_to_alt_resource_when_one_is_online() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -430,6 +434,7 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -472,6 +477,7 @@ async fn drops_no_store_hint_stanzas_silently() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -520,6 +526,7 @@ async fn full_jid_target_falls_back_to_bare_jid_fanout() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -558,6 +565,7 @@ async fn bare_jid_target_fans_out_to_all_routable_resources() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -599,6 +607,7 @@ async fn iq_unacked_promoted_to_alt_resource_when_addressed_resource_online() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -641,6 +650,7 @@ async fn iq_unacked_dropped_when_no_resource_online() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -664,6 +674,7 @@ async fn skips_unparseable_stanzas() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
     assert_eq!(summary.unparseable, 1);
@@ -714,6 +725,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
     assert_eq!(summary.queued, 1);
@@ -753,6 +765,7 @@ async fn storage_failure_records_storage_failed_not_dropped() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -808,6 +821,7 @@ async fn promotion_prefers_existing_self_stamp_time_over_queue_receipt_time() {
         &storage,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
 
@@ -893,6 +907,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
         &pending,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
     assert_eq!(summary.queued, 1);
@@ -1117,6 +1132,7 @@ async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry()
         &recovered,
         &Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
     assert_eq!(summary.queued, 1);
@@ -1273,6 +1289,411 @@ async fn fresh_bind_invalidation_delivers_displaced_queue_to_new_session() {
         .await
         .unwrap()
         .is_none());
+}
+
+fn dm_xml_with_id(from: &str, to: &str, id: &str, body: &str) -> String {
+    let mut m = xmpp_parsers::message::Message::new(Some(to.parse::<jid::Jid>().unwrap()));
+    m.from = Some(from.parse::<jid::Jid>().unwrap());
+    m.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    m.type_ = xmpp_parsers::message::MessageType::Chat;
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+    let element: xmpp_parsers::minidom::Element = m.into();
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
+fn transient_bodies(rows: &[waddle_xmpp::pending_delivery::PendingRow]) -> Vec<String> {
+    let mut bodies: Vec<String> = rows
+        .iter()
+        .filter_map(|row| match &row.payload {
+            waddle_xmpp::pending_delivery::PendingPayload::Transient(message) => {
+                message.bodies.values().next().cloned()
+            }
+            waddle_xmpp::pending_delivery::PendingPayload::Archived(_) => None,
+        })
+        .collect();
+    bodies.sort();
+    bodies
+}
+
+#[tokio::test]
+async fn promotion_scrubs_stanzas_matching_recent_tombstone() {
+    // R2 (round-2 review): the promotion chain must re-check the
+    // registry's recent-tombstone record before writing a drained
+    // session's unacked stanzas into pending_delivery, so a retraction
+    // racing an in-flight promotion cannot resurrect retracted content.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let session = detached_session_with_unacked(
+        "stream-tomb",
+        full("alice@example.com/laptop"),
+        vec![
+            dm_xml_with_id(
+                "bob@elsewhere/x",
+                "alice@example.com",
+                "retract-me",
+                "secret",
+            ),
+            dm_xml_with_id("bob@elsewhere/x", "alice@example.com", "keep-me", "safe"),
+        ],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[waddle_xmpp::stream_management::TombstoneKey {
+            target_id: "retract-me".to_string(),
+            archive_jid: "alice@example.com".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(summary.scrubbed, 1, "retracted stanza counted as scrubbed");
+    assert_eq!(summary.queued, 1, "the non-matching stanza still promotes");
+    assert_eq!(
+        summary.dropped, 0,
+        "scrubbed must not be counted as dropped"
+    );
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(
+        transient_bodies(&rows),
+        vec!["safe".to_string()],
+        "retracted content must not reach pending_delivery"
+    );
+}
+
+#[tokio::test]
+async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_content() {
+    // R2 end-to-end race: the janitor's drain moves the session off
+    // both maps into a local; the retraction scrub then finds it
+    // nowhere (and its pending row is not yet inserted); the promotion
+    // finally runs. The recent-tombstone re-check must drop the
+    // retracted stanza while the rest of the queue promotes, and
+    // confirm_drained may then erase the SM rows safely.
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-race",
+            full("alice@example.com/laptop"),
+            vec![
+                dm_xml_with_id(
+                    "bob@elsewhere/x",
+                    "alice@example.com",
+                    "retract-me",
+                    "secret",
+                ),
+                dm_xml_with_id("bob@elsewhere/x", "alice@example.com", "keep-me", "safe"),
+            ],
+        ))
+        .await
+        .unwrap();
+
+    // Step 1: drain (session now off both maps, held in a local).
+    let drained = sm_registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(drained.len(), 1);
+
+    // Step 2: retraction scrub lands mid-promotion.
+    sm_registry
+        .scrub_unacked_for_tombstone("retract-me", "alice@example.com")
+        .await
+        .unwrap();
+
+    // Step 3: promotion runs with the registry's recent tombstones.
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let recent = sm_registry.recent_tombstones().unwrap();
+    let summary = promote_session_unacked(
+        &drained[0],
+        &registry,
+        &pending,
+        &Blocklist::empty(),
+        "example.com",
+        &recent,
+    )
+    .await;
+    assert_eq!(summary.scrubbed, 1);
+    assert_eq!(summary.queued, 1);
+    assert!(!summary.has_storage_failure());
+    sm_registry.confirm_drained("stream-race").await;
+
+    let rows = pending.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(
+        transient_bodies(&rows),
+        vec!["safe".to_string()],
+        "the retracted stanza must be absent from pending storage; the \
+         other stanza must still be promoted"
+    );
+}
+
+/// PendingDeliveryStorage that fails exactly one insert (the Nth call)
+/// while armed, delegating everything to a real in-memory store —
+/// simulates a transient partial storage failure mid-promotion.
+struct FlakyPending {
+    inner: InMemoryPendingDeliveryStorage,
+    armed: std::sync::atomic::AtomicBool,
+    insert_calls: std::sync::atomic::AtomicU32,
+    fail_on_call: u32,
+}
+
+impl FlakyPending {
+    fn failing_on(call: u32) -> Self {
+        Self {
+            inner: InMemoryPendingDeliveryStorage::unlimited(),
+            armed: std::sync::atomic::AtomicBool::new(true),
+            insert_calls: std::sync::atomic::AtomicU32::new(0),
+            fail_on_call: call,
+        }
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl PendingDeliveryStorage for FlakyPending {
+    async fn insert(
+        &self,
+        row: waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<
+        waddle_xmpp::pending_delivery::InsertOutcome,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        let call = self
+            .insert_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) && call == self.fail_on_call {
+            return Err(
+                waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                    "simulated transient backend failure".into(),
+                ),
+            );
+        }
+        self.inner.insert(row).await
+    }
+    async fn list(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.list(recipient).await
+    }
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.claim_for_session(recipient, session).await
+    }
+    async fn delete_claimed(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_claimed(session).await
+    }
+    async fn delete_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_row(id).await
+    }
+    async fn release_claim(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_claim(session).await
+    }
+    async fn release_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_row(id).await
+    }
+    async fn record_pushed_at(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.record_pushed_at(id, sequence).await
+    }
+    async fn delete_acked_through(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence_max: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_acked_through(session, sequence_max).await
+    }
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+    ) -> Result<
+        Vec<(
+            waddle_xmpp::pending_delivery::PendingRowId,
+            waddle_xmpp::pending_delivery::SmSessionId,
+        )>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.list_orphaned_claims(live_sessions).await
+    }
+    async fn count(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<u32, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.count(recipient).await
+    }
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_older_than(cutoff).await
+    }
+    async fn scrub_for_tombstone(
+        &self,
+        target_id: &str,
+        archive_jid: &str,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.scrub_for_tombstone(target_id, archive_jid).await
+    }
+}
+
+#[tokio::test]
+async fn partial_storage_failure_retries_only_failed_stanzas_without_duplicates() {
+    // R4 (round-2 review): a partial storage failure used to re-promote
+    // the WHOLE queue on every janitor tick — already-Queued stanzas
+    // included — because promotion kept no per-stanza progress. After a
+    // partial failure the successfully promoted stanzas' durable
+    // sm_unacked rows must be deleted and dropped from the reinserted
+    // session, so retries cover only the failed stanzas and duplication
+    // is bounded to a crash window, not per tick.
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let jid = full("alice@example.com/web");
+    assert!(sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-partial",
+            jid.clone(),
+            vec![
+                dm_xml("bob@elsewhere/x", "alice@example.com", "msg-1"),
+                dm_xml("bob@elsewhere/x", "alice@example.com", "msg-2"),
+                dm_xml("bob@elsewhere/x", "alice@example.com", "msg-3"),
+            ],
+        ))
+        .await
+        .unwrap()
+        .is_empty());
+    let displaced = sm_registry.invalidate_sessions_for_jid(&jid).await.unwrap();
+    assert_eq!(displaced.len(), 1);
+
+    // Tick 1: stanza 2 of 3 fails to insert.
+    let flaky = Arc::new(FlakyPending::failing_on(2));
+    let pending: Arc<dyn PendingDeliveryStorage> = Arc::clone(&flaky) as _;
+    let registry = ConnectionRegistry::new();
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    promote_displaced_sessions(
+        displaced,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: blocking.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    // Stanzas 1 & 3 landed in pending storage...
+    let rows = pending.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(
+        transient_bodies(&rows),
+        vec!["msg-1".to_string(), "msg-3".to_string()]
+    );
+    // ...and their durable sm_unacked rows are gone; only the failed
+    // stanza's row survives for the retry.
+    let stream_id = SmSessionId::new("stream-partial");
+    let surviving: Vec<u32> = sm_storage
+        .list_unacked(&stream_id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.sequence)
+        .collect();
+    assert_eq!(
+        surviving,
+        vec![2],
+        "successfully promoted stanzas' durable rows must be deleted after tick 1"
+    );
+
+    // Tick 2: janitor drains the reinserted session — it must retry
+    // ONLY the failed stanza.
+    let drained = sm_registry.drain_expired().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    let retry_sequences: Vec<u32> = drained[0]
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    assert_eq!(
+        retry_sequences,
+        vec![2],
+        "the reinserted session must retain only the failed stanza"
+    );
+
+    // Storage recovers: retry queues stanza 2 exactly once.
+    flaky.disarm();
+    promote_displaced_sessions(
+        drained,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: blocking.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    let rows = pending.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(
+        transient_bodies(&rows),
+        vec![
+            "msg-1".to_string(),
+            "msg-2".to_string(),
+            "msg-3".to_string()
+        ],
+        "after recovery every stanza must be queued exactly once — no duplicates"
+    );
+    assert!(
+        sm_storage.get_session(&stream_id).await.unwrap().is_none(),
+        "full success confirms the drain, erasing the durable session row"
+    );
 }
 
 #[tokio::test]

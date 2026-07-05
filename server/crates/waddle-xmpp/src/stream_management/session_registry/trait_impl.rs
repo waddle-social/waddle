@@ -219,6 +219,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         target_id: &str,
         archive_jid: &str,
     ) -> Result<usize, SmRegistryError> {
+        // Phase 0 (round-2 review R2): record the tombstone identity
+        // BEFORE any scrub phase runs so a promotion already holding a
+        // drained copy of a session (off both maps, pending row not
+        // yet inserted) re-checks it and drops matching stanzas
+        // instead of delivering retracted content on the next login.
+        self.record_recent_tombstone(target_id, archive_jid)?;
         // Phase 1 (issue #1145 lock-scope fix): snapshot every queue
         // under READ locks only. XML parsing of every entry used to
         // run under the sessions write lock, stalling all detach /

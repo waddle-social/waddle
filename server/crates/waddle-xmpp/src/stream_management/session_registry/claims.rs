@@ -178,6 +178,14 @@ impl InMemorySmSessionRegistry {
     /// `is_expired()`) while making the janitor's next tick retry the
     /// promote → confirm chain; the persistent promotion-failure
     /// counter still dead-letters runaway loops.
+    ///
+    /// `detached_at` is deliberately preserved (round-2 review R3): a
+    /// reinsert that refreshed it to ≈now made repeatedly-failing
+    /// sessions immortal against the max_sessions min-by-detached_at
+    /// eviction, sacrificing healthy resumable sessions under a
+    /// degraded backend. Forcing `max_resume_time = 0` alone keeps the
+    /// session expired (its true detach time is already in the past),
+    /// so peek/take/claim still refuse it while the janitor retries.
     pub async fn reinsert_for_retry(
         &self,
         mut session: DetachedSession,
@@ -185,10 +193,6 @@ impl InMemorySmSessionRegistry {
         let stream_lock = self.stream_lock(&session.stream_id)?;
         let _stream_guard = stream_lock.lock().await;
         session.max_resume_time = Some(0);
-        if let Some(past) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1))
-        {
-            session.detached_at = past;
-        }
         self.sessions
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?

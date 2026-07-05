@@ -123,6 +123,23 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 count = drained.len(),
                 "SM janitor: cleaning up expired detached sessions"
             );
+            // Round-2 review R2: retractions racing this drain window
+            // are invisible to the registry scrub (the sessions are off
+            // both maps); the promotion-time re-check below drops
+            // matching stanzas. On a poisoned-lock read error, proceed
+            // without the re-check rather than stranding the queues.
+            let recent_tombstones =
+                match state.deps.protocol.sm_session_registry.recent_tombstones() {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            "SM janitor: recent-tombstone read failed; proceeding \
+                             without the promotion-time tombstone re-check"
+                        );
+                        Vec::new()
+                    }
+                };
             for session in drained {
                 let blocklist = match state
                     .deps
@@ -202,6 +219,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     &state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     state.deps.auth_state.xmpp_domain.as_str(),
+                    &recent_tombstones,
                 )
                 .await;
                 if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
@@ -216,6 +234,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         dropped = summary.dropped,
                         not_promotable = summary.not_promotable,
                         unparseable = summary.unparseable,
+                        scrubbed = summary.scrubbed,
                         storage_failed = summary.storage_failed,
                         "SM janitor: Q6 promotion completed"
                     );
@@ -239,9 +258,10 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 "SM janitor: record_promotion_failure failed; \
                                  preserving session state for retry"
                             );
-                            crate::sm_promotion::reinsert_failed_session_for_retry(
+                            crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                                 &state.deps.protocol.sm_session_registry,
                                 session,
+                                &summary,
                             )
                             .await;
                             continue;
@@ -272,9 +292,10 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         "SM janitor: promotion had storage failures; \
                          preserving session state for retry"
                     );
-                    crate::sm_promotion::reinsert_failed_session_for_retry(
+                    crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &state.deps.protocol.sm_session_registry,
                         session,
+                        &summary,
                     )
                     .await;
                     continue;
@@ -839,6 +860,22 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 count = drained.len(),
                 "Graceful shutdown: promoting unacked queues for detached SM sessions"
             );
+            let recent_tombstones = match websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .recent_tombstones()
+            {
+                Ok(keys) => keys,
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "Graceful shutdown: recent-tombstone read failed; proceeding \
+                         without the promotion-time tombstone re-check"
+                    );
+                    Vec::new()
+                }
+            };
             for session in drained {
                 let blocklist = match websocket_state
                     .deps
@@ -865,6 +902,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     websocket_state.deps.auth_state.xmpp_domain.as_str(),
+                    &recent_tombstones,
                 )
                 .await;
                 info!(
@@ -874,6 +912,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     bounced = summary.bounced,
                     dropped = summary.dropped,
                     unparseable = summary.unparseable,
+                    scrubbed = summary.scrubbed,
                     storage_failed = summary.storage_failed,
                     "Graceful shutdown: Q6 promotion completed for session"
                 );

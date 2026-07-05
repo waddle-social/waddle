@@ -54,8 +54,16 @@ pub use types::{PromotedOutcome, PromotionSummary};
 /// preserved on the [`DetachedUnackedStanza`] (issue #209 PR #361:
 /// previously a wall-clock fallback at expiry — now correct per
 /// XEP-0203 §4.1 + XEP-0198 §5 line 364).
+///
+/// `recent_tombstones` is the SM registry's recently applied
+/// XEP-0424/0425 tombstone record (round-2 review R2): a retraction
+/// that raced the drain — session off both registry maps, pending row
+/// not yet inserted — is invisible to the scrub's four phases, so the
+/// promotion re-checks here and drops matching stanzas (counted as
+/// `scrubbed` in the summary) instead of resurrecting retracted
+/// content into `pending_delivery`.
 #[instrument(
-    skip(session, registry, pending_storage, blocklist),
+    skip(session, registry, pending_storage, blocklist, recent_tombstones),
     fields(stream_id = %session.stream_id, jid = %session.jid)
 )]
 pub async fn promote_session_unacked(
@@ -64,6 +72,7 @@ pub async fn promote_session_unacked(
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     blocklist: &Blocklist,
     server_domain: &str,
+    recent_tombstones: &[waddle_xmpp::stream_management::TombstoneKey],
 ) -> PromotionSummary {
     let mut summary = PromotionSummary::default();
     let recipient_bare = session.jid.to_bare();
@@ -74,7 +83,39 @@ pub async fn promote_session_unacked(
     // unless other resources joined after detach).
     let online = build_online_resources(registry, &recipient_bare);
 
+    // Round-2 review R2: select the sequences a recently applied
+    // tombstone matches, using the same shared matcher as the
+    // registry / pending-delivery scrubs.
+    let tombstoned_sequences: std::collections::HashSet<u32> = if recent_tombstones.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        let entries: Vec<(u32, String)> = session
+            .unacked_stanzas
+            .iter()
+            .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
+            .collect();
+        recent_tombstones
+            .iter()
+            .flat_map(|key| {
+                waddle_xmpp::tombstone::matching_tombstone_sequences(
+                    &entries,
+                    &key.target_id,
+                    &key.archive_jid,
+                )
+            })
+            .collect()
+    };
+
     for entry in &session.unacked_stanzas {
+        if tombstoned_sequences.contains(&entry.sequence) {
+            debug!(
+                stream_id = %session.stream_id,
+                sequence = entry.sequence,
+                "Q6 promotion: stanza matches a recent tombstone; scrubbed"
+            );
+            summary.record(entry.sequence, &PromotedOutcome::Scrubbed);
+            continue;
+        }
         let outcome = match parse_stanza(&entry.stanza_xml) {
             Some(Stanza::Message(message)) => {
                 let ctx = PromotionContext {
@@ -97,7 +138,7 @@ pub async fn promote_session_unacked(
             ?outcome,
             "Q6 promotion: per-stanza outcome"
         );
-        summary.record(&outcome);
+        summary.record(entry.sequence, &outcome);
     }
 
     debug!(
@@ -108,6 +149,7 @@ pub async fn promote_session_unacked(
         dropped = summary.dropped,
         not_promotable = summary.not_promotable,
         unparseable = summary.unparseable,
+        scrubbed = summary.scrubbed,
         storage_failed = summary.storage_failed,
         "Q6 promotion: session summary"
     );
@@ -158,10 +200,69 @@ pub async fn reinsert_failed_session_for_retry(
     }
 }
 
+/// After a PARTIAL promotion failure, durably erase the successfully
+/// promoted stanzas' `sm_unacked` rows, drop them from the session,
+/// and re-insert the remainder for the janitor's next retry (round-2
+/// review R4). Without this, every retry tick re-promoted the whole
+/// queue and duplicated the already-Queued stanzas.
+///
+/// Crash-safety ordering: each promoted stanza's `pending_delivery`
+/// row was committed inside `promote_session_unacked` BEFORE this
+/// delete runs, so at-least-once is preserved — a crash between the
+/// two duplicates at most one promotion window, not one per tick. If
+/// the durable delete itself fails, the session keeps its FULL queue
+/// (memory and storage stay consistent) and the retry may duplicate —
+/// at-least-once beats losing the failed stanzas' retry rows.
+pub async fn prune_promoted_then_reinsert_for_retry(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    mut session: DetachedSession,
+    summary: &PromotionSummary,
+) {
+    if !summary.promoted_sequences.is_empty() {
+        match sm_registry
+            .delete_unacked_sequences(&session.stream_id, &summary.promoted_sequences)
+            .await
+        {
+            Ok(_) => {
+                session
+                    .unacked_stanzas
+                    .retain(|entry| !summary.promoted_sequences.contains(&entry.sequence));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %session.jid,
+                    stream_id = %session.stream_id,
+                    %error,
+                    "partial promotion: durable delete of promoted sm_unacked rows \
+                     failed; keeping the full queue for retry (may duplicate — \
+                     at-least-once preserved)"
+                );
+            }
+        }
+    }
+    reinsert_failed_session_for_retry(sm_registry, session).await;
+}
+
 pub async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
 ) {
+    // Round-2 review R2: consult the registry's recent-tombstone
+    // record so a retraction racing the displacement drain still
+    // scrubs the in-flight copies. Lock poisoning is process-fatal
+    // territory; promotion proceeds without the re-check (the durable
+    // phase-4 scrub already covered rows present at scrub time).
+    let recent_tombstones = match deps.sm_registry.recent_tombstones() {
+        Ok(keys) => keys,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "displaced SM promotion: recent-tombstone read failed; \
+                 proceeding without the promotion-time tombstone re-check"
+            );
+            Vec::new()
+        }
+    };
     for session in sessions {
         let blocklist = match deps
             .blocking_storage
@@ -204,6 +305,7 @@ pub async fn promote_displaced_sessions(
             deps.pending_storage,
             &blocklist,
             deps.server_domain,
+            &recent_tombstones,
         )
         .await;
         if summary.has_storage_failure() {
@@ -229,7 +331,7 @@ pub async fn promote_displaced_sessions(
                 "displaced SM session: promotion had storage failures; \
                  preserving durable rows and re-inserting for janitor retry"
             );
-            reinsert_failed_session_for_retry(deps.sm_registry, session).await;
+            prune_promoted_then_reinsert_for_retry(deps.sm_registry, session, &summary).await;
             continue;
         }
         deps.sm_registry.confirm_drained(&session.stream_id).await;
@@ -252,6 +354,7 @@ pub async fn promote_displaced_sessions(
             dropped = summary.dropped,
             not_promotable = summary.not_promotable,
             unparseable = summary.unparseable,
+            scrubbed = summary.scrubbed,
             "displaced SM session: Q6 promotion completed"
         );
     }
