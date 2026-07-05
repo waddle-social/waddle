@@ -7,9 +7,8 @@ describe("safeAttachmentUrl", () => {
       .toBe("https://files.example.com/a/report.pdf");
   });
 
-  test("allows http URLs", () => {
-    expect(safeAttachmentUrl("http://files.example.com/pic.png"))
-      .toBe("http://files.example.com/pic.png");
+  test("rejects plain http URLs (mixed content; CSP fetch directives are https-only)", () => {
+    expect(safeAttachmentUrl("http://files.example.com/pic.png")).toBeNull();
   });
 
   test("allows locally-minted blob URLs (decrypted attachments)", () => {
