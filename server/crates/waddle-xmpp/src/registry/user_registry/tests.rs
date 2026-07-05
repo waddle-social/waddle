@@ -265,3 +265,123 @@ async fn test_unregister_and_register_are_serialized_without_user_loss() {
     let count = registry.ask(UserCount).await.expect("count");
     assert_eq!(count, 1);
 }
+
+fn sample_stanza(to: &FullJid) -> crate::Stanza {
+    let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(to.clone())));
+    msg.type_ = xmpp_parsers::message::MessageType::Chat;
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
+    crate::Stanza::Message(msg)
+}
+
+/// ADR-0017 Phase 1 Slice 2 (Copilot review on PR #1177): the delivery cutover
+/// makes `try_deliver`'s closed-channel eviction reachable in production. When
+/// it removes a user's *last* resource, the actor is left empty but still
+/// registered (the explicit unregister-prune path did not run). The reaper must
+/// remove such an orphaned empty actor.
+#[tokio::test]
+async fn test_reap_user_if_empty_removes_orphaned_empty_actor() {
+    use crate::registry::connection_registry::BroadcastOutcome;
+    use crate::registry::TrySendPeer;
+
+    let registry = spawn_registry().await;
+    let bare_jid = bare("alice");
+    let phone = full("alice", "phone");
+
+    let (phone_tx, phone_rx) = outbound_channel();
+    registry
+        .ask(RegisterUserResource {
+            jid: phone.clone(),
+            entry: ConnectionEntry::new(phone_tx),
+        })
+        .await
+        .expect("register phone");
+
+    // Close the channel, then drive one delivery so `try_deliver` evicts the
+    // last resource — exactly the production path that orphans an empty actor.
+    drop(phone_rx);
+    let user_actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get user")
+        .expect("actor exists");
+    let outcome = user_actor
+        .ask(TrySendPeer {
+            jid: phone.clone(),
+            stanza: sample_stanza(&phone),
+        })
+        .await
+        .expect("try send");
+    assert_eq!(outcome, BroadcastOutcome::DroppedClosed);
+
+    // The actor is now empty but still registered.
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 1);
+
+    let reaped = registry
+        .ask(ReapUserIfEmpty {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("reap");
+    assert!(reaped, "an empty orphaned actor must be reaped");
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
+    assert!(registry
+        .ask(GetUser { bare_jid })
+        .await
+        .expect("get user")
+        .is_none());
+}
+
+/// The reaper must never remove a user that still has a live resource — the
+/// race the atomic check-and-remove guards against.
+#[tokio::test]
+async fn test_reap_user_if_empty_keeps_nonempty_actor() {
+    let registry = spawn_registry().await;
+    let bare_jid = bare("alice");
+    let phone = full("alice", "phone");
+
+    let (phone_tx, _phone_rx) = outbound_channel();
+    registry
+        .ask(RegisterUserResource {
+            jid: phone.clone(),
+            entry: ConnectionEntry::new(phone_tx),
+        })
+        .await
+        .expect("register phone");
+
+    let reaped = registry
+        .ask(ReapUserIfEmpty {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("reap");
+    assert!(!reaped, "a user with a live resource must not be reaped");
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 1);
+    let resources = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get user")
+        .expect("actor still present")
+        .ask(crate::registry::user_actor::GetResources)
+        .await
+        .expect("resources");
+    assert_eq!(resources, vec![phone]);
+}
+
+/// Reaping an unknown bare JID is a no-op that reports nothing reaped.
+#[tokio::test]
+async fn test_reap_user_if_empty_absent_is_false() {
+    let registry = spawn_registry().await;
+    let reaped = registry
+        .ask(ReapUserIfEmpty {
+            bare_jid: bare("ghost"),
+        })
+        .await
+        .expect("reap");
+    assert!(!reaped);
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
+}

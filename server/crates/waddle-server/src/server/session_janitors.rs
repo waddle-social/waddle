@@ -11,6 +11,12 @@ const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval for the persistent-room dormancy janitor.
 const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Default interval for the empty-`UserActor` reaper (ADR-0017 Phase 1
+/// Slice 2). Matches the room dormancy cadence: orphaned empty actors are
+/// harmless between sweeps (they route to `NotConnected`/detached), so a
+/// 5-minute reap keeps `UserRegistryActor.users` bounded without hot-looping.
+const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -1155,6 +1161,110 @@ pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>)
                     examined = counts.examined,
                     remaining = counts.remaining,
                     "room dormancy janitor: no dormant rooms"
+                );
+            }
+        }
+    });
+}
+
+/// Per-sweep counts returned by [`sweep_empty_user_actors_once`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct UserReaperSweepCounts {
+    pub reaped: usize,
+    pub examined: usize,
+    pub remaining: usize,
+}
+
+/// Walk every registered `UserActor` and reap the ones that report zero
+/// connected resources (ADR-0017 Phase 1 Slice 2, Copilot review on PR #1177).
+///
+/// Each user is reaped via the single atomic [`ReapUserIfEmpty`] registry
+/// message — the emptiness check and the removal happen in one registry handler
+/// so a concurrent re-registration cannot slip a resource in between (see that
+/// message's docs). The janitor only drives the per-user asks; it never reads
+/// then removes across two asks, which would reintroduce that race. Each ask is
+/// bounded inside the registry handler, so one wedged `UserActor` stalls only
+/// its own check, not the sweep.
+///
+/// Pure helper so the live reaper and unit tests share the same logic.
+pub(crate) async fn sweep_empty_user_actors_once(
+    websocket_state: &WebSocketState,
+) -> UserReaperSweepCounts {
+    use waddle_xmpp::registry::{ListUsers, ReapUserIfEmpty, UserCount};
+    let mut counts = UserReaperSweepCounts::default();
+    let user_registry = &websocket_state.deps.protocol.user_registry;
+    let users = match user_registry.ask(ListUsers).await {
+        Ok(list) => list,
+        Err(error) => {
+            warn!(error = ?error, "user actor reaper: ListUsers ask failed");
+            return counts;
+        }
+    };
+    counts.examined = users.len();
+    for bare_jid in users {
+        match user_registry
+            .ask(ReapUserIfEmpty {
+                bare_jid: bare_jid.clone(),
+            })
+            .await
+        {
+            Ok(true) => {
+                counts.reaped += 1;
+                waddle_xmpp::prometheus::increment_user_actor_reaped();
+                debug!(jid = %bare_jid, "user actor reaper: reaped empty UserActor");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    jid = %bare_jid,
+                    error = ?error,
+                    "user actor reaper: ReapUserIfEmpty ask failed; will retry next pass"
+                );
+            }
+        }
+    }
+    counts.remaining = user_registry.ask(UserCount).await.unwrap_or(0);
+    counts
+}
+
+/// Periodically reap empty `UserActor`s so `UserRegistryActor.users` shrinks
+/// back to the current working set rather than growing to the lifetime user
+/// set.
+///
+/// Required by the Slice 2 delivery cutover: production delivery now runs
+/// through the actor's `TrySend*`, whose `try_deliver` evicts a closed-channel
+/// resource. When that eviction removes a `UserActor`'s last resource without
+/// the explicit `UnregisterConnectionAndReportEmpty` prune path running (a
+/// dropped best-effort `mirror_unregister`), the empty actor would otherwise
+/// linger forever. The `UserActor` deliberately does NOT self-prune on empty
+/// (that races an in-flight re-registration and trips the crashed-actor poison
+/// path); this out-of-band reaper is the safe alternative.
+///
+/// Runs on a 5-minute ticker. Skips the first immediate tick so the process
+/// doesn't sweep before any resource has been registered.
+pub(crate) fn spawn_user_actor_reaper(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(USER_ACTOR_REAPER_INTERVAL);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            let counts = sweep_empty_user_actors_once(&state).await;
+            if counts.reaped > 0 {
+                info!(
+                    examined = counts.examined,
+                    reaped = counts.reaped,
+                    remaining = counts.remaining,
+                    "user actor reaper: reaped empty UserActors"
+                );
+            } else {
+                debug!(
+                    examined = counts.examined,
+                    remaining = counts.remaining,
+                    "user actor reaper: no empty UserActors"
                 );
             }
         }

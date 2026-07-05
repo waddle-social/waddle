@@ -19,7 +19,9 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use super::connection_registry::ConnectionEntry;
-use super::user_actor::{RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor};
+use super::user_actor::{
+    RegisterConnection, ResourceCount, UnregisterConnectionAndReportEmpty, UserActor,
+};
 use crate::metrics;
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
@@ -280,6 +282,78 @@ impl kameo::message::Message<ListUsers> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.users.keys().cloned().collect()
+    }
+}
+
+/// Reap a user's `UserActor` iff it currently has zero connected resources.
+///
+/// Closes the empty-actor accumulation gap the ADR-0017 Phase 1 Slice 2
+/// delivery cutover opens (Copilot review on PR #1177): production delivery now
+/// runs through the actor's `TrySend*`, whose `try_deliver` evicts a
+/// closed-channel resource. When that eviction removes a `UserActor`'s *last*
+/// resource, the explicit `UnregisterConnectionAndReportEmpty` prune path does
+/// not run (e.g. the teardown's best-effort `mirror_unregister` was dropped on
+/// a mailbox timeout), so the now-empty actor would otherwise linger in `users`
+/// forever. A periodic reaper (see `spawn_user_actor_reaper`) drives this
+/// message per listed user.
+///
+/// Correctness (the race the ADR warns against): the `ResourceCount == 0` read
+/// and the `users` removal happen in this one registry handler with no yield to
+/// *other registry* messages between them — kameo does not dequeue the next
+/// message while a handler awaits a child ask — so a concurrent
+/// `RegisterUserResource` cannot insert a resource between the count read and
+/// the removal. That is why the reaper is a single atomic registry message
+/// rather than a non-atomic `IsEmpty`-then-`RemoveUser` pair (which would race
+/// an in-flight re-registration and could evict a live resource), and why the
+/// `UserActor` does NOT self-prune on empty.
+///
+/// Returns `true` only when an empty actor was removed.
+pub struct ReapUserIfEmpty {
+    pub bare_jid: BareJid,
+}
+
+impl kameo::message::Message<ReapUserIfEmpty> for UserRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: ReapUserIfEmpty,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        // A poisoned entry's lifecycle is owned by the state-lost path; never
+        // race it here.
+        if self.poisoned_users.contains(&msg.bare_jid) {
+            return false;
+        }
+        let Some(actor_ref) = self.users.get(&msg.bare_jid) else {
+            return false;
+        };
+        if !actor_ref.is_alive() {
+            // A dead actor is a state-lost condition, not an empty one; fold it
+            // into the poison path so that set stays the single source of
+            // dead-actor truth rather than silently dropping it here.
+            self.mark_actor_state_lost(&msg.bare_jid);
+            return false;
+        }
+        let actor_ref = actor_ref.clone();
+        let count = match actor_ref
+            .ask(ResourceCount)
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+        {
+            Ok(count) => count,
+            // Busy / unreachable — leave it for the next sweep rather than
+            // removing an actor whose state we could not read.
+            Err(_) => return false,
+        };
+        if count == 0 {
+            self.users.remove(&msg.bare_jid);
+            debug!(jid = %msg.bare_jid, "Reaped empty UserActor");
+            true
+        } else {
+            false
+        }
     }
 }
 
