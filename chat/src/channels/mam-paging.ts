@@ -191,11 +191,15 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       let rebuilt = buildTimelineFromMamResults(mamResults, metadataSeed, {
         seedExistingOnly: metadataSeed.length > 0,
       });
-      const channelIsForum = isForumChannel(currentChannel.value);
       for (const live of liveDuringLoad) {
-        rebuilt = insertLiveMessage(rebuilt, live, pendingEchoClientIds, {
-          finalize: (timeline) => applyForumContext(timeline, channelIsForum),
-        }).messages;
+        rebuilt = insertLiveMessage(rebuilt, live, pendingEchoClientIds).messages;
+      }
+      // One forum-context pass after all re-inserts: nothing observes
+      // the intermediate timelines (messages.value is assigned below),
+      // so recomputing per insert — as the true live-merge path must —
+      // would be pure waste here.
+      if (liveDuringLoad.length > 0) {
+        rebuilt = applyForumContext(rebuilt, isForumChannel(currentChannel.value));
       }
       const timelineWithQueue = appendQueuedMessages(rebuilt, roomJid);
       messages.value = timelineWithQueue;

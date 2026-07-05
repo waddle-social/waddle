@@ -324,6 +324,73 @@ describe("bootstrap merge keeps the unread divider anchored (#675 review)", () =
   });
 });
 
+describe("bootstrap merge keeps archive-applied retractions (#675 review)", () => {
+  test("re-inserting the live original does not resurrect a tombstoned message (XEP-0424)", async () => {
+    // The MAM page contains the original AND its retraction — the built
+    // timeline row is a tombstone. The live copy of the (pre-retraction)
+    // original merged during the await must not reintroduce its content
+    // or clear the tombstone.
+    const original = archivedRoomRow("live-1", "soon retracted", "2026-07-01T10:05:00.000Z");
+    const retraction = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "mam-retract-1",
+      stanza_id: "retract-1",
+      stanza_id_by: "space_room@muc.example.com",
+      body: "",
+      retracts_id: "live-1",
+      timestamp: "2026-07-01T10:05:30.000Z",
+    })! as LiveRoomMessage;
+    const mamPage = deferred<{ messages: LiveRoomMessage[]; firstArchiveId: string; complete: boolean }>();
+
+    const xmppClient = {
+      queryMamPage: mock(async () => mamPage.promise),
+      fetchRoomPins: mock(async () => []),
+    } as unknown as BrowserXmppClient;
+
+    const messages = ref<TimelineMessage[]>([]);
+    const pendingEchoClientIds = new Set<string>();
+    const paging = useChannelMamPaging({
+      session: ref(session),
+      xmppClient: ref(xmppClient),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("space_room"),
+      currentChannel: ref(channel),
+      messages,
+      firstUnseenId: ref<string | null>(null),
+      timelineEl: ref(null),
+      scrollDirection: ref("bottom"),
+      pinnedEdgeScroller: { cancelSettleLock: () => {} },
+      actionError: ref(""),
+      clearActionError: () => {},
+      normalizeError: (e) => String(e),
+      pendingEchoClientIds,
+      appendQueuedMessages: (timeline) => timeline,
+      roomJidForChannel: () => "space_room@muc.example.com",
+      scrollToPinnedEdgeAndPin: async () => true,
+      persistLastSeen: () => {},
+    });
+
+    const loadPromise = paging.loadMessages("space", "space_room");
+    await Promise.resolve();
+
+    const live = mapLiveRoomMessageToTimeline(
+      session,
+      liveRoomRow("live-1", "soon retracted", "2026-07-01T10:05:00.000Z"),
+    );
+    messages.value = insertLiveMessage(messages.value, live, pendingEchoClientIds).messages;
+
+    mamPage.resolve({ messages: [original, retraction], firstArchiveId: "mam-1", complete: true });
+    await expect(loadPromise).resolves.toBe("loaded");
+
+    const row = messages.value.find(
+      (m) => m.id === "live-1" || (m.wireIds ?? []).includes("live-1"),
+    );
+    expect(row).toBeDefined();
+    expect(row!.isRetracted).toBe(true);
+    expect(row!.body).toBe("");
+  });
+});
+
 describe("bootstrap merge keeps archive-applied corrections (#675 review)", () => {
   test("re-inserting the live original does not clobber a corrected body (XEP-0308)", async () => {
     // The MAM page contains the original AND its correction — the built

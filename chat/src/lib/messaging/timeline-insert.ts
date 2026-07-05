@@ -41,7 +41,7 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
     { createdAt: existing.createdAt, createdAtSource: existing.createdAtSource },
     { createdAt: incoming.createdAt, createdAtSource: incoming.createdAtSource },
   );
-  const updated: TimelineMessage = {
+  let updated: TimelineMessage = {
     ...existing,
     ...incoming,
     id: mergedIds.id,
@@ -75,6 +75,17 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
       delete updated.extensionAnnotations;
       delete updated.extensionBodyFallback;
     }
+  }
+  // XEP-0424: a tombstone is terminal. If either side is retracted (a
+  // MAM-applied tombstone meeting a redelivered pre-retraction original
+  // via SM replay or the #675 bootstrap re-insert, or vice versa), the
+  // merged row stays a tombstone with every content-bearing field
+  // stripped.
+  if (existing.isRetracted || incoming.isRetracted) {
+    updated = retractTimelineMessage(
+      updated,
+      existing.retractionId ?? incoming.retractionId,
+    );
   }
   if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
   else delete updated.wireIds;
