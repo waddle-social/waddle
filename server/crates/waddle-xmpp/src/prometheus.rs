@@ -22,6 +22,22 @@ static BROADCAST_DELIVERED: AtomicU64 = AtomicU64::new(0);
 static BROADCAST_NOT_CONNECTED: AtomicU64 = AtomicU64::new(0);
 static BROADCAST_DROPPED_FULL: AtomicU64 = AtomicU64::new(0);
 static BROADCAST_DROPPED_CLOSED: AtomicU64 = AtomicU64::new(0);
+// ADR-0017 Phase 1 Slice 2 actor-path delivery: a terminal `ask` failure
+// whose message MAY have been enqueued (`ActorStopped`, reply-wait
+// `Timeout(None)`) drops the frame rather than routing it to the detached
+// XEP-0198 buffer, because kameo does not cancel an enqueued handler and a
+// post-timeout run plus a detached replay would double-deliver. A non-zero
+// value is the signal that a live-recipient frame was dropped under actor
+// backpressure — the enqueue-uncertain sibling of `broadcast_dropped_full`.
+static DELIVERY_TERMINAL_ERROR_DROP: AtomicU64 = AtomicU64::new(0);
+
+// ADR-0017 Phase 1 Slice 2: empty `UserActor`s reaped by the periodic reaper
+// after `try_deliver`'s closed-channel eviction removed their last resource
+// without the explicit unregister-prune path running. A non-zero value is the
+// signal that the delivery-eviction path is orphaning actors that the reaper is
+// cleaning up — expected to stay low; sustained growth hints at dropped
+// unregister mirrors.
+static USER_ACTOR_REAPED: AtomicU64 = AtomicU64::new(0);
 
 // XEP-0198 unacked-queue evictions (see `stream_management::UnackedQueue`).
 // A non-zero counter means at least one stanza was evicted from an SM
@@ -351,6 +367,14 @@ pub fn increment_broadcast_dropped_closed() {
     BROADCAST_DROPPED_CLOSED.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_delivery_terminal_error_drop() {
+    DELIVERY_TERMINAL_ERROR_DROP.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn increment_user_actor_reaped() {
+    USER_ACTOR_REAPED.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn increment_sm_unacked_evicted() {
     SM_UNACKED_EVICTED.fetch_add(1, Ordering::Relaxed);
 }
@@ -510,6 +534,8 @@ pub fn reset_metrics_for_test() {
     BROADCAST_NOT_CONNECTED.store(0, Ordering::Release);
     BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
     BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
+    DELIVERY_TERMINAL_ERROR_DROP.store(0, Ordering::Release);
+    USER_ACTOR_REAPED.store(0, Ordering::Release);
     SM_UNACKED_EVICTED.store(0, Ordering::Release);
     PENDING_DELIVERY_QUOTA_EXCEEDED.store(0, Ordering::Release);
     PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.store(0, Ordering::Release);
@@ -546,6 +572,8 @@ pub fn render_metrics() -> String {
     let broadcast_not_connected = BROADCAST_NOT_CONNECTED.load(Ordering::Relaxed);
     let broadcast_dropped_full = BROADCAST_DROPPED_FULL.load(Ordering::Relaxed);
     let broadcast_dropped_closed = BROADCAST_DROPPED_CLOSED.load(Ordering::Relaxed);
+    let delivery_terminal_error_drop = DELIVERY_TERMINAL_ERROR_DROP.load(Ordering::Relaxed);
+    let user_actor_reaped = USER_ACTOR_REAPED.load(Ordering::Relaxed);
     let sm_unacked_evicted = SM_UNACKED_EVICTED.load(Ordering::Relaxed);
     let pending_quota_exceeded = PENDING_DELIVERY_QUOTA_EXCEEDED.load(Ordering::Relaxed);
     let pending_orphan_released = PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.load(Ordering::Relaxed);
@@ -592,6 +620,12 @@ pub fn render_metrics() -> String {
             "# HELP waddle_broadcast_dropped_closed_total Non-blocking broadcast attempts dropped because the recipient's outbound channel was closed.\n",
             "# TYPE waddle_broadcast_dropped_closed_total counter\n",
             "waddle_broadcast_dropped_closed_total {broadcast_dropped_closed}\n",
+            "# HELP waddle_delivery_terminal_error_drop_total Actor-path deliveries dropped after a terminal ask failure whose message may have been enqueued (ActorStopped / reply Timeout(None)); dropped instead of routed to the XEP-0198 detached buffer to avoid double-delivery.\n",
+            "# TYPE waddle_delivery_terminal_error_drop_total counter\n",
+            "waddle_delivery_terminal_error_drop_total {delivery_terminal_error_drop}\n",
+            "# HELP waddle_user_actor_reaped_total Empty UserActors reaped by the periodic reaper after delivery-path closed-channel eviction removed their last resource without the explicit unregister-prune path running.\n",
+            "# TYPE waddle_user_actor_reaped_total counter\n",
+            "waddle_user_actor_reaped_total {user_actor_reaped}\n",
             "# HELP waddle_sm_unacked_evicted_total XEP-0198 unacked-queue entries evicted because the queue hit capacity; older resume h values must fail instead of receiving an incomplete replay.\n",
             "# TYPE waddle_sm_unacked_evicted_total counter\n",
             "waddle_sm_unacked_evicted_total {sm_unacked_evicted}\n",
@@ -656,6 +690,8 @@ pub fn render_metrics() -> String {
         broadcast_not_connected = broadcast_not_connected,
         broadcast_dropped_full = broadcast_dropped_full,
         broadcast_dropped_closed = broadcast_dropped_closed,
+        delivery_terminal_error_drop = delivery_terminal_error_drop,
+        user_actor_reaped = user_actor_reaped,
         sm_unacked_evicted = sm_unacked_evicted,
         pending_quota_exceeded = pending_quota_exceeded,
         pending_orphan_released = pending_orphan_released,

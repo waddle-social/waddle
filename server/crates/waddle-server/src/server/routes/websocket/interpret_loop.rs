@@ -17,6 +17,7 @@ pub(crate) fn build_interpret_deps<'a>(
 ) -> crate::server::routes::interpret::Deps<'a> {
     crate::server::routes::interpret::Deps {
         connection_registry: &state.deps.protocol.connection_registry,
+        user_registry: Some(&state.deps.protocol.user_registry),
         sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
         mam_storage: Some(&state.deps.protocol.mam_storage),
         inbox_storage: Some(&state.deps.protocol.inbox_storage),

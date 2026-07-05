@@ -1,33 +1,53 @@
-//! Per-user actor managing connection state and presence.
+//! Per-user actor managing connection state, presence, and delivery.
 //!
 //! One `UserActor` exists per bare JID. It owns all mutable per-user state
-//! (connected resources, presence, pending subscriptions, carbons) and
-//! processes messages sequentially, removing the need for external locking.
+//! (connected resources with their outbound channels, presence, pending
+//! subscriptions, carbons) and processes messages sequentially, removing the
+//! need for external locking.
+//!
+//! The delivery surface lives in the [`delivery`] submodule: it reproduces
+//! the `ConnectionRegistry` routing invariants (RFC 6121 §8.5.2.1 bare-JID
+//! resource selection, the `DeliveryKind` recipient-pass split, non-blocking
+//! `try_send` fan-out with typed [`BroadcastOutcome`], and the Q7b
+//! pending-flush SM-row binding) inside the actor so the DashMap delivery
+//! path can be retired once the migration's invariant tests cover it (see
+//! ADR-0017 Phase 1).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
 use tracing::debug;
 
-use crate::registry::connection_registry::PresenceState;
+use crate::registry::connection_registry::{ConnectionEntry, PresenceState};
 use crate::Stanza;
 
-/// Actor that manages per-user connection state.
+pub mod delivery;
+
+/// Actor that manages per-user connection state and stanza delivery.
 ///
-/// Each connected bare JID gets exactly one `UserActor`. The actor tracks all
-/// connected resources, their presence, carbons state, and any pending
-/// subscription stanzas that arrived while the user was offline.
+/// Each connected bare JID gets exactly one `UserActor`. The actor owns one
+/// [`ConnectionEntry`] per connected resource — the entry is the single
+/// source of truth for that resource's outbound channel plus its presence
+/// availability, priority, and carbons atomics — along with per-resource
+/// presence state and any pending subscription stanzas that arrived while the
+/// user was offline.
 #[derive(Actor)]
 pub struct UserActor {
     bare_jid: BareJid,
-    resources: HashSet<FullJid>,
-    presence_available: HashMap<FullJid, bool>,
-    presence_priority: HashMap<FullJid, i8>,
+    /// Connected resources keyed by full JID. The [`ConnectionEntry`] carries
+    /// the outbound `mpsc::Sender` and the presence-**availability**/priority
+    /// and carbons atomics, so those are single-sourced here with no parallel
+    /// map to drift out of sync. (`presence_states` below is a distinct
+    /// concern — the full show/status/priority snapshot used for XEP-0012 /
+    /// probe responses — not a duplicate of the availability atomics.)
+    connections: HashMap<FullJid, ConnectionEntry>,
+    /// Per-resource show/status/priority snapshot for presence-probe replies.
     presence_states: HashMap<FullJid, PresenceState>,
     pending_subscriptions: Vec<Stanza>,
-    carbons_enabled: HashMap<FullJid, bool>,
 }
 
 impl UserActor {
@@ -35,12 +55,9 @@ impl UserActor {
     pub fn new(bare_jid: BareJid) -> Self {
         Self {
             bare_jid,
-            resources: HashSet::new(),
-            presence_available: HashMap::new(),
-            presence_priority: HashMap::new(),
+            connections: HashMap::new(),
             presence_states: HashMap::new(),
             pending_subscriptions: Vec::new(),
-            carbons_enabled: HashMap::new(),
         }
     }
 
@@ -51,11 +68,29 @@ impl UserActor {
 
     /// Remove all state associated with a resource.
     fn remove_resource(&mut self, jid: &FullJid) {
-        self.resources.remove(jid);
-        self.presence_available.remove(jid);
-        self.presence_priority.remove(jid);
+        self.connections.remove(jid);
         self.presence_states.remove(jid);
-        self.carbons_enabled.remove(jid);
+    }
+
+    /// Ownership-gated removal, mirroring the DashMap
+    /// `ConnectionRegistry::unregister_if_owner` semantics (ADR-0017 Phase 1
+    /// Slice 0). `owner` is the resource's ownership token — the entry's
+    /// `carbons_enabled` `Arc<AtomicBool>`, the same handle the DashMap
+    /// compares with `Arc::ptr_eq`. `Some(owner)` removes only when the stored
+    /// entry is still that owner's, so a lagging unregister for a superseded
+    /// connection cannot evict the replacement resource; `None` removes
+    /// unconditionally, matching a plain DashMap `unregister`. Returns whether
+    /// an entry was removed.
+    fn remove_resource_if_owner(&mut self, jid: &FullJid, owner: Option<&Arc<AtomicBool>>) -> bool {
+        let should_remove = match (self.connections.get(jid), owner) {
+            (Some(entry), Some(token)) => Arc::ptr_eq(&entry.carbons_enabled, token),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if should_remove {
+            self.remove_resource(jid);
+        }
+        should_remove
     }
 }
 
@@ -64,8 +99,16 @@ impl UserActor {
 // ---------------------------------------------------------------------------
 
 /// Register a new connection (resource) for this user.
+///
+/// Carries the resource's outbound channel via a [`ConnectionEntry`] so the
+/// actor owns the delivery surface for the resource. Re-registering an
+/// already-present full JID replaces the entry — this is the actor-model
+/// analogue of the `ConnectionRegistry` replacement path (a client's new
+/// stream taking over an existing resource), made race-free by the mailbox
+/// serializing register against every send.
 pub struct RegisterConnection {
     pub jid: FullJid,
+    pub entry: ConnectionEntry,
 }
 
 impl kameo::message::Message<RegisterConnection> for UserActor {
@@ -77,43 +120,20 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering connection");
-        self.resources.insert(msg.jid.clone());
-        self.presence_available.insert(msg.jid.clone(), false);
-        self.presence_priority.insert(msg.jid.clone(), 0);
-        self.carbons_enabled.insert(msg.jid, false);
-    }
-}
-
-/// Register a new connection with explicit carbons initial state.
-pub struct RegisterConnectionWithCarbons {
-    pub jid: FullJid,
-    pub carbons_enabled: bool,
-}
-
-impl kameo::message::Message<RegisterConnectionWithCarbons> for UserActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: RegisterConnectionWithCarbons,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        debug!(
-            jid = %msg.jid,
-            bare = %self.bare_jid,
-            carbons = msg.carbons_enabled,
-            "Registering connection with explicit carbons state"
-        );
-        self.resources.insert(msg.jid.clone());
-        self.presence_available.insert(msg.jid.clone(), false);
-        self.presence_priority.insert(msg.jid.clone(), 0);
-        self.carbons_enabled.insert(msg.jid, msg.carbons_enabled);
+        self.connections.insert(msg.jid, msg.entry);
     }
 }
 
 /// Unregister a connection (resource) for this user.
+///
+/// `owner` is the ownership token (the resource's `carbons_enabled`
+/// `Arc<AtomicBool>`): `Some` gates removal on the stored entry still being
+/// that owner's (so a lagging unregister can't evict a replacement), `None`
+/// removes unconditionally — matching the DashMap `unregister_if_owner` vs
+/// plain `unregister` call the teardown site makes.
 pub struct UnregisterConnection {
     pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
 }
 
 impl kameo::message::Message<UnregisterConnection> for UserActor {
@@ -125,13 +145,16 @@ impl kameo::message::Message<UnregisterConnection> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Unregistering connection");
-        self.remove_resource(&msg.jid);
+        self.remove_resource_if_owner(&msg.jid, msg.owner.as_ref());
     }
 }
 
 /// Unregister a connection and return whether the user has no resources left.
+///
+/// `owner` is ownership-gated exactly like [`UnregisterConnection`].
 pub struct UnregisterConnectionAndReportEmpty {
     pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
 }
 
 impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
@@ -147,8 +170,8 @@ impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
             bare = %self.bare_jid,
             "Unregistering connection and checking emptiness"
         );
-        self.remove_resource(&msg.jid);
-        self.resources.is_empty()
+        self.remove_resource_if_owner(&msg.jid, msg.owner.as_ref());
+        self.connections.is_empty()
     }
 }
 
@@ -163,7 +186,7 @@ impl kameo::message::Message<GetResources> for UserActor {
         _msg: GetResources,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources.iter().cloned().collect()
+        self.connections.keys().cloned().collect()
     }
 }
 
@@ -178,13 +201,10 @@ impl kameo::message::Message<GetAvailableResources> for UserActor {
         _msg: GetAvailableResources,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources
+        self.connections
             .iter()
-            .filter(|jid| self.presence_available.get(*jid).copied().unwrap_or(false))
-            .map(|jid| {
-                let priority = self.presence_priority.get(jid).copied().unwrap_or(0);
-                (jid.clone(), priority)
-            })
+            .filter(|(_, entry)| entry.is_presence_available())
+            .map(|(jid, entry)| (jid.clone(), entry.presence_priority()))
             .collect()
     }
 }
@@ -202,8 +222,8 @@ impl kameo::message::Message<GetOtherResources> for UserActor {
         msg: GetOtherResources,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources
-            .iter()
+        self.connections
+            .keys()
             .filter(|jid| **jid != msg.exclude)
             .cloned()
             .collect()
@@ -225,10 +245,13 @@ impl kameo::message::Message<UpdatePresence> for UserActor {
         msg: UpdatePresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.resources.contains(&msg.jid) {
-            self.presence_available
-                .insert(msg.jid.clone(), msg.available);
-            self.presence_priority.insert(msg.jid, msg.priority);
+        if let Some(entry) = self.connections.get(&msg.jid) {
+            entry
+                .presence_available
+                .store(msg.available, Ordering::Relaxed);
+            entry
+                .presence_priority
+                .store(msg.priority, Ordering::Relaxed);
             true
         } else {
             false
@@ -345,11 +368,14 @@ impl kameo::message::Message<IsConnected> for UserActor {
         msg: IsConnected,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources.contains(&msg.jid)
+        self.connections.contains_key(&msg.jid)
     }
 }
 
 /// Set carbons enabled/disabled for a resource.
+///
+/// No-op when the resource is not connected (the entry, and therefore the
+/// carbons atomic, only exists while the resource is registered).
 pub struct SetCarbonsEnabled {
     pub jid: FullJid,
     pub enabled: bool,
@@ -363,7 +389,9 @@ impl kameo::message::Message<SetCarbonsEnabled> for UserActor {
         msg: SetCarbonsEnabled,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.carbons_enabled.insert(msg.jid, msg.enabled);
+        if let Some(entry) = self.connections.get(&msg.jid) {
+            entry.carbons_enabled.store(msg.enabled, Ordering::Relaxed);
+        }
     }
 }
 
@@ -380,7 +408,10 @@ impl kameo::message::Message<IsCarbonsEnabled> for UserActor {
         msg: IsCarbonsEnabled,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.carbons_enabled.get(&msg.jid).copied().unwrap_or(false)
+        self.connections
+            .get(&msg.jid)
+            .map(|entry| entry.is_carbons_enabled())
+            .unwrap_or(false)
     }
 }
 
@@ -395,7 +426,7 @@ impl kameo::message::Message<ResourceCount> for UserActor {
         _msg: ResourceCount,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources.len()
+        self.connections.len()
     }
 }
 

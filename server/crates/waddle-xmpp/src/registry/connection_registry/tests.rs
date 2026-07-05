@@ -285,72 +285,11 @@ async fn test_send_to_waits_for_capacity_instead_of_dropping() {
     );
 }
 
-/// Issue #699: the MUC reflector emits one `RouteToConnection` per
-/// occupant. If even ONE recipient's per-connection mpsc is full
-/// (slow consumer, zombie WebSocket, paused VM, …) the reflector's
-/// caller must NOT block — every subsequent groupchat dispatch goes
-/// through the same interpreter loop, and a blocking send wedges
-/// archive + inbox writes for the whole room until the pod
-/// restarts. `try_send_peer_to` is the non-blocking variant the
-/// reflector now uses.
-#[tokio::test(start_paused = true)]
-async fn try_send_peer_to_returns_immediately_when_recipient_channel_is_full() {
-    let registry = ConnectionRegistry::new();
-    let jid = test_jid("zombie");
-    // Capacity 1 + never-drained receiver simulates the zombie
-    // WebSocket: consumer task hung on `Sink::send`, mpsc is full,
-    // producer must not stall.
-    let (tx, _rx_never_drains) = mpsc::channel(1);
-    registry.register(jid.clone(), tx);
-
-    // Saturate the channel.
-    let prime = make_test_message("zombie@example.com");
-    assert!(matches!(
-        registry.send_to(&jid, Stanza::Message(prime)).await,
-        SendResult::Sent
-    ));
-
-    // Now the channel is full. A blocking `send_peer_to` would
-    // await forever (1.5h+ in prod before this fix). The
-    // non-blocking variant returns `DroppedFull` synchronously.
-    let drop_target = make_test_message("zombie@example.com");
-    let start = tokio::time::Instant::now();
-    let outcome = registry.try_send_peer_to(&jid, Stanza::Message(drop_target));
-    let elapsed = start.elapsed();
-
-    assert_eq!(outcome, BroadcastOutcome::DroppedFull);
-    // The whole point: bounded synchronous cost regardless of
-    // recipient state.
-    assert!(
-        elapsed < Duration::from_millis(10),
-        "try_send_peer_to must not await capacity — took {elapsed:?}"
-    );
-}
-
-/// `try_send_peer_to` must tag the outbound as `PeerStanza` so the
-/// destination's main loop runs the recipient pass (XEP-0359
-/// recipient stanza-id, XEP-0313 archive, XEP-0280 received-carbons,
-/// inbox projection). If this regressed to `DirectFrame`, groupchat
-/// reflection would skip every recipient-side side-effect and look
-/// like silent message loss to anyone other than the sender.
-#[tokio::test]
-async fn try_send_peer_to_emits_peer_stanza_kind() {
-    let registry = ConnectionRegistry::new();
-    let jid = test_jid("alice");
-    let (tx, mut rx) = mpsc::channel(4);
-    registry.register(jid.clone(), tx);
-
-    let msg = make_test_message("alice@example.com");
-    let outcome = registry.try_send_peer_to(&jid, Stanza::Message(msg));
-    assert_eq!(outcome, BroadcastOutcome::Delivered);
-
-    let outbound = rx.recv().await.expect("queued stanza");
-    assert_eq!(
-        outbound.kind,
-        DeliveryKind::PeerStanza,
-        "groupchat reflection must run through the recipient-pass pipeline"
-    );
-}
+// ADR-0017 Slice 3: `try_send_peer_to`/`send_peer_to` were deleted (peer-routed
+// delivery now goes through the authoritative `UserActor`'s `TrySendPeer`), so
+// their dedicated non-blocking / PeerStanza-kind tests moved with the behaviour
+// to the `user_actor::delivery` invariant suite and the interpret routing
+// tests.
 
 #[test]
 fn test_list_connections() {
@@ -666,6 +605,95 @@ fn test_remove_if_sender_closed_keeps_new_live_registration() {
 }
 
 #[test]
+fn select_routable_prefers_top_priority_and_excludes_lower_positive() {
+    // RFC 6121 §8.5.2.1.2: a lower positive priority is NOT a destination when
+    // a strictly-higher priority is available — pins the max-priority filter so
+    // it can't silently degrade to a plain `>= 0` filter.
+    let registry = ConnectionRegistry::new();
+    let phone: FullJid = "alice@example.com/phone".parse().unwrap();
+    let laptop: FullJid = "alice@example.com/laptop".parse().unwrap();
+    let bare = phone.to_bare();
+
+    let (phone_tx, _phone_rx) = mpsc::channel(16);
+    let (laptop_tx, _laptop_rx) = mpsc::channel(16);
+    registry.register(phone.clone(), phone_tx);
+    registry.register(laptop.clone(), laptop_tx);
+    registry.update_presence(&phone, true, 5);
+    registry.update_presence(&laptop, true, 3);
+
+    assert_eq!(
+        registry.select_routable_resources_for_user(&bare),
+        vec![phone],
+        "only the strictly-highest-priority resource is a destination"
+    );
+}
+
+#[test]
+fn select_routable_ties_at_top_priority_route_to_all() {
+    // RFC 6121 §8.5.2.1.2: ties at the top priority all receive the stanza.
+    let registry = ConnectionRegistry::new();
+    let phone: FullJid = "alice@example.com/phone".parse().unwrap();
+    let laptop: FullJid = "alice@example.com/laptop".parse().unwrap();
+    let bare = phone.to_bare();
+
+    let (phone_tx, _phone_rx) = mpsc::channel(16);
+    let (laptop_tx, _laptop_rx) = mpsc::channel(16);
+    registry.register(phone.clone(), phone_tx);
+    registry.register(laptop.clone(), laptop_tx);
+    registry.update_presence(&phone, true, 5);
+    registry.update_presence(&laptop, true, 5);
+
+    let mut selected = registry.select_routable_resources_for_user(&bare);
+    selected.sort_by_key(|j| j.to_string());
+    assert_eq!(selected, vec![laptop, phone]);
+}
+
+#[test]
+fn select_routable_excludes_negative_priority_resource() {
+    // RFC 6121 §8.5.2.1.1: a resource with negative priority is never a
+    // bare-JID destination. This must match the `UserActor` path exactly.
+    let registry = ConnectionRegistry::new();
+    let phone: FullJid = "alice@example.com/phone".parse().unwrap();
+    let bot: FullJid = "alice@example.com/bot".parse().unwrap();
+    let bare = phone.to_bare();
+
+    let (phone_tx, _phone_rx) = mpsc::channel(16);
+    let (bot_tx, _bot_rx) = mpsc::channel(16);
+    registry.register(phone.clone(), phone_tx);
+    registry.register(bot.clone(), bot_tx);
+    registry.update_presence(&phone, true, 1);
+    registry.update_presence(&bot, true, -1);
+
+    assert_eq!(
+        registry.select_routable_resources_for_user(&bare),
+        vec![phone],
+        "negative-priority resource must be excluded"
+    );
+}
+
+#[test]
+fn select_routable_empty_when_only_negative_priority() {
+    // RFC 6121 §8.5.2.1.1: when every available resource has negative
+    // priority the stanza is handled as if no resource is available
+    // (offline-storage fallback) — the all-negative corner the live path
+    // previously mis-routed.
+    let registry = ConnectionRegistry::new();
+    let bot: FullJid = "alice@example.com/bot".parse().unwrap();
+    let bare = bot.to_bare();
+
+    let (bot_tx, _bot_rx) = mpsc::channel(16);
+    registry.register(bot.clone(), bot_tx);
+    registry.update_presence(&bot, true, -1);
+
+    assert!(
+        registry
+            .select_routable_resources_for_user(&bare)
+            .is_empty(),
+        "all-negative-priority selects nothing → offline fallback"
+    );
+}
+
+#[test]
 fn test_try_send_to_load_reports_single_delivery_then_drops() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("load");
@@ -684,4 +712,58 @@ fn test_try_send_to_load_reports_single_delivery_then_drops() {
 
     assert_eq!(delivered, 1);
     assert_eq!(dropped_full, 31);
+}
+
+/// ADR-0017 Phase 1 (Greptile P1 on PR #1177): the SM-expiry janitor must not
+/// evict a live REPLACEMENT session. `unregister_if_sm_stream_id` removes the
+/// entry only when its published SM stream id matches the expired session's, so
+/// a replacement S2 that rebound the same full JID after S1 detached survives
+/// S1's expiry — on BOTH the DashMap here and (via the caller's gated mirror)
+/// the actor tree.
+#[test]
+fn unregister_if_sm_stream_id_spares_a_replacement_session() {
+    use crate::pending_delivery::SmSessionId;
+
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    // S1 binds and publishes its SM stream id.
+    let (s1_tx, _s1_rx) = mpsc::channel(4);
+    registry.register(jid.clone(), s1_tx);
+    let s1_stream = SmSessionId::new("s1-stream".to_string());
+    registry
+        .get_entry(&jid)
+        .expect("s1 entry")
+        .set_sm_stream_id(Some(s1_stream.clone()));
+
+    // S2 rebinds the SAME full JID (replacing the DashMap entry) with its own
+    // SM stream id — the detach→rebind race the janitor must tolerate.
+    let (s2_tx, _s2_rx) = mpsc::channel(4);
+    registry.register(jid.clone(), s2_tx);
+    let s2_stream = SmSessionId::new("s2-stream".to_string());
+    registry
+        .get_entry(&jid)
+        .expect("s2 entry")
+        .set_sm_stream_id(Some(s2_stream.clone()));
+
+    // S1's expiry must NOT remove S2.
+    assert!(
+        registry
+            .unregister_if_sm_stream_id(&jid, &s1_stream)
+            .is_none(),
+        "S1's stream id no longer owns the entry; nothing must be removed"
+    );
+    assert!(
+        registry.is_connected(&jid),
+        "the replacement session S2 must survive S1's expiry"
+    );
+
+    // S2's own expiry removes it (matching stream id).
+    assert!(
+        registry
+            .unregister_if_sm_stream_id(&jid, &s2_stream)
+            .is_some(),
+        "a matching stream id removes the entry"
+    );
+    assert!(!registry.is_connected(&jid));
 }

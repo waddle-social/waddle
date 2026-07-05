@@ -302,6 +302,24 @@ pub(super) async fn cleanup_connection_shutdown(
                             .await;
                         return;
                     }
+                    // ADR-0017 Phase 1: prune the actor-tree entry at detach
+                    // (Greptile review on PR #1177). We just removed the DashMap
+                    // routing entry and are about to close this resource's
+                    // channel; the actor entry is no longer live-routable.
+                    // Keeping it would LEAK: a later SM-expiry cannot converge
+                    // it — the janitor's `unregister` returns `None` (the
+                    // DashMap entry is already gone) so its mirror never fires.
+                    // Detached delivery is sourced from the SM session registry
+                    // (not the actor), and a successful resume re-registers a
+                    // fresh entry via `register_bound_connection_after_frame` →
+                    // `mirror_register`, so pruning here does not affect resume.
+                    // Owner-gated so a superseding newcomer is untouched.
+                    crate::server::dual_registration::mirror_unregister(
+                        &state.deps.protocol.user_registry,
+                        &jid,
+                        Some(std::sync::Arc::clone(owner)),
+                    )
+                    .await;
                     outbound_rx.close();
                     // Second detach drain: anything that arrived
                     // between the first drain and the registry
@@ -336,11 +354,27 @@ pub(super) async fn cleanup_connection_shutdown(
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
                     state.deps.protocol.resumable_sessions.remove(&stream_id);
-                    let _ = state
+                    let detach_fail_removed = state
                         .deps
                         .protocol
                         .connection_registry
-                        .unregister_if_owner(&jid, owner);
+                        .unregister_if_owner(&jid, owner)
+                        .is_some();
+                    if detach_fail_removed {
+                        // ADR-0017 Phase 1: mirror the unregister into the
+                        // actor tree on the SM-detach-failure fallback. This
+                        // session is never stored, so no SM-expiry janitor
+                        // will ever converge it — without this mirror the
+                        // resource leaks in the actor tree forever. Owner-gated
+                        // (the same token that owned the DashMap slot) so a
+                        // superseding newcomer's actor-tree entry is not clobbered.
+                        crate::server::dual_registration::mirror_unregister(
+                            &state.deps.protocol.user_registry,
+                            &jid,
+                            Some(std::sync::Arc::clone(owner)),
+                        )
+                        .await;
+                    }
                     // PR #438 review (Copilot): when SM detachment
                     // fails we fall back to a full unregister, so the
                     // caps resource→ver mapping AND any pending
@@ -354,15 +388,25 @@ pub(super) async fn cleanup_connection_shutdown(
         }
     }
 
-    let removed = conn.registry_owner.as_ref().is_some_and(|owner| {
+    let removed_owner = conn.registry_owner.as_ref().and_then(|owner| {
         state
             .deps
             .protocol
             .connection_registry
             .unregister_if_owner(&jid, owner)
-            .is_some()
+            .map(|_| std::sync::Arc::clone(owner))
     });
-    if removed {
+    if let Some(owner) = removed_owner {
+        // ADR-0017 Phase 1: mirror the unregister into the actor tree on
+        // the dominant disconnect teardown path. Owner-gated (the same token
+        // that owned the DashMap entry) so a superseding newcomer that
+        // already replaced this FullJid's actor-tree entry is not clobbered.
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            &jid,
+            Some(owner),
+        )
+        .await;
         // XEP-0115 §6: drop the per-resource caps mapping for this
         // resource. The hash-keyed `CapsCache` itself stays warm so
         // a future session reusing the same `(hash, ver)` short-
@@ -441,6 +485,10 @@ pub(super) async fn cleanup_invalidated_detached_session(
         .protocol
         .resumable_sessions
         .remove(&detached.stream_id);
+    // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
+    // DashMap entry. It gates whether we attempt cleanup at all: if the
+    // replacement (the freshly-bound session that triggered this invalidation)
+    // already owns the slot, there is nothing of the old session's to clean up.
     let replacement_is_current_owner = replacement_owner.is_some_and(|owner| {
         state
             .deps
@@ -450,11 +498,32 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .is_some()
     });
     if !replacement_is_current_owner {
-        state
+        // Remove the DashMap entry ONLY if it is still this exact invalidated
+        // session's, gated on its own SM stream id (Greptile P1 on PR #1177) —
+        // NOT a plain `unregister`. A plain unregister removes whatever holds
+        // the full JID, which can be an UNRELATED live session S3 that bound the
+        // same resource concurrently; the mirror below (keyed on the removed
+        // entry's token) would then evict S3 from the actor tree too, and under
+        // Slice 1 that silently drops S3 from bare-JID routing on both paths.
+        // The invalidated session was normally already pruned at detach, so this
+        // returns `None` and the mirror is skipped; if it somehow lingered, only
+        // its own entry (matching stream id) is removed.
+        let removed_entry = state
             .deps
             .protocol
             .connection_registry
-            .unregister(&detached.jid);
+            .unregister_if_sm_stream_id(
+                &detached.jid,
+                &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
+            );
+        if let Some(entry) = removed_entry {
+            crate::server::dual_registration::mirror_unregister(
+                &state.deps.protocol.user_registry,
+                &detached.jid,
+                Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+            )
+            .await;
+        }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an
         // unresumed detached session doesn't leak indefinitely.

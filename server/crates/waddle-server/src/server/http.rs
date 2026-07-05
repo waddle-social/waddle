@@ -14,7 +14,7 @@ use crate::server::routes::websocket::{
 use crate::server::session_janitors::{
     spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor,
     spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
-    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
+    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -231,6 +231,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     spawn_push_service_publish_job_janitor(&websocket_state);
     spawn_auth_state_janitor(&websocket_state);
     spawn_room_dormancy_janitor(&websocket_state);
+    spawn_user_actor_reaper(&websocket_state);
     crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
@@ -344,6 +345,22 @@ async fn create_websocket_state(
 ) -> Result<Arc<WebSocketState>> {
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
+
+    // ADR-0017 Phase 1: spawn the actor-backed per-user registry. It is
+    // populated alongside `connection_registry` on the live register/
+    // unregister path (dual-registration). It is now the authoritative routing
+    // surface: bare-JID selection (`route_to_connection`, Slice 1) sources its
+    // candidate set + RFC priority ranking from this actor (intersected with
+    // DashMap liveness), and 1:1/DM/groupchat delivery (`deliver_*_to_full`,
+    // Slice 2) routes through its `TrySend*` with no DashMap send fallback. The
+    // empty-actor reaper (`spawn_user_actor_reaper`) prunes actors left empty by
+    // delivery-path closed-channel eviction.
+    let user_registry = {
+        use kameo::actor::Spawn;
+        waddle_xmpp::registry::UserRegistryActor::spawn(
+            waddle_xmpp::registry::UserRegistryActor::new(),
+        )
+    };
 
     // Read the MUC room registry and PubSub storage off the shared
     // `AppState` — both are built in `start_with_config` so admin V2
@@ -586,6 +603,7 @@ async fn create_websocket_state(
             service_domains,
             protocol: ProtocolServices {
                 connection_registry,
+                user_registry,
                 room_registry,
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),

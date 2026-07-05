@@ -81,6 +81,16 @@ pub(super) async fn register_bound_connection_after_frame(
     // offline-flush path keys claims by the XEP-0198 session id, not the
     // resource JID. For a fresh bind without SM enabled, sm_state.stream_id is
     // None and the flush path falls back to delete-on-push for non-SM sessions.
+    //
+    // This — and the presence publication below — run BEFORE the authoritative
+    // mirror `ask`, not after (concurrency review, Slice 0): the mirror is a
+    // blocking `ask` bounded at 2s, and leaving it between the DashMap
+    // `register` and these mutations would leave the just-bound resource
+    // registered-but-unavailable (and stream-id-less) on the authoritative
+    // routing map for the whole ask window. On an SM resume that window would
+    // hide a live resource from RFC 6121 §8.5.2.1.1 bare-JID selection. Setting
+    // presence/stream-id first closes it; the actor shares this same
+    // `Arc`-backed entry, so it still observes these atomics.
     if let Some(entry) = state.deps.protocol.connection_registry.get_entry(&jid) {
         entry.set_sm_stream_id(
             conn.sm_state
@@ -113,6 +123,59 @@ pub(super) async fn register_bound_connection_after_frame(
                 // a detached window omits the stamp until the next live update.
                 None,
             );
+    }
+
+    // ADR-0017 Phase 1 completion: registration into the actor tree is
+    // authoritative and fail-closed. We share the SAME `Arc`-backed
+    // `ConnectionEntry` we just registered (obtained owner-gated via
+    // `entry_if_owner`, now carrying the presence/stream-id set above) so the
+    // actor sees live presence/carbons updates without per-site mirroring. If
+    // the `UserActor` cannot confirm the resource, roll the DashMap
+    // registration back (owner-gated, so a racing replacement is left intact)
+    // and fail the bind: a lagging register is a *silent false-negative* — a
+    // bare-JID selection that misses this live resource looks like a complete
+    // set and can never fall back — so the two views must never disagree in the
+    // miss-a-resource direction. The client simply reconnects. See
+    // docs/adrs/0017-phase1-completion-authoritative-registration.md.
+    //
+    // The `None` arm (our slot was already superseded by a racing
+    // reconnect on the same resource) preserves prior behaviour: the
+    // replacement owns the slot and performs its own authoritative register,
+    // so there is nothing for this session to mirror.
+    if let Some(entry) = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &owner)
+    {
+        let registered = crate::server::dual_registration::mirror_register(
+            &state.deps.protocol.user_registry,
+            jid.clone(),
+            entry,
+        )
+        .await;
+        if !registered {
+            // Rollback also clears the presence_states published above.
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .unregister_if_owner(&jid, &owner);
+            // kameo's reply_timeout does not cancel an already-enqueued
+            // handler, so a register that *timed out* may still land in the
+            // actor tree after this rollback. Reap it with an owner-gated
+            // unregister: the `UserRegistryActor` mailbox is FIFO, so this is
+            // ordered after the register ask and prunes the phantom if it ran
+            // late; owner-gating leaves a racing replacement untouched.
+            crate::server::dual_registration::mirror_unregister(
+                &state.deps.protocol.user_registry,
+                &jid,
+                Some(owner.clone()),
+            )
+            .await;
+            conn.registry_owner = None;
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        }
     }
 
     let sm_finalization = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;

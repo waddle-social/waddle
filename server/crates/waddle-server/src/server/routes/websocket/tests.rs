@@ -55,6 +55,45 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(empty_extension_manager().await, None).await
 }
 
+/// Register a connection into BOTH the DashMap `ConnectionRegistry` and the
+/// actor tree, sharing the `Arc`-backed `ConnectionEntry` exactly as the
+/// production dual-registration path does (ADR-0017 Phase 1).
+///
+/// Tests that drive delivery or bare-JID selection through the actor cutover
+/// MUST use this instead of a bare `connection_registry.register(...)`;
+/// otherwise the actor tree is empty and the cutover paths resolve no target.
+pub(crate) async fn register_test_connection(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+    sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
+) {
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), sender);
+    // `register` always inserts, so the entry must be present — fail fast
+    // rather than silently skipping the actor mirror, which would leave the
+    // actor tree empty and mask a regression as the offline/headless path
+    // (Copilot review on PR #1177).
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(jid)
+        .expect("connection entry must exist immediately after register");
+    let registered = crate::server::dual_registration::mirror_register(
+        &state.deps.protocol.user_registry,
+        jid.clone(),
+        entry,
+    )
+    .await;
+    assert!(
+        registered,
+        "test dual-registration should confirm the resource in the actor tree for {jid}"
+    );
+}
+
 /// A self-contained [`waddle_sfu::LiveKitSfu`] for tests. Mints real
 /// JWTs locally (no network), so the XEP-0166 Jingle handler can
 /// rewrite the Waddle LiveKit transport exactly as it does in
@@ -212,6 +251,9 @@ async fn create_test_websocket_state_with_extension_manager(
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
+                    user_registry: waddle_xmpp::registry::UserRegistryActor::spawn(
+                        waddle_xmpp::registry::UserRegistryActor::new(),
+                    ),
                     room_registry: RoomRegistryActor::spawn(RoomRegistryActor::new(
                         "muc.example.com".to_string(),
                         OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())

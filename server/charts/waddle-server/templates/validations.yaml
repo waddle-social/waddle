@@ -1,9 +1,51 @@
+{{- /*
+  ADR-0017 Phase 0 shutdown budget: the grace period must cover the whole
+  ordered shutdown — preStop endpoint-propagation sleep, then the connection
+  drain, plus a kill margin — or the kubelet SIGKILLs mid-drain and in-flight
+  sessions are lost instead of cleanly detached. The margin (5s) is the slack
+  the drain coordinator needs after the socket loop exits, so the floor is
+  strictly greater than preStop + drain (Copilot review on PR #1177).
+*/ -}}
+{{- $killMargin := 5 -}}
 {{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
+{{- $preStopSleep := int .Values.preStopSleepSeconds -}}
 {{- $terminationGrace := int .Values.terminationGracePeriodSeconds -}}
-{{- if lt $terminationGrace $drainTimeout -}}
-{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= config.drainTimeoutSeconds (%d)" $terminationGrace $drainTimeout) -}}
+{{- $shutdownFloor := add $preStopSleep $drainTimeout $killMargin -}}
+{{- if lt $terminationGrace $shutdownFloor -}}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $killMargin $shutdownFloor) -}}
 {{- end -}}
 
+{{- /*
+  ADR-0017: multi-replica is refused until clustering ships (Phase 4). The
+  cross-node routing/ownership fabric does not exist yet, so replicaCount > 1
+  would split routing, presence, and MUC rooms across replicas that cannot
+  reach each other.
+
+  Two guards, belt-and-suspenders (Copilot review on PR #1177): the
+  clustering.enabled flag is itself refused because the fabric is not built —
+  so nobody can flip it to unlock scale-up before it works — AND replicaCount
+  > 1 is refused independently. Phase 4 removes the first guard when clustering
+  actually ships; until then both replicaCount > 1 and clustering.enabled=true
+  fail to render.
+*/ -}}
+{{- if .Values.clustering.enabled -}}
+{{- fail "clustering.enabled=true is not supported yet — the cross-node routing/ownership fabric ships in ADR-0017 Phase 4. Leave clustering.enabled=false." -}}
+{{- end -}}
+{{- if gt (int .Values.replicaCount) 1 -}}
+{{- fail (printf "replicaCount (%d) > 1 is not supported yet — cross-node routing ships in ADR-0017 Phase 4. A second replica would split routing/presence/MUC state across pods that cannot reach each other." (int .Values.replicaCount)) -}}
+{{- end -}}
+
+{{- if and (eq .Values.updateStrategy.type "RollingUpdate") .Values.persistence.enabled (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
+{{- fail "updateStrategy.type=RollingUpdate with a ReadWriteOnce PVC surges a second pod that deadlocks on Multi-Attach. Use updateStrategy.type=Recreate, switch to ReadWriteMany, or set persistence.allowUnsafeRwoScale=true if your storage backend supports concurrent attach." -}}
+{{- end -}}
+
+{{/*
+  NOTE: this replicaCount>1 + RWO-PVC guard is currently *shadowed* by the
+  unconditional `replicaCount > 1` fail above (Phase 4 gate) — it can only fire
+  once that gate is lifted. It is kept deliberately as the forward-looking
+  storage guard that becomes authoritative when Phase 4 unlocks multi-replica,
+  so it does not need to be re-derived then (Copilot review on PR #1177).
+*/ -}}
 {{- if and .Values.persistence.enabled (gt (int .Values.replicaCount) 1) (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
 {{- fail "replicaCount > 1 with persistence.accessModes containing ReadWriteOnce is usually unschedulable. Use ReadWriteMany/ReadOnlyMany, disable persistence, or set persistence.allowUnsafeRwoScale=true if your storage backend supports it." -}}
 {{- end -}}

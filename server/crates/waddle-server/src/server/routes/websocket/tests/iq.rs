@@ -4458,16 +4458,9 @@ async fn dm_call_session_initiate_forwards_to_peer_not_feature_not_implemented()
 
     let (alice_tx, _alice_rx) = tokio::sync::mpsc::channel(8);
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel::<OutboundStanza>(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(alice.clone(), alice_tx);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob.clone(), bob_tx);
+    // ADR-0017 Slice 2: delivery reads the actor tree, so register into both.
+    super::register_test_connection(state.as_ref(), &alice, alice_tx).await;
+    super::register_test_connection(state.as_ref(), &bob, bob_tx).await;
 
     // Realistic XEP-0166 1:1 session-initiate carrying an XEP-0167
     // Opus RTP description and the Waddle LiveKit transport request

@@ -6,14 +6,18 @@ impl ConnectionRegistry {
     ///
     /// Returns every currently-connected resource of `bare_jid` whose
     /// advertised presence priority equals the maximum among the
-    /// user's available resources. Per §8.5.2.1.1, only resources
-    /// that have advertised availability (positive presence) are
-    /// eligible; per §8.5.2.1.2, when multiple resources tie at the
-    /// highest priority the server SHOULD deliver to all of them.
+    /// user's available, non-negative-priority resources. Per
+    /// §8.5.2.1.1, only resources that have advertised availability
+    /// are eligible, a resource with negative priority is never a
+    /// bare-JID destination, and when multiple resources tie at the
+    /// highest priority the server SHOULD deliver to all of them
+    /// (§8.5.2.1.1 governs message routing; §8.5.2.1.2 is presence).
     ///
-    /// Returns `Vec::new()` when the user has no available
-    /// resources — caller should fall back to offline-storage
-    /// semantics.
+    /// Returns `Vec::new()` when the user has no available,
+    /// non-negative-priority resource — caller should fall back to
+    /// offline-storage semantics. This mirrors the `UserActor`
+    /// `SelectRoutableResources` handler exactly so the actor path can
+    /// replace this one without a behavior change.
     pub fn select_routable_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
         let candidates: Vec<(FullJid, i8)> = self
             .connections
@@ -22,6 +26,7 @@ impl ConnectionRegistry {
                 entry.key().to_bare() == *bare_jid && entry.value().is_presence_available()
             })
             .map(|entry| (entry.key().clone(), entry.value().presence_priority()))
+            .filter(|(_, priority)| *priority >= 0)
             .collect();
         let Some(max_priority) = candidates.iter().map(|(_, p)| *p).max() else {
             return Vec::new();

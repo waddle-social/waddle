@@ -96,7 +96,7 @@ async fn complete_pending_resume_claim(
                 replay_gap_through = ?detached.replay_gap_through,
                 "SM resume claim gained a replay gap before completion"
             );
-            reset_registered_resume_attempt(state, conn, jid, owner);
+            reset_registered_resume_attempt(state, conn, jid, owner).await;
             remove_resumable_sidecar = false;
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
@@ -112,7 +112,7 @@ async fn complete_pending_resume_claim(
                 send_count = detached.outbound_count,
                 "SM resume claim completed with handled count too high"
             );
-            close_registered_resume_attempt(state, conn, jid, owner);
+            close_registered_resume_attempt(state, conn, jid, owner).await;
             remove_resumable_sidecar = false;
             SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
                 acknowledged,
@@ -122,21 +122,21 @@ async fn complete_pending_resume_claim(
         Ok(Some(SmClaimCompletion::Expired(detached))) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
-            close_registered_resume_attempt(state, conn, jid, owner);
+            close_registered_resume_attempt(state, conn, jid, owner).await;
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "item-not-found",
             ))
         }
         Ok(None) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
-            close_registered_resume_attempt(state, conn, jid, owner);
+            close_registered_resume_attempt(state, conn, jid, owner).await;
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "item-not-found",
             ))
         }
         Err(error) => {
             warn!(stream_id = %stream_id, jid = %jid, error = %error, "Failed to complete SM resume claim");
-            close_registered_resume_attempt(state, conn, jid, owner);
+            close_registered_resume_attempt(state, conn, jid, owner).await;
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "internal-server-error",
             ))
@@ -171,17 +171,31 @@ async fn invalidate_older_detached_sessions(
     }
 }
 
-fn reset_registered_resume_attempt(
+async fn reset_registered_resume_attempt(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let _ = state
+    let removed = state
         .deps
         .protocol
         .connection_registry
-        .unregister_if_owner(jid, owner);
+        .unregister_if_owner(jid, owner)
+        .is_some();
+    if removed {
+        // ADR-0017 Phase 1: the fresh/resumed bind already mirror-registered
+        // this resource into the actor tree, so a resume-rollback that
+        // unregisters it from the DashMap must mirror the unregister too or
+        // the actor-tree resource leaks. Owner-gated on the same token so a
+        // superseding newcomer is not clobbered.
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            jid,
+            Some(Arc::clone(owner)),
+        )
+        .await;
+    }
     conn.registry_owner = None;
     conn.phase = ConnectionPhase::authenticated(jid);
     // Replace (never null) the per-connection state machine: the
@@ -203,17 +217,30 @@ fn reset_registered_resume_attempt(
     conn.suppress_sm_record_next_batch = false;
 }
 
-fn close_registered_resume_attempt(
+async fn close_registered_resume_attempt(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let _ = state
+    let removed = state
         .deps
         .protocol
         .connection_registry
-        .unregister_if_owner(jid, owner);
+        .unregister_if_owner(jid, owner)
+        .is_some();
+    if removed {
+        // ADR-0017 Phase 1: mirror the DashMap unregister into the actor
+        // tree so the resource the bind mirror-registered does not leak when
+        // a resume attempt is closed out. Owner-gated on the same token so a
+        // superseding newcomer is not clobbered.
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            jid,
+            Some(Arc::clone(owner)),
+        )
+        .await;
+    }
     conn.registry_owner = None;
     conn.phase = ConnectionPhase::closing(Some(jid.clone()));
 }

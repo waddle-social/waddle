@@ -200,6 +200,7 @@ mod tests {
                 service_domains: deps.service_domains.clone(),
                 protocol: super::super::state::ProtocolServices {
                     connection_registry: Arc::clone(&deps.protocol.connection_registry),
+                    user_registry: deps.protocol.user_registry.clone(),
                     room_registry: deps.protocol.room_registry.clone(),
                     mam_storage: Arc::clone(&deps.protocol.mam_storage),
                     inbox_storage: Arc::clone(&deps.protocol.inbox_storage),

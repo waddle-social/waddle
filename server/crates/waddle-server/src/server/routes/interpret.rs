@@ -36,7 +36,6 @@
 //!   [`waddle_xmpp::protocol::handlers::archive::ArchiveHandler`].
 //! - [`OutboundEvent::ProjectInbox`] — Waddle inbox upsert keyed by
 //!   `(owner, peer)` with `archive_ref` linking back to the MAM entry.
-//! - [`OutboundEvent::UnregisterConnection`] — drop from the registry.
 //! - [`OutboundEvent::LookupArchivedMessage`] — XEP-0359 stanza-id /
 //!   origin-id lookup against personal MAM; result feeds back as
 //!   [`InboundEvent::ArchivedMessageLoaded`] in
@@ -73,6 +72,9 @@
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
 //!   `ValidateOAuthBearer`, `RegisterConnection` — wired in later
 //!   migration steps.
+//! - `UnregisterConnection` — intentionally NOT wired: owner-gated registry
+//!   removal is driven by the live teardown paths (which hold the session's
+//!   ownership token), not by the token-less state machine. See the arm.
 
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
@@ -187,7 +189,7 @@ use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
 use routing::{
-    deliver_peer_to_full, deliver_to_detached, run_fanout_recipient_pass,
+    deliver_direct_to_full, deliver_peer_to_full, run_fanout_recipient_pass,
     run_headless_recipient_pass, FanoutPassResult,
 };
 
@@ -471,8 +473,28 @@ async fn interpret_with_depth(
                 );
             }
             OutboundEvent::UnregisterConnection(jid) => {
-                let _entry = registry.unregister(&jid);
-                debug!(jid = %jid, "UnregisterConnection: removed from registry");
+                // Deliberately a warn-only stub, NOT a registry unregister
+                // (Greptile review on PR #1177). No producer emits this event,
+                // and the variant carries only a `FullJid` — no ownership token
+                // or SM stream id — so a plain `registry.unregister(&jid)` here
+                // could evict an UNRELATED live session that holds the same full
+                // JID, exactly the replacement-eviction footgun fixed on every
+                // real teardown path (`unregister_if_owner` /
+                // `unregister_if_sm_stream_id`). Owner-gated registry removal is
+                // a server-side concern the live teardown paths already own
+                // (`cleanup::cleanup_connection_shutdown`,
+                // `stream_management::registration`'s resume-rollback helpers,
+                // `cleanup_invalidated_detached_session`, the SM-expiry janitor);
+                // the pure state machine has no ownership token to drive it
+                // safely. If this is ever wired, the event MUST first carry the
+                // owning session's token so the removal can be gated.
+                warn!(
+                    variant = "UnregisterConnection",
+                    jid = %jid,
+                    "OutboundEvent variant not wired in interpreter: registry \
+                     unregister is owner-gated and driven by the live teardown \
+                     paths, not the state machine"
+                );
             }
             OutboundEvent::ArchiveGroupchat {
                 room,

@@ -59,6 +59,19 @@ pub enum TimerCommand {
 #[derive(Clone)]
 pub struct Deps<'a> {
     pub connection_registry: &'a ConnectionRegistry,
+    /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so bare-JID
+    /// routing selection (`route_to_connection`, Slice 1) can source its
+    /// candidate set + RFC priority ranking from the actor, and so 1:1/DM
+    /// delivery (`deliver_*_to_full`, Slice 2) can route through the actor's
+    /// `TrySend*` with no DashMap send fallback. (The token-less
+    /// [`OutboundEvent::UnregisterConnection`] interpreter arm is now a
+    /// warn-only stub — it does NOT mirror into the actor tree; ownership-gated
+    /// teardown mirrors via `mirror_unregister` at the connection sites
+    /// instead.) `None` in unit tests that do not exercise live bare-JID
+    /// delivery (selection then degrades to the offline/headless path);
+    /// supplied in production via
+    /// [`super::super::websocket::build_interpret_deps`].
+    pub user_registry: Option<&'a ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     /// XEP-0198 stream-management session registry. Used to fan
     /// XEP-0280 carbons out to *detached but resumable* resources so
     /// briefly-disconnected secondary devices don't lose carbon
@@ -133,6 +146,35 @@ impl<'a> Deps<'a> {
     pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
         Self {
             connection_registry,
+            user_registry: None,
+            sm_session_registry: None,
+            mam_storage: None,
+            inbox_storage: None,
+            extension_manager: None,
+            room_registry: None,
+            web_socket_state: None,
+            authenticated_session: None,
+            local_domain: "example.com",
+            blocking_storage: None,
+            message_dispatcher: None,
+            pending_delivery_storage: None,
+        }
+    }
+
+    /// Build a `Deps` with the connection registry AND the
+    /// actor-authoritative `UserRegistryActor` — for unit tests that
+    /// exercise bare-JID selection, which after ADR-0017 Phase 1 Slice 1
+    /// reads resources from the actor tree (`route_to_connection`), not the
+    /// DashMap. The registry must have the resources mirrored into it (see
+    /// the test-side `register_into_both_tiers` helper).
+    #[cfg(test)]
+    pub fn registry_with_user_registry(
+        connection_registry: &'a ConnectionRegistry,
+        user_registry: &'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            user_registry: Some(user_registry),
             sm_session_registry: None,
             mam_storage: None,
             inbox_storage: None,
@@ -158,6 +200,7 @@ impl<'a> Deps<'a> {
     ) -> Self {
         Self {
             connection_registry,
+            user_registry: None,
             sm_session_registry: None,
             mam_storage: Some(mam_storage),
             inbox_storage: Some(inbox_storage),
@@ -181,6 +224,7 @@ impl<'a> Deps<'a> {
     ) -> Self {
         Self {
             connection_registry,
+            user_registry: None,
             sm_session_registry: None,
             mam_storage: None,
             inbox_storage: None,

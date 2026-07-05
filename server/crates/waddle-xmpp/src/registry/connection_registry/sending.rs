@@ -6,16 +6,52 @@ impl ConnectionRegistry {
     /// without running the recipient pass.
     ///
     /// This is the right call for server-generated frames (carbons,
-    /// IQ replies, SM acks, …). For peer-routed stanzas that should
-    /// run through the recipient pipeline, use [`Self::send_peer_to`].
+    /// IQ replies, SM acks, …). Peer-routed stanzas that must run through
+    /// the recipient pipeline go through the authoritative `UserActor`'s
+    /// `TrySendPeer` (ADR-0017 Slice 2), not a DashMap send.
     ///
     /// This waits for outbound channel capacity instead of dropping stanzas when
     /// a connection is temporarily backpressured. Closed channels are treated as
-    /// stale connections and removed from the registry.
+    /// stale connections and removed from the registry; if a concurrent
+    /// `register` installed a fresh sender on the same JID between our lookup and
+    /// a failed send, the stanza is retried on the replacement rather than lost.
     #[instrument(skip(self, stanza), fields(to = %jid))]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
-        self.send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
-            .await
+        let sender = match self.connections.get(jid) {
+            Some(entry) => entry.value().sender.clone(),
+            None => {
+                debug!("Recipient not connected");
+                return SendResult::NotConnected;
+            }
+        };
+
+        match sender.send(OutboundStanza::new(stanza.clone())).await {
+            Ok(()) => {
+                debug!("Stanza queued for delivery");
+                SendResult::Sent
+            }
+            Err(_) => {
+                debug!("Outbound channel closed, connection may have dropped");
+                self.remove_if_sender_closed_owner(jid, &sender);
+                if let Some(entry) = self.connections.get(jid) {
+                    let current = entry.value().sender.clone();
+                    drop(entry);
+                    if !current.same_channel(&sender) {
+                        return match current.send(OutboundStanza::new(stanza)).await {
+                            Ok(()) => {
+                                debug!("Stanza queued for replacement connection");
+                                SendResult::Sent
+                            }
+                            Err(_) => {
+                                self.remove_if_sender_closed_owner(jid, &current);
+                                SendResult::ChannelClosed
+                            }
+                        };
+                    }
+                }
+                SendResult::ChannelClosed
+            }
+        }
     }
 
     /// Send a [`pending_delivery`](crate::pending_delivery) flush stanza
@@ -48,78 +84,6 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Send a stanza to a connected user as a [`DeliveryKind::PeerStanza`]
-    /// — the destination's main loop feeds
-    /// [`crate::protocol::InboundEvent::StanzaFromPeer`] into its
-    /// state machine so the recipient-pass pipeline (XEP-0191
-    /// incoming block, XEP-0359 recipient stamp, XEP-0313 archive,
-    /// XEP-0280 received-carbons, inbox projection) runs before any
-    /// wire write.
-    ///
-    /// Used by the [`crate::protocol::OutboundEvent::RouteToConnection`]
-    /// interpreter arm starting in #229 PR12.
-    #[instrument(skip(self, stanza), fields(to = %jid))]
-    pub async fn send_peer_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
-        self.send_to_with_kind(jid, stanza, DeliveryKind::PeerStanza)
-            .await
-    }
-
-    /// Inner helper shared by [`Self::send_to`] and [`Self::send_peer_to`]
-    /// so the queueing / replacement / channel-closed paths stay in
-    /// one place. The only thing the public callers vary is the
-    /// [`DeliveryKind`] tag on the queued [`OutboundStanza`], which
-    /// is built via the same [`OutboundStanza::new`] / [`OutboundStanza::peer_stanza`]
-    /// constructors every other call site uses — no manual struct
-    /// literal here so the kind→constructor mapping stays in one
-    /// place.
-    async fn send_to_with_kind(
-        &self,
-        jid: &FullJid,
-        stanza: Stanza,
-        kind: DeliveryKind,
-    ) -> SendResult {
-        let sender = match self.connections.get(jid) {
-            Some(entry) => entry.value().sender.clone(),
-            None => {
-                debug!("Recipient not connected");
-                return SendResult::NotConnected;
-            }
-        };
-
-        let make_outbound = |s: Stanza| match kind {
-            DeliveryKind::DirectFrame => OutboundStanza::new(s),
-            DeliveryKind::PeerStanza => OutboundStanza::peer_stanza(s),
-        };
-
-        match sender.send(make_outbound(stanza.clone())).await {
-            Ok(()) => {
-                debug!(?kind, "Stanza queued for delivery");
-                SendResult::Sent
-            }
-            Err(_) => {
-                debug!("Outbound channel closed, connection may have dropped");
-                self.remove_if_sender_closed_owner(jid, &sender);
-                if let Some(entry) = self.connections.get(jid) {
-                    let current = entry.value().sender.clone();
-                    drop(entry);
-                    if !current.same_channel(&sender) {
-                        return match current.send(make_outbound(stanza)).await {
-                            Ok(()) => {
-                                debug!(?kind, "Stanza queued for replacement connection");
-                                SendResult::Sent
-                            }
-                            Err(_) => {
-                                self.remove_if_sender_closed_owner(jid, &current);
-                                SendResult::ChannelClosed
-                            }
-                        };
-                    }
-                }
-                SendResult::ChannelClosed
-            }
-        }
-    }
-
     /// Non-blocking send as [`DeliveryKind::DirectFrame`]. Returns a
     /// typed `BroadcastOutcome` describing delivery, absence, or
     /// which silent-drop path was taken.
@@ -128,39 +92,9 @@ impl ConnectionRegistry {
     /// broadcasts, roster pushes, …) where a slow or zombied
     /// consumer must never stall the producer task.
     ///
-    /// For peer-routed groupchat reflection that needs the recipient
-    /// pass (XEP-0359 recipient stamp, XEP-0313 archive, XEP-0280
-    /// received-carbons, inbox projection), use
-    /// [`Self::try_send_peer_to`] instead — same non-blocking
-    /// guarantees, but the destination's main loop runs its state
-    /// machine before writing to the wire.
-    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
-        self.try_send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
-    }
-
-    /// Non-blocking [`DeliveryKind::PeerStanza`] send. Locked Q-fix
-    /// #699: the MUC reflector emits one `RouteToConnection` per
-    /// occupant and must NOT block on any single connection's mpsc
-    /// — one zombie WebSocket peer with a hung consumer task was
-    /// enough to stall every groupchat dispatch through the same
-    /// interpreter loop (and therefore archive + inbox writes for
-    /// every other user of the room) until the pod restarted.
-    ///
-    /// Same `BroadcastOutcome` contract as [`Self::try_send_to`];
-    /// the destination's main loop feeds the stanza through its
-    /// state machine as `InboundEvent::StanzaFromPeer` so the
-    /// recipient pass still runs when the channel has capacity.
-    pub fn try_send_peer_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
-        self.try_send_to_with_kind(jid, stanza, DeliveryKind::PeerStanza)
-    }
-
-    /// Shared non-blocking send path. The only thing the public
-    /// callers vary is the [`DeliveryKind`] tag on the queued
-    /// [`OutboundStanza`], which is built via the same
-    /// [`OutboundStanza::new`] / [`OutboundStanza::peer_stanza`]
-    /// constructors as the blocking [`Self::send_to_with_kind`] — no
-    /// manual struct literal here so the kind→constructor mapping
-    /// stays in one place.
+    /// Peer-routed groupchat reflection that needs the recipient pass now routes
+    /// through the authoritative `UserActor`'s `TrySendPeer` (ADR-0017 Slice 2),
+    /// not a DashMap send.
     ///
     /// On `Closed` the stale entry is evicted, but only if the
     /// current registry entry's sender is still closed — a
@@ -172,12 +106,7 @@ impl ConnectionRegistry {
     ///
     /// Every outcome bumps a Prometheus counter so production drop
     /// rates are visible even when callers discard the return value.
-    fn try_send_to_with_kind(
-        &self,
-        jid: &FullJid,
-        stanza: Stanza,
-        kind: DeliveryKind,
-    ) -> BroadcastOutcome {
+    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
             None => {
@@ -186,12 +115,7 @@ impl ConnectionRegistry {
             }
         };
 
-        let outbound = match kind {
-            DeliveryKind::DirectFrame => OutboundStanza::new(stanza),
-            DeliveryKind::PeerStanza => OutboundStanza::peer_stanza(stanza),
-        };
-
-        match sender.try_send(outbound) {
+        match sender.try_send(OutboundStanza::new(stanza)) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
                 BroadcastOutcome::Delivered
@@ -207,7 +131,6 @@ impl ConnectionRegistry {
                 // out every other signal on the pod.
                 debug!(
                     jid = %jid,
-                    ?kind,
                     "Outbound channel full; broadcast stanza dropped"
                 );
                 BroadcastOutcome::DroppedFull

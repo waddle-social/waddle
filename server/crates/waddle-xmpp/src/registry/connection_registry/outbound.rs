@@ -270,7 +270,7 @@ impl SendResult {
 /// "just didn't get the message" from the recipient side. Each variant
 /// bumps the matching Prometheus counter inside `try_send_to` so
 /// per-site aggregation is optional for callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
 pub enum BroadcastOutcome {
     /// Stanza enqueued on the recipient's outbound channel.
     Delivered,

@@ -275,76 +275,238 @@ pub(super) async fn run_fanout_recipient_pass(
     }
 }
 
-/// Apply a XEP-0424 §"prevent further distribution" tombstone to the
-/// retraction target inside `archive`. Looks up the target via the
-/// retraction's wire id (matches legacy
-/// `lookup_retraction_target_message`), then replaces the row with a
-/// tombstone using `mam_storage.replace_with_tombstone`.
+/// Upper bound on each actor `ask` on the delivery hot path (mailbox enqueue +
+/// handler reply). `UserActor` delivery handlers are non-blocking `try_send`s,
+/// so a real stall is rare; the bound keeps a wedged actor from stalling the
+/// interpreter loop.
+const ACTOR_DELIVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Which recipient-pass semantics the actor should stamp on the queued frame.
+#[derive(Clone, Copy)]
+enum ActorSendKind {
+    /// `DeliveryKind::DirectFrame` — the stanza is already recipient-passed
+    /// (the #1106 shared fan-out `processed` copy); write it to the wire
+    /// as-is.
+    Direct,
+    /// `DeliveryKind::PeerStanza` — the destination re-runs its recipient pass
+    /// (legacy per-resource / groupchat-reflection delivery).
+    Peer,
+}
+
+/// Classification of a terminal actor `ask` failure on the delivery hot path,
+/// deciding whether the frame may safely fall back to the detached XEP-0198
+/// replay buffer.
 ///
-/// Called from the [`OutboundEvent::ArchiveDirect`] arm once per
-/// archive write, so sender's and recipient's archives both
-/// independently observe the tombstone. Failures are logged at WARN
-/// and ignored — the retraction message itself was already archived
-/// and the original is the SHOULD-be-tombstoned target, never the
-/// authoritative payload after this point.
+/// The decision hinges on whether the message could already be sitting in the
+/// actor's mailbox: kameo does **not** cancel an enqueued handler when the
+/// caller's `reply_timeout` fires, so a message that may have been enqueued
+/// could still be delivered later — routing it to detached as well would
+/// double-deliver.
+#[derive(Debug, PartialEq, Eq)]
+enum ActorSendFailure {
+    /// Provably never enqueued (`ActorNotRunning`, `MailboxFull`, and the
+    /// mailbox-enqueue `Timeout(Some(_))`, which hands the message back). No
+    /// delivery was attempted, so routing to the detached replay buffer is
+    /// lossless and cannot duplicate.
+    NeverEnqueued,
+    /// May have been enqueued (`ActorStopped`, the reply-wait `Timeout(None)`,
+    /// `HandlerError`). A post-timeout handler run could still deliver, so we
+    /// drop rather than risk a double-delivery via detached.
+    MaybeEnqueued,
+}
+
+/// Classify a terminal `SendError` for the delivery fallback decision.
+///
+/// `Timeout` discriminates by payload: `.mailbox_timeout()` elapsing hands the
+/// message back as `Timeout(Some(_))` (never enqueued), whereas
+/// `.reply_timeout()` elapsing after a successful enqueue yields `Timeout(None)`
+/// (may still run).
+fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSendFailure {
+    use kameo::error::SendError;
+    match error {
+        SendError::ActorNotRunning(_) | SendError::MailboxFull(_) | SendError::Timeout(Some(_)) => {
+            ActorSendFailure::NeverEnqueued
+        }
+        SendError::ActorStopped | SendError::Timeout(None) | SendError::HandlerError(_) => {
+            ActorSendFailure::MaybeEnqueued
+        }
+    }
+}
+
+/// Deliver one stanza to one resource through the authoritative `UserActor`
+/// (ADR-0017 Phase 1 Slice 2), with **no DashMap fallback**.
+///
+/// The actor delivery is a non-blocking `try_send`: `Delivered` is done;
+/// `DroppedFull` drops the frame (the recipient is connected but its 256-slot
+/// channel is full — a deliberate behaviour change from the old *blocking* 1:1
+/// send, so one wedged/zombie recipient can no longer stall global dispatch,
+/// issue #699; `try_deliver` already bumps the Prometheus dropped-full
+/// counter); `NotConnected`/`DroppedClosed` routes to the detached XEP-0198
+/// replay buffer.
+///
+/// A terminal ask failure is classified by [`classify_send_error`]:
+/// provably-never-enqueued failures (`ActorNotRunning`, `MailboxFull`,
+/// mailbox-enqueue `Timeout(Some(_))`) route to detached — no delivery was
+/// attempted, so replay cannot duplicate; possibly-enqueued failures
+/// (`ActorStopped`, reply `Timeout(None)`, `HandlerError`) drop WITHOUT routing
+/// to detached, because kameo does not cancel an enqueued handler and a
+/// post-timeout run plus a detached replay would double-deliver.
+async fn deliver_one_via_actor(
+    user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: ActorSendKind,
+) {
+    // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
+    // for a bare-JID DM this is the SECOND `GetUser` for the same bare JID —
+    // `select_bare_jid_live_targets` already resolved the `UserActor` during
+    // selection, then every target here re-resolves it. It's a cheap
+    // (HashMap-lookup, bounded) registry round-trip, but the delivery signature
+    // could thread the already-resolved `ActorRef` from selection to collapse it
+    // to one `GetUser` per bare JID. Deferred: keeping the self-contained
+    // GetUser+TrySend encapsulation is simpler than reworking the delivery path
+    // ahead of the Phase-2/3 changes that touch it anyway.
+    let user_actor = match user_registry
+        .ask(waddle_xmpp::registry::GetUser {
+            bare_jid: target.to_bare(),
+        })
+        .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+        .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        // No live actor for this bare JID — no delivery was attempted, so the
+        // detached replay buffer is a safe (non-duplicating) fallback.
+        Ok(None) => {
+            deliver_to_detached(sm_session_registry, target, stanza).await;
+            return;
+        }
+        Err(error) => {
+            warn!(jid = %target, %error, "actor delivery: GetUser failed; routing to detached");
+            deliver_to_detached(sm_session_registry, target, stanza).await;
+            return;
+        }
+    };
+
+    // The two `TrySend*` messages are distinct types with distinct `SendError`
+    // types; classify each terminal failure into the shared `ActorSendFailure`
+    // disposition (plus a `String` rendering for the human-facing log below)
+    // before unifying.
+    let outcome: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> =
+        match kind {
+            ActorSendKind::Direct => user_actor
+                .ask(waddle_xmpp::registry::TrySendDirect {
+                    jid: target.clone(),
+                    stanza: stanza.clone(),
+                })
+                .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+                .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+                .await
+                .map_err(|error| (classify_send_error(&error), error.to_string())),
+            ActorSendKind::Peer => user_actor
+                .ask(waddle_xmpp::registry::TrySendPeer {
+                    jid: target.clone(),
+                    stanza: stanza.clone(),
+                })
+                .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+                .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+                .await
+                .map_err(|error| (classify_send_error(&error), error.to_string())),
+        };
+
+    match outcome {
+        Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
+            debug!(jid = %target, "actor delivery: queued for recipient");
+        }
+        Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
+            debug!(jid = %target, "actor delivery: recipient channel full; dropped");
+        }
+        Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
+        | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => {
+            deliver_to_detached(sm_session_registry, target, stanza).await;
+        }
+        // Provably never enqueued — no delivery was attempted, so the detached
+        // replay buffer is a lossless, non-duplicating fallback.
+        Err((ActorSendFailure::NeverEnqueued, error)) => {
+            warn!(
+                jid = %target,
+                %error,
+                "actor delivery: TrySend ask failed before enqueue; routing to detached"
+            );
+            deliver_to_detached(sm_session_registry, target, stanza).await;
+        }
+        // May have been enqueued — kameo does not cancel the enqueued handler,
+        // so a post-timeout run plus a detached replay would double-deliver.
+        // Count the drop so this enqueue-uncertain loss is graphable alongside
+        // the other broadcast drop reasons (the one drop path `try_deliver`
+        // does not itself account for).
+        Err((ActorSendFailure::MaybeEnqueued, error)) => {
+            waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
+            warn!(
+                jid = %target,
+                %error,
+                "actor delivery: TrySend ask failed terminally (possibly enqueued); \
+                 dropping to avoid double-delivery"
+            );
+        }
+    }
+}
+
+/// Deliver a peer-routed (`PeerStanza`) stanza to one resource through the
+/// authoritative `UserActor` (`TrySendPeer`).
+///
+/// ADR-0017 Phase 1 Slice 3: the legacy DashMap delivery methods
+/// (`send_peer_to` / `try_send_peer_to`) are deleted, so `user_registry` is the
+/// only delivery path. `None` — test fixtures without an actor tree — can no
+/// longer deliver live and falls back to the detached XEP-0198 buffer (the same
+/// "no live target" fallback used everywhere), never a DashMap send.
 pub(super) async fn deliver_peer_to_full(
-    registry: &waddle_xmpp::registry::ConnectionRegistry,
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) {
-    // Issue #699: the MUC reflector emits one `RouteToConnection` per
-    // occupant. Sending with the blocking `send_peer_to` (which
-    // `mpsc::Sender::send().await`s on a 256-slot per-connection
-    // channel) means a single zombie WebSocket peer — TCP gone
-    // without FIN, consumer task hung on `Sink::send` — wedges every
-    // subsequent groupchat dispatch through the same interpreter
-    // loop. In prod that froze global MAM + inbox writes for hours
-    // until a pod restart. Groupchat reflection is a fan-out by
-    // design, so route it through the non-blocking `try_send_peer_to`
-    // and tolerate `DroppedFull` for slow consumers. 1:1 chat
-    // (message type='chat', IQ, presence-to-full-JID) keeps the
-    // blocking path: those targets are singular and the natural
-    // backpressure is desirable.
-    let is_groupchat_reflection = matches!(
-        stanza,
-        Stanza::Message(message)
-            if message.type_ == xmpp_parsers::message::MessageType::Groupchat
-    );
-    if is_groupchat_reflection {
-        match registry.try_send_peer_to(target, stanza.clone()) {
-            waddle_xmpp::registry::BroadcastOutcome::Delivered => {
-                debug!(jid = %target, "RouteToConnection: groupchat reflection queued for recipient pass");
-            }
-            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
-                // Per-recipient log at debug; the broadcast-level
-                // Prometheus counter (`waddle_broadcast_dropped_full_total`)
-                // is the canonical signal under load.
-                debug!(
-                    jid = %target,
-                    "RouteToConnection: groupchat reflection dropped (recipient mpsc full)"
-                );
-            }
-            waddle_xmpp::registry::BroadcastOutcome::NotConnected
-            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
-                deliver_to_detached(sm_session_registry, target, stanza).await;
-            }
+    match user_registry {
+        Some(user_registry) => {
+            deliver_one_via_actor(
+                user_registry,
+                sm_session_registry,
+                target,
+                stanza,
+                ActorSendKind::Peer,
+            )
+            .await
         }
-        return;
+        None => deliver_to_detached(sm_session_registry, target, stanza).await,
     }
-    // The live-send path needs ownership for `send_peer_to`; the
-    // detached fallback only borrows. Clone once here on the live
-    // branch so the caller hands us an `&Stanza` and avoids a
-    // redundant clone per live target on the bare-JID fan-out hot
-    // path (Copilot review on PR #276).
-    match registry.send_peer_to(target, stanza.clone()).await {
-        waddle_xmpp::registry::SendResult::Sent => {
-            debug!(jid = %target, "RouteToConnection: peer-stanza queued for recipient pass");
+}
+
+/// Deliver an already-recipient-passed (`DirectFrame`) stanza to one resource
+/// — the #1106 shared fan-out `processed` copy — through the authoritative
+/// `UserActor` (`TrySendDirect`).
+///
+/// ADR-0017 Phase 1 Slice 3: mirrors [`deliver_peer_to_full`] — the actor is
+/// the only delivery path; `None` (actor-less test fixtures) falls back to the
+/// detached XEP-0198 buffer instead of a DashMap `send_to`.
+pub(super) async fn deliver_direct_to_full(
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) {
+    match user_registry {
+        Some(user_registry) => {
+            deliver_one_via_actor(
+                user_registry,
+                sm_session_registry,
+                target,
+                stanza,
+                ActorSendKind::Direct,
+            )
+            .await
         }
-        waddle_xmpp::registry::SendResult::NotConnected
-        | waddle_xmpp::registry::SendResult::ChannelClosed => {
-            deliver_to_detached(sm_session_registry, target, stanza).await;
-        }
+        None => deliver_to_detached(sm_session_registry, target, stanza).await,
     }
 }
 
@@ -397,5 +559,276 @@ pub(super) async fn deliver_to_detached(
                 "RouteToConnection: failed to record stanza for detached resource"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! ADR-0017 Phase 1 Slice 2 delivery-cutover behaviour: the actor-path
+    //! delivery decides between the recipient's live channel, a deliberate
+    //! drop, and the detached XEP-0198 replay buffer — and MUST NOT
+    //! double-deliver a frame that may still be sitting in the actor's mailbox.
+    use super::*;
+    use kameo::actor::Spawn;
+    use kameo::error::SendError;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use waddle_xmpp::registry::{ConnectionEntry, OutboundStanza, UserRegistryActor};
+    use waddle_xmpp::stream_management::{
+        DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
+    };
+
+    fn full(s: &str) -> jid::FullJid {
+        s.parse().expect("valid full jid")
+    }
+
+    fn sample_message(to: &jid::FullJid) -> Stanza {
+        let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(to.clone())));
+        msg.type_ = xmpp_parsers::message::MessageType::Chat;
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
+        Stanza::Message(msg)
+    }
+
+    /// A non-expired detached session bound to `jid`, so
+    /// `record_stanza_for_detached_bound_resource` matches it and appends to
+    /// `unacked_stanzas` — the observable signal that a frame was routed to
+    /// the XEP-0198 replay buffer rather than dropped.
+    fn detached_session(stream_id: &str, jid: &jid::FullJid) -> DetachedSession {
+        DetachedSession {
+            stream_id: stream_id.to_string(),
+            user_id: jid.to_bare().to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: true,
+            blocklist_interested: false,
+            presence_available: true,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        }
+    }
+
+    /// Spawn a fresh registry with `jid` registered against a channel of the
+    /// given capacity. The receiver is returned so the caller controls channel
+    /// state: keep it to leave the channel open, `drop` it to close it.
+    async fn registry_with_resource(
+        jid: &jid::FullJid,
+        capacity: usize,
+    ) -> (
+        kameo::actor::ActorRef<UserRegistryActor>,
+        mpsc::Receiver<OutboundStanza>,
+    ) {
+        let registry = UserRegistryActor::spawn(UserRegistryActor::new());
+        let (tx, rx) = mpsc::channel(capacity);
+        let entry = ConnectionEntry::new(tx);
+        assert!(
+            crate::server::dual_registration::mirror_register(&registry, jid.clone(), entry).await,
+            "register mirror should confirm the resource in the actor tree"
+        );
+        (registry, rx)
+    }
+
+    async fn unacked_len(sm: &Arc<InMemorySmSessionRegistry>, stream_id: &str) -> usize {
+        sm.peek_session(stream_id)
+            .await
+            .expect("peek ok")
+            .expect("detached session present")
+            .unacked_stanzas
+            .len()
+    }
+
+    /// Finding 1 (PR #1177 council review): the never-enqueued/maybe-enqueued
+    /// partition is the whole safety argument for the terminal-error fallback,
+    /// so pin every `SendError` variant's classification directly.
+    #[test]
+    fn classify_send_error_partitions_by_enqueue_certainty() {
+        // Provably never enqueued — the actor never saw the message, so
+        // detached is a lossless fallback.
+        assert_eq!(
+            classify_send_error(&SendError::<(), ()>::ActorNotRunning(())),
+            ActorSendFailure::NeverEnqueued
+        );
+        assert_eq!(
+            classify_send_error(&SendError::<(), ()>::MailboxFull(())),
+            ActorSendFailure::NeverEnqueued
+        );
+        assert_eq!(
+            classify_send_error(&SendError::<(), ()>::Timeout(Some(()))),
+            ActorSendFailure::NeverEnqueued
+        );
+        // May have been enqueued — a post-timeout handler run plus a detached
+        // replay would double-deliver, so these drop.
+        assert_eq!(
+            classify_send_error(&SendError::<(), ()>::Timeout(None)),
+            ActorSendFailure::MaybeEnqueued
+        );
+        assert_eq!(
+            classify_send_error(&SendError::<(), ()>::ActorStopped),
+            ActorSendFailure::MaybeEnqueued
+        );
+        assert_eq!(
+            classify_send_error(&SendError::<(), ()>::HandlerError(())),
+            ActorSendFailure::MaybeEnqueued
+        );
+    }
+
+    /// A successfully-queued frame must NOT also be buffered for replay.
+    #[tokio::test]
+    async fn actor_delivery_delivered_does_not_route_to_detached() {
+        let target = full("alice@example.com/web");
+        let (registry, _rx) = registry_with_resource(&target, 4).await;
+        let sm = Arc::new(InMemorySmSessionRegistry::new());
+        sm.store_session(detached_session("s-delivered", &target))
+            .await
+            .expect("store");
+
+        deliver_one_via_actor(
+            &registry,
+            Some(&sm),
+            &target,
+            &sample_message(&target),
+            ActorSendKind::Peer,
+        )
+        .await;
+
+        assert_eq!(
+            unacked_len(&sm, "s-delivered").await,
+            0,
+            "a delivered frame must not also be queued for XEP-0198 replay"
+        );
+    }
+
+    /// `DroppedFull` is a deliberate behaviour change (issue #699): a connected
+    /// recipient whose channel is full has the frame DROPPED, never rerouted to
+    /// detached (that would replay it out of band on resume).
+    #[tokio::test]
+    async fn actor_delivery_dropped_full_drops_without_detached() {
+        let target = full("alice@example.com/web");
+        let (registry, _rx) = registry_with_resource(&target, 1).await;
+
+        // Fill the single channel slot (Delivered) so the next send is Full.
+        // `None` sm so this priming send can never touch the detached buffer.
+        deliver_one_via_actor(
+            &registry,
+            None,
+            &target,
+            &sample_message(&target),
+            ActorSendKind::Peer,
+        )
+        .await;
+
+        let sm = Arc::new(InMemorySmSessionRegistry::new());
+        sm.store_session(detached_session("s-full", &target))
+            .await
+            .expect("store");
+
+        deliver_one_via_actor(
+            &registry,
+            Some(&sm),
+            &target,
+            &sample_message(&target),
+            ActorSendKind::Peer,
+        )
+        .await;
+
+        assert_eq!(
+            unacked_len(&sm, "s-full").await,
+            0,
+            "DroppedFull must drop, not route to detached replay"
+        );
+    }
+
+    /// A live actor with no such resource (`NotConnected`) falls back to the
+    /// detached replay buffer.
+    #[tokio::test]
+    async fn actor_delivery_not_connected_routes_to_detached() {
+        let registered = full("alice@example.com/web");
+        let (registry, _rx) = registry_with_resource(&registered, 4).await;
+
+        // Same bare JID, different resource: the actor exists but the resource
+        // is absent → NotConnected.
+        let missing = full("alice@example.com/desktop");
+        let sm = Arc::new(InMemorySmSessionRegistry::new());
+        sm.store_session(detached_session("s-missing", &missing))
+            .await
+            .expect("store");
+
+        deliver_one_via_actor(
+            &registry,
+            Some(&sm),
+            &missing,
+            &sample_message(&missing),
+            ActorSendKind::Peer,
+        )
+        .await;
+
+        assert_eq!(
+            unacked_len(&sm, "s-missing").await,
+            1,
+            "NotConnected must route to detached replay"
+        );
+    }
+
+    /// A closed channel (`DroppedClosed`) falls back to the detached buffer.
+    #[tokio::test]
+    async fn actor_delivery_dropped_closed_routes_to_detached() {
+        let target = full("alice@example.com/web");
+        let (registry, rx) = registry_with_resource(&target, 4).await;
+        drop(rx); // close the channel → try_send returns Closed
+
+        let sm = Arc::new(InMemorySmSessionRegistry::new());
+        sm.store_session(detached_session("s-closed", &target))
+            .await
+            .expect("store");
+
+        deliver_one_via_actor(
+            &registry,
+            Some(&sm),
+            &target,
+            &sample_message(&target),
+            ActorSendKind::Peer,
+        )
+        .await;
+
+        assert_eq!(
+            unacked_len(&sm, "s-closed").await,
+            1,
+            "DroppedClosed must route to detached replay"
+        );
+    }
+
+    /// No actor for the bare JID (`GetUser` = `None`) falls back to detached —
+    /// nothing was ever attempted, so replay cannot duplicate.
+    #[tokio::test]
+    async fn actor_delivery_absent_user_routes_to_detached() {
+        let registry = UserRegistryActor::spawn(UserRegistryActor::new());
+        let target = full("ghost@example.com/web");
+        let sm = Arc::new(InMemorySmSessionRegistry::new());
+        sm.store_session(detached_session("s-ghost", &target))
+            .await
+            .expect("store");
+
+        deliver_one_via_actor(
+            &registry,
+            Some(&sm),
+            &target,
+            &sample_message(&target),
+            ActorSendKind::Peer,
+        )
+        .await;
+
+        assert_eq!(
+            unacked_len(&sm, "s-ghost").await,
+            1,
+            "GetUser=None must route to detached replay"
+        );
     }
 }

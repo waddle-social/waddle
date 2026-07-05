@@ -1,6 +1,7 @@
 mod acme;
 pub(crate) mod caps_resolution;
 mod config;
+pub(crate) mod dual_registration;
 mod extension_commands;
 pub mod extension_host_adapter;
 mod extension_host_tools;

@@ -467,3 +467,76 @@ async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
         "MessageContext snapshot must reflect the persisted blocklist"
     );
 }
+
+/// ADR-0017 Phase 1: the dominant (non-SM) disconnect teardown mirrors the
+/// unregister into the actor tree, so a bound-then-closed connection does not
+/// leak its resource — and the empty `UserActor` is pruned. Regression test
+/// for the register/unregister lock-step invariant claimed in
+/// `ProtocolServices::user_registry`.
+#[tokio::test]
+async fn cleanup_connection_shutdown_mirrors_unregister_into_actor_tree() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.presence_available = true;
+
+    let result = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+    assert!(matches!(result, RegistrationAfterFrame::Registered(_)));
+
+    // The bind mirrored the resource into the actor tree.
+    let user = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("get user")
+        .expect("actor tree tracks the bound resource");
+    let resources: Vec<FullJid> = user
+        .ask(waddle_xmpp::registry::user_actor::GetResources)
+        .await
+        .expect("resources");
+    assert_eq!(resources, vec![jid.clone()]);
+
+    // The default (non-SM, non-resumable) teardown takes the full-cleanup
+    // branch, which must mirror the unregister.
+    super::super::cleanup::cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false)
+        .await;
+
+    // DashMap authoritative registry dropped the entry...
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .is_none(),
+        "authoritative registry unregistered the resource"
+    );
+    // ...and the actor tree mirror pruned the now-empty user.
+    let after = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("get user");
+    assert!(
+        after.is_none(),
+        "teardown must mirror the unregister so the actor tree prunes the user"
+    );
+}
