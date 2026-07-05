@@ -131,7 +131,7 @@ describe("resume-time live-message buffering", () => {
     expect(seen).toHaveLength(1);
   });
 
-  test("non-body events (chat-state, displayed marker) bypass the resume buffer", () => {
+  test("ephemeral events (chat-state) bypass the resume buffer; displayed markers defer (#1165)", () => {
     const client = new BrowserXmppClient(session());
     const state = client as unknown as PrivateState;
     const dmSeen: LiveDmMessage[] = [];
@@ -162,8 +162,10 @@ describe("resume-time live-message buffering", () => {
     });
 
     expect(chatStateFired).toBe(1);
-    expect(displayedFired).toBe(1);
+    // #1165: displayed markers buffer with the bodies so their targets
+    // exist before they apply; they drain via `completeResumeBarrier`.
+    expect(displayedFired).toBe(0);
     expect(dmSeen).toHaveLength(0);
-    expect(state.pendingDuringResume).toHaveLength(0);
+    expect(state.pendingDuringResume).toHaveLength(1);
   });
 });

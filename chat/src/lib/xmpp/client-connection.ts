@@ -165,7 +165,18 @@ type ReconnectSchedulerDeps = {
   isDestroying: () => boolean;
   connect: () => Promise<void>;
   onScheduled: (info: { attempt: number; delayMs: number }) => void;
+  /** #1164: the attempt budget ran out — the caller should surface a terminal error state. */
+  onExhausted: () => void;
 };
+
+/**
+ * #1164: reconnect attempts before the loop gives up. With the
+ * 2s·2^n backoff capped at 60s this spends ~6 minutes retrying —
+ * long enough to ride out a deploy or a network blip, short enough
+ * that a dead session doesn't spin a "reconnecting" banner forever.
+ * `resetAttempts()` (wired to session-ready) restores the budget.
+ */
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 /** Exponential-backoff reconnect timer + reconnect-duration stopwatch. */
 export class ReconnectScheduler {
@@ -177,6 +188,10 @@ export class ReconnectScheduler {
 
   schedule(): void {
     if (this.deps.isDestroying() || this.timer) return;
+    if (this.attempt >= MAX_RECONNECT_ATTEMPTS) {
+      this.deps.onExhausted();
+      return;
+    }
     const delay = Math.min(2000 * (2 ** this.attempt), 60000);
     this.attempt += 1;
     this.deps.onScheduled({ attempt: this.attempt, delayMs: delay });
@@ -578,6 +593,12 @@ export class OfflineSendQueue {
   }
 
   private noteQueuedMessage(): void {
+    // #1164: a room-scoped queue while the session is healthy (we're
+    // connected, the room just isn't joined yet) must not flip the
+    // global connection banner to offline/reconnecting — the message
+    // drains on join, not on reconnect. Only report a degraded status
+    // when the session itself is unusable.
+    if (this.deps.canUseConnectedSession()) return;
     const queueCount = countQueuedMessages(this.deps.queueScope());
     this.deps.emitStatus({
       state: browserOffline() ? "offline" : "reconnecting",

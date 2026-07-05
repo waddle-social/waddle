@@ -201,6 +201,27 @@ type XmppStreamErrorPayload = string | {
   streamManagementError?: XmppErrorEvent["streamManagementError"] | null;
 };
 
+/**
+ * #1164: stream-error conditions that no amount of retrying can fix —
+ * the credentials or the session itself were rejected, so the honest
+ * UI state is terminal `"error"` ("sign in again"), not an eternal
+ * "reconnecting" spinner. Maps each condition to the user-facing
+ * status detail (`connection-notice.ts` renders the copy).
+ */
+const TERMINAL_STREAM_CONDITION_DETAILS: Record<string, string> = {
+  // RFC 6120 §4.9.3.12 / SASL failure surfaced as a stream error:
+  // the session token is no longer accepted.
+  "not-authorized": "Your session expired — sign in again to restore live messaging.",
+  // RFC 6120 §4.9.3.3: the server closed this stream in favour of a
+  // newer one for the same resource; reconnecting would just fight it.
+  conflict: "This session was replaced by a newer sign-in for the same account.",
+};
+
+function terminalDisconnectDetail(condition: string | undefined): string | null {
+  if (!condition) return null;
+  return TERMINAL_STREAM_CONDITION_DETAILS[condition] ?? null;
+}
+
 function streamErrorConditionFromText(text: string | null | undefined): string | undefined {
   const normalized = text?.trim().toLowerCase();
   if (!normalized) return undefined;
@@ -388,6 +409,14 @@ export class BrowserXmppClient {
   // a `before=` page is in flight can skip or duplicate messages near
   // the page boundary).
   //
+  // Targeted follow-ups — XEP-0333 displayed markers and XEP-0444
+  // reactions — are buffered too (#1165): applying one before its
+  // target row exists makes the merge layer drop it silently. The
+  // drain dispatches bodies first, then follow-ups, preserving
+  // arrival order within each kind. Ephemeral traffic (chat states,
+  // in-call reactions, pin-event store updates) stays live — it is
+  // meaningless to replay after the fact.
+  //
   // `resumeBarrier` coalesces redundant resume triggers. Three event
   // sources can fire `handleSessionReady` for the same xmpp handle:
   // `set_on_session_lifecycle`, `on("session:started")`, and
@@ -412,6 +441,13 @@ export class BrowserXmppClient {
   // entry) cannot observe one set without the other.
   private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
   private pendingDuringResume: InboundWasmMessage[] | null = null;
+  // #1164: set when a stream error announced a terminal condition
+  // (see `TERMINAL_STREAM_CONDITION_DETAILS`). The wire error and the
+  // disconnect arrive as two separate WASM callbacks; this carries
+  // the classification from the first into `handleDisconnected`,
+  // which then emits `state: "error"` instead of scheduling retries.
+  // Cleared by an explicit `connect()` (user-driven fresh attempt).
+  private terminalDisconnectDetail: string | null = null;
 
   constructor(session: WaddleSession, persistence?: ResumePersistence) {
     this.session = session;
@@ -490,6 +526,14 @@ export class BrowserXmppClient {
       isDestroying: () => this.destroying,
       connect: () => this.connect(),
       onScheduled: (info) => this.events.emitSafe("reconnectScheduled", info),
+      // #1164: the retry budget ran out — an endless "reconnecting"
+      // banner would be dishonest. Terminal error state; the user can
+      // retry via reload / sign-in (`connect()` resets the budget path
+      // through session-ready's `resetAttempts`).
+      onExhausted: () => this.emitStatus({
+        state: "error",
+        detail: "We couldn't reconnect after several attempts. Check your connection, then reload to try again.",
+      }),
     });
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
   }
@@ -692,20 +736,42 @@ export class BrowserXmppClient {
 
   private onceConnected: (() => void) | null = null;
   private onceConnectFailed: ((error: Error) => void) | null = null;
+  /** Budget for a single connect attempt to reach session-ready. Instance
+   * field (not a module constant) so tests can shrink it. */
+  private connectTimeoutMs = 15_000;
 
   async connect(): Promise<void> {
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
     this.destroying = false;
+    // An explicit connect is a fresh start: drop any terminal-error
+    // classification from the previous session (#1164).
+    this.terminalDisconnectDetail = null;
     this.clearReconnectTimer();
     this.connectPromise = withSpan(
       "xmpp.connect",
       { "waddle.xmpp.transport": "websocket" },
       () => new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
+          // #1164: a stalled connect must not strand the client in
+          // limbo. Tear the half-open handle down (so a late
+          // session-ready from it can't land — `isCurrentXmpp` guards
+          // key off `this.xmpp`), tell the UI we're still trying, and
+          // hand the retry to the backoff scheduler.
           this.connectPromise = null;
+          this.onceConnected = null;
+          this.onceConnectFailed = null;
+          const stalled = this.xmpp;
+          if (stalled) {
+            this.xmpp = null;
+            void Promise.resolve(stalled.disconnect?.()).catch(() => undefined);
+          }
+          if (!this.destroying) {
+            this.emitStatus({ state: "reconnecting", detail: "Connection attempt timed out — retrying" });
+            this.reconnect.schedule();
+          }
           reject(new Error("Reconnection timed out"));
-        }, 15000);
+        }, this.connectTimeoutMs);
         const done = (fn: () => void) => {
           clearTimeout(timeout);
           this.connectPromise = null;
@@ -1952,15 +2018,23 @@ export class BrowserXmppClient {
     // echoes alongside (or before) the inbound arrivals they belong
     // next to, instead of mis-ordering the tail (Bug 4).
     this.flushAfterSessionReady(xmpp);
-    // Drain in arrival order. Each replay flows through the same
-    // `dispatchLiveBodyMessage` path that a fresh socket arrival
-    // would, so cursor advance + downstream `message` /
-    // `directMessage` listener dedup behave identically.
+    // Drain bodies first, then targeted follow-ups (displayed markers
+    // + reactions), each kind in arrival order (#1165). A follow-up
+    // whose target arrived during the same catch-up window — via MAM
+    // pagination (already merged: `runReconnectCatchup` completed
+    // before this drain) or via the live buffer itself — must see its
+    // target row already inserted, or `applyReactionUpdate` /
+    // `applyDisplayedMarker` short-circuit on the miss and the merge
+    // layers drop it silently. Each replay flows through the same
+    // `dispatchLiveMessage` path a fresh socket arrival would, so
+    // cursor advance + downstream listener dedup behave identically.
     // Observe-only: the buffer drain is a single synchronous task over
     // everything that arrived during the resume barrier — a prime
     // background-tab HUNG suspect. Measure its size + wall-clock.
     const drainStartedAt = performance.now();
-    for (const m of buffered) this.dispatchLiveBodyMessage(m);
+    const isTargetedFollowUp = (m: InboundWasmMessage) => !!m.displayed_marker_id || !!m.reaction_target_id;
+    for (const m of buffered) if (!isTargetedFollowUp(m)) this.dispatchLiveMessage(m);
+    for (const m of buffered) if (isTargetedFollowUp(m)) this.dispatchLiveMessage(m);
     this.events.emitSafe("resumeDrain", {
       buffered: buffered.length,
       durationMs: performance.now() - drainStartedAt,
@@ -2047,6 +2121,20 @@ export class BrowserXmppClient {
     this.joinedMucReady.clear();
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
+    // #1164: a terminal failure (auth rejection, resource conflict)
+    // means retrying is dishonest — surface `state: "error"` so the
+    // connection notice tells the user to sign in again, and do NOT
+    // schedule a reconnect. The classification usually arrives via
+    // the preceding stream-error callback; connect-time failures may
+    // only carry it in the disconnect error's message.
+    const terminalDetail = this.terminalDisconnectDetail
+      ?? terminalDisconnectDetail(streamErrorConditionFromText(error?.message));
+    if (terminalDetail) {
+      this.terminalDisconnectDetail = null;
+      this.emitStatus({ state: "error", detail: terminalDetail });
+      if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error(terminalDetail)); }
+      return;
+    }
     // Keep transient reconnect state in this JS context only — see
     // `ResumeStateStore.captureFromDisconnect` for the pagehide-handoff
     // rationale.
@@ -2082,7 +2170,6 @@ export class BrowserXmppClient {
       else this.events.emit("dmChatState", { peerJid: barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
       return;
     }
-    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else this.events.emit("dmDisplayed", { peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
     if (message.in_call?.kind === "reaction") {
       if (!isInCallReactionForActiveCall($callState.get(), message.in_call.sid)) return;
       receiveInCallReaction({
@@ -2092,7 +2179,6 @@ export class BrowserXmppClient {
       });
       return;
     }
-    if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
     if (message.pin_event) {
       const roomJid = message.is_muc
         ? barePeerJid(message.from ?? message.to ?? "")
@@ -2107,6 +2193,19 @@ export class BrowserXmppClient {
       this.pendingDuringResume.push(message);
       return;
     }
+    this.dispatchLiveMessage(message);
+  }
+
+  /**
+   * Dispatch a live inbound message past the resume gate: targeted
+   * follow-ups (XEP-0333 displayed markers, XEP-0444 reactions) emit
+   * their dedicated events; everything else is a body message. Called
+   * both from `handleMessage` (no barrier) and from the barrier drain
+   * in `completeResumeBarrier` — it never re-enters the buffer.
+   */
+  private dispatchLiveMessage(message: InboundWasmMessage) {
+    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else this.events.emit("dmDisplayed", { peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
+    if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
     this.dispatchLiveBodyMessage(message);
   }
 
@@ -2152,9 +2251,11 @@ export class BrowserXmppClient {
     xmpp.set_on_error?.((payload: XmppStreamErrorPayload) => {
       if (this.xmpp !== xmpp) return;
       const streamError = normalizeXmppStreamErrorPayload(payload);
+      const terminalDetail = terminalDisconnectDetail(streamError.condition);
+      if (terminalDetail) this.terminalDisconnectDetail = terminalDetail;
       this.emitError({
         kind: "stream",
-        recoverable: !this.destroying,
+        recoverable: !this.destroying && !terminalDetail,
         detail: streamError.detail,
         ...(streamError.condition ? { condition: streamError.condition } : {}),
         ...(streamError.streamManagementError
