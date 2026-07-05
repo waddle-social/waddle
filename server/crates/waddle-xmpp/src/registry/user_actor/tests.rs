@@ -99,7 +99,10 @@ async fn test_unregister_cleans_up() {
         .expect("register");
 
     actor
-        .ask(UnregisterConnection { jid: jid.clone() })
+        .ask(UnregisterConnection {
+            jid: jid.clone(),
+            owner: None,
+        })
         .await
         .expect("unregister");
 
@@ -125,10 +128,72 @@ async fn test_unregister_and_report_empty_is_atomic_per_user_actor() {
         .expect("register");
 
     let is_empty: bool = actor
-        .ask(UnregisterConnectionAndReportEmpty { jid })
+        .ask(UnregisterConnectionAndReportEmpty { jid, owner: None })
         .await
         .expect("unregister+check");
     assert!(is_empty);
+}
+
+/// Owner-gated unregister mirrors the DashMap `unregister_if_owner`: a lagging
+/// teardown carrying the OLD session's token must not evict the resource once a
+/// replacement session has re-registered the same full JID. Only the token that
+/// matches the stored entry may remove it.
+#[tokio::test]
+async fn test_unregister_is_owner_gated() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+
+    let (old_entry, _old_rx) = entry();
+    let old_owner = std::sync::Arc::clone(&old_entry.carbons_enabled);
+    actor
+        .ask(RegisterConnection {
+            jid: jid.clone(),
+            entry: old_entry,
+        })
+        .await
+        .expect("register old");
+
+    // A replacement session takes over the same full JID with a fresh entry
+    // (distinct ownership token).
+    let (new_entry, _new_rx) = entry();
+    let new_owner = std::sync::Arc::clone(&new_entry.carbons_enabled);
+    actor
+        .ask(RegisterConnection {
+            jid: jid.clone(),
+            entry: new_entry,
+        })
+        .await
+        .expect("register replacement");
+
+    // The old session's lagging teardown must NOT evict the replacement.
+    actor
+        .ask(UnregisterConnection {
+            jid: jid.clone(),
+            owner: Some(old_owner),
+        })
+        .await
+        .expect("stale unregister");
+    let connected: bool = actor
+        .ask(IsConnected { jid: jid.clone() })
+        .await
+        .expect("connected");
+    assert!(
+        connected,
+        "stale-owner unregister must not evict the replacement resource"
+    );
+
+    // The replacement's own teardown (matching token) removes it.
+    let is_empty: bool = actor
+        .ask(UnregisterConnectionAndReportEmpty {
+            jid,
+            owner: Some(new_owner),
+        })
+        .await
+        .expect("owned unregister");
+    assert!(
+        is_empty,
+        "matching-owner unregister must remove the resource"
+    );
 }
 
 #[tokio::test]

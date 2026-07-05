@@ -73,12 +73,16 @@ pub(crate) async fn register_test_connection(
         .connection_registry
         .register(jid.clone(), sender);
     if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
-        crate::server::dual_registration::mirror_register(
+        let registered = crate::server::dual_registration::mirror_register(
             &state.deps.protocol.user_registry,
             jid.clone(),
             entry,
         )
         .await;
+        assert!(
+            registered,
+            "test dual-registration should confirm the resource in the actor tree for {jid}"
+        );
     }
 }
 

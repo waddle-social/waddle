@@ -347,11 +347,13 @@ pub(super) async fn cleanup_connection_shutdown(
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
                         // will ever converge it — without this mirror the
-                        // resource leaks in the actor tree forever. Gated on
-                        // ownership so a superseding newcomer is not clobbered.
+                        // resource leaks in the actor tree forever. Owner-gated
+                        // (the same token that owned the DashMap slot) so a
+                        // superseding newcomer's actor-tree entry is not clobbered.
                         crate::server::dual_registration::mirror_unregister(
                             &state.deps.protocol.user_registry,
                             &jid,
+                            Some(std::sync::Arc::clone(owner)),
                         )
                         .await;
                     }
@@ -368,22 +370,23 @@ pub(super) async fn cleanup_connection_shutdown(
         }
     }
 
-    let removed = conn.registry_owner.as_ref().is_some_and(|owner| {
+    let removed_owner = conn.registry_owner.as_ref().and_then(|owner| {
         state
             .deps
             .protocol
             .connection_registry
             .unregister_if_owner(&jid, owner)
-            .is_some()
+            .map(|_| std::sync::Arc::clone(owner))
     });
-    if removed {
+    if let Some(owner) = removed_owner {
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
-        // the dominant disconnect teardown path. Gated on `removed` (i.e.
-        // we still owned the DashMap entry) so a superseding newcomer that
+        // the dominant disconnect teardown path. Owner-gated (the same token
+        // that owned the DashMap entry) so a superseding newcomer that
         // already replaced this FullJid's actor-tree entry is not clobbered.
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             &jid,
+            Some(owner),
         )
         .await;
         // XEP-0115 §6: drop the per-resource caps mapping for this
@@ -482,11 +485,13 @@ pub(super) async fn cleanup_invalidated_detached_session(
         // the DashMap actually removed an entry (Greptile review on PR #1177),
         // consistent with every other teardown site — so a branch that found
         // nothing to remove cannot evict an actor-tree entry a newer session
-        // installed for the same JID.
-        if removed_entry.is_some() {
+        // installed for the same JID. Owner-gated on the removed entry's own
+        // token so the actor prunes only if it still holds that same session.
+        if let Some(entry) = removed_entry {
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 &detached.jid,
+                Some(std::sync::Arc::clone(&entry.carbons_enabled)),
             )
             .await;
         }

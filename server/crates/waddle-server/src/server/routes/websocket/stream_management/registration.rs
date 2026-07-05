@@ -187,11 +187,12 @@ async fn reset_registered_resume_attempt(
         // ADR-0017 Phase 1: the fresh/resumed bind already mirror-registered
         // this resource into the actor tree, so a resume-rollback that
         // unregisters it from the DashMap must mirror the unregister too or
-        // the actor-tree resource leaks. Gated on ownership so a superseding
-        // newcomer is not clobbered.
+        // the actor-tree resource leaks. Owner-gated on the same token so a
+        // superseding newcomer is not clobbered.
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             jid,
+            Some(Arc::clone(owner)),
         )
         .await;
     }
@@ -231,11 +232,12 @@ async fn close_registered_resume_attempt(
     if removed {
         // ADR-0017 Phase 1: mirror the DashMap unregister into the actor
         // tree so the resource the bind mirror-registered does not leak when
-        // a resume attempt is closed out. Gated on ownership so a
+        // a resume attempt is closed out. Owner-gated on the same token so a
         // superseding newcomer is not clobbered.
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             jid,
+            Some(Arc::clone(owner)),
         )
         .await;
     }

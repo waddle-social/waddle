@@ -3672,10 +3672,13 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
         .connection_registry
         .update_presence(&recipient_mobile, true, 0);
 
-    // ADR-0017 Phase 1 read-cutover: bare-JID selection resolves through the
-    // actor tree, so mirror the (shared-Arc) entries into it exactly as the
-    // production registration path does. update_presence above mutates the
-    // shared atomics, so the actor observes the same availability.
+    // ADR-0017 Phase 1: dual-registration mirrors the (shared-Arc) entries
+    // into the actor tree exactly as the production registration path does, so
+    // the actor tree tracks the same live resources. Bare-JID selection is
+    // still DashMap-authoritative in this PR (the read-cutover has NOT landed);
+    // the mirror is kept warm here so the future cutover has an accurate tree.
+    // update_presence above mutates the shared atomics, so the actor observes
+    // the same availability.
     for jid in [&recipient_web, &recipient_mobile] {
         let entry = state
             .deps
@@ -3683,12 +3686,13 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
             .connection_registry
             .get_entry(jid)
             .expect("entry registered above");
-        crate::server::dual_registration::mirror_register(
+        let registered = crate::server::dual_registration::mirror_register(
             &state.deps.protocol.user_registry,
             jid.clone(),
             entry,
         )
         .await;
+        assert!(registered, "test dual-registration should confirm {jid}");
     }
 
     let responses = handle_message_for_test(

@@ -237,7 +237,10 @@ async fn test_unregister_and_register_are_serialized_without_user_loss() {
         .await
         .expect("register phone");
 
-    let unregister = registry.ask(UnregisterUserResource { jid: phone });
+    let unregister = registry.ask(UnregisterUserResource {
+        jid: phone,
+        owner: None,
+    });
     let register = registry.ask(RegisterUserResource {
         jid: laptop.clone(),
         entry: ConnectionEntry::new(laptop_tx),

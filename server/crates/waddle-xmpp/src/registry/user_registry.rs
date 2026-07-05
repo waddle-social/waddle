@@ -6,6 +6,8 @@
 //! concerns (Phase 2 of the actor-model migration).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
@@ -188,8 +190,13 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
 }
 
 /// Unregister a user resource atomically in the actor-owned path and prune empty users.
+///
+/// `owner` is the ownership token forwarded to the `UserActor` so the removal
+/// is ownership-gated (`UnregisterConnection` semantics); `None` removes
+/// unconditionally, matching a plain DashMap `unregister`.
 pub struct UnregisterUserResource {
     pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
 }
 
 impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
@@ -213,7 +220,10 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
         }
 
         let is_empty = match user_actor
-            .ask(UnregisterConnectionAndReportEmpty { jid: msg.jid })
+            .ask(UnregisterConnectionAndReportEmpty {
+                jid: msg.jid,
+                owner: msg.owner,
+            })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
             .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await

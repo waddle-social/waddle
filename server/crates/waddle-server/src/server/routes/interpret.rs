@@ -480,10 +480,14 @@ async fn interpret_with_depth(
                 // `cleanup_invalidated_detached_session`, and the SM-expiry
                 // janitor). If the state machine ever starts emitting this
                 // event, this keeps the mirror symmetric on that path too.
-                if removed_entry.is_some() {
+                if let Some(entry) = removed_entry {
                     if let Some(user_registry) = deps.user_registry {
-                        crate::server::dual_registration::mirror_unregister(user_registry, &jid)
-                            .await;
+                        crate::server::dual_registration::mirror_unregister(
+                            user_registry,
+                            &jid,
+                            Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+                        )
+                        .await;
                     }
                 }
             }

@@ -283,10 +283,11 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 // DashMap itself: if the janitor found nothing to remove
                 // (already superseded), it must not evict the actor-tree entry
                 // a newer session may have installed for the same JID.
-                if removed_entry.is_some() {
+                if let Some(entry) = removed_entry {
                     crate::server::dual_registration::mirror_unregister(
                         &state.deps.protocol.user_registry,
                         &session.jid,
+                        Some(std::sync::Arc::clone(&entry.carbons_enabled)),
                     )
                     .await;
                 }
