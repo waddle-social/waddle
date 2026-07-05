@@ -198,6 +198,12 @@ pub async fn spawn(
     // The node's single kademlia registration: its supervised relay actor.
     // Must start after the event loop is polling (registration flows through
     // the swarm command channel serviced by the loop).
+    if config.fault_injection {
+        tracing::warn!(
+            "clustering fault injection is ENABLED: any enrolled peer can crash this node's \
+             relay or stall its mailbox — test harnesses only, never production"
+        );
+    }
     relay::spawn_supervised(node_id.clone(), config.fault_injection, stop_token);
 
     let handle = SwarmHandle {

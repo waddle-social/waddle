@@ -106,6 +106,15 @@ async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
     }
 }
 
+/// Reserve an ephemeral TCP port by binding and immediately releasing it.
+///
+/// Inherently best-effort (bind/release TOCTOU): another process could grab
+/// the port before the spawned server binds it. The window is unavoidable
+/// here — the mesh needs pre-agreed ports (A's seed list names B's port and
+/// vice versa), so neither server can pick its own port at bind time. The
+/// kernel avoids immediately reissuing a just-released ephemeral port, and a
+/// lost race fails loudly (the server's swarm listen bind errors and the
+/// node-id file never appears) rather than corrupting the test.
 fn free_tcp_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     let port = listener.local_addr().expect("local addr").port();
@@ -118,68 +127,83 @@ fn free_tcp_port() -> u16 {
 /// `bootstrap_ports` element (the harness expression of the headless
 /// Service resolving to every pod). Returns the server handle plus its
 /// published (node_id, peer_id).
-fn spawn_cluster_server(
+///
+/// `TestServer::start_with_extra_envs` and the node-id-file poll both block
+/// (process spawn + sleep polling), so the whole bring-up runs on the tokio
+/// blocking pool instead of stalling a worker thread.
+async fn spawn_cluster_server(
     postgres_url: &str,
     pool_env: &str,
     swarm_port: u16,
     bootstrap_ports: &[u16],
 ) -> (TestServer, String, String) {
-    let node_id_file = std::env::temp_dir().join(format!(
-        "waddle-clustering-e2e-node-{}",
-        uuid::Uuid::new_v4()
-    ));
-    let listen = format!("/ip4/127.0.0.1/tcp/{swarm_port}");
-    let node_id_file_str = node_id_file.display().to_string();
-    let bootstrap_peers = bootstrap_ports
-        .iter()
-        .map(|port| format!("localhost:{port}"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let postgres_url = postgres_url.to_string();
+    let pool_env = pool_env.to_string();
+    let bootstrap_ports = bootstrap_ports.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let node_id_file = std::env::temp_dir().join(format!(
+            "waddle-clustering-e2e-node-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let listen = format!("/ip4/127.0.0.1/tcp/{swarm_port}");
+        let node_id_file_str = node_id_file.display().to_string();
+        let bootstrap_peers = bootstrap_ports
+            .iter()
+            .map(|port| format!("localhost:{port}"))
+            .collect::<Vec<_>>()
+            .join(",");
 
-    let mut envs: Vec<(&str, &str)> = vec![
-        ("WADDLE_DB_DRIVER", "postgres"),
-        ("WADDLE_DATABASE_URL", postgres_url),
-        // NB: the fixed test account stays enabled (TestServer's default) —
-        // disabling it flips the permission backend onto the SpiceDB path and
-        // fails startup. Its seeding is delete-then-recreate, safe for the
-        // sequential startups this harness performs.
-        ("WADDLE_CLUSTERING_ENABLED", "true"),
-        ("WADDLE_CLUSTERING_LISTEN_ADDRS", &listen),
-        ("WADDLE_CLUSTERING_KEYPAIR_POOL", pool_env),
-        ("WADDLE_CLUSTERING_NODE_ID_FILE", &node_id_file_str),
-        ("WADDLE_CLUSTERING_FAULT_INJECTION", "true"),
-        // Tight intervals so revocation/re-dial assertions run fast.
-        ("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "1000"),
-        ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "1000"),
-        ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "1000"),
-        ("WADDLE_CLUSTERING_LEASE_TTL_MS", "10000"),
-    ];
-    if !bootstrap_peers.is_empty() {
-        envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
-    }
-
-    let server = TestServer::start_with_extra_envs(&[], &envs);
-
-    // The node-id file is written during clustering bring-up, which precedes
-    // HTTP readiness — but poll defensively anyway.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let contents = loop {
-        if let Ok(contents) = std::fs::read_to_string(&node_id_file) {
-            if contents.trim().split(' ').count() == 2 {
-                break contents;
-            }
+        let mut envs: Vec<(&str, &str)> = vec![
+            ("WADDLE_DB_DRIVER", "postgres"),
+            ("WADDLE_DATABASE_URL", &postgres_url),
+            // NB: the fixed test account stays enabled (TestServer's default) —
+            // disabling it flips the permission backend onto the SpiceDB path and
+            // fails startup. Its seeding is delete-then-recreate, safe for the
+            // sequential startups this harness performs.
+            ("WADDLE_CLUSTERING_ENABLED", "true"),
+            ("WADDLE_CLUSTERING_LISTEN_ADDRS", &listen),
+            ("WADDLE_CLUSTERING_KEYPAIR_POOL", &pool_env),
+            ("WADDLE_CLUSTERING_NODE_ID_FILE", &node_id_file_str),
+            ("WADDLE_CLUSTERING_FAULT_INJECTION", "true"),
+            // Tight intervals so revocation/re-dial assertions run fast.
+            ("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "1000"),
+            ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_LEASE_TTL_MS", "10000"),
+        ];
+        if !bootstrap_peers.is_empty() {
+            envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
         }
-        assert!(
-            Instant::now() < deadline,
-            "server did not publish its node-id file"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let mut parts = contents.trim().split(' ');
-    let node_id = parts.next().expect("node id").to_string();
-    let peer_id = parts.next().expect("peer id").to_string();
-    let _ = std::fs::remove_file(&node_id_file);
-    (server, node_id, peer_id)
+
+        let server = TestServer::start_with_extra_envs(&[], &envs);
+
+        // The node-id file is written during clustering bring-up, which
+        // precedes HTTP readiness — but poll defensively anyway.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let contents = loop {
+            if let Ok(contents) = std::fs::read_to_string(&node_id_file) {
+                if contents.trim().split(' ').count() == 2 {
+                    break contents;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not publish its node-id file"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let mut parts = contents.trim().split(' ');
+        let node_id = parts.next().expect("node id").to_string();
+        let peer_id = parts.next().expect("peer id").to_string();
+        let _ = std::fs::remove_file(&node_id_file);
+        (server, node_id, peer_id)
+    })
+    .await
+    .unwrap_or_else(|join_error| match join_error.try_into_panic() {
+        // Re-raise the inner panic so assertion messages surface verbatim.
+        Ok(payload) => std::panic::resume_unwind(payload),
+        Err(join_error) => panic!("cluster server bring-up task failed: {join_error}"),
+    })
 }
 
 /// Ping a relay with retries until `deadline` (discovery through kademlia can
@@ -243,9 +267,9 @@ async fn cluster_exit_criteria_end_to_end() {
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
     let (server_a, node_a, peer_a) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]);
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
     let (server_b, node_b, _peer_b) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]);
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
 
     // --- The test process joins as node C.
     let stop = CancellationToken::new();
@@ -406,7 +430,7 @@ async fn cluster_exit_criteria_end_to_end() {
     // the newcomer's periodic re-registration makes its relay resolvable.
     drop(server_b);
     let (server_b2, node_b2, _peer_b2) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]);
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
     assert_ne!(node_b2, node_b, "restarted node must mint a fresh node_id");
     let mut relay_b2 = RelayHandle::new(NodeId::new(node_b2.clone()));
     ping_until(&mut relay_b2, &node_b2, Duration::from_secs(45))

@@ -133,7 +133,7 @@ impl SpiceDbConfig {
 /// [`crate::clustering`]. This struct carries no libp2p types (multiaddrs are
 /// strings, parsed inside the feature-gated swarm module) so it compiles into
 /// every build.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClusteringConfig {
     pub enabled: bool,
     /// libp2p listen multiaddrs for the swarm transport. Default: one
@@ -176,6 +176,34 @@ pub struct ClusteringConfig {
     /// (`WADDLE_CLUSTERING_NODE_ID_FILE`) so the harness can resolve this
     /// node's relay name — mirrors the `WADDLE_HTTP_PORT_FILE` convention.
     pub node_id_file: Option<std::path::PathBuf>,
+}
+
+/// Manual `Debug`: `keypair_pool` holds base64-encoded ed25519 secret-key
+/// seeds, and `ClusteringConfig` is embedded in `ServerConfig`, so a derived
+/// impl would print raw private key material into any `{:?}` sink (panic
+/// handlers, error logs, `--nocapture` test output). The pool is redacted to
+/// a count; every other field formats as the derive would.
+impl std::fmt::Debug for ClusteringConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClusteringConfig")
+            .field("enabled", &self.enabled)
+            .field("listen_addrs", &self.listen_addrs)
+            .field("bootstrap_peers", &self.bootstrap_peers)
+            .field("messaging", &self.messaging)
+            .field(
+                "keypair_pool",
+                &format_args!("[{} keys redacted]", self.keypair_pool.len()),
+            )
+            .field("lease", &self.lease)
+            .field(
+                "allowlist_refresh_interval",
+                &self.allowlist_refresh_interval,
+            )
+            .field("dial_interval", &self.dial_interval)
+            .field("fault_injection", &self.fault_injection)
+            .field("node_id_file", &self.node_id_file)
+            .finish()
+    }
 }
 
 /// Timing for the keypair-slot lease heartbeat and expiry (ADR element 4
@@ -1132,6 +1160,23 @@ mod tests {
         assert_eq!(config.keypair_pool, vec!["keyA", "keyB", "keyC"]);
         assert_eq!(config.lease.heartbeat_interval.as_millis(), 5000);
         assert_eq!(config.lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_debug_redacts_keypair_pool_secrets() {
+        let config = ClusteringConfig {
+            keypair_pool: vec![
+                "c2VjcmV0LXNlZWQtQQ==".to_string(),
+                "c2VjcmV0LXNlZWQtQg==".to_string(),
+            ],
+            ..ClusteringConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("c2VjcmV0"),
+            "Debug output leaked keypair seed material: {rendered}"
+        );
+        assert!(rendered.contains("[2 keys redacted]"), "{rendered}");
     }
 
     #[test]
