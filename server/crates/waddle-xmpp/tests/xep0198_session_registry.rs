@@ -151,6 +151,130 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
     }
 }
 
+/// Storage double that mislabels rows: its
+/// `list_all_sessions_with_unacked` attaches a foreign-stream
+/// unacked stanza to every session's queue. Models the class of
+/// grouping bug fixed in #1157 arising again in any backend, so the
+/// registry-side defense can be exercised through the public
+/// restore path.
+struct MislabelingStore {
+    inner: InMemorySmPersistence,
+}
+
+#[async_trait]
+impl SmPersistenceStorage for MislabelingStore {
+    async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
+        self.inner.upsert_session(session).await
+    }
+
+    async fn get_session(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<PersistedSession>, SmPersistenceError> {
+        self.inner.get_session(stream_id).await
+    }
+
+    async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
+        self.inner.delete_session(stream_id).await
+    }
+
+    async fn append_unacked(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<(), SmPersistenceError> {
+        self.inner.append_unacked(stanza).await
+    }
+
+    async fn ack_through(
+        &self,
+        stream_id: &SmSessionId,
+        up_to_sequence: u32,
+    ) -> Result<u64, SmPersistenceError> {
+        self.inner.ack_through(stream_id, up_to_sequence).await
+    }
+
+    async fn list_unacked(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
+        self.inner.list_unacked(stream_id).await
+    }
+
+    async fn list_expired_sessions(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        self.inner.list_expired_sessions(now).await
+    }
+
+    async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        self.inner.list_all_sessions().await
+    }
+
+    async fn list_all_sessions_with_unacked(
+        &self,
+    ) -> Result<Vec<(PersistedSession, Vec<PersistedUnackedStanza>)>, SmPersistenceError> {
+        let mut groups = self.inner.list_all_sessions_with_unacked().await?;
+        for (_, unacked) in &mut groups {
+            let to: FullJid = "mallory@example.test/phone".parse().expect("valid jid");
+            unacked.push(PersistedUnackedStanza {
+                stream_id: SmSessionId::new("attacker-stream"),
+                sequence: 99,
+                stanza: Box::new(chat_stanza(&to, "leaked secret")),
+                original_receipt_at: chrono::Utc::now(),
+            });
+        }
+        Ok(groups)
+    }
+}
+
+/// Issue #1157 defense in depth: hydration MUST verify each unacked
+/// row's own `stream_id` against the session being restored and drop
+/// mismatched rows, so a grouping bug anywhere in a storage backend
+/// can never replay one user's stanzas on another user's
+/// `<resumed/>` (XEP-0198 §5 retransmission is per-stream).
+#[tokio::test]
+async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
+    let persistence: Arc<dyn SmPersistenceStorage> = Arc::new(MislabelingStore {
+        inner: InMemorySmPersistence::new(),
+    });
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    let mut session = detached_session("victim-stream", "alice@example.test/laptop");
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            sequence: 12,
+            stanza_xml:
+                "<message xmlns='jabber:client' id='m12'><body>alice's own</body></message>"
+                    .to_string(),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    registry.store_session(session).await.expect("store");
+
+    // Simulate restart: restore through the mislabeling storage.
+    drop(registry);
+    let restored = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    restored.restore_from_persistence().await.expect("restore");
+
+    let claimed = restored
+        .claim_session("victim-stream")
+        .await
+        .expect("claim restored")
+        .expect("present");
+    assert_eq!(
+        claimed.unacked_stanzas.len(),
+        1,
+        "the foreign-stream row must be dropped, not queued for replay"
+    );
+    assert_eq!(claimed.unacked_stanzas[0].sequence, 12);
+    assert!(
+        claimed.unacked_stanzas[0]
+            .stanza_xml
+            .contains("alice's own"),
+        "only the session's own stanza survives hydration"
+    );
+}
+
 #[tokio::test]
 async fn xep0198_claimed_session_remains_writable_until_completed() {
     let registry = InMemorySmSessionRegistry::new();
