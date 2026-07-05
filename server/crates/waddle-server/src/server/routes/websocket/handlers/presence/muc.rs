@@ -3,7 +3,10 @@ use super::*;
 mod access;
 mod xml;
 
-pub use access::{get_managed_channel_for_room, parse_room_jid_context};
+pub use access::{
+    get_managed_channel_for_room, parse_room_jid_context, resolve_muc_room_archive_access,
+    RoomArchiveAccess,
+};
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
@@ -108,12 +111,27 @@ async fn handle_muc_join_unlocked(
                 .as_ref()
                 .map(|snapshot| snapshot.room.config.members_only)
                 .unwrap_or(channel.members_only);
+            let Ok(session_bare) = session.user_jid.parse::<BareJid>() else {
+                return vec![build_muc_presence_error_xml(
+                    room_jid,
+                    &nick,
+                    sender_jid,
+                    StanzaError::new(
+                        ErrorType::Wait,
+                        DefinedCondition::InternalServerError,
+                        "en",
+                        "Failed to resolve managed-channel affiliation.",
+                    ),
+                )];
+            };
             match resolve_managed_channel_affiliation(
                 state,
-                session,
+                &session_bare,
                 room_jid,
                 &channel.id,
                 admission_members_only,
+                // Join admission repairs a stale Space→channel projection.
+                true,
             )
             .await
             {

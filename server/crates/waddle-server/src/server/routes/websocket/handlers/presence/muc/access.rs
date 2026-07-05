@@ -5,13 +5,14 @@ use crate::permissions::{
 
 pub(super) async fn resolve_managed_channel_affiliation(
     state: &WebSocketState,
-    session: &Session,
+    user_jid: &BareJid,
     room_jid: &BareJid,
     channel_id: &str,
     members_only: bool,
+    allow_repairs: bool,
 ) -> Result<Option<Affiliation>, ()> {
     let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(&session.user_jid);
+    let subject = Subject::user(user_jid.to_string());
     if let Some(affiliation) =
         direct_channel_affiliation(state, object.clone(), subject.clone()).await?
     {
@@ -39,11 +40,120 @@ pub(super) async fn resolve_managed_channel_affiliation(
         return Ok(read_access_affiliation(members_only));
     }
 
-    restore_space_parent_tuples_for_room(state, room_jid, channel_id).await?;
-    if check_channel_permission(state, object, subject, Permission::Read).await? {
-        return Ok(read_access_affiliation(members_only));
+    // The parent-tuple repair below issues `WriteTuple`/`DeleteTuple`
+    // effects. Join admission opts in (`allow_repairs = true`) so a stale
+    // Space→channel projection self-heals on the way into the room. The
+    // read-only MAM archive gate opts out: an archive query must not
+    // mutate the permission graph. A member whose Space-inherited read
+    // access hinges on a broken parent tuple is denied here until their
+    // next join repairs it; explicit channel affiliations (resolved by
+    // `direct_channel_affiliation` above) are unaffected.
+    if allow_repairs {
+        restore_space_parent_tuples_for_room(state, room_jid, channel_id).await?;
+        if check_channel_permission(state, object, subject, Permission::Read).await? {
+            return Ok(read_access_affiliation(members_only));
+        }
     }
     Ok(None)
+}
+
+/// XEP-0313 §5.1 archive-access decision for a MUC room MAM query.
+pub enum RoomArchiveAccess {
+    Allowed,
+    Denied,
+    Error,
+}
+
+/// XEP-0313 §5.1: "A MUC archive MUST check that the user requesting the
+/// archive has the right to enter it at the time of the query and only
+/// allow access if so." The decision mirrors join admission: members-only
+/// rooms require at least Member affiliation, open rooms admit any
+/// non-outcast. An unmanaged room without a live actor has no admission
+/// data, so it fails closed.
+///
+/// `channel` is the managed-channel row for `room_jid` (or `None` for an
+/// unmanaged room), resolved once by the caller and shared with
+/// `group_dm_archive_visibility` so a single MAM query does not fetch the
+/// same row twice.
+pub async fn resolve_muc_room_archive_access(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+    channel: Option<&XmppChannelRecord>,
+) -> RoomArchiveAccess {
+    let Some(requester) = requester else {
+        return RoomArchiveAccess::Denied;
+    };
+
+    let snapshot = match get_room_actor(state, room_jid).await {
+        Some(actor) => match actor.ask(GetSnapshot).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    requester = %requester,
+                    error = ?error,
+                    "Failed to snapshot room for MAM access gate"
+                );
+                return RoomArchiveAccess::Error;
+            }
+        },
+        None => None,
+    };
+
+    if let Some(channel) = channel {
+        // Same precedence as join admission: a live actor's config wins
+        // over a stale channel row.
+        let members_only = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.room.config.members_only)
+            .unwrap_or(channel.members_only);
+        return match resolve_managed_channel_affiliation(
+            state,
+            requester,
+            room_jid,
+            &channel.id,
+            members_only,
+            // Read-only archive gate: never mutate the permission graph.
+            false,
+        )
+        .await
+        {
+            Ok(Some(Affiliation::Outcast)) => RoomArchiveAccess::Denied,
+            Ok(Some(_)) => RoomArchiveAccess::Allowed,
+            Ok(None) if members_only => RoomArchiveAccess::Denied,
+            Ok(None) => RoomArchiveAccess::Allowed,
+            Err(()) => RoomArchiveAccess::Error,
+        };
+    }
+
+    // Unmanaged room (instant room, no channel row). Admission data lives
+    // only in the live actor's in-memory affiliation list and config; both
+    // are lost when the room is evicted. If no actor is live we cannot
+    // authorize the request, so we deliberately fail closed rather than
+    // fail open: an instant room reconfigured members-only before eviction
+    // would otherwise leak its archive to non-members (the #1093 bypass).
+    // Managed channels — the norm in Waddle — always resolve above via the
+    // persisted channel row and are unaffected.
+    match snapshot {
+        Some(snapshot) if snapshot.room.can_user_join(requester) => RoomArchiveAccess::Allowed,
+        Some(_) => {
+            debug!(
+                room = %room_jid,
+                requester = %requester,
+                "MAM archive denied: requester may not enter unmanaged room"
+            );
+            RoomArchiveAccess::Denied
+        }
+        None => {
+            debug!(
+                room = %room_jid,
+                requester = %requester,
+                "MAM archive denied: no live actor for unmanaged room (fail-closed)"
+            );
+            RoomArchiveAccess::Denied
+        }
+    }
 }
 
 async fn direct_channel_affiliation(

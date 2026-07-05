@@ -41,7 +41,10 @@ mod subscription;
 
 #[cfg(test)]
 pub use muc::parse_room_jid_context;
-pub use muc::{get_managed_channel_for_room, handle_muc_join, handle_muc_leave};
+pub use muc::{
+    get_managed_channel_for_room, handle_muc_join, handle_muc_leave,
+    resolve_muc_room_archive_access, RoomArchiveAccess,
+};
 use probe::handle_presence_probe;
 use regular::handle_regular_presence_update;
 pub use subscription::broadcast_unavailable_for_expired_detached_session;
