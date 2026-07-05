@@ -80,6 +80,9 @@ pub(super) async fn run_headless_recipient_pass(
         // effects; discarding matches the frames/feedback semantics.
         keepalive_probes: _,
         timer_commands: _,
+        // Headless pass emits no wire copy, so there is nothing to
+        // rewrite.
+        archive_id_rewrites: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,
@@ -241,6 +244,7 @@ pub(super) async fn run_fanout_recipient_pass(
         feedback,
         keepalive_probes: _,
         timer_commands: _,
+        archive_id_rewrites,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,
@@ -250,6 +254,20 @@ pub(super) async fn run_fanout_recipient_pass(
         "fanout recipient-pass: persistence interpreted once; transient \
          outcome discarded"
     );
+    // XEP-0359 live/MAM id parity: the archive store may have deduped
+    // to an EXISTING row (origin-id retry), reported via
+    // ArchiveIdRewrite. The interpreter already rewrote the persistence
+    // events in the batch; the wire copy and side routes were extracted
+    // BEFORE interpreting, so apply the rewrites here too — otherwise
+    // live resources carry a recipient <stanza-id/> no archive row has.
+    if !archive_id_rewrites.is_empty() {
+        if let Some(processed) = processed.as_mut() {
+            rewrite_stanza_archive_ids(processed, &archive_id_rewrites);
+        }
+        for (_, stanza) in side_routes.iter_mut() {
+            rewrite_stanza_archive_ids(stanza, &archive_id_rewrites);
+        }
+    }
 
     FanoutPassResult::Ran {
         processed,

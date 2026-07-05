@@ -29,6 +29,13 @@ pub struct InterpretOutcome {
     /// connection-local timer wheel. Only the transport adapter owns a
     /// clock; the interpreter just relays the typed commands.
     pub timer_commands: Vec<TimerCommand>,
+    /// XEP-0359 archive-id rewrites accumulated while interpreting the
+    /// batch (a store deduped to an existing row). The interpreter
+    /// already applies these to later events in the same batch; the
+    /// shared fan-out recipient pass (#1106) also needs them for the
+    /// wire stanza it extracts BEFORE interpreting, so live/MAM id
+    /// parity holds under origin-id retries.
+    pub(super) archive_id_rewrites: Vec<ArchiveIdRewrite>,
 }
 
 /// Typed timer instruction relayed from the state machine to the

@@ -415,6 +415,7 @@ async fn interpret_with_depth(
                     feedback: nested_feedback,
                     keepalive_probes: nested_probes,
                     timer_commands: nested_timer_commands,
+                    archive_id_rewrites: nested_rewrites,
                 } = nested;
                 outcome.frames.extend(nested_frames);
                 if nested_close {
@@ -423,6 +424,9 @@ async fn interpret_with_depth(
                 outcome.feedback.extend(nested_feedback);
                 outcome.keepalive_probes += nested_probes;
                 outcome.timer_commands.extend(nested_timer_commands);
+                // Carry nested rewrites forward so later events in THIS
+                // batch see them too.
+                archive_id_rewrites.extend(nested_rewrites);
             }
             OutboundEvent::ProjectInbox {
                 owner,
@@ -645,6 +649,7 @@ async fn interpret_with_depth(
         }
     }
 
+    outcome.archive_id_rewrites = archive_id_rewrites;
     outcome
 }
 

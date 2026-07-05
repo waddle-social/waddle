@@ -128,6 +128,19 @@ async fn send_available_presence(client: &mut WsXmppClient) {
         .expect("send presence");
 }
 
+async fn send_presence_with_priority(client: &mut WsXmppClient, priority: i8) {
+    let mut priority_el = Element::builder("priority", JABBER_CLIENT).build();
+    priority_el.append_text_node(priority.to_string());
+    client
+        .send(&element_to_xml(
+            Element::builder("presence", JABBER_CLIENT)
+                .append(priority_el)
+                .build(),
+        ))
+        .await
+        .expect("send presence with priority");
+}
+
 /// Drain every frame until the stream stays quiet, returning the ones
 /// containing `needle`.
 async fn drain_matching(client: &mut WsXmppClient, needle: &str) -> Vec<String> {
@@ -441,6 +454,106 @@ async fn detached_carbons_enabled_sibling_gets_the_dm_exactly_once_on_resume() {
     let _ = sender.close().await;
     let _ = web.close().await;
     let _ = resumed.close().await;
+}
+
+#[tokio::test]
+async fn lower_priority_resource_outside_the_delivery_set_gets_exactly_one_received_carbon() {
+    // Positive XEP-0280 assertion: a carbons-enabled resource OUTSIDE
+    // the RFC 6121 delivery set must still receive the received-carbon
+    // — exactly once. Before the shared fan-out pass it received N
+    // copies (one per per-resource recipient pass); a regression that
+    // suppresses carbons entirely would also fail here.
+    let server = TestServer::start_with_extra_accounts(&[(SENDER_USER, SENDER_PASSWORD)]);
+    let password = server.fixed_account_password().to_string();
+
+    let mut web = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        RECIPIENT_USER,
+        &password,
+        &format!("web-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("web connection");
+    enable_carbons(&mut web, "carbons-enable-web").await;
+    send_presence_with_priority(&mut web, 5).await;
+
+    let mut phone = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        RECIPIENT_USER,
+        &password,
+        &format!("phone-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("phone connection");
+    enable_carbons(&mut phone, "carbons-enable-phone").await;
+    send_presence_with_priority(&mut phone, 5).await;
+
+    let mut laptop = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        RECIPIENT_USER,
+        &password,
+        &format!("laptop-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("laptop connection");
+    enable_carbons(&mut laptop, "carbons-enable-laptop").await;
+    send_presence_with_priority(&mut laptop, 0).await;
+
+    let mut sender = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        SENDER_USER,
+        SENDER_PASSWORD,
+        &format!("sender-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("sender connection");
+    let body = format!("carbon-positive-proof-{}", uuid::Uuid::new_v4());
+    sender
+        .send(&chat_message_xml(
+            &format!("admin@{DOMAIN}"),
+            "fanout-5",
+            &body,
+        ))
+        .await
+        .expect("send dm");
+
+    // The two max-priority resources get the original, no carbon.
+    for (name, client) in [("web", &mut web), ("phone", &mut phone)] {
+        let copies = drain_matching(client, &body).await;
+        assert_eq!(
+            copies.len(),
+            1,
+            "{name} gets exactly the original: {copies:?}"
+        );
+        assert!(
+            !copies[0].contains(CARBONS_NS),
+            "{name}'s copy must not be a carbon: {}",
+            copies[0]
+        );
+    }
+
+    // The lower-priority laptop is outside the delivery set: exactly
+    // one received-carbon, and nothing else.
+    let laptop_copies = drain_matching(&mut laptop, &body).await;
+    assert_eq!(
+        laptop_copies.len(),
+        1,
+        "laptop must get the DM exactly once, as a carbon: {laptop_copies:?}"
+    );
+    assert!(
+        laptop_copies[0].contains(CARBONS_NS) && laptop_copies[0].contains("<received"),
+        "laptop's copy must be a received-carbon: {}",
+        laptop_copies[0]
+    );
+
+    let _ = sender.close().await;
+    let _ = web.close().await;
+    let _ = phone.close().await;
+    let _ = laptop.close().await;
 }
 
 /// Extract the `id` of the XEP-0359 `<stanza-id/>` stamped by the
