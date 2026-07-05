@@ -124,6 +124,228 @@ impl SpiceDbConfig {
     }
 }
 
+/// ADR-0017 Phase 2 clustering (owned libp2p swarm) configuration.
+///
+/// Parsed from `WADDLE_CLUSTERING_*`. With `enabled` false (the default) the
+/// swarm subsystem never starts and server behaviour is byte-for-byte
+/// identical to the single-replica path. Clustering additionally requires the
+/// `clustering` build feature and the Postgres control plane; see
+/// [`crate::clustering`]. This struct carries no libp2p types (multiaddrs are
+/// strings, parsed inside the feature-gated swarm module) so it compiles into
+/// every build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringConfig {
+    pub enabled: bool,
+    /// libp2p listen multiaddrs for the swarm transport. Default: one
+    /// ephemeral TCP address (`/ip4/0.0.0.0/tcp/0`).
+    pub listen_addrs: Vec<String>,
+    /// Kubernetes headless-Service peer discovery. `None` = cold start with no
+    /// bootstrap peers (kademlia bootstrap retries continuously; an empty peer
+    /// set is tolerated, avoiding cold-start deadlock).
+    pub bootstrap: Option<ClusteringBootstrapConfig>,
+    /// kameo `messaging::Config` limits and the ADR element-5 timeout
+    /// hierarchy.
+    pub messaging: ClusteringMessagingConfig,
+}
+
+/// Headless-Service peer discovery inputs for the swarm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringBootstrapConfig {
+    /// Headless Service DNS name resolved (A/AAAA) to peer addresses.
+    pub dns_name: String,
+    /// TCP port peers listen on for the swarm transport.
+    pub port: u16,
+}
+
+/// kameo `messaging::Config` limits plus the ADR element-5 timeout hierarchy.
+///
+/// Invariants enforced at parse time: `reply_timeout <= request_timeout` and
+/// `mailbox_timeout <= request_timeout`. `request_timeout` is the sender-side
+/// libp2p transport cap (`with_request_timeout`) and is the binding bound; any
+/// `reply_timeout` above it is dead configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringMessagingConfig {
+    pub request_timeout: Duration,
+    pub reply_timeout: Duration,
+    pub mailbox_timeout: Duration,
+    /// Cap on concurrent asks per peer connection (kameo default 100).
+    pub max_concurrent_streams: usize,
+    /// Max serialized request envelope bytes (kameo default 1 MiB).
+    pub max_request_bytes: u64,
+    /// Max serialized response envelope bytes (kameo default 10 MiB).
+    pub max_response_bytes: u64,
+}
+
+impl Default for ClusteringMessagingConfig {
+    fn default() -> Self {
+        Self {
+            // Sized above the worst-case fenced-write / resume-handshake budget
+            // (the 10s kameo default is too low per ADR element 5).
+            request_timeout: Duration::from_secs(30),
+            reply_timeout: Duration::from_secs(20),
+            mailbox_timeout: Duration::from_secs(5),
+            max_concurrent_streams: 256,
+            max_request_bytes: 1024 * 1024,
+            max_response_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for ClusteringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addrs: vec!["/ip4/0.0.0.0/tcp/0".to_string()],
+            bootstrap: None,
+            messaging: ClusteringMessagingConfig::default(),
+        }
+    }
+}
+
+impl ClusteringConfig {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let defaults = Self::default();
+        let enabled = parse_bool_var(&vars, "WADDLE_CLUSTERING_ENABLED", false)?;
+
+        let listen_addrs = match vars
+            .get("WADDLE_CLUSTERING_LISTEN_ADDRS")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            None => defaults.listen_addrs,
+            Some(raw) => {
+                let addrs: Vec<String> = raw
+                    .split(',')
+                    .map(|entry| entry.trim().to_string())
+                    .filter(|entry| !entry.is_empty())
+                    .collect();
+                if addrs.is_empty() {
+                    return Err(
+                        "WADDLE_CLUSTERING_LISTEN_ADDRS must contain at least one multiaddr"
+                            .to_string(),
+                    );
+                }
+                addrs
+            }
+        };
+
+        let bootstrap = match vars
+            .get("WADDLE_CLUSTERING_BOOTSTRAP_DNS")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            None => None,
+            Some(dns_name) => {
+                let port = parse_u64_var(&vars, "WADDLE_CLUSTERING_BOOTSTRAP_PORT", 7900)?;
+                let port = u16::try_from(port).ok().filter(|value| *value != 0).ok_or_else(|| {
+                    format!(
+                        "WADDLE_CLUSTERING_BOOTSTRAP_PORT='{port}' must be a valid TCP port (1-65535)"
+                    )
+                })?;
+                Some(ClusteringBootstrapConfig { dns_name, port })
+            }
+        };
+
+        let messaging_defaults = ClusteringMessagingConfig::default();
+        let request_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS",
+            millis_u64(messaging_defaults.request_timeout),
+        )?);
+        let reply_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REPLY_TIMEOUT_MS",
+            millis_u64(messaging_defaults.reply_timeout),
+        )?);
+        let mailbox_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS",
+            millis_u64(messaging_defaults.mailbox_timeout),
+        )?);
+        let max_concurrent_streams = parse_usize_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAX_CONCURRENT_STREAMS",
+            messaging_defaults.max_concurrent_streams,
+        )?;
+        let max_request_bytes = parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAX_REQUEST_BYTES",
+            messaging_defaults.max_request_bytes,
+        )?;
+        let max_response_bytes = parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAX_RESPONSE_BYTES",
+            messaging_defaults.max_response_bytes,
+        )?;
+
+        // ADR element-5 timeout hierarchy. `request_timeout` is the sender-side
+        // transport cap; a `reply_timeout` above it is dead configuration (the
+        // sender always observes `OutboundFailure(Timeout)` at the cap), and
+        // the receiver-side `mailbox_timeout` must also fit under the cap.
+        if reply_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_REPLY_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({}): a reply timeout above the \
+                 transport request timeout is dead configuration",
+                reply_timeout.as_millis(),
+                request_timeout.as_millis()
+            ));
+        }
+        if mailbox_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({})",
+                mailbox_timeout.as_millis(),
+                request_timeout.as_millis()
+            ));
+        }
+        if max_concurrent_streams == 0 {
+            return Err("WADDLE_CLUSTERING_MAX_CONCURRENT_STREAMS must be at least 1".to_string());
+        }
+        if max_request_bytes == 0 || max_response_bytes == 0 {
+            return Err(
+                "WADDLE_CLUSTERING_MAX_REQUEST_BYTES and WADDLE_CLUSTERING_MAX_RESPONSE_BYTES \
+                 must both be non-zero"
+                    .to_string(),
+            );
+        }
+
+        Ok(Self {
+            enabled,
+            listen_addrs,
+            bootstrap,
+            messaging: ClusteringMessagingConfig {
+                request_timeout,
+                reply_timeout,
+                mailbox_timeout,
+                max_concurrent_streams,
+                max_request_bytes,
+                max_response_bytes,
+            },
+        })
+    }
+}
+
+/// Milliseconds of a `Duration` as `u64`, saturating (used only to derive
+/// env-var defaults from the compiled-in `Duration` defaults).
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub mode: ServerMode,
@@ -146,6 +368,9 @@ pub struct ServerConfig {
     /// every stamping site reads the same key. Required at startup;
     /// see [`parse_occupant_id_secret`] for the validation rules.
     pub occupant_id_secret: OccupantIdSecret,
+    /// ADR-0017 Phase 2 clustering (owned libp2p swarm) configuration. With
+    /// `enabled` false (the default) the swarm subsystem never starts.
+    pub clustering: ClusteringConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,6 +762,7 @@ impl Default for ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
+            clustering: ClusteringConfig::default(),
         }
     }
 }
@@ -564,6 +790,8 @@ impl ServerConfig {
         let occupant_id_secret =
             parse_occupant_id_secret(std::env::var("WADDLE_OCCUPANT_ID_SECRET").ok().as_deref())?;
 
+        let clustering = ClusteringConfig::from_env()?;
+
         Ok(Self {
             mode,
             base_url,
@@ -574,6 +802,7 @@ impl ServerConfig {
             ws_keepalive,
             spicedb,
             occupant_id_secret,
+            clustering,
         })
     }
 
@@ -607,6 +836,7 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
+            clustering: ClusteringConfig::default(),
         }
     }
 
@@ -622,6 +852,7 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
+            clustering: ClusteringConfig::default(),
         }
     }
 }
@@ -629,6 +860,109 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clustering_defaults_are_disabled() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.listen_addrs, vec!["/ip4/0.0.0.0/tcp/0".to_string()]);
+        assert!(config.bootstrap.is_none());
+        assert_eq!(config.messaging, ClusteringMessagingConfig::default());
+        // Byte-for-byte-identical guarantee: the whole struct equals Default.
+        assert_eq!(config, ClusteringConfig::default());
+    }
+
+    #[test]
+    fn clustering_parses_enabled_and_listen_addrs() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_ENABLED", "true"),
+            (
+                "WADDLE_CLUSTERING_LISTEN_ADDRS",
+                "/ip4/0.0.0.0/tcp/7900, /ip4/0.0.0.0/udp/7900/quic-v1",
+            ),
+        ])
+        .unwrap();
+        assert!(config.enabled);
+        assert_eq!(
+            config.listen_addrs,
+            vec![
+                "/ip4/0.0.0.0/tcp/7900".to_string(),
+                "/ip4/0.0.0.0/udp/7900/quic-v1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn clustering_parses_bootstrap_dns_and_port() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_ENABLED", "1"),
+            ("WADDLE_CLUSTERING_BOOTSTRAP_DNS", "waddle-server-swarm"),
+            ("WADDLE_CLUSTERING_BOOTSTRAP_PORT", "7900"),
+        ])
+        .unwrap();
+        let bootstrap = config.bootstrap.expect("bootstrap parsed");
+        assert_eq!(bootstrap.dns_name, "waddle-server-swarm");
+        assert_eq!(bootstrap.port, 7900);
+    }
+
+    #[test]
+    fn clustering_bootstrap_defaults_port_when_dns_set() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_BOOTSTRAP_DNS",
+            "waddle-server-swarm",
+        )])
+        .unwrap();
+        assert_eq!(config.bootstrap.expect("bootstrap parsed").port, 7900);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_bootstrap_port() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_BOOTSTRAP_DNS", "swarm"),
+            ("WADDLE_CLUSTERING_BOOTSTRAP_PORT", "0"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_BOOTSTRAP_PORT"));
+    }
+
+    #[test]
+    fn clustering_rejects_reply_timeout_above_request_timeout() {
+        // reply_timeout > request_timeout is dead configuration per ADR
+        // element 5 (the sender caps out at the transport request_timeout).
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "10000"),
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "20000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("must be <="));
+    }
+
+    #[test]
+    fn clustering_rejects_mailbox_timeout_above_request_timeout() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "10000"),
+            // Keep reply under the request cap so the mailbox check is the one
+            // that trips (otherwise the reply-timeout invariant fires first).
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "5000"),
+            ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "20000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_concurrent_streams() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_MAX_CONCURRENT_STREAMS", "0")])
+            .unwrap_err();
+        assert!(err.contains("MAX_CONCURRENT_STREAMS"));
+    }
+
+    #[test]
+    fn clustering_rejects_non_boolean_enabled() {
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ENABLED", "maybe")]).unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ENABLED"));
+    }
 
     #[test]
     fn ws_keepalive_defaults_are_45s_2_misses() {

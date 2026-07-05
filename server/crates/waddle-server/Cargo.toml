@@ -134,6 +134,15 @@ tempfile = "3.27"
 waddle-xmpp = { path = "../waddle-xmpp", features = ["test-utils"] }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
 
+[features]
+# ADR-0017 Phase 2: the owned libp2p swarm subsystem (node discovery only).
+# OFF by default so the standard production build links zero libp2p and is
+# byte-for-byte identical to the single-replica path. Enabling it turns on
+# kameo's `remote` feature (which pulls libp2p) and compiles the
+# `crate::clustering` swarm/codec/relay modules. A clustering-built binary is
+# still inert unless the runtime `clustering.enabled` config is also set.
+clustering = ["kameo/remote"]
+
 [[bin]]
 name = "waddle-server"
 path = "src/main.rs"

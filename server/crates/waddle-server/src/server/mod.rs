@@ -175,6 +175,16 @@ pub async fn start_with_config(
     room_registry_gauge::spawn(room_registry_handle.clone(), stop_token.clone());
     let room_registry = room_registry_handle.actor_ref().clone();
 
+    // ADR-0017 Phase 2: conditionally start the owned libp2p swarm subsystem
+    // (node discovery only), gated behind `clustering.enabled` + the
+    // `clustering` build feature + the Postgres control plane. A no-op when
+    // disabled — the default single-replica path is byte-for-byte unchanged.
+    crate::clustering::start_if_enabled(
+        &server_config.clustering,
+        db_pool.global().driver(),
+        &stop_token,
+    )?;
+
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
