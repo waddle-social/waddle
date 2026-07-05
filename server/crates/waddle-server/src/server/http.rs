@@ -342,10 +342,13 @@ async fn create_websocket_state(
 
     // ADR-0017 Phase 1: spawn the actor-backed per-user registry. It is
     // populated alongside `connection_registry` on the live register/
-    // unregister path (dual-registration). As of Slice 1, bare-JID routing
-    // selection (`route_to_connection`) sources its candidate set + RFC
-    // priority ranking from this actor, intersected with DashMap liveness;
-    // delivery still uses the DashMap until Slice 2.
+    // unregister path (dual-registration). It is now the authoritative routing
+    // surface: bare-JID selection (`route_to_connection`, Slice 1) sources its
+    // candidate set + RFC priority ranking from this actor (intersected with
+    // DashMap liveness), and 1:1/DM/groupchat delivery (`deliver_*_to_full`,
+    // Slice 2) routes through its `TrySend*` with no DashMap send fallback. The
+    // empty-actor reaper (`spawn_user_actor_reaper`) prunes actors left empty by
+    // delivery-path closed-channel eviction.
     let user_registry = {
         use kameo::actor::Spawn;
         waddle_xmpp::registry::UserRegistryActor::spawn(

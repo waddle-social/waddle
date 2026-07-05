@@ -1,12 +1,15 @@
 # ADR-0017 Phase 1 Completion — Actor-Authoritative Registration
 
 Companion design note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md).
-Status: **In progress** — Slices 0–2 landed. Slice 2 delivery cutover (1:1/DM
-via the actor's `TrySend*`, liveness filter KEPT) and its empty-actor reaper
-(`ReapUserIfEmpty` + `spawn_user_actor_reaper`, required because production
-delivery activates `try_deliver`'s closed-channel eviction) are both in. Slice 3
-(deleting the now-unused DashMap delivery/selection methods) is next.
-See the slice order below for per-slice status and issue #1195 (ADR-0017
+Status: **Phase 1 complete — Slices 0–3 landed.** Authoritative fail-closed
+registration (Slice 0), actor-sourced bare-JID selection (Slice 1), 1:1/DM/
+groupchat delivery through the actor's `TrySend*` with no DashMap fallback plus
+the empty-actor reaper (Slice 2), and deletion of the now-unused DashMap
+*delivery* methods (Slice 3) are all in. The transitional Slice-1 liveness
+filter is deliberately KEPT, and the DashMap *selection* methods
+(`select_routable_resources_for_user` / `get_resources_for_user`) survive as
+Phase-1 infrastructure (~14 live callers) — retiring both is deferred to a later
+phase. See the slice order below for per-slice detail and issue #1195 (ADR-0017
 horizontal-scaling epic) for the live tracker.
 
 ## Why this exists

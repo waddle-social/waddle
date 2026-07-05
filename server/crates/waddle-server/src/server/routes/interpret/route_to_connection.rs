@@ -100,8 +100,10 @@ async fn select_bare_jid_live_targets(
     // can neither mask a live lower-priority resource nor promote other
     // lower-priority resources above it (council review on PR #1177). Using the
     // actor's own pre-collapsed `SelectRoutableResources` here would reintroduce
-    // that distortion; it returns to use in Slice 2 once delivery (and thus the
-    // liveness filter) moves to the actor.
+    // that distortion, so it stays deliberately avoided as long as the liveness
+    // filter is kept. It can return once a later phase retires the filter (once
+    // teardown flips the shared ownership atomic / the empty-actor reaper reaps
+    // stale extras eagerly).
     let available: Vec<(jid::FullJid, i8)> = match user_actor
         .ask(waddle_xmpp::registry::user_actor::GetAvailableResources)
         .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
