@@ -134,6 +134,48 @@ describe("installGlobalErrorTelemetry", () => {
       }
     }
   });
+
+  test("reinstalls listeners when the window instance changes (test window swaps, HMR re-init)", () => {
+    function makeWindowStub() {
+      const listeners = new Map<string, Array<(event: unknown) => void>>();
+      return {
+        listeners,
+        stub: {
+          addEventListener: (type: string, listener: (event: unknown) => void) => {
+            const bucket = listeners.get(type) ?? [];
+            bucket.push(listener);
+            listeners.set(type, bucket);
+          },
+        },
+      };
+    }
+    const first = makeWindowStub();
+    const second = makeWindowStub();
+    const originalWindow = globalThis.window;
+    try {
+      (globalThis as { window: unknown }).window = first.stub;
+      installGlobalErrorTelemetry();
+      expect(first.listeners.get("error")).toHaveLength(1);
+
+      // A different window object (fresh stub, HMR-recreated window)
+      // must get its own listeners — the guard is per-window, not a
+      // process-lifetime latch.
+      (globalThis as { window: unknown }).window = second.stub;
+      installGlobalErrorTelemetry();
+      expect(second.listeners.get("error")).toHaveLength(1);
+      expect(second.listeners.get("unhandledrejection")).toHaveLength(1);
+
+      // Same window again stays idempotent.
+      installGlobalErrorTelemetry();
+      expect(second.listeners.get("error")).toHaveLength(1);
+    } finally {
+      if (originalWindow === undefined) {
+        Reflect.deleteProperty(globalThis, "window");
+      } else {
+        (globalThis as { window: unknown }).window = originalWindow;
+      }
+    }
+  });
 });
 
 describe("vue app errorHandler", () => {

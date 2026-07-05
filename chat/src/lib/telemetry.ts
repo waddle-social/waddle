@@ -249,21 +249,24 @@ export function initTelemetry(options: InitTelemetryOptions): void {
 // error through the sanitizing `reportError()` path instead.
 
 const GLOBAL_ERROR_DEDUPE_WINDOW_MS = 5_000;
-let globalErrorsInstalled = false;
+// Guard is per-window (not a process-lifetime latch) so a swapped
+// `window` — a fresh test stub, an HMR-recreated document — gets its
+// own listeners instead of a silent no-op.
+let globalErrorsInstalledOn: unknown = null;
 let reportingGlobalError = false;
 let lastGlobalErrorKey = "";
 let lastGlobalErrorAtMs = 0;
 
 /**
- * Install window `error` + `unhandledrejection` capture. Idempotent and
- * a no-op outside the browser. Called once from {@link initTelemetry};
- * `reportError` already no-ops without Faro, so installing before or
- * without a collector is harmless.
+ * Install window `error` + `unhandledrejection` capture. Idempotent
+ * per window instance and a no-op outside the browser. Called once
+ * from {@link initTelemetry}; `reportError` already no-ops without
+ * Faro, so installing before or without a collector is harmless.
  */
 export function installGlobalErrorTelemetry(): void {
-  if (globalErrorsInstalled) return;
   if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
-  globalErrorsInstalled = true;
+  if (globalErrorsInstalledOn === window) return;
+  globalErrorsInstalledOn = window;
 
   window.addEventListener("error", (event) => {
     handleWindowErrorEvent(event);
