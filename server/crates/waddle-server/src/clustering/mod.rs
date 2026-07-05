@@ -51,12 +51,21 @@ pub fn start_if_enabled(
     if !config.enabled {
         return Ok(());
     }
-    if driver != DatabaseDriver::Postgres {
-        return Err(ClusteringError::RequiresPostgres { driver });
+
+    // Root-cause-first: a binary built without the `clustering` feature can
+    // never cluster regardless of driver, so that is the more fundamental
+    // failure and is reported before the Postgres prerequisite.
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = driver;
+        Err(ClusteringError::FeatureNotCompiled)
     }
 
     #[cfg(feature = "clustering")]
     {
+        if driver != DatabaseDriver::Postgres {
+            return Err(ClusteringError::RequiresPostgres { driver });
+        }
         tracing::info!(
             listen_addrs = ?config.listen_addrs,
             request_timeout_ms = config.messaging.request_timeout.as_millis() as u64,
@@ -65,9 +74,5 @@ pub fn start_if_enabled(
         // Slices 1–5 wire the owned swarm event loop, keypair-slot lease,
         // peer allowlist, remote codec, and supervised relay actors here.
         Ok(())
-    }
-    #[cfg(not(feature = "clustering"))]
-    {
-        Err(ClusteringError::FeatureNotCompiled)
     }
 }
