@@ -24,13 +24,48 @@ interface GiphyProxyGif {
   };
 }
 
+/**
+ * Fixed-window rate limiter for the proxy route. The route is
+ * unauthenticated (auth lives on the XMPP server), so this per-client
+ * budget is what bounds how fast anonymous traffic can burn the Giphy
+ * key's quota — the Cache-Control below only helps organic repeat
+ * queries in the browser, not adversarial unique-`q` traffic.
+ * In-memory per Worker isolate: best-effort, zero-dependency.
+ */
+export function createGiphyRateLimiter(
+  maxPerWindow: number,
+  windowMs: number,
+): (key: string, nowMs: number) => boolean {
+  const windows = new Map<string, { start: number; count: number }>();
+  return (key, nowMs) => {
+    const entry = windows.get(key);
+    if (!entry || nowMs - entry.start >= windowMs) {
+      // Rolling into a new window: also drop other stale entries so
+      // the map can't grow unboundedly from one-off client keys.
+      if (windows.size > 10_000) {
+        for (const [k, v] of windows) {
+          if (nowMs - v.start >= windowMs) windows.delete(k);
+        }
+      }
+      windows.set(key, { start: nowMs, count: 1 });
+      return true;
+    }
+    entry.count += 1;
+    return entry.count <= maxPerWindow;
+  };
+}
+
 export async function handleGiphyProxyRequest(
   apiKey: string | undefined,
   params: URLSearchParams,
   fetchImpl: typeof fetch,
+  rateGate?: () => boolean,
 ): Promise<Response> {
   if (!apiKey) {
     return jsonError("GIF search is not configured", 503);
+  }
+  if (rateGate && !rateGate()) {
+    return jsonError("Too many GIF searches — try again shortly", 429);
   }
 
   const query = (params.get("q") ?? "").trim().slice(0, MAX_QUERY_LENGTH);
@@ -53,11 +88,10 @@ export async function handleGiphyProxyRequest(
     return jsonError("GIF search is unavailable", 502);
   }
 
-  // Shared-cache the trimmed result: the route is same-origin and
-  // unauthenticated (auth lives on the XMPP server), so a short CDN
-  // TTL is what bounds how fast anonymous traffic can burn the Giphy
-  // key's quota. Responses are identical for identical params —
-  // nothing user-specific is cached.
+  // Response is a pure function of q+limit and nothing user-specific,
+  // so browsers may cache repeat queries briefly. (Cloudflare does not
+  // edge-cache dynamic responses on this header alone — the quota
+  // bound comes from the rate limiter above, not from caching.)
   return Response.json(
     { data: trimGiphyPayload(payload) },
     { headers: { "Cache-Control": "public, max-age=300" } },

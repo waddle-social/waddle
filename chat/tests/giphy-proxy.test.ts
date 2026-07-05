@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { handleGiphyProxyRequest } from "../src/lib/giphy-proxy";
+import { createGiphyRateLimiter, handleGiphyProxyRequest } from "../src/lib/giphy-proxy";
 
 const KEY = "super-secret-giphy-key";
 
@@ -188,5 +188,45 @@ describe("response caching", () => {
   test("error responses are not cacheable", async () => {
     const unconfigured = await handleGiphyProxyRequest(undefined, new URLSearchParams(), fetch);
     expect(unconfigured.headers.get("Cache-Control")).toBeNull();
+  });
+});
+
+describe("rate limiting", () => {
+  test("createGiphyRateLimiter allows up to the per-window budget per key, then blocks, then resets after the window", () => {
+    const allow = createGiphyRateLimiter(3, 60_000);
+    expect(allow("ip-a", 0)).toBe(true);
+    expect(allow("ip-a", 1_000)).toBe(true);
+    expect(allow("ip-a", 2_000)).toBe(true);
+    expect(allow("ip-a", 3_000)).toBe(false);
+    // Independent budgets per key.
+    expect(allow("ip-b", 3_000)).toBe(true);
+    // Window rollover restores the budget.
+    expect(allow("ip-a", 60_001)).toBe(true);
+  });
+
+  test("a denied gate returns 429 without contacting Giphy and without a cache header", async () => {
+    const { calls, fetchImpl } = stubFetch(() => Response.json(giphyUpstreamBody()));
+    const response = await handleGiphyProxyRequest(
+      KEY,
+      new URLSearchParams({ q: "cats" }),
+      fetchImpl,
+      () => false,
+    );
+    expect(response.status).toBe(429);
+    expect(calls.length).toBe(0);
+    expect(response.headers.get("Cache-Control")).toBeNull();
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("Too many GIF searches — try again shortly");
+  });
+
+  test("an allowing gate leaves the happy path untouched", async () => {
+    const { fetchImpl } = stubFetch(() => Response.json(giphyUpstreamBody()));
+    const response = await handleGiphyProxyRequest(
+      KEY,
+      new URLSearchParams({ q: "cats" }),
+      fetchImpl,
+      () => true,
+    );
+    expect(response.status).toBe(200);
   });
 });
