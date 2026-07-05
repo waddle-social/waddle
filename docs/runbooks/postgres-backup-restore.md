@@ -19,9 +19,10 @@ Configuration lives in `infrastructure/waddle.cloud/gitops/waddle-server/`:
 - `postgresql-scheduled-backup.yaml` — daily base backup at 02:00:00 UTC.
 - `spicedb-scheduled-backup.yaml` — daily base backup at 02:30:00 UTC (staggered).
 - `postgres-backup-credentials-external-secret.yaml` — R2 credentials synced from
-  1Password item `server-runtime-production` (properties `r2-access-key-id` /
-  `r2-secret-access-key`) into Secret `postgres-backup-r2-credentials`
-  (keys `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY`).
+  the dedicated 1Password item `postgres-backup-r2` (properties `access-key-id` /
+  `secret-access-key`) into Secret `postgres-backup-r2-credentials`
+  (keys `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY`). Deliberately a separate item
+  from the app's `server-runtime-production` R2 keys — see the HITL steps.
 
 Object storage is Cloudflare R2 via its S3-compatible API, endpoint
 `https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com`, dedicated
@@ -35,8 +36,10 @@ not support S3 object tagging — keep the `barmanObjectStore` config minimal
 kubectl -n waddle get scheduledbackups,backups
 kubectl -n waddle get cluster postgresql -o jsonpath='{.status.firstRecoverabilityPoint}{"\n"}{.status.lastSuccessfulBackup}{"\n"}'
 kubectl -n waddle get cluster postgresql-spicedb -o jsonpath='{.status.firstRecoverabilityPoint}{"\n"}{.status.lastSuccessfulBackup}{"\n"}'
-# WAL archiving status on the primary:
-kubectl -n waddle exec postgresql-1 -- psql -c "SELECT archived_count, failed_count, last_archived_time, last_failed_time FROM pg_stat_archiver;"
+# WAL archiving status on the primary (discover it by label — the primary
+# is not pinned to postgresql-1 and moves on failover/switchover):
+PRIMARY=$(kubectl -n waddle get pod -l cnpg.io/cluster=postgresql,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}')
+kubectl -n waddle exec "$PRIMARY" -- psql -c "SELECT archived_count, failed_count, last_archived_time, last_failed_time FROM pg_stat_archiver;"
 ```
 
 A healthy cluster shows `Backup` CRs in phase `completed`, a non-empty
@@ -47,9 +50,11 @@ A healthy cluster shows `Backup` CRs in phase `completed`, a non-empty
 Once `spec.backup.barmanObjectStore` is applied, Postgres retains every WAL
 segment until it is archived to R2. If archiving fails persistently (bucket
 missing, credential scope wrong, R2 unreachable), WAL accumulates without
-bound: `postgresql` fills its dedicated 2Gi `walStorage` and the primary
-PANICs; `postgresql-spicedb` has no separate walStorage, so WAL eats the 10Gi
-data PVC instead. The Cluster CR stays `Ready` while this happens — only the
+bound and eventually fills the volume it lands on. Both clusters isolate WAL
+on a dedicated 2Gi `walStorage`, so the buildup fills that volume (and PANICs
+the primary) rather than the data PVC — contained, but still an outage until
+archiving recovers or the backup config is rolled back. The Cluster CR stays
+`Ready` while this happens — only the
 `ContinuousArchiving` status condition flips — so it will not show up as a
 Flux health failure. Watch `pg_stat_archiver.failed_count` after any change
 to the backup config.
@@ -173,9 +178,10 @@ countdown described above.
 - [ ] Create the R2 bucket `waddle-postgres-backups` in the Cloudflare account
       (the operator does not create buckets).
 - [ ] Mint a dedicated R2 API token scoped to `waddle-postgres-backups`
-      (read **and** write), add it to 1Password, and point
-      `postgres-backup-credentials-external-secret.yaml` at the new
-      properties. Do not reuse the app-runtime token: even if its scope
+      (read **and** write) and store it in the 1Password item
+      `postgres-backup-r2` as properties `access-key-id` / `secret-access-key`
+      (the item the ExternalSecret already references — no manifest edit
+      needed). Do not reuse the app-runtime token: even if its scope
       happens to cover the new bucket, a compromised app key must not be able
       to delete backups (R2 has no object lock).
 
@@ -212,7 +218,7 @@ Apply the rules to Grafana Cloud (HITL — needs a Grafana Cloud ruler token,
 not held in 1Password yet):
 
 - [ ] Confirm the CNPG metric names against the deployed operator
-      (`kubectl -n waddle exec postgresql-1 -- curl -s localhost:9187/metrics | grep -E 'backup|archiver'`)
+      (`kubectl -n waddle exec "$(kubectl -n waddle get pod -l cnpg.io/cluster=postgresql,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}')" -- curl -s localhost:9187/metrics | grep -E 'backup|archiver'`)
       and adjust the rule file if they differ from CNPG 1.25.
 - [ ] Load the rule group into the Grafana Cloud Mimir ruler
       (`mimirtool rules load --address=<prom-url> --id=<tenant> …/postgres-backups.yaml`)

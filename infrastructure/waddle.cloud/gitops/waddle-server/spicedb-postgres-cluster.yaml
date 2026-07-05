@@ -14,6 +14,14 @@ spec:
   storage:
     size: 10Gi
     storageClass: openebs-mayastor
+  # Dedicated WAL volume (parity with the `postgresql` cluster). With
+  # continuous archiving enabled, a persistent archive failure retains WAL
+  # until it succeeds; isolating WAL here means that buildup fills this
+  # volume instead of the 10Gi data PVC, so a stuck backup can't take the
+  # database down. See the WAL-buildup hazard in the restore runbook.
+  walStorage:
+    size: 2Gi
+    storageClass: openebs-mayastor
   backup:
     retentionPolicy: 30d
     barmanObjectStore:
