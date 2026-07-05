@@ -1,0 +1,13 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgresql-spicedb-daily-backup
+  namespace: waddle
+spec:
+  # CNPG cron format has six fields (seconds first): daily at 02:30:00 UTC,
+  # staggered after the main postgresql cluster backup.
+  schedule: "0 30 2 * * *"
+  backupOwnerReference: self
+  immediate: true
+  cluster:
+    name: postgresql-spicedb
