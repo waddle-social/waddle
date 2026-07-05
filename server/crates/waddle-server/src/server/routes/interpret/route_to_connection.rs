@@ -25,16 +25,18 @@ const ACTOR_ROUTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// # Liveness filter: intersect with the DashMap, then rank
 ///
 /// Each tier's result is intersected with DashMap membership (`is_connected`).
-/// This is REQUIRED while delivery still reads the DashMap
-/// (`deliver_peer_to_full`, cut over in Slice 2): the best-effort, owner-gated
-/// unregister mirror can leave a *stale extra* in the actor — a resource whose
-/// DashMap entry was already removed at teardown but whose actor entry the
-/// mirror `tell` has not yet reaped. Selecting such a stale resource (which the
-/// actor may still report as presence-available, since teardown does not flip
-/// the shared atomic) and handing it to DashMap delivery would find it gone
-/// (`NotConnected`) and, if it was the only/top candidate, skip the headless
-/// offline pass — silently losing or delaying the message (council review on
-/// PR #1177).
+/// Slice 2 cut delivery over to the authoritative `UserActor`
+/// (`deliver_peer_to_full` / `deliver_direct_to_full`), but this filter is
+/// deliberately KEPT: the best-effort, owner-gated unregister mirror can leave
+/// a *stale extra* in the actor — a resource whose DashMap entry was already
+/// removed at teardown but whose actor entry the mirror `tell` has not yet
+/// reaped. Such a resource is still presence-available in the actor (teardown
+/// does not flip the shared atomic) and, until the empty-actor reaper runs, its
+/// sender channel may still be open, so the actor would happily queue to a
+/// resource the legacy selection considered gone. Filtering it out here keeps
+/// selection byte-for-byte identical to the legacy DashMap behaviour and keeps
+/// the offline/headless pass reachable when a bare JID has no live resource
+/// (council review on PR #1177).
 ///
 /// The intersection is SOUND and introduces no false-negative: Slice 0 made
 /// registration authoritative (a live resource is in the actor *and* the
@@ -47,9 +49,10 @@ const ACTOR_ROUTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// dropped before the max is computed — it can neither mask a live
 /// lower-priority resource nor promote other lower-priority resources above it.
 /// The result is byte-for-byte identical to the legacy DashMap selection, with
-/// the candidate/ranking source moved to the actor. Slice 2 moves delivery to
-/// the actor (whose `try_deliver` evicts closed channels), retiring this filter
-/// and returning tier 1 to the actor-side `SelectRoutableResources`.
+/// the candidate/ranking source moved to the actor. A later slice retires this
+/// filter — once teardown flips the shared ownership atomic (or the empty-actor
+/// reaper eagerly reaps stale extras) selection can return to the actor-side
+/// `SelectRoutableResources` without it.
 ///
 /// On any actor error (registry / user-actor busy, wedged, or state-lost) the
 /// selection degrades to empty, so the caller runs the offline/headless
@@ -268,7 +271,14 @@ pub(super) async fn route_to_connection(
 
         match jid.clone().try_into_full() {
             Ok(full) => {
-                deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza).await
+                deliver_peer_to_full(
+                    deps.user_registry,
+                    registry,
+                    deps.sm_session_registry,
+                    &full,
+                    &stanza,
+                )
+                .await
             }
             Err(bare) => {
                 // Enumerate XEP-0198 detached-but-resumable
@@ -384,35 +394,25 @@ pub(super) async fn route_to_connection(
                                 side_routes,
                             } => {
                                 if let Some(processed) = processed {
-                                    // Wire delivery of the ONE processed
-                                    // stanza per resource. `send_to`
-                                    // queues a `DeliveryKind::DirectFrame`
-                                    // — the destination's main loop keeps
-                                    // XEP-0198 outbound accounting
-                                    // (`record_outbound`) but does NOT
-                                    // re-run the recipient pass. The
+                                    // Wire delivery of the ONE processed stanza
+                                    // per resource as a `DeliveryKind::DirectFrame`
+                                    // — the destination's main loop keeps XEP-0198
+                                    // outbound accounting (`record_outbound`) but
+                                    // does NOT re-run the recipient pass. The
                                     // stanza's `to` stays bare (RFC 6121
-                                    // §8.5.2.1.1 delivery of a
-                                    // bare-addressed message).
+                                    // §8.5.2.1.1). ADR-0017 Slice 2: this now goes
+                                    // through the authoritative actor
+                                    // (`TrySendDirect`, non-blocking) via
+                                    // `deliver_direct_to_full`.
                                     for full in &live_targets {
-                                        match registry.send_to(full, (*processed).clone()).await {
-                                            waddle_xmpp::registry::SendResult::Sent => {
-                                                debug!(
-                                                    jid = %full,
-                                                    "RouteToConnection: processed DM \
-                                                     delivered (shared recipient pass)"
-                                                );
-                                            }
-                                            waddle_xmpp::registry::SendResult::NotConnected
-                                            | waddle_xmpp::registry::SendResult::ChannelClosed => {
-                                                deliver_to_detached(
-                                                    deps.sm_session_registry,
-                                                    full,
-                                                    &processed,
-                                                )
-                                                .await;
-                                            }
-                                        }
+                                        deliver_direct_to_full(
+                                            deps.user_registry,
+                                            registry,
+                                            deps.sm_session_registry,
+                                            full,
+                                            &processed,
+                                        )
+                                        .await;
                                     }
                                     // Detached XEP-0198 targets get the
                                     // PROCESSED stanza too, so resume
@@ -472,8 +472,14 @@ pub(super) async fn route_to_connection(
                         }
                     }
                     for full in live_targets {
-                        deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza)
-                            .await;
+                        deliver_peer_to_full(
+                            deps.user_registry,
+                            registry,
+                            deps.sm_session_registry,
+                            &full,
+                            &stanza,
+                        )
+                        .await;
                     }
                     if let Some(sm) = deps.sm_session_registry {
                         for full in detached_targets {

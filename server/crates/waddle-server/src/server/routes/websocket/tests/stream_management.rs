@@ -1125,11 +1125,8 @@ async fn message_carbons_record_for_detached_enabled_resources() {
         Blocklist::empty(),
     );
     let (alice_phone_tx, mut alice_phone_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(alice_phone.clone(), alice_phone_tx);
+    // ADR-0017 Slice 2: delivery reads the actor tree, so register into both.
+    super::register_test_connection(state.as_ref(), &alice_phone, alice_phone_tx).await;
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);

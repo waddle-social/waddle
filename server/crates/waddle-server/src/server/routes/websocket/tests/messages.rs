@@ -3573,11 +3573,8 @@ async fn handle_message_direct_with_sample_extension_payload_preserves_payload_f
     let state = create_test_websocket_state().await;
 
     let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(recipient_jid.clone(), recipient_tx);
+    // ADR-0017 Slice 2: delivery reads the actor tree, so register into both.
+    register_test_connection(state.as_ref(), &recipient_jid, recipient_tx).await;
 
     let mut message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
@@ -3797,16 +3794,19 @@ async fn handle_message_direct_chat_sends_received_carbon_to_opted_in_sibling_re
 
     let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
     let (sibling_tx, mut sibling_rx) = mpsc::channel(8);
+    // ADR-0017 Slice 2: delivery reads the actor tree, so register into both
+    // tiers. The sibling has carbons enabled — set it on the shared entry after
+    // registration (the Arc is shared with the actor).
+    register_test_connection(state.as_ref(), &recipient_jid, recipient_tx).await;
+    register_test_connection(state.as_ref(), &sibling_jid, sibling_tx).await;
     state
         .deps
         .protocol
         .connection_registry
-        .register(recipient_jid.clone(), recipient_tx);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
+        .get_entry(&sibling_jid)
+        .expect("sibling entry")
+        .carbons_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let frame = format!(
         "<message xmlns='jabber:client' to='{recipient_jid}' type='chat' id='recv-carbon-1'>\
