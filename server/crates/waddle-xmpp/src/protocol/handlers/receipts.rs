@@ -50,11 +50,19 @@ impl MessageHandler for ReceiptsHandler {
             return HandlerOutcome::Continue(Vec::new());
         };
 
-        let mut receipt = build_receipt_message(
-            Some(target.clone()),
-            Some(Jid::from(ctx.full_jid.clone())),
-            original_id,
-        );
+        // #1106: on the shared fan-out recipient pass (delivery_fanout
+        // set) `ctx.full_jid` is the synthetic
+        // `…/offline-recipient-pass` sentinel, which must never leak to
+        // the wire — a resource-locking sender would address its next
+        // message to a nonexistent resource. The server-generated ack
+        // comes from the recipient's bare JID instead.
+        let receipt_from = if ctx.delivery_fanout.is_empty() {
+            Jid::from(ctx.full_jid.clone())
+        } else {
+            Jid::from(ctx.full_jid.to_bare())
+        };
+        let mut receipt =
+            build_receipt_message(Some(target.clone()), Some(receipt_from), original_id);
         receipt.type_ = message.type_.clone();
 
         HandlerOutcome::Continue(vec![OutboundEvent::RouteToConnection {
@@ -97,6 +105,15 @@ mod tests {
     }
 
     fn run(local: &FullJid, has_live_transport: bool, message: &mut Message) -> HandlerOutcome {
+        run_with_fanout(local, has_live_transport, &[], message)
+    }
+
+    fn run_with_fanout(
+        local: &FullJid,
+        has_live_transport: bool,
+        delivery_fanout: &[FullJid],
+        message: &mut Message,
+    ) -> HandlerOutcome {
         let blocklist = Blocklist::empty();
         let occupancy = MucOccupancy::empty();
         let id_gen = FixedIdGenerator("id".to_string());
@@ -107,7 +124,7 @@ mod tests {
             carbons: CarbonsState::Disabled,
             muc_occupancy: &occupancy,
             has_live_transport,
-            delivery_fanout: &[],
+            delivery_fanout,
             id_gen: &id_gen,
         };
         let mut ctx = MessageContext::derive(env, message);
@@ -137,6 +154,37 @@ mod tests {
                     Some(local.to_string())
                 );
                 assert_eq!(extract_received_id(receipt), Some("msg-1".to_string()));
+            }
+            other => panic!("expected RouteToConnection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xep_0184_shared_fanout_pass_sends_receipt_from_bare_jid() {
+        // #1106: the shared recipient pass runs on a synthetic full JID
+        // (`…/offline-recipient-pass`). That sentinel must never leak to
+        // the wire as the receipt `from` — a resource-locking sender
+        // would address its next message to a nonexistent resource. The
+        // server-generated ack comes from the recipient's bare JID.
+        let local = full("bob@example.com/offline-recipient-pass");
+        let fanout = vec![full("bob@example.com/web"), full("bob@example.com/phone")];
+        let mut message = receipt_request_message();
+
+        let outcome = run_with_fanout(&local, true, &fanout, &mut message);
+        let events = match outcome {
+            HandlerOutcome::Continue(events) => events,
+            other => panic!("expected Continue, got {other:?}"),
+        };
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            OutboundEvent::RouteToConnection { stanza, .. } => {
+                let Stanza::Message(receipt) = stanza.as_ref() else {
+                    panic!("expected receipt message")
+                };
+                assert_eq!(
+                    receipt.from.as_ref().map(ToString::to_string),
+                    Some("bob@example.com".to_string())
+                );
             }
             other => panic!("expected RouteToConnection, got {other:?}"),
         }
