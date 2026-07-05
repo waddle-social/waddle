@@ -1,7 +1,10 @@
 # ADR-0017 Phase 1 Completion — Actor-Authoritative Registration
 
 Companion design note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md).
-Status: **In progress** — Slices 0–1 landed; Slice 2 (delivery cutover) next.
+Status: **In progress** — Slices 0–1 landed; Slice 2 delivery cutover landed
+(1:1/DM via the actor's `TrySend*`, liveness filter KEPT); the empty-actor
+reaper is the immediate next unit (required now that production delivery
+activates `try_deliver`'s closed-channel eviction).
 See the slice order below for per-slice status and issue #1195 (ADR-0017
 horizontal-scaling epic) for the live tracker.
 
@@ -121,9 +124,15 @@ get-or-create/reaper split is a fast follow-up availability slice.
   DashMap == the DashMap live set ranked by the actor — provably equal to the
   legacy selection, no false-negative. Applying the filter *inside* each tier
   keeps a stale high-priority extra from masking a live lower-priority resource
-  (tier-1 filtered-empty falls through to tier-2). Slice 2 retires this filter
-  when delivery moves to the actor (whose `try_deliver` evicts closed channels).
-- **Slice 2 — delivery + MUC fan-out cutover.** ⏳ **Next.** `deliver_peer_to_full`
+  (tier-1 filtered-empty falls through to tier-2). The filter is deliberately
+  **KEPT through Slice 2** (the delivery cutover): keeping it holds this
+  stale-extra window closed without needing the headless-persistence gate, and
+  keeps selection byte-for-byte identical to the legacy behaviour. A later slice
+  retires it once teardown flips the shared ownership atomic (or the empty-actor
+  reaper eagerly reaps stale extras), returning tier 1 to the actor's
+  `SelectRoutableResources`.
+- **Slice 2 — delivery + MUC fan-out cutover.** ✅ **Delivery cutover landed;
+  empty-actor reaper is the remaining unit.** `deliver_peer_to_full`
   routes via the actor's `TrySendPeer` with **no DashMap send fallback**.
   Duplicate is impossible structurally (one `try_send` per recipient). Full
   design, locked:
@@ -180,17 +189,22 @@ get-or-create/reaper split is a fast follow-up availability slice.
     safe). Test fixtures without an actor (`None`) keep the existing DashMap
     delivery path until Slice 3 migrates them. `deliver_to_detached` returns a
     `bool` (queued).
-  - **Retire the Slice 1 liveness filter.** `select_bare_jid_live_targets`
-    tier 1 returns to the actor's `SelectRoutableResources` (drop
-    `filter_deliverable`, the `registry` param, and the
-    `GetAvailableResources` + post-filter-max logic): delivery now self-heals
-    a stale extra via `TrySendPeer` → `DroppedClosed` eviction.
-  - **Headless-persistence gate (keeps Finding 1 closed).** In the bare-JID
-    else-branch, track whether *any* live target returned
-    `DeliveredLive`/`QueuedDetached` or any detached target queued; if **none**
-    reached a live/detached resource, run `run_headless_recipient_pass`
-    (local-domain only) so a sole stale extra (`DroppedClosed` → drop) still
-    archives.
+  - **Slice 1 liveness filter — KEPT (not retired) in this slice.** The
+    shipped cutover deliberately keeps `select_bare_jid_live_targets`'
+    DashMap-liveness intersection (`filter_deliverable`, the `registry` param,
+    the `GetAvailableResources` + post-filter-max logic). Keeping it holds the
+    stale-extra window closed without the headless-persistence gate below and
+    keeps selection byte-for-byte legacy-identical. Retiring it — and switching
+    to self-healing via `TrySendPeer` → `DroppedClosed` eviction — is deferred
+    to a later slice, once teardown flips the shared ownership atomic or the
+    empty-actor reaper eagerly reaps stale extras.
+  - **Headless-persistence gate — deferred with the filter retirement.** Only
+    needed once the liveness filter is retired: with the filter in place a sole
+    stale extra can never be selected, so there is no `DroppedClosed`-only
+    delivery that would skip archiving. When the filter is later retired, the
+    bare-JID else-branch must track whether *any* live target returned
+    `DeliveredLive`/`QueuedDetached` or any detached target queued, and run
+    `run_headless_recipient_pass` (local-domain only) when none did.
   - **Empty-actor reaper (MUST land with this slice — Copilot review on PR
     #1177).** Slice 2 activates `try_deliver`'s closed-channel eviction in
     production. When that eviction removes a `UserActor`'s *last* resource, the

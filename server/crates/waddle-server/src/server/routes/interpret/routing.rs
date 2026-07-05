@@ -352,7 +352,7 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 /// `DroppedFull` drops the frame (the recipient is connected but its 256-slot
 /// channel is full — a deliberate behaviour change from the old *blocking* 1:1
 /// send, so one wedged/zombie recipient can no longer stall global dispatch,
-/// issue #699; `try_deliver` already logs + bumps the Prometheus dropped-full
+/// issue #699; `try_deliver` already bumps the Prometheus dropped-full
 /// counter); `NotConnected`/`DroppedClosed` routes to the detached XEP-0198
 /// replay buffer.
 ///
@@ -441,7 +441,11 @@ async fn deliver_one_via_actor(
         }
         // May have been enqueued — kameo does not cancel the enqueued handler,
         // so a post-timeout run plus a detached replay would double-deliver.
+        // Count the drop so this enqueue-uncertain loss is graphable alongside
+        // the other broadcast drop reasons (the one drop path `try_deliver`
+        // does not itself account for).
         Err((ActorSendFailure::MaybeEnqueued, error)) => {
+            waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
             warn!(
                 jid = %target,
                 %error,
