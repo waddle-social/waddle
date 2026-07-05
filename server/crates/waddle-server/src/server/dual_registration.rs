@@ -6,14 +6,20 @@
 //! [`waddle_xmpp::registry::UserRegistryActor`] so the actor tree tracks live
 //! sessions ahead of the read-cutover.
 //!
-//! Both mirrors are **best-effort**: the DashMap registry is authoritative for
-//! delivery. Bare-JID selection and fan-out delivery read the actor tree as a
-//! fast path but fall back to the DashMap when the actor has no entry (see
-//! `route_to_connection` / `deliver_peer_to_full`), so a failed or lost mirror
-//! degrades to the DashMap rather than dropping a stanza. A failure is logged,
-//! never propagated — it must not fail a connection or a teardown path, and it
-//! must never stall one either: every mirror `ask` is bounded by
-//! [`MIRROR_TIMEOUT`] so a slow/wedged `UserRegistryActor` cannot hang the
+//! Both mirrors are **best-effort** and, in this PR, **write-only**: the
+//! DashMap `ConnectionRegistry` is the sole authoritative source for routing.
+//! Nothing reads the actor tree for delivery or selection yet — bare-JID
+//! selection (`route_to_connection`) and MUC fan-out (`deliver_peer_to_full`)
+//! are deliberately DashMap-only, because a best-effort async mirror cannot
+//! back a sound cutover (partial-mirror selection miss; duplicate delivery on
+//! a timed-out fan-out ask). The read-cutover lands only once registration is
+//! actor-authoritative (Phase 1 completion). Until then the mirror just tracks
+//! live sessions so that cutover has a warm actor tree to switch onto.
+//!
+//! A mirror failure is logged, never propagated — it must not fail a
+//! connection or a teardown path, and it must never stall one either: each
+//! mirror is a bounded `tell` (enqueue-only, not `ask`) capped by
+//! [`MIRROR_TIMEOUT`], so a slow/wedged `UserRegistryActor` cannot hang the
 //! live registration or teardown path (Copilot review on PR #1177).
 
 use std::time::Duration;

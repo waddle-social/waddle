@@ -19,11 +19,20 @@
   ADR-0017: multi-replica is refused until clustering ships (Phase 4). The
   cross-node routing/ownership fabric does not exist yet, so replicaCount > 1
   would split routing, presence, and MUC rooms across replicas that cannot
-  reach each other. Gate on clustering.enabled so scale-up is impossible until
-  the fabric lands and flips the flag.
+  reach each other.
+
+  Two guards, belt-and-suspenders (Copilot review on PR #1177): the
+  clustering.enabled flag is itself refused because the fabric is not built —
+  so nobody can flip it to unlock scale-up before it works — AND replicaCount
+  > 1 is refused independently. Phase 4 removes the first guard when clustering
+  actually ships; until then both replicaCount > 1 and clustering.enabled=true
+  fail to render.
 */ -}}
-{{- if and (gt (int .Values.replicaCount) 1) (not .Values.clustering.enabled) -}}
-{{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true, which ships in ADR-0017 Phase 4. Cross-node routing does not exist yet; a second replica would split routing/presence/MUC state." (int .Values.replicaCount)) -}}
+{{- if .Values.clustering.enabled -}}
+{{- fail "clustering.enabled=true is not supported yet — the cross-node routing/ownership fabric ships in ADR-0017 Phase 4. Leave clustering.enabled=false." -}}
+{{- end -}}
+{{- if gt (int .Values.replicaCount) 1 -}}
+{{- fail (printf "replicaCount (%d) > 1 is not supported yet — cross-node routing ships in ADR-0017 Phase 4. A second replica would split routing/presence/MUC state across pods that cannot reach each other." (int .Values.replicaCount)) -}}
 {{- end -}}
 
 {{- if and (eq .Values.updateStrategy.type "RollingUpdate") .Values.persistence.enabled (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
