@@ -398,23 +398,28 @@ impl ArchiveResolver for MamArchiveResolver {
             // Definitive miss: no archive row for this id. Poison
             // pill — the caller deletes the pending row.
             Ok(None) => return Ok(None),
-            // Permanent row-content corruption: the production lookup
-            // surfaces a bad timestamp/JID column
-            // (decode_sqlite_message_row / decode_postgres_message_row)
-            // as `Serialization`, and an unusable stored id as
-            // `InvalidQuery`. Retrying can never succeed, so these are
-            // genuine poison pills — `Ok(None)` deletes the row and
-            // fires the loud corruption counter instead of retrying
-            // forever under the "no mail lost" transient counter.
+            // Permanent, retry-can-never-succeed conditions — genuine
+            // poison pills. `Ok(None)` deletes the row and fires the
+            // loud corruption counter instead of retrying forever under
+            // the "no mail lost" transient counter:
+            //   - `Serialization`: bad timestamp/JID column, surfaced by
+            //     decode_sqlite_message_row / decode_postgres_message_row.
+            //   - `InvalidQuery`: an unusable stored id.
+            //   - `NotFound`: a definitive miss. The lookup returns
+            //     `Ok(None)` for a genuine miss today, so this is
+            //     unreachable here, but classifying it as a poison pill
+            //     (not transient) keeps a future refactor that surfaces
+            //     `NotFound` from wedging the row in an immortal retry.
             Err(
                 error @ (waddle_xmpp::mam::storage::MamStorageError::Serialization(_)
-                | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)),
+                | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)
+                | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
             ) => {
                 warn!(
                     error = %error,
                     archive_jid = %archive_bare,
                     stanza_id = %stanza_id,
-                    "MAM row decode failed permanently during flush; treating as poison pill"
+                    "MAM lookup resolved to a permanent miss during flush; treating as poison pill"
                 );
                 return Ok(None);
             }
@@ -422,10 +427,7 @@ impl ArchiveResolver for MamArchiveResolver {
             // typed error so the caller RELEASES the row (and the
             // rest of the claimed batch) for retry instead of
             // destroying queued mail during a MAM outage.
-            Err(
-                error @ (waddle_xmpp::mam::storage::MamStorageError::Database(_)
-                | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
-            ) => {
+            Err(error @ waddle_xmpp::mam::storage::MamStorageError::Database(_)) => {
                 warn!(
                     error = %error,
                     archive_jid = %archive_bare,
