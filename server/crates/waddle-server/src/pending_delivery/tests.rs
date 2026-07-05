@@ -1642,3 +1642,395 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
     let deleted = storage.delete_row(&row_id).await.expect("cleanup");
     assert_eq!(deleted, 1, "test row must be deleted by id");
 }
+
+// ── Issue #1122: transient MAM failure vs genuine tombstone miss ────
+//
+// The archive resolver must distinguish a transient MAM storage
+// error (release the row so the next flush retries) from a genuine
+// miss / unparseable row (poison pill: delete). Collapsing both into
+// "unresolved" meant a momentary MAM outage permanently destroyed
+// queued offline mail.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use waddle_xmpp::mam::storage::{InMemoryMamStorage, MamStorage, MamStorageError};
+use waddle_xmpp_core::mam::ArchivedMessage;
+
+/// MAM storage wrapper that fails `get_message_by_archive_or_stanza_id`
+/// with a transient `Database` error for the first
+/// `failures_remaining` lookups, then delegates to the inner
+/// in-memory storage. Every other operation delegates unconditionally.
+struct LookupOutageMamStorage {
+    inner: InMemoryMamStorage,
+    failures_remaining: AtomicU32,
+}
+
+impl LookupOutageMamStorage {
+    fn new(inner: InMemoryMamStorage, failures: u32) -> Self {
+        Self {
+            inner,
+            failures_remaining: AtomicU32::new(failures),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MamStorage for LookupOutageMamStorage {
+    async fn store_message(
+        &self,
+        archive_jid: &BareJid,
+        message: &ArchivedMessage,
+    ) -> Result<String, MamStorageError> {
+        self.inner.store_message(archive_jid, message).await
+    }
+    async fn query_messages(
+        &self,
+        archive_jid: &BareJid,
+        query: &waddle_xmpp_core::mam::MamQuery,
+    ) -> Result<waddle_xmpp_core::mam::MamResult, MamStorageError> {
+        self.inner.query_messages(archive_jid, query).await
+    }
+    async fn get_message(
+        &self,
+        archive_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        self.inner.get_message(archive_id).await
+    }
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        self.inner
+            .replace_with_tombstone(archive_id, tombstone)
+            .await
+    }
+    async fn get_message_by_stanza_id(
+        &self,
+        archive_jid: &BareJid,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        self.inner
+            .get_message_by_stanza_id(archive_jid, stanza_id)
+            .await
+    }
+    async fn get_message_by_message_id(
+        &self,
+        archive_jid: &BareJid,
+        message_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        self.inner
+            .get_message_by_message_id(archive_jid, message_id)
+            .await
+    }
+    async fn get_message_by_archive_or_stanza_id(
+        &self,
+        archive_jid: &BareJid,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let remaining = self.failures_remaining.load(Ordering::Acquire);
+        if remaining > 0 {
+            self.failures_remaining
+                .store(remaining - 1, Ordering::Release);
+            return Err(MamStorageError::Database(
+                "simulated transient MAM outage".to_string(),
+            ));
+        }
+        self.inner
+            .get_message_by_archive_or_stanza_id(archive_jid, stanza_id)
+            .await
+    }
+    async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
+        self.inner.count_messages(room_jid).await
+    }
+    async fn delete_before(
+        &self,
+        room_jid: &BareJid,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, MamStorageError> {
+        self.inner.delete_before(room_jid, before).await
+    }
+}
+
+/// Seed the given MAM storage with an archived copy of a chat message
+/// addressed to `recipient`, retrievable by `archive_id` via
+/// `get_message_by_archive_or_stanza_id`. `stanza_xml` overrides the
+/// preserved wire XML (pass `None` to leave the column empty, or
+/// garbage to simulate a corrupt row).
+async fn seed_archived_message(
+    mam: &dyn MamStorage,
+    recipient: &str,
+    archive_id: &str,
+    stanza_xml: Option<String>,
+) {
+    let recipient_bare = bare(recipient);
+    let mut archived = ArchivedMessage::for_test(
+        "bob@elsewhere/x".parse::<jid::Jid>().expect("jid"),
+        jid::Jid::from(recipient_bare.clone()),
+    );
+    archived.id = archive_id.to_string();
+    archived.stanza_id = Some(StanzaId::new(
+        archive_id,
+        jid::Jid::from(recipient_bare.clone()),
+    ));
+    archived.stanza_xml = stanza_xml;
+    mam.store_message(&recipient_bare, &archived)
+        .await
+        .expect("seed archived message");
+}
+
+fn valid_archived_stanza_xml(recipient: &str, body: &str) -> String {
+    transient_message_xml(recipient, body)
+}
+
+#[tokio::test]
+async fn flush_archived_row_transient_resolver_error_releases_row_for_retry() {
+    // Issue #1122 core repro: MAM lookup errors (outage), the row
+    // must be RELEASED for the next flush — not poison-pill-deleted.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(archived_row("alice@example.com", "archive-1"))
+        .await
+        .unwrap();
+
+    // MAM storage that always fails the lookup.
+    let mam: Arc<dyn MamStorage> = Arc::new(LookupOutageMamStorage::new(
+        InMemoryMamStorage::new(),
+        u32::MAX,
+    ));
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let sm_session = SmSessionId::new("sm-stream-mam-outage");
+
+    let outcome = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.claimed, 1);
+    assert_eq!(outcome.pushed, 0);
+    assert_eq!(
+        outcome.unresolved, 0,
+        "transient MAM error must NOT count as an unresolved poison pill"
+    );
+    assert_eq!(
+        outcome.deferred_transient, 1,
+        "transient MAM error must be counted as a deferred row"
+    );
+    assert!(rx.try_recv().is_err(), "nothing pushed during the outage");
+
+    // The row survives AND its claim is released so the next flush
+    // (or another recovering resource) can re-claim it.
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(rows.len(), 1, "row must not be deleted on transient error");
+    assert!(
+        rows[0].flushed_in_session.is_none(),
+        "row must be released for re-claim on the next flush"
+    );
+}
+
+#[tokio::test]
+async fn flush_archived_row_genuine_mam_miss_is_poison_pill_deleted() {
+    // Genuine tombstone miss (`Ok(None)` from MAM): the original
+    // stanza is unrecoverable — keep the poison-pill delete so the
+    // flush loop never wedges on the row.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(archived_row("alice@example.com", "archive-missing"))
+        .await
+        .unwrap();
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new()); // empty archive
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let sm_session = SmSessionId::new("sm-stream-mam-miss");
+
+    let outcome = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.unresolved, 1);
+    assert_eq!(outcome.deferred_transient, 0);
+    assert_eq!(
+        storage.count(&bare("alice@example.com")).await.unwrap(),
+        0,
+        "genuine miss is a poison pill: row deleted"
+    );
+}
+
+#[tokio::test]
+async fn flush_archived_row_unparseable_stanza_xml_is_poison_pill() {
+    // Corrupt archive rows (garbage / absent stanza_xml) are
+    // unrecoverable — poison-pill delete, never retry-loop.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(archived_row("alice@example.com", "archive-garbage"))
+        .await
+        .unwrap();
+    storage
+        .insert(archived_row("alice@example.com", "archive-no-xml"))
+        .await
+        .unwrap();
+
+    let mam_inner = InMemoryMamStorage::new();
+    seed_archived_message(
+        &mam_inner,
+        "alice@example.com",
+        "archive-garbage",
+        Some("<<<definitely-not-xml".to_string()),
+    )
+    .await;
+    seed_archived_message(&mam_inner, "alice@example.com", "archive-no-xml", None).await;
+    let mam: Arc<dyn MamStorage> = Arc::new(mam_inner);
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let sm_session = SmSessionId::new("sm-stream-mam-corrupt");
+
+    let outcome = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.unresolved, 2);
+    assert_eq!(outcome.deferred_transient, 0);
+    assert_eq!(
+        storage.count(&bare("alice@example.com")).await.unwrap(),
+        0,
+        "unparseable rows are poison pills: deleted, not retried"
+    );
+}
+
+#[tokio::test]
+async fn flush_brief_mam_outage_preserves_offline_message() {
+    // End-to-end issue #1122 guarantee: a MAM outage during one flush
+    // loses no mail — the next flush re-claims the released row,
+    // resolves it, and delivers it via the normal SM-ack lifecycle.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(archived_row("alice@example.com", "archive-1"))
+        .await
+        .unwrap();
+
+    let mam_inner = InMemoryMamStorage::new();
+    seed_archived_message(
+        &mam_inner,
+        "alice@example.com",
+        "archive-1",
+        Some(valid_archived_stanza_xml(
+            "alice@example.com",
+            "survived-the-outage",
+        )),
+    )
+    .await;
+    // Fail exactly the first lookup, then recover.
+    let mam: Arc<dyn MamStorage> = Arc::new(LookupOutageMamStorage::new(mam_inner, 1));
+    let resolver = MamArchiveResolver { mam_storage: mam };
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let sm_session = SmSessionId::new("sm-stream-brief-outage");
+
+    // Flush #1: outage — nothing delivered, nothing lost.
+    let first = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+    assert_eq!(first.deferred_transient, 1);
+    assert_eq!(first.pushed, 0);
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+
+    // Flush #2: MAM is back — the released row is re-claimed and
+    // delivered.
+    let second = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+    assert_eq!(second.claimed, 1);
+    assert_eq!(second.pushed, 1);
+    assert_eq!(second.deferred_transient, 0);
+    assert_eq!(second.unresolved, 0);
+
+    let pushed = rx.try_recv().expect("replay stanza delivered");
+    match &pushed.stanza {
+        waddle_xmpp::Stanza::Message(m) => {
+            assert_eq!(
+                m.bodies.get("").map(|b| b.as_str()),
+                Some("survived-the-outage")
+            );
+        }
+        other => panic!("expected Message replay, got {other:?}"),
+    }
+
+    // Locked Q7b: after delivery the row stays claimed by the SM
+    // session; only the normal SM-ack path removes it.
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].flushed_in_session.as_ref(), Some(&sm_session));
+    storage
+        .delete_acked_through(&sm_session, u32::MAX)
+        .await
+        .unwrap();
+}

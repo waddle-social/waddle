@@ -52,8 +52,8 @@ mod flush;
 
 pub use database::DatabasePendingDeliveryStorage;
 pub use flush::{
-    flush_for_resource, ArchiveResolver, FlushContext, FlushOutcome, MamArchiveResolver,
-    NullArchiveResolver,
+    flush_for_resource, ArchiveResolveError, ArchiveResolver, FlushContext, FlushOutcome,
+    MamArchiveResolver, NullArchiveResolver,
 };
 
 #[cfg(test)]

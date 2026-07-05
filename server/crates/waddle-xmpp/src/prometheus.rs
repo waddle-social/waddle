@@ -52,6 +52,12 @@ static PENDING_DELIVERY_AGED_OUT: AtomicU64 = AtomicU64::new(0);
 // materialize a row's MAM payload and dropped it. Should be ~0 on a
 // healthy deployment; non-zero signals MAM corruption.
 static PENDING_DELIVERY_UNRESOLVED_POISON_PILL: AtomicU64 = AtomicU64::new(0);
+// `pending_delivery_archive_lookup_transient_failure`: flush hit a
+// transient MAM storage error resolving an Archived row and RELEASED
+// the row for retry instead of dropping it (issue #1122). Distinct
+// from the poison-pill counter: this one signals MAM storage
+// availability problems, not archive corruption, and no mail is lost.
+static PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE: AtomicU64 = AtomicU64::new(0);
 // `sm_promotion_storage_failed`: Q6 promotion encountered a
 // pending_delivery insert error and preserved the durable SM row for
 // retry (issue #209 PR #346 + finding #14 dead-letter cap).
@@ -361,6 +367,10 @@ pub fn increment_pending_delivery_unresolved_poison_pill() {
     PENDING_DELIVERY_UNRESOLVED_POISON_PILL.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_pending_delivery_archive_lookup_transient_failure() {
+    PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn add_sm_promotion_storage_failed(n: u64) {
     SM_PROMOTION_STORAGE_FAILED.fetch_add(n, Ordering::Relaxed);
 }
@@ -501,6 +511,7 @@ pub fn reset_metrics_for_test() {
     PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.store(0, Ordering::Release);
     PENDING_DELIVERY_AGED_OUT.store(0, Ordering::Release);
     PENDING_DELIVERY_UNRESOLVED_POISON_PILL.store(0, Ordering::Release);
+    PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.store(0, Ordering::Release);
     SM_PROMOTION_STORAGE_FAILED.store(0, Ordering::Release);
     SM_PROMOTION_NOT_PROMOTABLE.store(0, Ordering::Release);
     SM_PROMOTION_BLOCKLIST_FAILED.store(0, Ordering::Release);
@@ -536,6 +547,8 @@ pub fn render_metrics() -> String {
     let pending_orphan_released = PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.load(Ordering::Relaxed);
     let pending_aged_out = PENDING_DELIVERY_AGED_OUT.load(Ordering::Relaxed);
     let pending_poison_pill = PENDING_DELIVERY_UNRESOLVED_POISON_PILL.load(Ordering::Relaxed);
+    let pending_archive_lookup_transient =
+        PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.load(Ordering::Relaxed);
     let sm_promotion_storage_failed = SM_PROMOTION_STORAGE_FAILED.load(Ordering::Relaxed);
     let sm_promotion_not_promotable = SM_PROMOTION_NOT_PROMOTABLE.load(Ordering::Relaxed);
     let sm_promotion_blocklist_failed = SM_PROMOTION_BLOCKLIST_FAILED.load(Ordering::Relaxed);
@@ -590,6 +603,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_pending_delivery_unresolved_poison_pill_total Pending_delivery flushes that dropped a row because its MAM payload could not be resolved (corruption signal).\n",
             "# TYPE waddle_pending_delivery_unresolved_poison_pill_total counter\n",
             "waddle_pending_delivery_unresolved_poison_pill_total {pending_poison_pill}\n",
+            "# HELP waddle_pending_delivery_archive_lookup_transient_failure_total Pending_delivery flushes that hit a transient MAM storage error resolving an Archived row and released the row for retry instead of dropping it (issue #1122). Signals MAM storage availability problems, not corruption; no mail is lost.\n",
+            "# TYPE waddle_pending_delivery_archive_lookup_transient_failure_total counter\n",
+            "waddle_pending_delivery_archive_lookup_transient_failure_total {pending_archive_lookup_transient}\n",
             "# HELP waddle_sm_promotion_storage_failed_total Q6 promotion encountered a transient pending_delivery insert error; durable SM row preserved for retry.\n",
             "# TYPE waddle_sm_promotion_storage_failed_total counter\n",
             "waddle_sm_promotion_storage_failed_total {sm_promotion_storage_failed}\n",
@@ -641,6 +657,7 @@ pub fn render_metrics() -> String {
         pending_orphan_released = pending_orphan_released,
         pending_aged_out = pending_aged_out,
         pending_poison_pill = pending_poison_pill,
+        pending_archive_lookup_transient = pending_archive_lookup_transient,
         sm_promotion_storage_failed = sm_promotion_storage_failed,
         sm_promotion_not_promotable = sm_promotion_not_promotable,
         sm_promotion_blocklist_failed = sm_promotion_blocklist_failed,
@@ -767,6 +784,7 @@ mod tests {
         add_pending_delivery_orphan_claims_released(7);
         add_pending_delivery_aged_out(3);
         increment_pending_delivery_unresolved_poison_pill();
+        increment_pending_delivery_archive_lookup_transient_failure();
         add_sm_promotion_storage_failed(2);
         increment_sm_promotion_not_promotable();
         increment_sm_promotion_blocklist_failed();
@@ -781,6 +799,7 @@ mod tests {
             "waddle_pending_delivery_orphan_claims_released_total",
             "waddle_pending_delivery_aged_out_total",
             "waddle_pending_delivery_unresolved_poison_pill_total",
+            "waddle_pending_delivery_archive_lookup_transient_failure_total",
             "waddle_sm_promotion_storage_failed_total",
             "waddle_sm_promotion_not_promotable_total",
             "waddle_sm_promotion_blocklist_failed_total",
@@ -800,6 +819,9 @@ mod tests {
         assert!(rendered.contains("waddle_pending_delivery_quota_exceeded_total 1"));
         assert!(rendered.contains("waddle_pending_delivery_orphan_claims_released_total 7"));
         assert!(rendered.contains("waddle_pending_delivery_aged_out_total 3"));
+        assert!(
+            rendered.contains("waddle_pending_delivery_archive_lookup_transient_failure_total 1")
+        );
         assert!(rendered.contains("waddle_sm_promotion_storage_failed_total 2"));
         assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 1"));
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));

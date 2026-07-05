@@ -145,6 +145,7 @@ async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJ
             claimed = outcome.claimed,
             pushed = outcome.pushed,
             unresolved = outcome.unresolved,
+            deferred_transient = outcome.deferred_transient,
             "XEP-0160 pending_delivery flush completed"
         );
     }
