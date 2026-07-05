@@ -111,12 +111,27 @@ async fn handle_muc_join_unlocked(
                 .as_ref()
                 .map(|snapshot| snapshot.room.config.members_only)
                 .unwrap_or(channel.members_only);
+            let Ok(session_bare) = session.user_jid.parse::<BareJid>() else {
+                return vec![build_muc_presence_error_xml(
+                    room_jid,
+                    &nick,
+                    sender_jid,
+                    StanzaError::new(
+                        ErrorType::Wait,
+                        DefinedCondition::InternalServerError,
+                        "en",
+                        "Failed to resolve managed-channel affiliation.",
+                    ),
+                )];
+            };
             match resolve_managed_channel_affiliation(
                 state,
-                &session.user_jid,
+                &session_bare,
                 room_jid,
                 &channel.id,
                 admission_members_only,
+                // Join admission repairs a stale Space→channel projection.
+                true,
             )
             .await
             {

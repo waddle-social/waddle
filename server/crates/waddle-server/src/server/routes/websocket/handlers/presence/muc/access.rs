@@ -5,13 +5,14 @@ use crate::permissions::{
 
 pub(super) async fn resolve_managed_channel_affiliation(
     state: &WebSocketState,
-    user_jid: &str,
+    user_jid: &BareJid,
     room_jid: &BareJid,
     channel_id: &str,
     members_only: bool,
+    allow_repairs: bool,
 ) -> Result<Option<Affiliation>, ()> {
     let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(user_jid);
+    let subject = Subject::user(user_jid.to_string());
     if let Some(affiliation) =
         direct_channel_affiliation(state, object.clone(), subject.clone()).await?
     {
@@ -39,9 +40,19 @@ pub(super) async fn resolve_managed_channel_affiliation(
         return Ok(read_access_affiliation(members_only));
     }
 
-    restore_space_parent_tuples_for_room(state, room_jid, channel_id).await?;
-    if check_channel_permission(state, object, subject, Permission::Read).await? {
-        return Ok(read_access_affiliation(members_only));
+    // The parent-tuple repair below issues `WriteTuple`/`DeleteTuple`
+    // effects. Join admission opts in (`allow_repairs = true`) so a stale
+    // Space→channel projection self-heals on the way into the room. The
+    // read-only MAM archive gate opts out: an archive query must not
+    // mutate the permission graph. A member whose Space-inherited read
+    // access hinges on a broken parent tuple is denied here until their
+    // next join repairs it; explicit channel affiliations (resolved by
+    // `direct_channel_affiliation` above) are unaffected.
+    if allow_repairs {
+        restore_space_parent_tuples_for_room(state, room_jid, channel_id).await?;
+        if check_channel_permission(state, object, subject, Permission::Read).await? {
+            return Ok(read_access_affiliation(members_only));
+        }
     }
     Ok(None)
 }
@@ -106,10 +117,12 @@ pub async fn resolve_muc_room_archive_access(
             .unwrap_or(channel.members_only);
         return match resolve_managed_channel_affiliation(
             state,
-            requester.to_string().as_str(),
+            requester,
             room_jid,
             &channel.id,
             members_only,
+            // Read-only archive gate: never mutate the permission graph.
+            false,
         )
         .await
         {

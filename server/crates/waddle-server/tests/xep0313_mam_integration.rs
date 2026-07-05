@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use xmpp_parsers::message::MessageType;
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -991,15 +992,49 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
 // XEP-0313 §5.1 MUC archive access gate (#1093)
 // =========================================================================
 
+const NS_CLIENT: &str = "jabber:client";
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+const NS_XDATA: &str = "jabber:x:data";
+const MUC_ROOMCONFIG_FORM: &str = "http://jabber.org/protocol/muc#roomconfig";
+const ARCHIVE_PROBE_BODY: &str = "archive gate probe";
+
+/// Serialize a `minidom::Element` to a wire frame. The XML-generation
+/// hard rule bans `format!`-built stanzas even in tests, so stanzas are
+/// composed with typed `minidom` builders and serialized here.
+fn element_to_xml(element: Element) -> String {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize XML");
+    String::from_utf8(bytes).expect("XML serialization is UTF-8")
+}
+
+fn attr_name(name: &'static str) -> &'static minidom::rxml::NcNameStr {
+    name.try_into().expect("valid ncname")
+}
+
+fn data_form_field(var: &str, field_type: Option<&str>, value: &str) -> Element {
+    let mut builder =
+        Element::builder("field", NS_XDATA).attr(attr_name("var").to_owned(), var.to_owned());
+    if let Some(field_type) = field_type {
+        builder = builder.attr(attr_name("type").to_owned(), field_type.to_owned());
+    }
+    builder
+        .append(
+            Element::builder("value", NS_XDATA)
+                .append(value.to_owned())
+                .build(),
+        )
+        .build()
+}
+
 /// Join (creating an instant room), set the given members-only state via
 /// the XEP-0045 §10.2 owner-config form, and archive one message.
 async fn create_room_with_message(client: &mut WsXmppClient, room: &str, members_only: bool) {
-    client
-        .send(&format!(
-            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
-        ))
-        .await
-        .expect("send join");
+    let join = Element::builder("presence", NS_CLIENT)
+        .attr(attr_name("to").to_owned(), format!("{room}/{USERNAME}"))
+        .append(Element::builder("x", NS_MUC).build())
+        .build();
+    client.send(&element_to_xml(join)).await.expect("send join");
     client
         .recv_until(|f| f.contains("<subject"))
         .await
@@ -1007,10 +1042,27 @@ async fn create_room_with_message(client: &mut WsXmppClient, room: &str, members
 
     let cfg_id = format!("cfg-{}", uuid::Uuid::new_v4());
     let members_only_value = if members_only { "1" } else { "0" };
-    client
-        .send(&format!(
-            r#"<iq type="set" id="{cfg_id}" to="{room}"><query xmlns="http://jabber.org/protocol/muc#owner"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/muc#roomconfig</value></field><field var="muc#roomconfig_membersonly"><value>{members_only_value}</value></field></x></query></iq>"#
+    let form = Element::builder("x", NS_XDATA)
+        .attr(attr_name("type").to_owned(), "submit")
+        .append(data_form_field(
+            "FORM_TYPE",
+            Some("hidden"),
+            MUC_ROOMCONFIG_FORM,
         ))
+        .append(data_form_field(
+            "muc#roomconfig_membersonly",
+            None,
+            members_only_value,
+        ))
+        .build();
+    let owner_config = Element::builder("iq", NS_CLIENT)
+        .attr(attr_name("type").to_owned(), "set")
+        .attr(attr_name("id").to_owned(), cfg_id.clone())
+        .attr(attr_name("to").to_owned(), room.to_owned())
+        .append(Element::builder("query", NS_MUC_OWNER).append(form).build())
+        .build();
+    client
+        .send(&element_to_xml(owner_config))
         .await
         .expect("send owner config");
     let cfg_response = client
@@ -1022,14 +1074,21 @@ async fn create_room_with_message(client: &mut WsXmppClient, room: &str, members
         "owner config must be accepted: {cfg_response}"
     );
 
+    let message = Element::builder("message", NS_CLIENT)
+        .attr(attr_name("type").to_owned(), "groupchat")
+        .attr(attr_name("to").to_owned(), room.to_owned())
+        .append(
+            Element::builder("body", NS_CLIENT)
+                .append(ARCHIVE_PROBE_BODY)
+                .build(),
+        )
+        .build();
     client
-        .send(&format!(
-            r#"<message type="groupchat" to="{room}"><body>archive gate probe</body></message>"#
-        ))
+        .send(&element_to_xml(message))
         .await
         .expect("send message");
     client
-        .recv_matching(|f| f.contains("archive gate probe"))
+        .recv_matching(|f| f.contains(ARCHIVE_PROBE_BODY))
         .await
         .expect("echo");
 }
