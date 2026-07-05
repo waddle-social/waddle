@@ -110,6 +110,12 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
 pub(crate) async fn create_websocket_mam_storage(
     database_url: Option<String>,
 ) -> Result<Arc<dyn MamStorage>> {
+    if !cfg!(test) {
+        ensure_mam_database_is_durable(
+            database_url.as_deref(),
+            env_flag("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY"),
+        )?;
+    }
     let storage = match database_url.as_deref() {
         Some(database_url) => SqlxMamStorage::open(database_url).await,
         None => SqlxMamStorage::open_in_memory().await,
@@ -825,6 +831,32 @@ async fn create_pending_delivery_storage(
         .await
         .expect("open pending_delivery storage"),
     )
+}
+
+/// Fail-fast guard for XEP-0313 MAM storage durability. A missing or
+/// in-memory database URL is only acceptable for dev/test runs that
+/// explicitly opt in via `WADDLE_XMPP_MAM_ALLOW_IN_MEMORY`.
+pub(crate) fn ensure_mam_database_is_durable(
+    database_url: Option<&str>,
+    allow_in_memory: bool,
+) -> Result<()> {
+    if database_url.is_some_and(|url| !sqlite_url_is_in_memory(url)) {
+        return Ok(());
+    }
+    if allow_in_memory {
+        warn!(
+            "WADDLE_XMPP_MAM_ALLOW_IN_MEMORY is set; the XEP-0313 MAM archive \
+             is using in-memory SQLite and will NOT survive restart. \
+             Use only in tests."
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "XEP-0313 MAM archive requires durable storage. Set \
+         WADDLE_XMPP_MAM_DATABASE_URL (or the WADDLE_DATABASE_URL fallback) \
+         to a durable SQLite/Postgres DSN, or set \
+         WADDLE_XMPP_MAM_ALLOW_IN_MEMORY=true only for tests."
+    );
 }
 
 fn ensure_push_service_global_database_is_durable() -> Result<()> {

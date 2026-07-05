@@ -25,6 +25,7 @@ import type { ActivityPublication, MoodPublication, TunePublication } from "@/li
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { FeedEntry, FeedPostInput, FeedSourceKind, Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
 import { jidLocalpart } from "@/lib/xmpp/jid";
+import { safeExternalUrl } from "@/lib/chat-ui";
 
 const SOURCE_ICONS = {
   mood: Smile,
@@ -453,8 +454,8 @@ function selectStoryReaction(emoji: string) {
               {{ item.entry.body }}
             </p>
             <a
-              v-if="item.entry.link"
-              :href="item.entry.link"
+              v-if="safeExternalUrl(item.entry.link)"
+              :href="safeExternalUrl(item.entry.link)"
               target="_blank"
               rel="noopener noreferrer"
               class="type-caption inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"

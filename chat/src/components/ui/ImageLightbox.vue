@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, watch } from "vue";
 import { X, ChevronLeft, ChevronRight, Download } from "lucide-vue-next";
+import { safeAttachmentUrl } from "@/lib/attachment-url";
 
 interface LightboxImage {
   url: string;
@@ -21,6 +22,10 @@ const emit = defineEmits<{
 }>();
 
 const current = computed(() => props.images[props.index] ?? null);
+// Callers already resolve gallery entries through the attachment scheme
+// allowlist; re-checking here keeps the lightbox safe against any future
+// caller that forgets to.
+const currentUrl = computed(() => safeAttachmentUrl(current.value?.url));
 const hasPrev = computed(() => props.index > 0);
 const hasNext = computed(() => props.index < props.images.length - 1);
 
@@ -70,7 +75,8 @@ onBeforeUnmount(() => {
 
       <div class="z-sticky absolute top-3 right-3 flex items-center gap-1">
         <a
-          :href="current.url"
+          v-if="currentUrl"
+          :href="currentUrl"
           :download="current.name ?? ''"
           target="_blank"
           rel="noopener noreferrer"
@@ -115,7 +121,8 @@ onBeforeUnmount(() => {
 
       <div class="chat-lightbox-frame relative flex flex-col items-center justify-center" @click.stop>
         <img
-          :src="current.url"
+          v-if="currentUrl"
+          :src="currentUrl"
           :alt="current.name ?? 'Image'"
           class="chat-lightbox-image object-contain rounded-lg shadow-2xl animate-slide-up"
         />

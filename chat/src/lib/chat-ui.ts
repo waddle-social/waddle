@@ -649,7 +649,7 @@ function githubEventPresentation(
   };
 }
 
-function safeExternalUrl(value: string | undefined): string | undefined {
+export function safeExternalUrl(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
   try {

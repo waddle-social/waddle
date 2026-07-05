@@ -7,10 +7,22 @@ pub struct FlushOutcome {
     pub claimed: u32,
     /// Number of replayed stanzas successfully pushed to the resource.
     pub pushed: u32,
-    /// Number of rows the resolver could not materialize (Archived row
-    /// whose MAM lookup is not available — happens when MAM storage is
-    /// unwired in the test fixture, never in production).
+    /// Number of rows the resolver definitively could not materialize
+    /// (Archived row whose MAM lookup returned no row, or whose
+    /// preserved wire XML is unparseable). These are poison pills:
+    /// the row is deleted so the flush loop never wedges on it.
     pub unresolved: u32,
+    /// Number of rows whose MAM lookup failed *transiently* (issue
+    /// #1122), plus every later row in the same claimed batch: the
+    /// first transient failure is batch-fatal (see the Err arm in
+    /// [`flush_for_resource`]) so FIFO order is preserved and a MAM
+    /// outage isn't hammered once per remaining row. These rows are
+    /// NOT deleted — their claims are released, and the presence
+    /// handler resets the connection's offline-flush CAS when this
+    /// counter is non-zero so the client's next presence update
+    /// re-attempts the flush (another recovering resource can also
+    /// pick the rows up).
+    pub deferred_transient: u32,
     /// Number of rows dropped because the recipient blocked the sender
     /// AFTER the row was inserted (XEP-0191 §2 step 4 flush-time
     /// re-evaluation, issue #209 PR #360). Blocked rows are deleted
@@ -124,24 +136,69 @@ where
         return outcome;
     }
 
-    for row in claimed {
-        let Some(payload) = materialize(&row, archive_resolver).await else {
-            // Archived row whose MAM lookup failed — the original
-            // stanza is unrecoverable. Drop the row instead of
-            // releasing it so we don't loop forever on a poison pill.
-            // The message is permanently lost from the recipient's
-            // perspective; we surface it loudly so production logs
-            // can flag MAM corruption / unexpected tombstones.
-            outcome.unresolved += 1;
-            waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
-            if let Err(error) = storage.delete_row(&row.id).await {
+    let mut rows = claimed.into_iter();
+    while let Some(row) = rows.next() {
+        let payload = match materialize(&row, archive_resolver).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => {
+                // Archived row whose MAM lookup definitively found
+                // nothing usable (row missing, tombstoned, or its
+                // preserved XML is unparseable) — the original stanza
+                // is unrecoverable. Drop the row instead of releasing
+                // it so we don't loop forever on a poison pill. The
+                // message is permanently lost from the recipient's
+                // perspective; we surface it loudly so production
+                // logs can flag MAM corruption / unexpected
+                // tombstones.
+                outcome.unresolved += 1;
+                waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
+                if let Err(error) = storage.delete_row(&row.id).await {
+                    warn!(
+                        row_id = %row.id,
+                        error = %error,
+                        "pending_delivery delete_row (unresolved poison pill) failed"
+                    );
+                }
+                continue;
+            }
+            Err(error) => {
+                // Issue #1122: the MAM lookup ERRORED — a transient
+                // storage failure, not a missing row. Deleting here
+                // would let a momentary MAM outage destroy queued
+                // offline mail. The failure is BATCH-FATAL:
+                // pending_delivery is FIFO (XEP-0160 §3 order of
+                // receipt), so delivering later rows while releasing
+                // this one would reorder the recipient's offline
+                // mail, and a hard MAM outage would otherwise cost
+                // one failing lookup per remaining archived row,
+                // awaited inline in the presence handler. Release
+                // this row and every remaining claimed row, then
+                // abort the flush. Retry fires on the client's next
+                // presence update — `maybe_flush_pending_delivery`
+                // resets the connection's offline-flush CAS when
+                // `deferred_transient > 0` — or via another
+                // recovering resource.
+                outcome.deferred_transient += 1;
+                waddle_xmpp::prometheus::increment_pending_delivery_archive_lookup_transient_failure();
                 warn!(
                     row_id = %row.id,
                     error = %error,
-                    "pending_delivery delete_row (unresolved poison pill) failed"
+                    "pending_delivery archive lookup failed transiently; \
+                     aborting flush batch and releasing this row and all \
+                     remaining claimed rows for retry"
                 );
+                release_row_or_warn(storage, &row.id, "transient archive failure").await;
+                for deferred in rows.by_ref() {
+                    outcome.deferred_transient += 1;
+                    release_row_or_warn(
+                        storage,
+                        &deferred.id,
+                        "transient archive failure (batch abort)",
+                    )
+                    .await;
+                }
+                break;
             }
-            continue;
         };
         // XEP-0191 §2 step 4 flush-time block re-evaluation
         // (issue #209 PR #360): if the recipient blocked the sender
@@ -251,6 +308,25 @@ where
     outcome
 }
 
+/// Release a row's flush claim, downgrading a release failure to a
+/// warning: the claim-expiry janitor will release the row once the
+/// claiming session expires.
+async fn release_row_or_warn(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    row_id: &PendingRowId,
+    context: &'static str,
+) {
+    if let Err(error) = storage.release_row(row_id).await {
+        warn!(
+            row_id = %row_id,
+            error = %error,
+            context,
+            "pending_delivery release_row failed; claim-expiry janitor \
+             will release it once the session expires"
+        );
+    }
+}
+
 /// Resolves Archived `PendingRow` references against MAM.
 ///
 /// Production wiring uses [`MamArchiveResolver`] over a real
@@ -261,10 +337,40 @@ pub trait ArchiveResolver: Send + Sync {
     /// Read the archived stanza by canonical XEP-0359 [`StanzaId`]
     /// (`{ id, by }`). Returns the typed
     /// [`xmpp_parsers::message::Message`] reconstructed from the MAM
-    /// row; returns `None` on miss or any non-fatal lookup failure
-    /// (the caller treats this as a poison pill and drops the
-    /// `pending_delivery` row).
-    async fn resolve(&self, stanza_id: &StanzaId) -> Option<xmpp_parsers::message::Message>;
+    /// row.
+    ///
+    /// The three outcomes are semantically distinct (issue #1122):
+    ///
+    /// - `Ok(Some(message))` — resolved; the caller replays it.
+    /// - `Ok(None)` — definitive miss (no archive row, tombstone, or
+    ///   unparseable preserved XML). The caller treats this as a
+    ///   poison pill and deletes the `pending_delivery` row.
+    /// - `Err(_)` — *transient* lookup failure (MAM storage outage).
+    ///   Batch-fatal for the caller: it releases this row's claim AND
+    ///   every remaining claimed row, then aborts the flush so FIFO
+    ///   order is preserved; the queued messages are never destroyed
+    ///   by a momentary outage. Permanent decode failures
+    ///   (`Serialization` / `InvalidQuery` row corruption) must be
+    ///   reported as `Ok(None)`, never as `Err(_)`.
+    async fn resolve(
+        &self,
+        stanza_id: &StanzaId,
+    ) -> Result<Option<xmpp_parsers::message::Message>, ArchiveResolveError>;
+}
+
+/// Transient failure resolving an Archived `pending_delivery` row
+/// against MAM (issue #1122). Distinct from a genuine miss
+/// (`Ok(None)`): the flush loop releases the row for retry instead of
+/// poison-pill-deleting it.
+#[derive(Debug, thiserror::Error)]
+pub enum ArchiveResolveError {
+    /// The MAM storage lookup itself failed (DB outage, timeout, …).
+    /// Carries only *retryable* storage errors: permanent decode
+    /// failures (`MamStorageError::Serialization` / `InvalidQuery`)
+    /// are mapped to `Ok(None)` poison pills by
+    /// [`MamArchiveResolver::resolve`] and never reach this variant.
+    #[error("MAM storage lookup failed: {0}")]
+    Storage(waddle_xmpp::mam::storage::MamStorageError),
 }
 
 /// MAM-backed resolver for production use.
@@ -274,7 +380,10 @@ pub struct MamArchiveResolver {
 
 #[async_trait::async_trait]
 impl ArchiveResolver for MamArchiveResolver {
-    async fn resolve(&self, stanza_id: &StanzaId) -> Option<xmpp_parsers::message::Message> {
+    async fn resolve(
+        &self,
+        stanza_id: &StanzaId,
+    ) -> Result<Option<xmpp_parsers::message::Message>, ArchiveResolveError> {
         // MAM lookup keys on the archive's *bare* JID — XEP-0313 §5
         // archives are per-user / per-room (BareJid), and the canonical
         // `StanzaId.by` Jid carries that information (the MAM writer
@@ -286,24 +395,63 @@ impl ArchiveResolver for MamArchiveResolver {
             .await
         {
             Ok(Some(archived)) => archived,
-            Ok(None) => return None,
-            Err(error) => {
+            // Definitive miss: no archive row for this id. Poison
+            // pill — the caller deletes the pending row.
+            Ok(None) => return Ok(None),
+            // Permanent, retry-can-never-succeed conditions — genuine
+            // poison pills. `Ok(None)` deletes the row and fires the
+            // loud corruption counter instead of retrying forever under
+            // the "no mail lost" transient counter:
+            //   - `Serialization`: bad timestamp/JID column, surfaced by
+            //     decode_sqlite_message_row / decode_postgres_message_row.
+            //   - `InvalidQuery`: an unusable stored id.
+            //   - `NotFound`: a definitive miss. The lookup returns
+            //     `Ok(None)` for a genuine miss today, so this is
+            //     unreachable here, but classifying it as a poison pill
+            //     (not transient) keeps a future refactor that surfaces
+            //     `NotFound` from wedging the row in an immortal retry.
+            Err(
+                error @ (waddle_xmpp::mam::storage::MamStorageError::Serialization(_)
+                | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)
+                | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
+            ) => {
                 warn!(
                     error = %error,
                     archive_jid = %archive_bare,
                     stanza_id = %stanza_id,
-                    "MAM lookup failed during flush"
+                    "MAM lookup resolved to a permanent miss during flush; treating as poison pill"
                 );
-                return None;
+                return Ok(None);
+            }
+            // Transient storage failure (issue #1122): propagate the
+            // typed error so the caller RELEASES the row (and the
+            // rest of the claimed batch) for retry instead of
+            // destroying queued mail during a MAM outage.
+            Err(error @ waddle_xmpp::mam::storage::MamStorageError::Database(_)) => {
+                warn!(
+                    error = %error,
+                    archive_jid = %archive_bare,
+                    stanza_id = %stanza_id,
+                    "MAM lookup failed transiently during flush"
+                );
+                return Err(ArchiveResolveError::Storage(error));
             }
         };
         // Parse the preserved wire XML back into a typed Message. The
         // archived row includes server-stamped <stanza-id> by recipient
         // bare, so the parsed Message already carries the XEP-0359
         // identifier required by locked Q5c.
-        let stanza_xml = archived.stanza_xml.as_deref()?;
-        let element: xmpp_parsers::minidom::Element = stanza_xml.parse().ok()?;
-        xmpp_parsers::message::Message::try_from(element).ok()
+        //
+        // An absent or unparseable `stanza_xml` is row corruption, not
+        // a transient condition — retrying can never succeed, so these
+        // stay `Ok(None)` poison pills.
+        let Some(stanza_xml) = archived.stanza_xml.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(element) = stanza_xml.parse::<xmpp_parsers::minidom::Element>() else {
+            return Ok(None);
+        };
+        Ok(xmpp_parsers::message::Message::try_from(element).ok())
     }
 }
 
@@ -313,21 +461,27 @@ pub struct NullArchiveResolver;
 
 #[async_trait::async_trait]
 impl ArchiveResolver for NullArchiveResolver {
-    async fn resolve(&self, _stanza_id: &StanzaId) -> Option<xmpp_parsers::message::Message> {
-        None
+    async fn resolve(
+        &self,
+        _stanza_id: &StanzaId,
+    ) -> Result<Option<xmpp_parsers::message::Message>, ArchiveResolveError> {
+        Ok(None)
     }
 }
 
-async fn materialize<R>(row: &PendingRow, resolver: &R) -> Option<MaterializedPayload>
+async fn materialize<R>(
+    row: &PendingRow,
+    resolver: &R,
+) -> Result<Option<MaterializedPayload>, ArchiveResolveError>
 where
     R: ArchiveResolver + ?Sized,
 {
     match &row.payload {
-        PendingPayload::Transient(_) => MaterializedPayload::from_transient(row),
-        PendingPayload::Archived(stanza_id) => {
-            let archived = resolver.resolve(stanza_id).await?;
-            Some(MaterializedPayload::Archived(Box::new(archived)))
-        }
+        PendingPayload::Transient(_) => Ok(MaterializedPayload::from_transient(row)),
+        PendingPayload::Archived(stanza_id) => Ok(resolver
+            .resolve(stanza_id)
+            .await?
+            .map(|archived| MaterializedPayload::Archived(Box::new(archived)))),
     }
 }
 

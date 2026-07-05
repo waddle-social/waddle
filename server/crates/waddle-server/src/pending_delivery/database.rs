@@ -394,6 +394,17 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             crate::db_params![session.as_str().to_string(), recipient.to_string()],
         )
         .await?;
+        // Return ONLY the rows this claim just tagged, identified by
+        // `outbound_sequence IS NULL`. A row already pushed on this same
+        // session in an earlier flush keeps `flushed_in_session = session`
+        // AND a non-NULL `outbound_sequence` (the UPDATE above only touched
+        // IS NULL rows), so filtering on the null sequence excludes it.
+        // Without this, a re-flush of the same SM session (issue #1122:
+        // `reset_offline_flush` re-opens the once-per-connection CAS after a
+        // transient MAM error defers rows mid-batch) would re-select and
+        // re-push an already-pushed-but-unacked row, duplicating delivery
+        // and overwriting its `outbound_sequence`. This matches the
+        // in-memory backend, which only returns freshly-claimed rows.
         let mut rows = self
             .query(
                 "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
@@ -401,6 +412,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                         flushed_in_session, outbound_sequence \
                  FROM pending_delivery \
                  WHERE recipient_jid = ? AND flushed_in_session = ? \
+                   AND outbound_sequence IS NULL \
                  ORDER BY row_id ASC",
                 crate::db_params![recipient.to_string(), session.as_str().to_string()],
             )

@@ -98,7 +98,10 @@ pub(super) async fn handle_regular_presence_update(
 /// `ConnectionEntry::claim_offline_flush()` is a CAS that returns
 /// `true` exactly once per fresh session — repeated presence updates
 /// (priority transitions, status text changes) do not re-flush an
-/// already-drained queue.
+/// already-drained queue. Exception (issue #1122 follow-up): when the
+/// flush defers rows on a transient MAM failure
+/// (`deferred_transient > 0`), the CAS is reset so the next presence
+/// update retries instead of stranding the rows until reconnect.
 async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJid) {
     let entry = match state
         .deps
@@ -139,12 +142,26 @@ async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJ
         },
     )
     .await;
+    if outcome.deferred_transient > 0 {
+        // Issue #1122 follow-up (R2): the flush hit a transient MAM
+        // failure and released the failing row plus the rest of the
+        // batch. `claim_offline_flush` is a once-per-connection CAS,
+        // so without a reset those rows would wait for a full
+        // reconnect — potentially forever on a long-lived session.
+        // Re-open the CAS so this client's next presence update
+        // re-attempts the flush (rate-limited by presence traffic —
+        // no hot retry loop). Safe: this runs on the same connection
+        // task that won the claim above, so no concurrent claimant
+        // can race the reset.
+        entry.reset_offline_flush();
+    }
     if outcome.claimed > 0 {
         debug!(
             jid = %sender_jid,
             claimed = outcome.claimed,
             pushed = outcome.pushed,
             unresolved = outcome.unresolved,
+            deferred_transient = outcome.deferred_transient,
             "XEP-0160 pending_delivery flush completed"
         );
     }

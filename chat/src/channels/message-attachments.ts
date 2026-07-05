@@ -13,6 +13,7 @@ import {
   encryptedAttachmentKey,
   hasEncryptedAttachmentMetadata,
 } from "@/lib/xmpp/encrypted-attachments";
+import { safeAttachmentUrl } from "@/lib/attachment-url";
 
 type ReadonlyRef<T> = Readonly<Ref<T>>;
 // Internal gallery entry metadata. `sourceId` tracks the same attachment object
@@ -188,8 +189,12 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     decryptedAttachmentUrls.value = next;
   }
 
+  // Single choke point for every render sink (img/video/audio/iframe/anchor/
+  // lightbox): wire-provided URLs pass the scheme allowlist or resolve to null
+  // so the attachment renders inert. Decrypted attachments resolve to a
+  // locally-minted blob: URL, which the allowlist keeps working.
   function resolvedAttachmentUrl(file: TimelineSharedFile): string | null {
-    if (!hasEncryptedAttachmentMetadata(file)) return file.url;
+    if (!hasEncryptedAttachmentMetadata(file)) return safeAttachmentUrl(file.url);
     return decryptedAttachmentUrls.value[attachmentKey(file)] ?? null;
   }
 
@@ -203,7 +208,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
 
   async function ensureAttachmentReady(file: TimelineSharedFile, persist = false): Promise<string | null> {
     if (disposed) return null;
-    if (!hasEncryptedAttachmentMetadata(file)) return file.url;
+    if (!hasEncryptedAttachmentMetadata(file)) return safeAttachmentUrl(file.url);
     if (typeof window === "undefined" || typeof URL === "undefined") return null;
     const key = attachmentKey(file);
     const existing = decryptedAttachmentUrls.value[key];
