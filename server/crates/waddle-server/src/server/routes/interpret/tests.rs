@@ -2643,3 +2643,88 @@ fn message_thread_id(message: &Message) -> Option<String> {
             })
         })
 }
+
+// -----------------------------------------------------------------
+// #1106 — shared fan-out recipient pass: blocklist-load failure
+// -----------------------------------------------------------------
+
+/// BlockingStorage stub whose reads always fail, simulating a
+/// transient storage outage during the shared fan-out pass.
+struct FailingBlockingStorage;
+
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for FailingBlockingStorage {
+    async fn list_blocked_jids(
+        &self,
+        _user: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        Err(waddle_xmpp::xep::xep0191::BlockingStorageError::new(
+            std::io::Error::other("storage down"),
+        ))
+    }
+
+    async fn list_blocked_jid_entries(
+        &self,
+        _user: &jid::BareJid,
+    ) -> Result<Vec<jid::Jid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        Err(waddle_xmpp::xep::xep0191::BlockingStorageError::new(
+            std::io::Error::other("storage down"),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_delivery() {
+    // A transient blocklist-storage error must not drop a DM to LIVE
+    // recipients: the legacy per-resource PeerStanza path still runs
+    // each recipient connection's own state machine, whose bind-time
+    // blocklist snapshot keeps XEP-0191 enforcement intact.
+    use waddle_xmpp::registry::DeliveryKind;
+
+    let registry = ConnectionRegistry::new();
+    let bob: jid::FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+    registry.register(bob.clone(), bob_tx);
+
+    let blocking: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
+        Arc::new(FailingBlockingStorage);
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        connection_registry: &registry,
+        sm_session_registry: None,
+        mam_storage: None,
+        inbox_storage: None,
+        extension_manager: None,
+        room_registry: None,
+        web_socket_state: None,
+        authenticated_session: None,
+        local_domain: "example.com",
+        blocking_storage: Some(&blocking),
+        message_dispatcher: Some(&dispatcher),
+        pending_delivery_storage: None,
+    };
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "must arrive");
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
+        stanza: Box::new(Stanza::Message(msg)),
+    }];
+    let _ = interpret(events, &deps).await;
+
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(2), bob_rx.recv())
+        .await
+        .expect("delivery must not time out")
+        .expect("channel open");
+    assert_eq!(
+        delivered.kind,
+        DeliveryKind::PeerStanza,
+        "fallback delivers via the legacy per-resource recipient pass"
+    );
+    let Stanza::Message(delivered_msg) = delivered.stanza else {
+        panic!("expected message stanza");
+    };
+    assert_eq!(
+        delivered_msg.bodies.values().next().map(|b| b.as_str()),
+        Some("must arrive")
+    );
+}

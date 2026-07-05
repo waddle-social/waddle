@@ -15,19 +15,102 @@
 use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
+use waddle_xmpp::ns::{JABBER_CLIENT, SM as SM_NS};
+use waddle_xmpp::xep::xep0430::NS_INBOX;
+use waddle_xmpp_core::carbons::CARBONS_NS;
+use waddle_xmpp_core::mam::MAM_NS;
 use ws_common::{TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const RECIPIENT_USER: &str = "admin";
 const SENDER_USER: &str = "peer";
 const SENDER_PASSWORD: &str = "peer-password-1";
-const NS_CARBONS: &str = "urn:xmpp:carbons:2";
+
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML");
+    String::from_utf8(buf).expect("UTF-8")
+}
+
+fn attr(name: &str) -> minidom::rxml::NcName {
+    minidom::rxml::NcNameStr::from_str(name)
+        .expect("static attribute name is a valid NcName")
+        .to_owned()
+}
+
+fn iq_xml(kind: &str, id: &str, to: Option<&str>, payload: Element) -> String {
+    let mut builder = Element::builder("iq", JABBER_CLIENT)
+        .attr(attr("type"), kind)
+        .attr(attr("id"), id);
+    if let Some(to) = to {
+        builder = builder.attr(attr("to"), to);
+    }
+    element_to_xml(builder.append(payload).build())
+}
+
+fn carbons_enable_xml(id: &str) -> String {
+    iq_xml(
+        "set",
+        id,
+        None,
+        Element::builder("enable", CARBONS_NS).build(),
+    )
+}
+
+fn chat_message_xml(to: &str, id: &str, body: &str) -> String {
+    let mut body_el = Element::builder("body", JABBER_CLIENT).build();
+    body_el.append_text_node(body);
+    element_to_xml(
+        Element::builder("message", JABBER_CLIENT)
+            .attr(attr("to"), to)
+            .attr(attr("type"), "chat")
+            .attr(attr("id"), id)
+            .append(body_el)
+            .build(),
+    )
+}
+
+fn sm_enable_xml() -> String {
+    element_to_xml(
+        Element::builder("enable", SM_NS)
+            .attr(attr("resume"), "true")
+            .build(),
+    )
+}
+
+fn sm_resume_xml(previd: &str) -> String {
+    element_to_xml(
+        Element::builder("resume", SM_NS)
+            .attr(attr("previd"), previd)
+            .attr(attr("h"), "0")
+            .build(),
+    )
+}
+
+fn mam_query_xml(id: &str, archive_jid: &str) -> String {
+    iq_xml(
+        "set",
+        id,
+        Some(archive_jid),
+        Element::builder("query", MAM_NS).build(),
+    )
+}
+
+fn inbox_query_xml(id: &str) -> String {
+    iq_xml(
+        "get",
+        id,
+        None,
+        Element::builder("inbox", NS_INBOX)
+            .attr(attr("messages"), "false")
+            .build(),
+    )
+}
 
 async fn enable_carbons(client: &mut WsXmppClient, id: &str) {
     client
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="set" id="{id}"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#
-        ))
+        .send(&carbons_enable_xml(id))
         .await
         .expect("send carbons enable");
     let _ = client
@@ -38,7 +121,9 @@ async fn enable_carbons(client: &mut WsXmppClient, id: &str) {
 
 async fn send_available_presence(client: &mut WsXmppClient) {
     client
-        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .send(&element_to_xml(
+            Element::builder("presence", JABBER_CLIENT).build(),
+        ))
         .await
         .expect("send presence");
 }
@@ -117,8 +202,10 @@ async fn two_same_priority_resources_receive_the_dm_exactly_once_each() {
     let body = format!("fanout-dedupe-proof-{}", uuid::Uuid::new_v4());
 
     fx.sender
-        .send(&format!(
-            r#"<message xmlns="jabber:client" to="admin@{DOMAIN}" type="chat" id="fanout-1"><body>{body}</body></message>"#
+        .send(&chat_message_xml(
+            &format!("admin@{DOMAIN}"),
+            "fanout-1",
+            &body,
         ))
         .await
         .expect("send dm");
@@ -134,7 +221,7 @@ async fn two_same_priority_resources_receive_the_dm_exactly_once_each() {
             copies.len()
         );
         assert!(
-            !copies[0].contains(NS_CARBONS),
+            !copies[0].contains(CARBONS_NS),
             "{name}'s only copy must be the original delivery, not a carbon: {}",
             copies[0]
         );
@@ -151,8 +238,10 @@ async fn recipient_archive_and_stanza_id_are_single_per_bare_recipient() {
     let body = format!("fanout-archive-proof-{}", uuid::Uuid::new_v4());
 
     fx.sender
-        .send(&format!(
-            r#"<message xmlns="jabber:client" to="admin@{DOMAIN}" type="chat" id="fanout-2"><body>{body}</body></message>"#
+        .send(&chat_message_xml(
+            &format!("admin@{DOMAIN}"),
+            "fanout-2",
+            &body,
         ))
         .await
         .expect("send dm");
@@ -176,9 +265,7 @@ async fn recipient_archive_and_stanza_id_are_single_per_bare_recipient() {
 
     // XEP-0313: exactly one archived row for the message.
     fx.web
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="set" id="fanout-mam-1" to="admin@{DOMAIN}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
-        ))
+        .send(&mam_query_xml("fanout-mam-1", &format!("admin@{DOMAIN}")))
         .await
         .expect("send mam query");
     let mut archived = 0usize;
@@ -188,7 +275,7 @@ async fn recipient_archive_and_stanza_id_are_single_per_bare_recipient() {
             .recv_timeout(Duration::from_secs(3))
             .await
             .expect("mam stream frame");
-        if frame.contains(&body) && frame.contains("urn:xmpp:mam:2") {
+        if frame.contains(&body) && frame.contains(MAM_NS) {
             archived += 1;
         }
         if frame.contains("<fin") {
@@ -211,8 +298,10 @@ async fn recipient_inbox_unread_increments_once_per_message() {
     let body = format!("fanout-inbox-proof-{}", uuid::Uuid::new_v4());
 
     fx.sender
-        .send(&format!(
-            r#"<message xmlns="jabber:client" to="admin@{DOMAIN}" type="chat" id="fanout-3"><body>{body}</body></message>"#
+        .send(&chat_message_xml(
+            &format!("admin@{DOMAIN}"),
+            "fanout-3",
+            &body,
         ))
         .await
         .expect("send dm");
@@ -227,9 +316,7 @@ async fn recipient_inbox_unread_increments_once_per_message() {
     );
 
     fx.web
-        .send(
-            r#"<iq xmlns="jabber:client" type="get" id="fanout-inbox-1"><inbox xmlns="urn:xmpp:inbox:1" messages="false"/></iq>"#,
-        )
+        .send(&inbox_query_xml("fanout-inbox-1"))
         .await
         .expect("send inbox query");
     let mut unread: Option<String> = None;
@@ -289,7 +376,7 @@ async fn detached_carbons_enabled_sibling_gets_the_dm_exactly_once_on_resume() {
     .expect("phone connection");
     enable_carbons(&mut phone, "carbons-enable-phone").await;
     phone
-        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .send(&sm_enable_xml())
         .await
         .expect("enable resumption");
     let enabled = phone
@@ -310,8 +397,10 @@ async fn detached_carbons_enabled_sibling_gets_the_dm_exactly_once_on_resume() {
     .expect("sender connection");
     let body = format!("detached-dedupe-proof-{}", uuid::Uuid::new_v4());
     sender
-        .send(&format!(
-            r#"<message xmlns="jabber:client" to="admin@{DOMAIN}" type="chat" id="fanout-4"><body>{body}</body></message>"#
+        .send(&chat_message_xml(
+            &format!("admin@{DOMAIN}"),
+            "fanout-4",
+            &body,
         ))
         .await
         .expect("send dm");
@@ -328,9 +417,7 @@ async fn detached_carbons_enabled_sibling_gets_the_dm_exactly_once_on_resume() {
         .await
         .expect("authenticate resume connection");
     resumed
-        .send(&format!(
-            r#"<resume xmlns="urn:xmpp:sm:3" previd="{stream_id}" h="0"/>"#
-        ))
+        .send(&sm_resume_xml(&stream_id))
         .await
         .expect("send resume");
     let _ = resumed
@@ -346,7 +433,7 @@ async fn detached_carbons_enabled_sibling_gets_the_dm_exactly_once_on_resume() {
          (original replay only, no received-carbon — XEP-0280 §6.3), got: {replayed:?}"
     );
     assert!(
-        !replayed[0].contains(NS_CARBONS),
+        !replayed[0].contains(CARBONS_NS),
         "the replayed copy must be the original delivery, not a carbon: {}",
         replayed[0]
     );

@@ -289,13 +289,14 @@ pub(super) async fn route_to_connection(
                                 }
                                 return;
                             }
-                            FanoutPassResult::DropFailClosed => {
-                                return;
-                            }
                             FanoutPassResult::Unavailable => {
-                                // Test fixtures without a dispatcher keep
-                                // the legacy per-resource PeerStanza path
-                                // below.
+                                // Shared pass unavailable (no dispatcher
+                                // in test fixtures, or blocklist load
+                                // failed): fall through to the legacy
+                                // per-resource PeerStanza path below —
+                                // each recipient connection's bind-time
+                                // blocklist snapshot keeps XEP-0191
+                                // enforcement.
                             }
                         }
                     }

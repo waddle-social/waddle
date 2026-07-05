@@ -102,15 +102,16 @@ pub(super) enum FanoutPassResult {
         processed: Option<Box<Stanza>>,
         side_routes: Vec<(Jid, Box<Stanza>)>,
     },
-    /// The shared pass could not be constructed — no
-    /// `message_dispatcher` in `Deps` (unit-test fixtures) or the
-    /// static synthetic resource literal was rejected (should not
-    /// happen). The caller falls back to per-resource `PeerStanza`
-    /// delivery.
+    /// The shared pass could not run — no `message_dispatcher` in
+    /// `Deps` (unit-test fixtures), the static synthetic resource
+    /// literal was rejected (should not happen), or the XEP-0191
+    /// blocklist load failed. The caller falls back to per-resource
+    /// `PeerStanza` delivery: each recipient connection's own state
+    /// machine carries a bind-time blocklist snapshot, so XEP-0191
+    /// enforcement holds on the fallback path — unlike the OFFLINE
+    /// headless pass, which has no per-connection snapshot to fall
+    /// back on and must stay fail-closed.
     Unavailable,
-    /// XEP-0191 blocklist load failed — fail closed and drop the
-    /// message entirely, mirroring [`run_headless_recipient_pass`].
-    DropFailClosed,
 }
 
 /// #1106: run the recipient pass ONCE for a bare-JID DM delivered to
@@ -178,11 +179,12 @@ pub(super) async fn run_fanout_recipient_pass(
                 warn!(
                     bare_jid = %recipient_bare,
                     error = %error,
-                    "fanout recipient-pass: blocklist load failed; dropping \
-                     delivery to preserve XEP-0191 incoming-block enforcement \
-                     (fail-closed)"
+                    "fanout recipient-pass: blocklist load failed; falling back \
+                     to legacy per-resource delivery (each recipient \
+                     connection's bind-time blocklist snapshot keeps XEP-0191 \
+                     enforcement)"
                 );
-                return FanoutPassResult::DropFailClosed;
+                return FanoutPassResult::Unavailable;
             }
         },
         None => Blocklist::empty(),
