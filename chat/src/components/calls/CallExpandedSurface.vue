@@ -120,7 +120,6 @@ const props = defineProps<{
   callThreadId?: string | null;
   isSending?: boolean;
   disabled?: boolean;
-  giphyApiKey?: string;
   mentionCandidates?: MentionCandidate[];
   slowModeCooldown?: number;
   uploadProgress?: { uploading: boolean; progress: number; filename: string };
@@ -812,7 +811,6 @@ onBeforeUnmount(() => {
               :avatar-url-by-author="avatarUrlByAuthor ?? {}"
               :is-sending="!!isSending"
               :disabled="!!disabled || !callThreadOverride"
-              :giphy-api-key="giphyApiKey ?? ''"
               :mention-candidates="mentionCandidates ?? []"
               :slow-mode-cooldown="slowModeCooldown ?? 0"
               :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"

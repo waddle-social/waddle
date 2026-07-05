@@ -6,11 +6,7 @@ import CallAudioSink from "@/components/calls/CallAudioSink.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
 import { appController } from "@/stores/app-controller";
 
-const props = defineProps<{
-  giphyApiKey?: string;
-}>();
-
-const controller = useChatAppController(props.giphyApiKey ?? "");
+const controller = useChatAppController();
 const { connectionStore } = controller;
 
 // Publish the controller into a module-level ref so per-route Vue

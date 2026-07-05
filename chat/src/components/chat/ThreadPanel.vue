@@ -60,7 +60,6 @@ const props = defineProps<{
   roomAuthority: RoomAuthority;
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
-  giphyApiKey: string;
   mentionCandidates: MentionCandidate[];
   slowModeCooldown: number;
   isSending: boolean;
@@ -420,7 +419,6 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :channel-name="`thread in ${channelName}`"
         :is-sending="isSending"
         :disabled="false"
-        :giphy-api-key="giphyApiKey"
         :mention-candidates="mentionCandidates"
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
@@ -620,7 +618,6 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :channel-name="`thread in ${channelName}`"
         :is-sending="isSending"
         :disabled="false"
-        :giphy-api-key="giphyApiKey"
         :mention-candidates="mentionCandidates"
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"

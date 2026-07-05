@@ -2,8 +2,7 @@
 import { onMounted, ref, watch } from "vue";
 import { Loader2, Search, SearchX, X } from "lucide-vue-next";
 
-const props = defineProps<{
-  apiKey: string;
+defineProps<{
   isTopPinned?: boolean;
 }>();
 
@@ -17,11 +16,12 @@ onMounted(() => {
   searchInput.value?.focus();
 });
 
+// Trimmed shape returned by the same-origin `/api/giphy` proxy.
 interface GiphyGif {
   id: string;
   title: string;
   images: {
-    fixed_height_small: { url: string; width: string; height: string };
+    fixed_height_small: { url: string };
     original: { url: string };
   };
 }
@@ -29,17 +29,26 @@ interface GiphyGif {
 const query = ref("");
 const results = ref<GiphyGif[]>([]);
 const isLoading = ref(false);
+const notConfigured = ref(false);
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Searches go through the same-origin `/api/giphy` proxy so the Giphy
+// key never reaches the browser (see `@/lib/giphy-proxy`). Rating and
+// key handling live server-side; the client only sends `q` + `limit`.
 async function fetchGifs(searchQuery: string) {
-  if (!props.apiKey) return;
   isLoading.value = true;
   try {
-    const endpoint = searchQuery.trim()
-      ? `https://api.giphy.com/v1/gifs/search?q=${encodeURIComponent(searchQuery)}&api_key=${props.apiKey}&limit=24&rating=g`
-      : `https://api.giphy.com/v1/gifs/trending?api_key=${props.apiKey}&limit=24&rating=g`;
-    const res = await fetch(endpoint);
+    const params = new URLSearchParams({ limit: "24" });
+    const q = searchQuery.trim();
+    if (q) params.set("q", q);
+    const res = await fetch(`/api/giphy?${params}`);
+    if (res.status === 503) {
+      notConfigured.value = true;
+      results.value = [];
+      return;
+    }
     if (res.ok) {
+      notConfigured.value = false;
       const data = await res.json();
       results.value = data.data ?? [];
     }
@@ -91,8 +100,8 @@ function selectGif(gif: GiphyGif) {
       </div>
     </div>
 
-    <!-- No API key -->
-    <div v-if="!apiKey" class="type-control flex h-24 items-center justify-center px-4 text-center text-muted-foreground">
+    <!-- Server has no Giphy key configured (proxy answered 503) -->
+    <div v-if="notConfigured" class="type-control flex h-24 items-center justify-center px-4 text-center text-muted-foreground">
       GIF search is not configured.
     </div>
 

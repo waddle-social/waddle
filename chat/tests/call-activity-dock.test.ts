@@ -4076,7 +4076,6 @@ function contentAreaBaseProps(): Record<string, unknown> {
     selfDomain: "example.com",
     avatarUrlByAuthor: {},
     authorJidByNick: {},
-    giphyApiKey: "",
     mentionCandidates: [],
     roomHats: {},
     roomAuthority: {},
