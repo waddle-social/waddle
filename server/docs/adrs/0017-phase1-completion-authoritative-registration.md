@@ -128,6 +128,17 @@ get-or-create/reaper split is a fast follow-up availability slice.
   Duplicate is impossible structurally (one `try_send` per recipient). Full
   design, locked:
 
+  > **Merge note (main #1106 "shared fan-out recipient pass").** Since this note
+  > was written, `main` added `run_fanout_recipient_pass` in
+  > `route_to_connection.rs`, which runs the recipient pass ONCE over the DM
+  > delivery set and writes each live target a `DirectFrame` (the per-target
+  > `deliver_peer_to_full` loop now only serves the non-DM / groupchat-reflection
+  > path). Slice 2 must cut over **both** the fan-out pass's per-target write AND
+  > the `deliver_peer_to_full` loop to `TrySendPeer`, with the disposition +
+  > headless-gate logic applied to the fan-out set. The selection feeding it is
+  > already actor-authoritative (Slice 1).
+
+
   - **Backpressure decision (maintainer-visible behaviour change).** 1:1
     delivery moves from the **blocking** `send_peer_to` to the actor's
     **non-blocking** `TrySendPeer`. On a full recipient channel,
