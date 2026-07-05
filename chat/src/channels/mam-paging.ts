@@ -17,7 +17,8 @@ import {
   buildChannelTimelineFromMamResults,
   type TimelineBuildOptions,
 } from "@/channels/message-timeline-state";
-import { isFeedTimelineMessage } from "@/channels/timeline";
+import { applyForumContext, isFeedTimelineMessage } from "@/channels/timeline";
+import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import {
   firstUnseenIdAfterDisplayedState,
   firstUnseenIdFromUnreadCount,
@@ -181,12 +182,22 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       });
       oldestArchiveId = cursor.oldestArchiveId;
       hasOlderMessages.value = cursor.hasOlderMessages;
-      const timelineWithQueue = appendQueuedMessages(
-        buildTimelineFromMamResults(mamResults, metadataSeed, {
-          seedExistingOnly: metadataSeed.length > 0,
-        }),
-        roomJid,
-      );
+      // #675: a live message merged into `messages.value` during the
+      // queryMamPage await must survive the rebuild. Re-insert each one
+      // through the same reconciliation as mergeLiveMessage, so a MAM copy
+      // of the same message (XEP-0359 id parity) merges instead of
+      // duplicating.
+      const liveDuringLoad = stripQueuedSelfMessages(messages.value);
+      let rebuilt = buildTimelineFromMamResults(mamResults, metadataSeed, {
+        seedExistingOnly: metadataSeed.length > 0,
+      });
+      const channelIsForum = isForumChannel(currentChannel.value);
+      for (const live of liveDuringLoad) {
+        rebuilt = insertLiveMessage(rebuilt, live, pendingEchoClientIds, {
+          finalize: (timeline) => applyForumContext(timeline, channelIsForum),
+        }).messages;
+      }
+      const timelineWithQueue = appendQueuedMessages(rebuilt, roomJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;

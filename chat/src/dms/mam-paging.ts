@@ -10,6 +10,7 @@ import {
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { buildDmTimelineFromMamResults } from "@/dms/message-timeline-state";
+import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import {
   firstUnseenIdAfterDisplayedState,
   firstUnseenIdFromUnreadCount,
@@ -129,7 +130,16 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       });
       oldestArchiveId = cursor.oldestArchiveId;
       hasOlderMessages.value = cursor.hasOlderMessages;
-      const timeline = buildTimelineFromMamResults(mamResults);
+      // #675: a live DM merged into `messages.value` during the
+      // queryPersonalMamPage await must survive the rebuild. Re-insert each
+      // one through the same reconciliation as mergeLiveMessage, so a MAM
+      // copy of the same message (XEP-0359 id parity) merges instead of
+      // duplicating.
+      const liveDuringLoad = stripQueuedSelfMessages(messages.value);
+      let timeline = buildTimelineFromMamResults(mamResults);
+      for (const live of liveDuringLoad) {
+        timeline = insertLiveMessage(timeline, live, pendingEchoClientIds).messages;
+      }
       const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
