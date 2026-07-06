@@ -2987,3 +2987,13 @@ async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
         "the ban in the batch surfaces its removed session"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ownership (ADR-0017 Phase 3 Slice 3: steal-intent owner-veto path)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_check_replies_when_the_room_actor_is_idle() {
+    let actor = spawn_room_actor().await;
+    actor.ask(HealthCheck).await.expect("health check replies");
+}

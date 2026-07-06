@@ -856,3 +856,25 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
         })
     }
 }
+
+/// Internal liveness probe for the owner-veto path (ADR-0017 Phase 3 Slice
+/// 3, element 4's "Unwedge" text) — the `RoomActor` counterpart of
+/// `registry::user_actor::HealthCheck`: a successful reply proves this
+/// actor's mailbox loop is live and responsive right now, since kameo
+/// processes a mailbox strictly in order. No production caller wires this
+/// yet — `RoomActor` claims do not exist until Slice 7 wires durable MUC
+/// room ownership (the only production `LocallyClaimedEntities` implementor
+/// today is `waddle_server::clustering::self_fence::NoLocallyClaimedEntities`,
+/// whose `owned()` is always empty).
+pub struct HealthCheck;
+
+impl kameo::message::Message<HealthCheck> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: HealthCheck,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+    }
+}

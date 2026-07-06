@@ -823,3 +823,76 @@ async fn get_connection_entry_reflects_registration() {
     let some: Option<ConnectionEntry> = actor.ask(GetConnectionEntry { jid }).await.expect("get");
     assert!(some.is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Ownership (ADR-0017 Phase 3 Slice 3: steal-intent owner-veto path)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_check_replies_when_the_actor_is_idle() {
+    let actor = spawn_actor("alice").await;
+    actor.ask(HealthCheck).await.expect("health check replies");
+}
+
+#[tokio::test]
+async fn conflict_close_all_resources_clears_every_registered_resource() {
+    let actor = spawn_actor("alice").await;
+    let (e1, _rx1) = entry();
+    let (e2, _rx2) = entry();
+    register(&actor, full("alice", "phone"), e1).await;
+    register(&actor, full("alice", "desktop"), e2).await;
+
+    let torn_down: usize = actor
+        .ask(ConflictCloseAllResources)
+        .await
+        .expect("conflict close");
+    assert_eq!(torn_down, 2);
+
+    let count: usize = actor.ask(ResourceCount).await.expect("count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn health_check_or_wedge_kill_returns_true_for_a_healthy_actor() {
+    let actor = spawn_actor("alice").await;
+    let healthy = health_check_or_wedge_kill(&actor, std::time::Duration::from_secs(5)).await;
+    assert!(healthy);
+    assert!(actor.is_alive(), "a healthy actor must not be killed");
+}
+
+#[tokio::test]
+async fn health_check_or_wedge_kill_kills_a_wedged_actor() {
+    let actor = spawn_actor("alice").await;
+    let (e, _rx) = entry();
+    register(&actor, full("alice", "phone"), e).await;
+
+    // Wedge the actor: this message occupies the mailbox loop indefinitely
+    // (until released), so `HealthCheck` — enqueued after it — can never be
+    // answered before a short timeout elapses.
+    let (_release_tx, release_rx) = oneshot::channel();
+    actor
+        .tell(HoldMailboxUntilReleased { release_rx })
+        .await
+        .expect("hold message should enqueue");
+
+    let healthy = health_check_or_wedge_kill(&actor, std::time::Duration::from_millis(100)).await;
+    assert!(!healthy, "a wedged actor must fail its bounded health ask");
+
+    // `kill()` is unconditional (unlike the best-effort conflict-close
+    // tell), so the actor must stop even though it never got to process
+    // `ConflictCloseAllResources`.
+    let mut killed = false;
+    for _ in 0..50 {
+        if !actor.is_alive() {
+            killed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        killed,
+        "a failed health ask must proactively kill the actor"
+    );
+    // `_release_tx` drops here, releasing the wedge — harmless, the actor
+    // is already gone.
+}

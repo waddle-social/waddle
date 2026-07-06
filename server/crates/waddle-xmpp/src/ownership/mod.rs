@@ -148,10 +148,12 @@ pub enum StalePredicate {
     OwnerStale,
     /// The steal-intent predicate (ADR-0017 Phase 3 Slice 3): `EXISTS
     /// (SELECT 1 FROM steal_intents WHERE entity=$e AND created_at < now()
-    /// - $intent_ttl)`. Not yet implementable — the `clustering_steal_intents`
-    /// table doesn't exist until Slice 3 lands it — so every `ClaimStore`
-    /// implementation in this slice rejects this variant with
-    /// [`ClaimError::NotYetImplemented`].
+    /// - $intent_ttl)`. Realized by
+    /// `waddle-server::clustering::claims::PostgresClaimStore::steal_stale`.
+    /// Per the three-rule steal-variant block (ADR-0017 Phase 3 plan, Slice
+    /// 3), this variant never applies to `EntityType::SmSession` claims —
+    /// implementations reject that combination with
+    /// [`ClaimError::SmSessionExcludedFromStealIntent`].
     StealIntentExpired { intent_ttl: Duration },
 }
 
@@ -180,15 +182,24 @@ pub enum ClaimError {
     #[error("claim CAS lost the race (stale epoch, fresh owner, or claim gone)")]
     Conflict,
 
-    /// A [`StalePredicate`] variant this `ClaimStore` implementation does
-    /// not yet realize (e.g. [`StalePredicate::StealIntentExpired`] before
-    /// ADR-0017 Phase 3 Slice 3 lands the `steal_intents` table).
-    #[error("staleness predicate not yet implemented by this claim store: {0}")]
-    NotYetImplemented(&'static str),
-
     /// In-process bookkeeping lock was poisoned by a panicking holder.
     #[error("claim store internal lock poisoned")]
     Poisoned,
+
+    /// A steal-intent operation (`report_steal_intent`/`owner_steal_intents`/
+    /// `clear_steal_intent`, ADR-0017 Phase 3 Slice 3) was asked to operate
+    /// on an `EntityType::SmSession` claim. Per the three-rule steal-variant
+    /// block (Slice 3 of the phase plan): steal-intents never touch
+    /// SM-session claims — those are stolen exclusively via
+    /// `steal_for_resume` (identity-bound resume, element 8) or, for
+    /// dead-owner garbage collection, `steal_stale`'s `OwnerStale` predicate
+    /// via the orphan reaper (Slice 5). Typed rejection, not a silently
+    /// accepted no-op, so a caller cannot mistake this for "intent recorded."
+    #[error(
+        "SM-session claims are excluded from the steal-intent path (use steal_for_resume, \
+         or the orphan reaper's OwnerStale predicate, instead)"
+    )]
+    SmSessionExcludedFromStealIntent,
 }
 
 /// Entity ownership claims: which node currently owns a given `UserActor`/

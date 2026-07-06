@@ -111,7 +111,52 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// Purely local: must succeed even when Postgres is unreachable — the
     /// self-fencing trigger this method exists to serve. Best-effort and
     /// idempotent.
+    ///
+    /// **FIX 3 — must be effective against a wedged target.** `demote` is
+    /// called from two distinct situations, both of which must actually
+    /// stop the entity from continuing to act as owner even if its actor is
+    /// stuck:
+    ///
+    /// 1. **Reconcile-deposed** (`reconcile`'s lost-claims list, and the
+    ///    self-fenced block at the bottom of [`run_node_lease`]): Postgres
+    ///    has already moved the claim elsewhere, so this node's copy is
+    ///    provably stale — but the local actor may still be alive and, if
+    ///    wedged, unresponsive to an ordinary `tell`.
+    /// 2. **Veto-health-fail** (the steal-intent scan's `local_claims.
+    ///    health_check(&entity)` returning `false`): the actor has *already*
+    ///    failed to answer a bounded health ask — by construction, this is
+    ///    the wedged case, not a healthy actor that merely hasn't gotten to
+    ///    it yet.
+    ///
+    /// A correct implementation therefore MUST NOT be a mailbox `tell` that
+    /// simply queues behind whatever the actor is wedged inside — that
+    /// would never run. It must use the same **hard-kill discipline** as
+    /// [`waddle_xmpp::registry::user_actor::health_check_or_wedge_kill`]
+    /// (`waddle-xmpp`'s exemplar for this exact shape): tear down owned
+    /// resources best-effort, then call the actor handle's `kill()`
+    /// directly, which drops the actor's state (and every resource sender
+    /// it holds) regardless of whether the actor's mailbox loop is
+    /// otherwise stuck. A future `UserActor`/`RoomActor`-backed
+    /// implementation of this trait must route `demote` through that kind
+    /// of hard kill, not a `tell`.
     async fn demote(&self, entity: &Entity);
+
+    /// Health-ask the local actor owning `entity` (ADR-0017 Phase 3 Slice
+    /// 3's owner-veto path): `true` if it answered promptly (the owner may
+    /// then clear the entity's steal intent — FIX 1(e): the veto is
+    /// enforced by serializing on the intent rows against a concurrent
+    /// steal, deadlock-abort-safe per FIX 1(c), not by any inherent
+    /// "unforgeability" of the write itself), `false` if the ask failed or
+    /// timed out (wedged — the caller proactively demotes rather than
+    /// waiting to be stolen from at `intent_ttl`, per element 4's "an owner
+    /// whose internal health ask fails ... kills the wedged actor and
+    /// conflict-closes its sockets" text).
+    ///
+    /// Never called against an entity absent from [`Self::owned`] — the
+    /// veto-scan loop only health-asks entities `owner_steal_intents`
+    /// reports as both currently claimed by this node *and* bearing an
+    /// outstanding intent.
+    async fn health_check(&self, entity: &Entity) -> bool;
 }
 
 /// No claimed entities — see the trait doc for why this is the only
@@ -125,6 +170,14 @@ impl LocallyClaimedEntities for NoLocallyClaimedEntities {
     }
 
     async fn demote(&self, _entity: &Entity) {}
+
+    // Never actually invoked in production this slice: `owned()` is always
+    // empty, so `run_node_lease`'s veto scan (Slice 3) has nothing to
+    // health-ask against. Trivially healthy rather than panicking/`todo!`,
+    // matching this type's existing no-op `demote`.
+    async fn health_check(&self, _entity: &Entity) -> bool {
+        true
+    }
 }
 
 /// Isolation-with-hysteresis decision state (element 4's locked spec).
@@ -292,8 +345,10 @@ where
 /// against the deadline and shutdown (single-flight — never more than one
 /// renewal in flight, never dropped except on fence/shutdown).
 ///
-/// **FIX 2**: `count_other_live_nodes` and `reconcile` are control-plane
-/// calls too, and are deadline-armed identically — raced against the same
+/// **FIX 2**: `count_other_live_nodes` and `reconcile` (and, from ADR-0017
+/// Phase 3 Slice 3, `owner_steal_intents`/`clear_steal_intent`) are
+/// control-plane calls too, and are deadline-armed identically — raced
+/// against the same
 /// `sleep_until(last_success + lease_ttl)` deadline the heartbeat itself
 /// uses (biased, so the deadline always wins a simultaneous wakeup): a hung
 /// call here fences exactly as if the heartbeat call itself had blown its
@@ -359,7 +414,13 @@ pub async fn run_node_lease<L>(
         // Runs until this identity self-fences (either trigger). Both
         // trigger paths converge on identical handling below, so this
         // block's exit is unconditional (never a plain `break`).
-        loop {
+        //
+        // FIX 2: labeled so the per-entity veto-scan loop below (which
+        // nests its own `for` loop over `owner_steal_intents`'s result) can
+        // `break 'tick` straight out to the self-fenced handling from
+        // inside that nested loop, exactly as if the heartbeat/count/
+        // reconcile calls above had blown the same deadline.
+        'tick: loop {
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
@@ -469,6 +530,143 @@ pub async fn run_node_lease<L>(
                 }
                 Err(error) => {
                     tracing::warn!(%error, "clustering demotion-reconciliation query failed; will retry next interval");
+                }
+            }
+
+            // ADR-0017 Phase 3 Slice 3: owner-side steal-intent veto scan,
+            // riding the same per-interval cadence and deadline-arm as the
+            // other control-plane calls above — "every owner's heartbeat
+            // loop reads intents against its own claims" (element 4).
+            // Vacuous in production this slice: `local_claims.owned()` is
+            // always empty (`NoLocallyClaimedEntities`, per Slice 2's own
+            // wiring — no code acquires a `UserActor`/`RoomActor` claim
+            // until Slices 5-7), so `owner_steal_intents` always returns an
+            // empty set and this block is a no-op every interval. It is
+            // exercised directly against `PostgresClaimStore` and a
+            // configurable `LocallyClaimedEntities` fake in this module's
+            // own tests.
+            let intents_future = std::pin::pin!(lease.owner_steal_intents(&identity));
+            let intents_result = tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    return;
+                }
+                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                    break;
+                }
+                result = intents_future => result,
+            };
+            match intents_result {
+                Ok(intents) => {
+                    // FIX 2: each per-entity await below (`health_check`,
+                    // `clear_steal_intent`, `demote`) is deadline/
+                    // cancellation-armed exactly like every other
+                    // control-plane call above — a slow-but-not-hung
+                    // `health_check` across N owned entities must not blow
+                    // this node's own heartbeat deadline unobserved, and
+                    // shutdown must not block behind a hung ask.
+                    for (entity, epoch) in intents {
+                        let health_check_future =
+                            std::pin::pin!(local_claims.health_check(&entity));
+                        let healthy = tokio::select! {
+                            biased;
+                            _ = stop_token.cancelled() => {
+                                mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                return;
+                            }
+                            _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                break 'tick;
+                            }
+                            result = health_check_future => result,
+                        };
+                        if healthy {
+                            let clear_future =
+                                std::pin::pin!(lease.clear_steal_intent(&entity, &identity, epoch));
+                            let cleared = tokio::select! {
+                                biased;
+                                _ = stop_token.cancelled() => {
+                                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                    return;
+                                }
+                                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                    break 'tick;
+                                }
+                                result = clear_future => result,
+                            };
+                            match cleared {
+                                Ok(rows) if rows > 0 => {}
+                                Ok(_) => {
+                                    // FIX 1(b): `owner_steal_intents` just
+                                    // reported this entity as ours with an
+                                    // outstanding intent, so zero rows
+                                    // affected by the epoch-fenced DELETE
+                                    // means the DELETE's own
+                                    // claims-ownership check failed — a
+                                    // steal already won the race (FIX 1(a)'s
+                                    // consume-CTE design) between our health
+                                    // check and this clear call. Treat this
+                                    // as "possibly deposed" and demote
+                                    // immediately rather than believing the
+                                    // veto succeeded.
+                                    tracing::warn!(
+                                        entity_id = %entity.id,
+                                        "clustering: clear_steal_intent affected zero rows; \
+                                         this node may already have been deposed for this \
+                                         entity — demoting locally"
+                                    );
+                                    let demote_future =
+                                        std::pin::pin!(local_claims.demote(&entity));
+                                    tokio::select! {
+                                        biased;
+                                        _ = stop_token.cancelled() => {
+                                            mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                            return;
+                                        }
+                                        _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                            break 'tick;
+                                        }
+                                        _ = demote_future => {}
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        entity_id = %entity.id,
+                                        "clustering: failed to clear a vetoed steal intent; the \
+                                         reporter's next scan will re-observe it"
+                                    );
+                                }
+                            }
+                        } else {
+                            // Proactive wedge-kill (element 4): the health
+                            // ask failed, so this owner already knows the
+                            // steal will proceed at `intent_ttl` — demote
+                            // now rather than keep serving (or squatting on)
+                            // a wedged actor until then.
+                            tracing::error!(
+                                entity_id = %entity.id,
+                                "clustering: local actor failed its internal health ask during \
+                                 steal-intent processing; proactively demoting ahead of the \
+                                 pending steal"
+                            );
+                            let demote_future = std::pin::pin!(local_claims.demote(&entity));
+                            tokio::select! {
+                                biased;
+                                _ = stop_token.cancelled() => {
+                                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                    return;
+                                }
+                                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                    break 'tick;
+                                }
+                                _ = demote_future => {}
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "clustering owner steal-intent scan failed; will retry next interval");
                 }
             }
         }
@@ -657,7 +855,7 @@ mod tests {
     // one level up (node lease instead of keypair-slot lease).
 
     use std::sync::atomic::{AtomicBool, AtomicU32};
-    use waddle_xmpp::ownership::ClaimError;
+    use waddle_xmpp::ownership::{ClaimEpoch, ClaimError};
 
     struct FakeLease {
         heartbeat_result: std::sync::Mutex<Box<dyn FnMut() -> Result<bool, ClaimError> + Send>>,
@@ -674,6 +872,18 @@ mod tests {
         /// the re-acquisition hysteresis gate can be made to genuinely
         /// reject several retries before succeeding.
         other_live_nodes: Arc<AtomicU32>,
+        /// What `owner_steal_intents` reports each interval (ADR-0017 Phase
+        /// 3 Slice 3's veto-scan test double).
+        steal_intents: Arc<std::sync::Mutex<Vec<(Entity, ClaimEpoch)>>>,
+        /// Every entity `clear_steal_intent` was called with, in order.
+        cleared_intents: Arc<std::sync::Mutex<Vec<Entity>>>,
+        /// FIX 1(b) test double: when set, `clear_steal_intent` reports
+        /// zero rows affected (and does not remove the intent) instead of
+        /// succeeding — simulates the "possibly deposed" case where a
+        /// concurrent steal already won the race under FIX 1(a)'s
+        /// consume-CTE design between this node's health check and its
+        /// clear call.
+        clear_reports_zero_rows: Arc<AtomicBool>,
     }
 
     impl FakeLease {
@@ -686,6 +896,9 @@ mod tests {
                 )),
                 draining_calls: Arc::new(AtomicU32::new(0)),
                 other_live_nodes: Arc::new(AtomicU32::new(0)),
+                steal_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
+                cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
+                clear_reports_zero_rows: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -735,6 +948,42 @@ mod tests {
             _locally_owned: &[Entity],
         ) -> Result<Vec<Entity>, ClaimError> {
             Ok(Vec::new())
+        }
+        async fn report_steal_intent(
+            &self,
+            entity: &Entity,
+            _reporter: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.steal_intents
+                .lock()
+                .expect("lock")
+                .push((entity.clone(), ClaimEpoch(0)));
+            Ok(())
+        }
+        async fn owner_steal_intents(
+            &self,
+            _me: &NodeIdentity,
+        ) -> Result<Vec<(Entity, ClaimEpoch)>, ClaimError> {
+            Ok(self.steal_intents.lock().expect("lock").clone())
+        }
+        async fn clear_steal_intent(
+            &self,
+            entity: &Entity,
+            _me: &NodeIdentity,
+            _mine: ClaimEpoch,
+        ) -> Result<u64, ClaimError> {
+            if self.clear_reports_zero_rows.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            self.cleared_intents
+                .lock()
+                .expect("lock")
+                .push(entity.clone());
+            self.steal_intents
+                .lock()
+                .expect("lock")
+                .retain(|(e, _)| e != entity);
+            Ok(1)
         }
     }
 
@@ -1214,6 +1463,219 @@ mod tests {
              accumulated phantom/draining rows"
         );
 
+        stop_token.cancel();
+    }
+
+    // --- Owner-side steal-intent veto scan wiring (ADR-0017 Phase 3 Slice 3) ---
+
+    fn user_actor_entity(id: &str) -> Entity {
+        Entity::new(
+            waddle_xmpp::ownership::EntityType::UserActor,
+            id.to_string(),
+        )
+    }
+
+    /// Configurable `LocallyClaimedEntities` test double: a fixed `owned()`
+    /// set, a toggle-able `health_check` outcome, and a record of every
+    /// `demote` call — lets the veto-scan tests below assert
+    /// `run_node_lease` calls `health_check`/`demote`/`clear_steal_intent`
+    /// exactly as the ADR's owner-veto text describes, without needing a
+    /// real `UserActor`/`RoomActor` (which no production `ClaimStore` caller
+    /// wires up until Slices 5-7).
+    struct FakeLocalClaims {
+        owned: Vec<Entity>,
+        healthy: Arc<AtomicBool>,
+        demoted: Arc<std::sync::Mutex<Vec<Entity>>>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for FakeLocalClaims {
+        fn owned(&self) -> Vec<Entity> {
+            self.owned.clone()
+        }
+
+        async fn demote(&self, entity: &Entity) {
+            self.demoted.lock().expect("lock").push(entity.clone());
+        }
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            self.healthy.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_node_lease_clears_a_healthy_owners_steal_intent() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(10);
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let entity = user_actor_entity("room-1");
+        lease
+            .steal_intents
+            .lock()
+            .expect("lock")
+            .push((entity.clone(), ClaimEpoch(0)));
+        let cleared_intents = Arc::clone(&lease.cleared_intents);
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: vec![entity.clone()],
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::clone(&demoted),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness,
+            },
+        ));
+
+        advance_until(interval, 20, || {
+            !cleared_intents.lock().expect("lock").is_empty()
+        })
+        .await;
+        assert_eq!(
+            cleared_intents.lock().expect("lock").as_slice(),
+            &[entity],
+            "a healthy owner must clear the intent via the epoch-fenced veto DELETE"
+        );
+        assert!(
+            demoted.lock().expect("lock").is_empty(),
+            "a healthy owner must not demote the entity it just vetoed for"
+        );
+        stop_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_node_lease_demotes_on_a_failed_health_check_instead_of_clearing() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(10);
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let entity = user_actor_entity("room-2");
+        lease
+            .steal_intents
+            .lock()
+            .expect("lock")
+            .push((entity.clone(), ClaimEpoch(0)));
+        let cleared_intents = Arc::clone(&lease.cleared_intents);
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: vec![entity.clone()],
+            // The health-ask fails: the owner already knows the steal will
+            // proceed, so it demotes proactively (the wedge-kill path)
+            // instead of waiting to be stolen from.
+            healthy: Arc::new(AtomicBool::new(false)),
+            demoted: Arc::clone(&demoted),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness,
+            },
+        ));
+
+        advance_until(interval, 20, || !demoted.lock().expect("lock").is_empty()).await;
+        assert_eq!(
+            demoted.lock().expect("lock").as_slice(),
+            &[entity],
+            "a failed health-ask must proactively demote the wedged entity"
+        );
+        assert!(
+            cleared_intents.lock().expect("lock").is_empty(),
+            "a wedged owner must never clear the intent it could not answer for"
+        );
+        stop_token.cancel();
+    }
+
+    // FIX 1(b): a healthy owner whose `clear_steal_intent` call reports
+    // zero rows affected (a concurrent steal already won the race between
+    // this node's health check and its clear call, under FIX 1(a)'s
+    // consume-CTE design) must demote the entity immediately — treating
+    // the zero-rows outcome as "possibly deposed" — rather than believing
+    // the veto succeeded and leaving the entity served locally.
+    #[tokio::test(start_paused = true)]
+    async fn run_node_lease_demotes_when_clear_steal_intent_reports_zero_rows() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(10);
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let entity = user_actor_entity("room-3");
+        lease
+            .steal_intents
+            .lock()
+            .expect("lock")
+            .push((entity.clone(), ClaimEpoch(0)));
+        lease.clear_reports_zero_rows.store(true, Ordering::SeqCst);
+        let cleared_intents = Arc::clone(&lease.cleared_intents);
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: vec![entity.clone()],
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::clone(&demoted),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness,
+            },
+        ));
+
+        advance_until(interval, 20, || !demoted.lock().expect("lock").is_empty()).await;
+        assert_eq!(
+            demoted.lock().expect("lock").as_slice(),
+            &[entity],
+            "zero rows affected by clear_steal_intent must be treated as possibly deposed \
+             and demote immediately"
+        );
+        assert!(
+            cleared_intents.lock().expect("lock").is_empty(),
+            "the fake never records a zero-rows clear as a successful clear"
+        );
         stop_token.cancel();
     }
 }

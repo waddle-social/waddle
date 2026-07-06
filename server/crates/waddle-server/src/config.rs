@@ -188,6 +188,20 @@ pub struct ClusteringConfig {
     /// 3 Slice 2, element 4's "N=2 lone-survivor carve-out" and
     /// re-registration hysteresis text).
     pub self_fence: ClusteringSelfFenceConfig,
+    /// Steal-intent unwedge/owner-veto timing (ADR-0017 Phase 3 Slice 3,
+    /// element 4's "Unwedge" text): how long an uncleared steal-intent row
+    /// must age before `StalePredicate::StealIntentExpired` treats the
+    /// entity as stealable — "a small multiple of the heartbeat interval"
+    /// per the ADR. Named `steal_intent` (not bundled into `node_lease` or
+    /// `self_fence`) because it is a third, conceptually distinct timing
+    /// value from either: it gates the steal-intent CAS, not node-lease
+    /// renewal or isolation fencing. No production call site issues
+    /// `StalePredicate::StealIntentExpired` this slice (Slice 3 lands the
+    /// mechanism; the cross-node reporter that would call it is Slice 5+
+    /// scope) — parsed and validated now so the mechanism and its config
+    /// surface land together, mirroring `node_lease`/`self_fence`'s own
+    /// Slice 2 precedent.
+    pub steal_intent: ClusteringStealIntentConfig,
     /// This pod's `pod-template-hash` label, read once at startup from the
     /// Kubernetes downward API (`WADDLE_CLUSTERING_POD_TEMPLATE_HASH`) and
     /// stamped onto this node's `clustering_nodes` row (Q5/element 4/Slice
@@ -227,6 +241,7 @@ impl std::fmt::Debug for ClusteringConfig {
             .field("node_id_file", &self.node_id_file)
             .field("node_lease", &self.node_lease)
             .field("self_fence", &self.self_fence)
+            .field("steal_intent", &self.steal_intent)
             .field("pod_template_hash", &self.pod_template_hash)
             .finish()
     }
@@ -297,6 +312,27 @@ impl Default for ClusteringSelfFenceConfig {
     }
 }
 
+/// Steal-intent unwedge/owner-veto timing (ADR-0017 Phase 3 Slice 3,
+/// element 4). `intent_ttl` bounds a sick-but-heartbeating owner's hostage
+/// window: an uncleared steal-intent row must age past this before it makes
+/// the entity stealable via `StalePredicate::StealIntentExpired`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringStealIntentConfig {
+    pub intent_ttl: Duration,
+}
+
+impl Default for ClusteringStealIntentConfig {
+    fn default() -> Self {
+        Self {
+            // "A small multiple of the heartbeat interval" (ADR element 4)
+            // — six times the default node-lease heartbeat interval (10s),
+            // giving the owner's veto scan several chances to clear a
+            // reported intent before it ages out.
+            intent_ttl: Duration::from_secs(60),
+        }
+    }
+}
+
 /// One peer-discovery seed: a DNS name or IP literal (A/AAAA-resolved to one
 /// or more peer IPs — the headless Service resolves to every ready pod) plus
 /// the TCP port those peers listen on for the swarm transport. IPv6 literals
@@ -362,6 +398,7 @@ impl Default for ClusteringConfig {
             node_id_file: None,
             node_lease: ClusteringNodeLeaseConfig::default(),
             self_fence: ClusteringSelfFenceConfig::default(),
+            steal_intent: ClusteringStealIntentConfig::default(),
             pod_template_hash: None,
         }
     }
@@ -724,6 +761,30 @@ impl ClusteringConfig {
             ));
         }
 
+        let steal_intent_defaults = ClusteringStealIntentConfig::default();
+        let intent_ttl = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS",
+            millis_u64(steal_intent_defaults.intent_ttl),
+        )?);
+        if intent_ttl.is_zero() {
+            return Err("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS must be greater than 0".to_string());
+        }
+        if intent_ttl < node_lease_heartbeat_interval * 2 {
+            return Err(format!(
+                "WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS ({}) must be at least 2x \
+                 WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS ({}): the owner-veto scan \
+                 only runs once per heartbeat tick, so worst-case phase alignment between an \
+                 intent's report time and the scan's cadence can consume most of one interval \
+                 before the owner's first chance to observe it — 2x is the conservative floor \
+                 guaranteeing at least one full scan interval survives inside intent_ttl \
+                 regardless of phase (mirroring node_lease_ttl's own 2x floor against its \
+                 heartbeat interval)",
+                intent_ttl.as_millis(),
+                node_lease_heartbeat_interval.as_millis()
+            ));
+        }
+
         Ok(Self {
             enabled,
             listen_addrs,
@@ -754,6 +815,7 @@ impl ClusteringConfig {
                 reregister_backoff_base,
                 reregister_backoff_max,
             },
+            steal_intent: ClusteringStealIntentConfig { intent_ttl },
             pod_template_hash,
         })
     }
@@ -1661,6 +1723,42 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS"));
+    }
+
+    #[test]
+    fn clustering_defaults_have_a_valid_steal_intent_config() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.steal_intent, ClusteringStealIntentConfig::default());
+    }
+
+    #[test]
+    fn clustering_parses_steal_intent_ttl() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "5000"),
+            ("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS", "30000"),
+        ])
+        .unwrap();
+        assert_eq!(config.steal_intent.intent_ttl.as_millis(), 30000);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_steal_intent_ttl() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_steal_intent_ttl_below_two_heartbeats() {
+        let err = ClusteringConfig::from_vars([
+            (
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+                "10000",
+            ),
+            ("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS", "15000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS"));
     }
 
     #[test]

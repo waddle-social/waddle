@@ -618,6 +618,22 @@ pub trait NodeLeaseStore: Send + Sync {
     // store for two read-only queries.
     async fn count_other_live_nodes(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<usize, ClaimError>;
     async fn reconcile(&self, me: &NodeIdentity, locally_owned: &[Entity]) -> Result<Vec<Entity>, ClaimError>;
+    // Added in Slice 3 (steal-intents unwedge/owner-veto path, deviation
+    // 22 — intent CRUD lands here, not on the cross-crate `ClaimStore`,
+    // since every caller is clustering-internal to waddle-server):
+    async fn report_steal_intent(&self, entity: &Entity, reporter: &NodeIdentity) -> Result<(), ClaimError>;
+    async fn owner_steal_intents(&self, me: &NodeIdentity) -> Result<Vec<(Entity, ClaimEpoch)>, ClaimError>;
+    // Council-adjudicated fix (Slice 3, post-implementation review): returns
+    // the affected-row count, not a bare `Result<(), ClaimError>` — a
+    // single data-modifying CTE (`WITH fenced AS (SELECT ... FOR SHARE)
+    // DELETE ... WHERE EXISTS (SELECT 1 FROM fenced)`) whose lock order is
+    // the deliberate opposite of `steal_stale(StealIntentExpired)`'s own
+    // consume-CTE, so the two serialize on the intent rows rather than
+    // race an unlocked `EXISTS` read. `run_node_lease` treats a zero-rows
+    // result after a nonzero `owner_steal_intents` entry as "possibly
+    // deposed" and demotes immediately instead of believing the veto
+    // succeeded.
+    async fn clear_steal_intent(&self, entity: &Entity, me: &NodeIdentity, mine: ClaimEpoch) -> Result<u64, ClaimError>;
 }
 ```
 
@@ -680,12 +696,16 @@ CREATE INDEX IF NOT EXISTS clustering_steal_intents_entity_created_at
     ON clustering_steal_intents (entity, created_at);
 ```
 
-Steal CAS substitutes `EXISTS (SELECT 1 FROM steal_intents WHERE entity=$e AND
-created_at < now() - $intent_ttl)` for the owner-stale predicate. Owner's heartbeat
-loop reads intents against its own claims, health-asks the owning actor, clears with an
-epoch-fenced DELETE on success (unforgeable veto — proven by writing under its own live
-epoch). Applies to **both** `RoomActor` and `UserActor` claims; SM-session claims are
-never stolen this way (identity-bound resume only, Slice 6).
+Steal CAS substitutes a data-modifying-CTE variant of `EXISTS (SELECT 1 FROM
+steal_intents WHERE entity=$e AND created_at < now() - $intent_ttl)` for the owner-stale
+predicate (council-adjudicated fix, below: the CTE *consumes* the authorizing intents
+rather than merely reading them). Owner's heartbeat loop reads intents against its own
+claims, health-asks the owning actor, and clears with an epoch-fenced DELETE on success —
+**corrected phrasing (FIX 1(e))**: the guarantee is that this clear and a concurrent
+steal serialize on the intent rows themselves (deadlock-abort-safe, see below), not any
+inherent "unforgeability" of the write. Applies to **both** `RoomActor` and `UserActor`
+claims; SM-session claims are never stolen this way (identity-bound resume only, Slice
+6).
 
 **Rule (major fix 10 — which CAS variant may touch an SM-session claim, stated once,
 binding on Slices 3/5/6 so no implementer wires the wrong one in)**:
@@ -721,14 +741,84 @@ Adding a second index on bare `created_at` for a table expected to hold tens of 
 would be write amplification for nothing.
 
 **Files**: `server/crates/waddle-server/src/clustering/claims.rs` (steal_intents CRUD +
-veto path), `server/crates/waddle-xmpp/src/registry/user_actor.rs` (internal health-ask
+veto path — including the consume-CTE `steal_stale(StealIntentExpired)` and the
+`FOR SHARE`-fenced `clear_steal_intent`, see the council-adjudicated fix below),
+`server/crates/waddle-server/src/clustering/self_fence.rs` (`run_node_lease`'s owner-side
+veto-scan wiring: `owner_steal_intents` → per-entity `health_check` →
+`clear_steal_intent`/`demote`, deadline/cancellation-armed identically to every other
+control-plane call in that function), `server/crates/waddle-server/src/config.rs`
+(`ClusteringStealIntentConfig`/`WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS`, deviation 23),
+`server/crates/waddle-xmpp/src/registry/user_actor.rs` (internal health-ask
 handler + proactive wedge-kill-and-conflict-close on a failed self health-check —
 pre-empts the steal at `intent_ttl`), `server/crates/waddle-xmpp/src/muc/
 room_actor.rs` (same health-ask handler for rooms).
 
-**Tests**: Postgres-gated: steal-intent veto vs. expiry. Harness: the
-**deposed-owner-with-live-socket case** (wedged `UserActor`, steal at `intent_ttl`,
-reconciliation conflict-closes the socket within one heartbeat interval).
+**Council-adjudicated fix — the veto race, full closure (post-implementation review
+finding)**: the first-landed pair was vulnerable to write skew under READ COMMITTED —
+`clear_steal_intent`'s DELETE was gated on an *unlocked* `EXISTS` over `clustering_claims`,
+and `steal_stale(StealIntentExpired)`'s UPDATE was gated on an *unlocked* `EXISTS` over
+`clustering_steal_intents`; both could commit concurrently (a healthy owner's veto and a
+stealer's claim both landing against the same observed epoch). Both statements were
+redesigned as data-modifying CTEs that serialize on the **intent rows themselves**:
+`steal_stale(StealIntentExpired)` becomes `WITH consumed AS (DELETE FROM
+clustering_steal_intents WHERE entity=? AND created_at < now() - intent_ttl RETURNING 1)
+UPDATE clustering_claims ... WHERE ... AND EXISTS (SELECT 1 FROM consumed)` — the DELETE
+row-locks the authorizing intents, so a concurrent veto-clear and a steal serialize on
+them: whichever deletes first wins, the loser's own predicate re-check (Postgres's
+EvalPlanQual) observes nothing left to act on. This also closes the instant-re-steal hole:
+a successful steal consumes the very intents that authorized it, so the new owner starts
+with a clean slate and the full `intent_ttl` window of protection. `clear_steal_intent`
+becomes `WITH fenced AS (SELECT 1 FROM clustering_claims WHERE entity=? AND node_id=? AND
+claim_epoch=? FOR SHARE) DELETE FROM clustering_steal_intents WHERE entity=? AND EXISTS
+(SELECT 1 FROM fenced)`, and — this is a **trait-signature change** — now returns the
+affected-row count (`Result<u64, ClaimError>`, not `Result<(), ClaimError>`):
+`run_node_lease` treats zero rows affected after a nonzero
+`owner_steal_intents` entry as "possibly deposed" and demotes immediately rather than
+believing the veto succeeded. The two statements deliberately acquire their
+`clustering_claims`/`clustering_steal_intents` locks in **opposite order** — this is what
+makes them serialize on the intent rows rather than race an unlocked read — so under
+contention Postgres may abort either side with a `40P01 deadlock_detected` error; this is
+safe (a typed `ClaimError::Backend`, never a panic; the loser retries next tick/scan) and
+is documented explicitly in both statements' doc comments. Proven by a Postgres-gated
+concurrent stress test (`steal_intent_veto_vs_steal_stress_never_both_succeed_same_round`)
+racing two real connections against one entity across 200 rounds, re-seeding an
+already-aged intent each round, asserting the invariant that a clear reporting
+`rows_affected > 0` and a steal succeeding against the same observed epoch never both
+happen in a round. The earlier doc-comment claim that this uses "the same single-statement
+CAS discipline `steal_stale`/`steal_for_resume` already use" was corrected: those two are a
+self-CAS on their own row; this is the cross-table case, and the actual guarantee is
+serialization on the intent rows, deadlock-abort-safe — not any inherent
+"unforgeability" of the write.
+
+**Tests**: Postgres-gated: steal-intent veto vs. expiry; epoch-fenced clear is a no-op
+for a deposed owner (and now asserts the exact affected-row count — `0` for a deposed
+owner, `1` for the current owner); SM-session exclusion is a typed rejection
+(`ClaimError::SmSessionExcludedFromStealIntent`) at both the intent-report surface
+(`report_steal_intent`) and defensively inside the steal CAS itself
+(`steal_stale`/`StalePredicate::StealIntentExpired`); the refresh-not-accumulate upsert;
+`owner_steal_intents` returns only entities with an outstanding intent; the FIX 1(d)
+concurrent stress test above; a `decode_entity` mismatched-prefix rejection test (a row
+whose key does not start with its own `entity_type`'s tag is skipped and logged, never
+silently mangled). Unit tests for
+the health-ask handler surfaces (`UserActor`/`RoomActor` `HealthCheck`,
+`health_check_or_wedge_kill`'s bounded-ask-then-kill behavior against a genuinely wedged
+`UserActor`) and for `run_node_lease`'s veto-scan wiring against a configurable
+`LocallyClaimedEntities` fake (healthy → `clear_steal_intent`; unhealthy → proactive
+`demote`; and — the FIX 1(b) regression — a healthy check whose `clear_steal_intent` call
+itself reports zero rows affected → proactive `demote`, not a believed-successful veto).
+
+**Deferred (implementation-time finding, see deviation 21)**: the **harness**
+**deposed-owner-with-live-socket case** as originally scoped — a real `UserActor` with a
+live socket, claimed in production, stolen via the intent path in
+`clustering_cluster_e2e.rs` — is not genuinely testable this slice: no production code
+acquires a `UserActor`/`RoomActor` Postgres claim until Slices 5-7 wire
+`LocallyClaimedEntities` to something non-empty (Slice 2's `NoLocallyClaimedEntities` is
+still the only production wiring). Faking claim acquisition inside the harness just for
+this one scenario would exercise a code path production never takes, not the mechanism
+this test is meant to prove. The mechanism itself (CAS, intent CRUD, veto-scan wiring,
+actor-level health-ask/wedge-kill primitives) is fully landed and unit-tested per above;
+the harness scenario is carried forward to land alongside Slice 5-7's real claim
+acquisition, where a genuinely wedged, genuinely-claimed `UserActor` can exist.
 
 **Dependencies**: Slice 2 (reconciliation is the "guarantee" backstop this path's fast
 path complements).
@@ -864,6 +954,18 @@ acquire-then-hydrate change closes for reads: an unscoped delete racing a second
 concurrent claim-scoped hydration of the same row would be a lost-write/phantom-expiry
 hazard, not merely a correctness nicety.
 
+**Reporter calling convention (FIX 4, forward reference)**: this slice (or a later one,
+per deviation 23's "Slice 5+" scoping) is where a genuine cross-node reporter — a node
+whose deliveries to an entity's owner keep failing/getting NACKed — first calls
+`NodeLeaseStore::report_steal_intent`. That call MUST happen on **crossing a failure
+threshold** (N consecutive failed/NACKed delivery attempts), never on every individual
+failed attempt: `report_steal_intent`'s upsert refreshes `created_at` on every call, so a
+reporter calling it once per failed attempt faster than `intent_ttl` elapses between
+attempts perpetually resets the intent's age and the steal can never clear `intent_ttl` —
+permanently starving the exact unwedge path this mechanism exists to provide. See
+`report_steal_intent`'s own doc comment (`waddle-server/src/clustering/claims.rs`) for
+the full constraint.
+
 **Files**: `server/crates/waddle-xmpp/src/stream_management/session_registry.rs` +
 `core.rs` (claim-scoped `restore_from_persistence` — acquire-then-hydrate instead of
 unscoped read), `server/crates/waddle-server/src/server/session_janitors.rs`
@@ -910,7 +1012,12 @@ flush-poke optimization, without requiring a routed cross-node relay ask this ph
 does not otherwise need. Harness: extend `clustering_cluster_e2e.rs` with a
 claim-scoped-hydration scenario (two nodes, shared Postgres, kill one, assert the
 survivor's `restore_from_persistence` claims and hydrates only the dead node's orphaned
-sessions, not its own already-claimed ones twice).
+sessions, not its own already-claimed ones twice). **Forward reference (deviation 21)**:
+this is also the first slice where a production `UserActor` acquires a real Postgres
+claim, so the harness's deferred **deposed-owner-with-live-socket** scenario (Slice 3's
+owner-veto path, exercised against a genuinely wedged, genuinely-claimed `UserActor` with
+a live socket) can land alongside this slice's own harness work, once
+`LocallyClaimedEntities` is wired to something non-empty here.
 
 **Dependencies (corrected — minor fix 18)**: Slice 4 (fenced SM persistence). The
 previous draft hard-depended this slice on Slice 3, but the orphan reaper uses
@@ -1104,7 +1211,11 @@ affiliation-list read/write), `room_registry.rs` / `room_registry_actor.rs` /
 steal commits (deposed owner's very next broadcast is blocked). Harness: room ownership
 steal restores config/affiliations/subject before the new owner accepts a join (this
 phase's mechanism test; the Phase 4 GA gate re-runs it as outcast-denial-after-steal
-once GA-gating lands).
+once GA-gating lands). **Forward reference (deviation 21)**: this slice is also the
+first production wiring of a `RoomActor` Postgres claim, so the harness's deferred
+**deposed-owner-with-live-socket** scenario (Slice 3's owner-veto path, the `RoomActor`
+counterpart — a genuinely wedged, genuinely-claimed room with a live occupant socket)
+can land alongside this slice's own harness work.
 
 **Pool assignment (blocker fix 1, stated explicitly per Slice 0)**: the fenced
 pre-fan-out `SELECT ... FOR SHARE` runs inline, inside the same `Database::begin()`
@@ -1640,3 +1751,76 @@ concern).
     (Slice 10's marker, and the just-fenced identity's row per FIX 1(b)) regardless of
     heartbeat freshness, so a node that has just self-fenced stops inflating others'
     counts immediately rather than waiting out the full TTL window.
+21. **Slice 3's owner-veto loop, health-ask handlers, and wedge-kill mechanism have no
+    production caller this slice — implementation-time finding, same pattern as deviation
+    18/19, one slice later.** `run_node_lease`'s veto scan
+    (`lease.owner_steal_intents(&identity)` → `local_claims.health_check(entity)` →
+    `clear_steal_intent`/`demote`) is real and runs every heartbeat interval, but
+    `local_claims.owned()` is always empty (`NoLocallyClaimedEntities`, unchanged from
+    Slice 2's wiring in `start_if_enabled` — no code acquires a `UserActor`/`RoomActor`
+    Postgres claim until Slices 5-7), so `owner_steal_intents` always returns an empty set
+    and the scan is a no-op every interval in production. Likewise, `UserActor::HealthCheck`/
+    `ConflictCloseAllResources`/`health_check_or_wedge_kill` and `RoomActor::HealthCheck`
+    are real, unit-tested actor primitives with no production call site — no
+    `LocallyClaimedEntities::health_check` implementation exists to call them. This mirrors
+    deviation 18's "mechanism is real and store-level tested, not dead code by the repo's
+    hard rule — it simply has nothing to reconcile against yet" reasoning exactly, applied
+    one layer up. The corresponding **harness deposed-owner-with-live-socket case** is
+    deferred for the same reason (exact edit landed in Slice 3's own Tests paragraph
+    above, not just here, and forward-referenced again from Slices 5 and 7's own Tests
+    paragraphs) rather than faked with a claim-acquisition shortcut the harness would
+    otherwise never exercise in production. **FIX 3 note for the future real
+    implementations**: `LocallyClaimedEntities::demote`'s doc contract (tightened
+    post-implementation review) requires hard-kill discipline against a wedged
+    target — `UserActor::health_check_or_wedge_kill` is the exemplar `UserActor`'s own
+    future `demote` must route through; `RoomActor` has only `HealthCheck` today (no
+    `ConflictCloseAllResources`/wedge-kill counterpart yet — that lands with Slice 7's
+    real claim wiring), and whichever slice wires a real `RoomActor`-backed
+    `LocallyClaimedEntities` must give it an equivalent hard-kill primitive before
+    routing `demote` through it, for both the reconcile-deposed and veto-health-fail
+    call sites.
+22. **Steal-intent CRUD (`report_steal_intent`/`owner_steal_intents`/`clear_steal_intent`)
+    lands on `NodeLeaseStore`, not on the cross-crate `ClaimStore` trait.** Q1's
+    unconditional-compilation rationale for `ClaimStore` (ordinary single-node
+    `waddle-xmpp` code needs *some* `ClaimStore` in every build) does not apply here: every
+    caller of intent CRUD is clustering-internal to `waddle-server` (the owner's
+    `run_node_lease` veto scan, and — from Slice 5+ — the cross-node reporter that would
+    call `report_steal_intent` after N failed deliveries), exactly the same reasoning
+    Slice 2 already used to keep `NodeLeaseStore` itself out of the cross-crate split.
+    `StalePredicate::StealIntentExpired` remains on the shared `StalePredicate` enum
+    (`waddle-xmpp/src/ownership/mod.rs`) since `steal_stale` itself is a `ClaimStore`
+    method every implementation must handle; only the intent CRUD that *populates*/*clears*
+    the table is server-local.
+23. **Config: `ClusteringConfig::steal_intent: ClusteringStealIntentConfig { intent_ttl:
+    Duration }`, env var `WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS`** — the plan's Slice 3
+    text names `intent_ttl` as a value ("a small multiple of the heartbeat interval," element
+    4) but does not lock a field/env-var name; this plan picks the same
+    `Clustering<Concern>Config` + `WADDLE_CLUSTERING_<CONCERN>_*` convention `node_lease`/
+    `self_fence` already established (Slice 2), rather than folding it into either existing
+    struct (it gates a third, independent CAS — the steal-intent predicate — not node-lease
+    renewal or isolation fencing). Default 60s (6x the default 10s node-lease heartbeat
+    interval); validated `> 0` and `>= 2x WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS`,
+    mirroring `node_lease_ttl`'s own validation shape. **FIX 7(d) — sharpened floor
+    rationale**: the owner-veto scan only runs once per heartbeat tick, so a report that
+    lands just *after* one scan has already passed needs a full further interval before
+    the *next* scan even looks at it — worst-case phase alignment between "when the
+    intent is reported" and "when the owner's scan runs" already consumes most of one
+    interval before the owner gets its first chance to observe and clear the intent. A
+    bare `> 1x` floor would let an unlucky phase alignment leave zero real interval
+    inside the window at all; `2x` is the conservative floor that guarantees at least one
+    full scan interval survives inside `intent_ttl` regardless of phase, mirroring
+    exactly why `node_lease_ttl` itself uses the same `2x` floor against its own
+    heartbeat interval. **No production call site issues
+    `StalePredicate::StealIntentExpired` this slice** (deviation 21: the cross-node reporter
+    is Slice 5+ scope), so this value is parsed and validated but not yet read by any
+    downstream call — the same "config lands with its mechanism, ahead of the mechanism's
+    first production caller" pattern `node_lease`/`self_fence` themselves followed in Slice
+    2.
+24. **`ClaimError::NotYetImplemented` removed** (repo dead-code hard rule): it existed
+    solely to mark `StalePredicate::StealIntentExpired` as unrealized in Slice 1's
+    `PostgresClaimStore::steal_stale`; Slice 3 implements that predicate, and no other
+    variant ever used the error, so the variant is deleted rather than left as an unused
+    dead branch. The SM-session exclusion this slice adds (rule 1 of the three-rule
+    steal-variant block) is a **new, distinct** typed rejection —
+    `ClaimError::SmSessionExcludedFromStealIntent` — not a repurposing of the removed
+    variant.

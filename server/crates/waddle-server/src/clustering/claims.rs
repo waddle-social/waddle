@@ -42,10 +42,14 @@
 //! the same CAS with no staleness predicate at all, reachable only via
 //! [`waddle_xmpp::ownership::ClaimStore::steal_for_resume`], which requires
 //! a `ResumeIdentityProof` no code outside the identity-checked resume path
-//! can mint. `StalePredicate::StealIntentExpired` is **not yet
-//! implementable this slice** — the `clustering_steal_intents` table lands
-//! in Slice 3 — so `steal_stale` rejects it with
-//! [`ClaimError::NotYetImplemented`].
+//! can mint. `StalePredicate::StealIntentExpired` (ADR-0017 Phase 3 Slice 3)
+//! substitutes an `EXISTS` probe over `clustering_steal_intents` for the
+//! owner-stale predicate — see [`NodeLeaseStore::report_steal_intent`]/
+//! [`NodeLeaseStore::owner_steal_intents`]/
+//! [`NodeLeaseStore::clear_steal_intent`] for the intent CRUD + owner-veto
+//! path. `EntityType::SmSession` is rejected for this variant (the
+//! three-rule steal-variant block: steal-intents never touch SM-session
+//! claims).
 //!
 //! All CAS statements run on the dedicated control-plane pool
 //! ([`Database::control_plane_guard`], ADR-0017 element 4/12, Slice 0):
@@ -58,7 +62,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, ResumeIdentityProof, StalePredicate,
+    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, NodeIdentity, ResumeIdentityProof,
+    StalePredicate,
 };
 
 use crate::db::{Database, DatabaseError};
@@ -69,6 +74,44 @@ use crate::db::{Database, DatabaseError};
 /// richer, `waddle-server`-local error type can't cross this boundary.
 fn db_err(error: DatabaseError) -> ClaimError {
     ClaimError::Backend(error.to_string())
+}
+
+/// True iff `error` is a Postgres `40P01 deadlock_detected` failure.
+///
+/// FIX 1(c): `steal_stale`'s `StealIntentExpired` CAS and
+/// `clear_steal_intent`'s epoch-fenced veto DELETE deliberately acquire
+/// their `clustering_claims`/`clustering_steal_intents` row locks in
+/// opposite orders (see both statements' doc comments for the full
+/// reasoning) — a documented design choice, not an oversight, because it is
+/// exactly what lets the two statements serialize *on the intent rows
+/// themselves* rather than racing an unlocked `EXISTS` read. The
+/// consequence is that Postgres may occasionally abort one side of a
+/// contended pair with `40P01` instead of blocking it. That outcome is
+/// always safe (a typed [`ClaimError::Backend`], never a panic; the loser
+/// retries on its own next tick/scan) — this helper only distinguishes it
+/// so callers can log it at `debug` instead of `warn`/`error`, since it is
+/// an expected consequence of the lock-order design, not a fault.
+fn is_postgres_deadlock(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Internal(sqlx::Error::Database(inner))
+            if inner.code().as_deref() == Some("40P01")
+    )
+}
+
+/// Log a `debug`-level note when `error` is the expected FIX 1(c) deadlock
+/// outcome; a no-op for every other error (those are logged by the normal
+/// `tracing::warn!` call sites that already wrap this store's callers).
+fn log_if_postgres_deadlock(error: &DatabaseError, entity_key: &str, statement: &'static str) {
+    if is_postgres_deadlock(error) {
+        tracing::debug!(
+            entity_key = %entity_key,
+            statement,
+            "clustering claim CAS: deadlock detected against the opposite-lock-order \
+             counterpart statement (FIX 1(c), expected under contention); retrying next \
+             tick/scan is the correct response"
+        );
+    }
 }
 
 /// Injective `(entity_type, id) -> TEXT` encoding for the
@@ -88,6 +131,30 @@ fn db_err(error: DatabaseError) -> ClaimError {
 /// in this slice decodes the key back, but a future slice safely could.
 fn entity_key(entity: &Entity) -> String {
     format!("{}:{}", entity.entity_type.as_db_str(), entity.id)
+}
+
+/// The inverse of [`entity_key`]: reconstruct an [`Entity`] from an encoded
+/// `clustering_claims.entity` key plus its separately-stored, already-typed
+/// `entity_type` column. Slice 1's doc comment noted that nothing in that
+/// slice decoded the key back — [`NodeLeaseStore::owner_steal_intents`]
+/// (Slice 3) is the first caller that needs to, since it returns typed
+/// [`Entity`] values to callers outside this module. Stripping the known
+/// `"{tag}:"` prefix (rather than a generic first-`:`-split decode) is safe
+/// even when `id` itself contains further colons, because the caller
+/// already knows the exact tag for each row from the `entity_type` column.
+///
+/// **FIX 6**: returns `None` on a prefix mismatch instead of silently
+/// falling back to the raw encoded string as the id (`unwrap_or(encoded)`)
+/// — a row whose `entity` key does not actually start with
+/// `entity_type`'s tag (a data-integrity anomaly: `entity_type` and the
+/// key's own tag prefix disagreeing about what type this row is) must
+/// never be allowed to mangle an id silently; the caller decides whether
+/// to skip and log the row (see
+/// [`NodeLeaseStore::owner_steal_intents`]'s handling).
+fn decode_entity(encoded: &str, entity_type: EntityType) -> Option<Entity> {
+    let prefix = format!("{}:", entity_type.as_db_str());
+    let id = encoded.strip_prefix(&prefix)?;
+    Some(Entity::new(entity_type, id))
 }
 
 #[cfg(test)]
@@ -124,6 +191,39 @@ mod entity_key_tests {
                  a different (entity_type, id) pair"
             );
         }
+    }
+
+    #[test]
+    fn decode_entity_round_trips_entity_key_including_ids_with_colons() {
+        let cases = [
+            Entity::new(EntityType::UserActor, "42"),
+            Entity::new(EntityType::RoomActor, "room_actor:42"),
+            Entity::new(EntityType::SmSession, "sm_session:sm_session:x"),
+            Entity::new(EntityType::UserActor, ""),
+            Entity::new(EntityType::RoomActor, ":"),
+        ];
+        for entity in cases {
+            let encoded = entity_key(&entity);
+            let decoded = super::decode_entity(&encoded, entity.entity_type)
+                .expect("decode_entity must succeed for a key it encoded itself");
+            assert_eq!(decoded, entity, "decode_entity must invert entity_key");
+        }
+    }
+
+    /// FIX 6: a row whose encoded key does not actually start with the
+    /// claimed `entity_type`'s tag prefix (a data-integrity anomaly, not a
+    /// shape `entity_key` itself ever produces) must be rejected rather
+    /// than silently decoded with the whole encoded string mangled in as
+    /// the id.
+    #[test]
+    fn decode_entity_returns_none_on_a_mismatched_prefix() {
+        let encoded = entity_key(&Entity::new(EntityType::UserActor, "42"));
+        assert_eq!(super::decode_entity(&encoded, EntityType::RoomActor), None);
+        assert_eq!(super::decode_entity(&encoded, EntityType::SmSession), None);
+        assert_eq!(
+            super::decode_entity("not-even-tagged", EntityType::UserActor),
+            None
+        );
     }
 }
 
@@ -187,6 +287,40 @@ impl ClaimStore for PostgresClaimStore {
         )
         .await
         .map_err(db_err)?;
+        // ADR-0017 Phase 3 Slice 3: steal-intents unwedge/owner-veto path
+        // (element 4's "Unwedge" text, quoted verbatim in the phase plan).
+        // `UNIQUE (entity, reporter_node)` + the upsert in
+        // `report_steal_intent` collapses repeated failures from one
+        // reporter against one entity into a single refreshed row rather
+        // than growing unbounded during a sustained relay fault.
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS clustering_steal_intents (
+                entity        TEXT NOT NULL,
+                reporter_node TEXT NOT NULL,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (entity, reporter_node)
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        // Backs both the steal CAS's per-entity `EXISTS` probe (hot path)
+        // and `owner_steal_intents`'s per-owner read. The abandoned-intent
+        // sweep (a future orphan-reaper concern, Slice 5) is deliberately
+        // NOT served by this index — it is keyed by bare `created_at` with
+        // no entity filter, a full-table scan on a table that stays small
+        // by construction (minor fix 20 in the phase plan).
+        conn.execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS clustering_steal_intents_entity_created_at
+                ON clustering_steal_intents (entity, created_at)
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 
@@ -225,56 +359,169 @@ impl ClaimStore for PostgresClaimStore {
         staleness: StalePredicate,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        // FIX 5: an exhaustive `match`, not an `if let ... else` fallthrough
+        // — so the compiler forces this function to be revisited the
+        // moment a third `StalePredicate` variant is added, rather than
+        // silently routing an unrecognised future variant into the
+        // `OwnerStale` arm below.
         match staleness {
-            StalePredicate::StealIntentExpired { .. } => {
-                // ADR-0017 Phase 3 Slice 3 lands `clustering_steal_intents`
-                // and this predicate's realization; until then it is
-                // unimplemented rather than silently falling back to a
-                // different (and wrong) staleness definition.
-                return Err(ClaimError::NotYetImplemented(
-                    "StalePredicate::StealIntentExpired requires the Slice 3 \
-                     clustering_steal_intents table",
-                ));
+            StalePredicate::StealIntentExpired { intent_ttl } => {
+                // Rule 1 of the three-rule steal-variant block (ADR-0017
+                // Phase 3 Slice 3): steal-intents never touch SM-session
+                // claims. Only `UserActor`/`RoomActor` claims accumulate
+                // `steal_intents` rows or get stolen through them —
+                // enforced here defensively (in addition to
+                // `report_steal_intent` never letting a `SmSession` row
+                // exist in the first place), so this CAS itself can never
+                // be misused to displace an SM-session owner even if a row
+                // somehow existed.
+                if entity.entity_type == EntityType::SmSession {
+                    return Err(ClaimError::SmSessionExcludedFromStealIntent);
+                }
+                let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+                let next_epoch = observed.0 + 1;
+                // FIX 1(a) — council-adjudicated redesign closing the veto
+                // race (write skew under READ COMMITTED between this CAS
+                // and `clear_steal_intent`'s DELETE, both previously gated
+                // on an *unlocked* `EXISTS` read over the other table): a
+                // single data-modifying CTE that **consumes** the
+                // authorizing intents. The `DELETE` runs first (as the
+                // WITH-clause's data-modifying CTE), row-locking and
+                // removing every steal-intent row for this entity aged
+                // past `intent_ttl`, *before* the outer `UPDATE` even
+                // evaluates its own `WHERE` clause. A concurrent
+                // `clear_steal_intent` racing to delete those exact same
+                // rows under the owner's live epoch therefore serializes
+                // on the intent rows themselves: whichever transaction's
+                // `DELETE` commits first physically removes the rows, and
+                // the loser — blocked on the row lock, then unblocked by
+                // the winner's commit — has its own predicate re-evaluated
+                // against the now-committed, already-emptied state
+                // (Postgres's EvalPlanQual re-check), so it finds nothing
+                // left to act on. A healthy owner's veto and a stealer's
+                // claim can therefore never both succeed against the same
+                // intent rows.
+                //
+                // This closes the instant-re-steal hole for free: a
+                // successful steal deletes exactly the intents that
+                // authorized it, so the new owner starts under a clean
+                // slate — no leftover aged intent row to immediately
+                // re-trigger another steal — with the full `intent_ttl`
+                // window of protection any freshly-acquired claim gets.
+                //
+                // FIX 1(c) — DEADLOCK NOTE: this statement acquires locks
+                // in the order {`clustering_steal_intents` rows (the
+                // DELETE), then the `clustering_claims` row (the UPDATE)}.
+                // `clear_steal_intent` below acquires them in the *opposite*
+                // order ({`clustering_claims` row via `FOR SHARE`, then
+                // `clustering_steal_intents` rows via DELETE}) — a
+                // deliberate, documented lock-order inversion, not an
+                // oversight. Under sustained contention Postgres may abort
+                // either statement with a `40P01 deadlock_detected` error;
+                // this is SAFE and expected: it surfaces as an ordinary
+                // typed [`ClaimError::Backend`] (never a panic), logged at
+                // `debug` (see [`is_postgres_deadlock`]), and the loser
+                // simply retries on its own next tick/scan.
+                // The DELETE is additionally gated on the caller's observed
+                // epoch still being current (an unlocked read — the
+                // authoritative gate remains the epoch-CAS on the UPDATE):
+                // a data-modifying CTE runs to completion even when the
+                // outer UPDATE matches nothing, so without this gate a
+                // caller holding an already-stale epoch would burn the
+                // expired intents a concurrent, correctly-epoched stealer
+                // needed, delaying the unwedge by one intent_ttl cycle.
+                // With it, a stale-epoch caller's CTE deletes nothing. The
+                // residual window (epoch bumped by a third writer between
+                // the CTE's read and the UPDATE's lock) burns intents
+                // without a steal — bounded, self-healing via the
+                // reporter's next threshold crossing.
+                let affected = conn
+                    .execute(
+                        r#"
+                        WITH consumed AS (
+                            DELETE FROM clustering_steal_intents
+                            WHERE entity = ?
+                              AND created_at < now() - (? || ' milliseconds')::interval
+                              AND EXISTS (
+                                  SELECT 1 FROM clustering_claims
+                                  WHERE entity = ? AND claim_epoch = ?
+                              )
+                            RETURNING 1
+                        )
+                        UPDATE clustering_claims
+                        SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                        WHERE entity = ?
+                          AND claim_epoch = ?
+                          AND EXISTS (SELECT 1 FROM consumed)
+                        "#,
+                        crate::db_params![
+                            entity_key(entity),
+                            intent_ttl.as_millis().to_string(),
+                            entity_key(entity),
+                            observed.0,
+                            me.node_id.clone(),
+                            me.node_epoch.clone(),
+                            next_epoch,
+                            entity_key(entity),
+                            observed.0,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| {
+                        log_if_postgres_deadlock(
+                            &error,
+                            &entity_key(entity),
+                            "steal_stale(StealIntentExpired)",
+                        );
+                        db_err(error)
+                    })?;
+                if affected == 1 {
+                    Ok(ClaimEpoch(next_epoch))
+                } else {
+                    Err(ClaimError::Conflict)
+                }
             }
-            StalePredicate::OwnerStale => {}
-        }
-        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let next_epoch = observed.0 + 1;
-        // Owner-stale steal CAS (element 4): the `NOT EXISTS` correlated
-        // subquery realizes the ADR's "LEFT JOIN" predicate
-        // (`nodes.node_id IS NULL OR nodes.expired OR node_epoch
-        // mismatch`) — a claim is stale iff no `clustering_nodes` row
-        // matches its current owner under a fresh (non-expired), current
-        // epoch. Reads only the committed `expired` flag, never a raw
-        // heartbeat comparison.
-        let affected = conn
-            .execute(
-                r#"
-                UPDATE clustering_claims
-                SET node_id = ?, node_epoch = ?, claim_epoch = ?
-                WHERE entity = ?
-                  AND claim_epoch = ?
-                  AND NOT EXISTS (
-                    SELECT 1 FROM clustering_nodes n
-                    WHERE n.node_id = clustering_claims.node_id
-                      AND NOT n.expired
-                      AND n.node_epoch = clustering_claims.node_epoch
-                  )
-                "#,
-                crate::db_params![
-                    me.node_id.clone(),
-                    me.node_epoch.clone(),
-                    next_epoch,
-                    entity_key(entity),
-                    observed.0,
-                ],
-            )
-            .await
-            .map_err(db_err)?;
-        if affected == 1 {
-            Ok(ClaimEpoch(next_epoch))
-        } else {
-            Err(ClaimError::Conflict)
+            StalePredicate::OwnerStale => {
+                let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+                let next_epoch = observed.0 + 1;
+                // Owner-stale steal CAS (element 4): the `NOT EXISTS`
+                // correlated subquery realizes the ADR's "LEFT JOIN"
+                // predicate (`nodes.node_id IS NULL OR nodes.expired OR
+                // node_epoch mismatch`) — a claim is stale iff no
+                // `clustering_nodes` row matches its current owner under a
+                // fresh (non-expired), current epoch. Reads only the
+                // committed `expired` flag, never a raw heartbeat
+                // comparison.
+                let affected = conn
+                    .execute(
+                        r#"
+                        UPDATE clustering_claims
+                        SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                        WHERE entity = ?
+                          AND claim_epoch = ?
+                          AND NOT EXISTS (
+                            SELECT 1 FROM clustering_nodes n
+                            WHERE n.node_id = clustering_claims.node_id
+                              AND NOT n.expired
+                              AND n.node_epoch = clustering_claims.node_epoch
+                          )
+                        "#,
+                        crate::db_params![
+                            me.node_id.clone(),
+                            me.node_epoch.clone(),
+                            next_epoch,
+                            entity_key(entity),
+                            observed.0,
+                        ],
+                    )
+                    .await
+                    .map_err(db_err)?;
+                if affected == 1 {
+                    Ok(ClaimEpoch(next_epoch))
+                } else {
+                    Err(ClaimError::Conflict)
+                }
+            }
         }
     }
 
@@ -509,6 +756,98 @@ pub trait NodeLeaseStore: Send + Sync {
         me: &NodeIdentity,
         locally_owned: &[Entity],
     ) -> Result<Vec<Entity>, ClaimError>;
+
+    /// Report a steal intent against `entity` (ADR-0017 Phase 3 Slice 3,
+    /// element 4's "Unwedge" text): "after N consecutive failed/NACKed
+    /// remote deliveries to a fresh-lease owner, the frustrated node writes
+    /// a `steal_intents` row." Refresh-not-accumulate: the `UNIQUE (entity,
+    /// reporter_node)` upsert collapses repeated reports from the same
+    /// reporter against the same entity into one row with a freshened
+    /// `created_at`, so a sustained relay fault never grows the table
+    /// unbounded.
+    ///
+    /// **FIX 4 — reporter calling convention (binding on the Slice 5+
+    /// cross-node reporter)**: a caller MUST report on **crossing a failure
+    /// threshold**, not on every individual failed/NACKed delivery attempt.
+    /// Because this upsert refreshes `created_at` on every call, a reporter
+    /// that calls this once per failed attempt — faster than `intent_ttl`
+    /// elapses between attempts — perpetually resets the row's age and the
+    /// intent can never clear `intent_ttl`, permanently starving the steal
+    /// this mechanism exists to unwedge. The correct shape: count
+    /// consecutive failures locally, call `report_steal_intent` once when
+    /// the count first crosses the configured threshold (N), and do not
+    /// call it again until either the intent clears (owner vetoed) or the
+    /// steal succeeds — never on a per-attempt cadence. See the Phase 3
+    /// plan's Slice 5 reporter text for the forward reference to the actual
+    /// cross-node reporter this constrains.
+    ///
+    /// Rejects [`EntityType::SmSession`](waddle_xmpp::ownership::EntityType)
+    /// with [`ClaimError::SmSessionExcludedFromStealIntent`] — rule 1 of the
+    /// three-rule steal-variant block: SM-session claims are never stolen
+    /// via the steal-intent path.
+    async fn report_steal_intent(
+        &self,
+        entity: &Entity,
+        reporter: &NodeIdentity,
+    ) -> Result<(), ClaimError>;
+
+    /// Every entity currently claimed by `me` (under its current
+    /// `node_id`/`node_epoch`) that has at least one outstanding
+    /// steal-intent row — the owner-veto loop's own read ("every owner's
+    /// heartbeat loop reads intents against its own claims," element 4).
+    /// Returns each entity alongside the [`ClaimEpoch`] `me` currently holds
+    /// it under, ready to feed [`Self::clear_steal_intent`]'s epoch-fenced
+    /// DELETE. `SmSession` claims are excluded defensively (mirroring
+    /// [`Self::report_steal_intent`]'s rejection — no row should exist for
+    /// one, but this filter means a stray row can never surface here
+    /// either).
+    async fn owner_steal_intents(
+        &self,
+        me: &NodeIdentity,
+    ) -> Result<Vec<(Entity, ClaimEpoch)>, ClaimError>;
+
+    /// Epoch-fenced veto: delete every steal-intent row for `entity` iff
+    /// `me` still holds it under `mine` right now (element 4's owner-veto
+    /// text). **FIX 1(e), corrected guarantee**: the earlier doc claimed
+    /// this uses "the same single-statement CAS discipline
+    /// `steal_stale`/`steal_for_resume` already use" — that was imprecise.
+    /// Those two are a **self-CAS on their own row** (`clustering_claims`):
+    /// the row they gate is the exact row they write. This method gates a
+    /// write on a *different* table (`clustering_steal_intents`) by a
+    /// `FOR SHARE` lock taken on `clustering_claims` — a cross-table
+    /// fencing discipline, not a self-CAS. The actual guarantee, precisely:
+    /// this DELETE and `steal_stale`'s `StealIntentExpired` CTE (FIX 1(a))
+    /// acquire their `clustering_claims`/`clustering_steal_intents` locks in
+    /// **opposite order** by design, so a concurrent veto-clear and a
+    /// concurrent steal **serialize on the intent rows themselves**
+    /// (whichever statement's row-locking `DELETE` half commits first
+    /// wins; the loser's own predicate re-check, evaluated against the
+    /// now-committed state, observes nothing left to act on) — never on an
+    /// unlocked, racy `EXISTS` read of a table neither statement is
+    /// otherwise touching. Under contention this lock-order inversion can
+    /// surface as a Postgres `40P01` deadlock on either side (FIX 1(c)) —
+    /// safe, typed, logged at `debug`, retried by the loser next
+    /// tick/scan — never a correctness hazard.
+    ///
+    /// **FIX 1(b)**: returns the number of rows actually deleted (`0` or
+    /// more; realistically `0` or `1` per reporter row, so a caller with
+    /// exactly one outstanding intent for `entity` sees `0` or `1`), not a
+    /// bare `Result<(), _>`. A deposed owner's stale-epoch call observes
+    /// `Ok(0)` — a no-op, not an error, exactly like every other
+    /// epoch-gated CAS in this store — but unlike a bare unit return, the
+    /// caller can now distinguish "the veto genuinely landed" from
+    /// "nothing happened, and I no longer hold this claim under `mine`."
+    /// [`self_fence::run_node_lease`](super::self_fence::run_node_lease)
+    /// treats `Ok(0)` after a nonzero
+    /// [`owner_steal_intents`](Self::owner_steal_intents) entry as
+    /// "possibly deposed" and demotes the entity immediately rather than
+    /// believing the veto succeeded.
+    async fn clear_steal_intent(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<u64, ClaimError>;
 }
 
 #[async_trait]
@@ -684,6 +1023,146 @@ impl NodeLeaseStore for PostgresClaimStore {
             .cloned()
             .collect())
     }
+
+    async fn report_steal_intent(
+        &self,
+        entity: &Entity,
+        reporter: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        if entity.entity_type == EntityType::SmSession {
+            return Err(ClaimError::SmSessionExcludedFromStealIntent);
+        }
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        conn.execute(
+            r#"
+            INSERT INTO clustering_steal_intents (entity, reporter_node, created_at)
+            VALUES (?, ?, now())
+            ON CONFLICT (entity, reporter_node) DO UPDATE SET created_at = EXCLUDED.created_at
+            "#,
+            crate::db_params![entity_key(entity), reporter.node_id.clone()],
+        )
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn owner_steal_intents(
+        &self,
+        me: &NodeIdentity,
+    ) -> Result<Vec<(Entity, ClaimEpoch)>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let sm_session_tag = EntityType::SmSession.as_db_str();
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT DISTINCT c.entity, c.entity_type, c.claim_epoch
+                FROM clustering_claims c
+                JOIN clustering_steal_intents si ON si.entity = c.entity
+                WHERE c.node_id = ? AND c.node_epoch = ? AND c.entity_type != ?
+                "#,
+                crate::db_params![
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    sm_session_tag.to_string()
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(db_err)? {
+            let encoded = row.get::<String>(0).map_err(db_err)?;
+            let entity_type_str = row.get::<String>(1).map_err(db_err)?;
+            let claim_epoch = row.get::<i64>(2).map_err(db_err)?;
+            let Some(entity_type) = EntityType::from_db_str(&entity_type_str) else {
+                tracing::warn!(
+                    entity_type = %entity_type_str,
+                    "owner_steal_intents: unrecognised entity_type in clustering_claims row; skipping"
+                );
+                continue;
+            };
+            // FIX 6: `decode_entity` now typed-rejects a key whose prefix
+            // disagrees with the row's own `entity_type` column instead of
+            // silently mangling the id — treat it exactly like the
+            // unrecognised-entity_type case above: log and skip the row
+            // rather than surfacing a corrupted `Entity`.
+            let Some(entity) = decode_entity(&encoded, entity_type) else {
+                tracing::warn!(
+                    encoded = %encoded,
+                    entity_type = %entity_type_str,
+                    "owner_steal_intents: entity key prefix does not match entity_type; skipping"
+                );
+                continue;
+            };
+            out.push((entity, ClaimEpoch(claim_epoch)));
+        }
+        Ok(out)
+    }
+
+    async fn clear_steal_intent(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<u64, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // FIX 1(b) — council-adjudicated redesign closing the veto race:
+        // the previous shape gated the DELETE on an *unlocked* `EXISTS`
+        // read over `clustering_claims`, which could observe "still owned"
+        // and commit the veto even while a concurrent `steal_stale`
+        // (`StealIntentExpired`) was in the middle of winning the same
+        // race — a write-skew hazard under READ COMMITTED. This version
+        // takes a real `FOR SHARE` lock on the owning claim row as a
+        // data-modifying CTE input, so the DELETE below only proceeds once
+        // that lock is held and the row is confirmed live under `mine`.
+        //
+        // FIX 1(c) — DEADLOCK NOTE: this statement acquires locks in the
+        // order {`clustering_claims` row (`FOR SHARE`), then
+        // `clustering_steal_intents` rows (the DELETE)} — the *opposite*
+        // order from `steal_stale`'s `StealIntentExpired` CTE (FIX 1(a)),
+        // which acquires {`clustering_steal_intents` rows first, then the
+        // `clustering_claims` row}. This is deliberate: it is exactly what
+        // makes a concurrent veto-clear and a concurrent steal serialize
+        // on the intent rows themselves rather than race an unlocked read
+        // — see `steal_stale`'s doc comment for the full argument. Under
+        // contention Postgres may abort either side with a `40P01`
+        // deadlock instead of blocking it; that is SAFE (a typed
+        // [`ClaimError::Backend`], never a panic — logged at `debug` via
+        // [`log_if_postgres_deadlock`] — the loser retries next
+        // tick/scan).
+        //
+        // A deposed owner's stale `(node_id, mine)` pair matches no
+        // `clustering_claims` row, so `fenced` is empty, the DELETE's
+        // `EXISTS (SELECT 1 FROM fenced)` is false, and it affects zero
+        // rows — a silent no-op, exactly like `release`'s epoch-gated
+        // semantics, but now observable by the caller via the returned
+        // count (FIX 1(b): see the trait doc for why `run_node_lease`
+        // needs to distinguish this from a genuine veto).
+        let affected = conn
+            .execute(
+                r#"
+                WITH fenced AS (
+                    SELECT 1 FROM clustering_claims
+                    WHERE entity = ? AND node_id = ? AND claim_epoch = ?
+                    FOR SHARE
+                )
+                DELETE FROM clustering_steal_intents
+                WHERE entity = ?
+                  AND EXISTS (SELECT 1 FROM fenced)
+                "#,
+                crate::db_params![
+                    entity_key(entity),
+                    me.node_id.clone(),
+                    mine.0,
+                    entity_key(entity),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                log_if_postgres_deadlock(&error, &entity_key(entity), "clear_steal_intent");
+                db_err(error)
+            })?;
+        Ok(affected)
+    }
 }
 
 /// Serializes every test that touches the shared `clustering_nodes`/
@@ -704,7 +1183,6 @@ pub(crate) fn clustering_control_plane_table_lock() -> &'static tokio::sync::Mut
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabaseDriver};
-    use waddle_xmpp::ownership::EntityType;
 
     fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
@@ -735,6 +1213,9 @@ mod tests {
         conn.execute("DELETE FROM clustering_nodes", ())
             .await
             .expect("clean nodes");
+        conn.execute("DELETE FROM clustering_steal_intents", ())
+            .await
+            .expect("clean steal intents");
         Some(store)
     }
 
@@ -938,8 +1419,16 @@ mod tests {
         assert!(matches!(err, ClaimError::Conflict));
     }
 
+    fn user_actor_entity(id: &str) -> Entity {
+        Entity::new(EntityType::UserActor, id.to_string())
+    }
+
     #[tokio::test]
-    async fn steal_stale_rejects_steal_intent_expired_this_slice() {
+    async fn steal_stale_rejects_steal_intent_expired_for_sm_session() {
+        // Rule 1 of the three-rule steal-variant block: steal-intents never
+        // touch SM-session claims, enforced defensively inside `steal_stale`
+        // itself (belt-and-suspenders alongside `report_steal_intent` never
+        // letting such a row exist).
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
@@ -954,13 +1443,13 @@ mod tests {
                 &entity,
                 epoch0,
                 StalePredicate::StealIntentExpired {
-                    intent_ttl: std::time::Duration::from_secs(30),
+                    intent_ttl: std::time::Duration::from_millis(1),
                 },
                 &stealer,
             )
             .await
-            .expect_err("StealIntentExpired is Slice 3 work, not implemented here");
-        assert!(matches!(err, ClaimError::NotYetImplemented(_)));
+            .expect_err("SM-session claims are excluded from the steal-intent path");
+        assert!(matches!(err, ClaimError::SmSessionExcludedFromStealIntent));
     }
 
     #[tokio::test]
@@ -1587,5 +2076,517 @@ mod tests {
             .await
             .expect("reconcile call succeeds");
         assert!(lost.is_empty());
+    }
+
+    // --- Steal-intents unwedge/owner-veto path (ADR-0017 Phase 3 Slice 3) ---
+
+    #[tokio::test]
+    async fn report_steal_intent_rejects_sm_session() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let reporter = node_identity();
+        let entity = sm_entity("stream-1");
+        let err = store
+            .report_steal_intent(&entity, &reporter)
+            .await
+            .expect_err("SM-session claims are excluded from the steal-intent path");
+        assert!(matches!(err, ClaimError::SmSessionExcludedFromStealIntent));
+    }
+
+    #[tokio::test]
+    async fn steal_intent_veto_clears_before_expiry_blocks_the_steal() {
+        // The owner-veto fast path: a reported intent, cleared by the owner
+        // (an epoch-fenced DELETE proving it is still alive) before it ages
+        // past `intent_ttl`, must make the steal CAS lose the race.
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = user_actor_entity("room-1");
+        let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
+
+        let stealer = node_identity();
+        store
+            .report_steal_intent(&entity, &stealer)
+            .await
+            .expect("report intent");
+
+        let intent_ttl = std::time::Duration::from_millis(50);
+
+        // Too fresh to steal yet.
+        let err = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &stealer,
+            )
+            .await
+            .expect_err("a freshly reported intent has not aged past intent_ttl yet");
+        assert!(matches!(err, ClaimError::Conflict));
+
+        // Owner scans its own claims, finds the intent, health-asks
+        // healthily, and clears it — FIX 1(e): the veto is enforced by
+        // serializing on the intent rows against a concurrent steal
+        // (deadlock-abort-safe, FIX 1(c)), not by any inherent
+        // "unforgeability" of the write itself.
+        let intents = store
+            .owner_steal_intents(&owner)
+            .await
+            .expect("owner_steal_intents");
+        assert_eq!(intents, vec![(entity.clone(), epoch0)]);
+        let cleared = store
+            .clear_steal_intent(&entity, &owner, epoch0)
+            .await
+            .expect("clear_steal_intent");
+        assert_eq!(
+            cleared, 1,
+            "FIX 1(b): a genuine veto reports the row it deleted"
+        );
+
+        // No outstanding intent left: the steal must lose even after
+        // `intent_ttl` has elapsed.
+        tokio::time::sleep(intent_ttl * 2).await;
+        let err = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &stealer,
+            )
+            .await
+            .expect_err("a vetoed (cleared) intent must not make the entity stealable");
+        assert!(matches!(err, ClaimError::Conflict));
+    }
+
+    #[tokio::test]
+    async fn steal_intent_unanswered_past_ttl_allows_the_steal() {
+        // The unwedge path: an intent the owner never clears (wedged, or
+        // genuinely gone but still heartbeating) becomes stealable once it
+        // ages past `intent_ttl` — the whole point of this CAS variant.
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = user_actor_entity("room-2");
+        let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
+        // The owner's node lease is perfectly fresh — this CAS variant must
+        // steal regardless, unlike `OwnerStale`.
+        seed_node(&store.db, &owner, false).await;
+
+        let stealer = node_identity();
+        store
+            .report_steal_intent(&entity, &stealer)
+            .await
+            .expect("report intent");
+
+        let intent_ttl = std::time::Duration::from_millis(100);
+        tokio::time::sleep(intent_ttl * 2).await;
+
+        let epoch1 = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &stealer,
+            )
+            .await
+            .expect("an uncleared, aged-out intent makes the entity stealable");
+        assert_eq!(epoch1, ClaimEpoch(1));
+    }
+
+    #[tokio::test]
+    async fn clear_steal_intent_by_a_deposed_owner_is_a_no_op() {
+        // Epoch-fenced clear: once the claim has moved to a new owner, the
+        // old owner's clear call (under its now-stale epoch) must not
+        // delete the intent row — only the current owner can veto.
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let old_owner = node_identity();
+        let entity = user_actor_entity("room-3");
+        let epoch0 = store.acquire(&entity, &old_owner).await.expect("acquire");
+
+        let reporter = node_identity();
+        store
+            .report_steal_intent(&entity, &reporter)
+            .await
+            .expect("report intent");
+
+        // Simulate the claim moving to a new owner via the consent CAS —
+        // any CAS variant works here; reconciliation and clear_steal_intent
+        // only care that Postgres no longer attributes the claim to
+        // old_owner/epoch0.
+        let new_owner = node_identity();
+        let jid: jid::BareJid = "alice@example.com".parse().expect("valid jid");
+        let proof =
+            waddle_xmpp::ownership::verify_resume_identity(&jid, &jid).expect("identity match");
+        let epoch1 = store
+            .steal_for_resume(&entity, epoch0, proof, &new_owner)
+            .await
+            .expect("steal succeeds");
+
+        // The deposed owner's clear call, still under its old epoch, is a
+        // silent no-op: the intent row must survive.
+        let cleared_by_deposed_owner = store
+            .clear_steal_intent(&entity, &old_owner, epoch0)
+            .await
+            .expect("deposed owner's clear call does not error, but is a no-op");
+        assert_eq!(
+            cleared_by_deposed_owner, 0,
+            "FIX 1(b): a deposed owner's stale-epoch clear must report zero rows affected, \
+             so `run_node_lease` can tell it apart from a genuine veto"
+        );
+        let survives = store
+            .owner_steal_intents(&new_owner)
+            .await
+            .expect("owner_steal_intents");
+        assert_eq!(
+            survives,
+            vec![(entity.clone(), epoch1)],
+            "the intent row must survive a deposed owner's stale-epoch clear attempt"
+        );
+
+        // The new, current owner's clear call succeeds.
+        let cleared_by_new_owner = store
+            .clear_steal_intent(&entity, &new_owner, epoch1)
+            .await
+            .expect("current owner's clear_steal_intent succeeds");
+        assert_eq!(
+            cleared_by_new_owner, 1,
+            "FIX 1(b): the current owner's veto reports the row it deleted"
+        );
+        let cleared = store
+            .owner_steal_intents(&new_owner)
+            .await
+            .expect("owner_steal_intents");
+        assert!(cleared.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_epoch_steal_attempt_does_not_burn_the_intents() {
+        // A data-modifying CTE runs to completion even when the outer
+        // UPDATE matches nothing, so without the epoch gate on the
+        // consuming DELETE a caller holding an already-stale observed
+        // epoch would delete the aged-out intents a concurrent,
+        // correctly-epoched stealer needed — delaying the unwedge by a
+        // full intent_ttl. The gate makes the stale caller's CTE a no-op.
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = user_actor_entity("room-stale-burn");
+        let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
+        seed_node(&store.db, &owner, false).await;
+
+        // Bump the claim epoch so epoch0 is stale.
+        let jid: jid::BareJid = "alice@example.com".parse().expect("valid jid");
+        let proof =
+            waddle_xmpp::ownership::verify_resume_identity(&jid, &jid).expect("identity match");
+        let current_owner = node_identity();
+        let epoch1 = store
+            .steal_for_resume(&entity, epoch0, proof, &current_owner)
+            .await
+            .expect("epoch bump");
+
+        let reporter = node_identity();
+        store
+            .report_steal_intent(&entity, &reporter)
+            .await
+            .expect("report intent");
+        let intent_ttl = std::time::Duration::from_millis(100);
+        tokio::time::sleep(intent_ttl * 2).await;
+
+        // The stale-epoch caller loses its CAS AND must not consume the
+        // intent.
+        let stale_caller = node_identity();
+        let err = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &stale_caller,
+            )
+            .await
+            .expect_err("stale observed epoch loses the CAS");
+        assert!(matches!(err, ClaimError::Conflict));
+        let survives = store
+            .owner_steal_intents(&current_owner)
+            .await
+            .expect("owner_steal_intents");
+        assert_eq!(
+            survives,
+            vec![(entity.clone(), epoch1)],
+            "a stale-epoch steal attempt must not burn the expired intent"
+        );
+
+        // A correctly-epoched stealer still wins on the surviving intent.
+        let real_stealer = node_identity();
+        let epoch2 = store
+            .steal_stale(
+                &entity,
+                epoch1,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &real_stealer,
+            )
+            .await
+            .expect("current-epoch stealer wins on the surviving intent");
+        assert_eq!(epoch2, ClaimEpoch(epoch1.0 + 1));
+        let consumed = store
+            .owner_steal_intents(&real_stealer)
+            .await
+            .expect("owner_steal_intents");
+        assert!(
+            consumed.is_empty(),
+            "the winning steal consumes the intents that authorized it"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_steal_intents_only_returns_entities_with_outstanding_intents() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let with_intent = user_actor_entity("room-with-intent");
+        let without_intent = Entity::new(EntityType::RoomActor, "room-without-intent".to_string());
+        let epoch_with_intent = store
+            .acquire(&with_intent, &owner)
+            .await
+            .expect("acquire with_intent");
+        store
+            .acquire(&without_intent, &owner)
+            .await
+            .expect("acquire without_intent");
+
+        let reporter = node_identity();
+        store
+            .report_steal_intent(&with_intent, &reporter)
+            .await
+            .expect("report intent");
+
+        let intents = store
+            .owner_steal_intents(&owner)
+            .await
+            .expect("owner_steal_intents");
+        assert_eq!(intents, vec![(with_intent, epoch_with_intent)]);
+    }
+
+    #[tokio::test]
+    async fn report_steal_intent_refreshes_rather_than_accumulates() {
+        // `UNIQUE (entity, reporter_node)` + the upsert: repeated reports
+        // from the same reporter against the same entity must collapse to
+        // one row, refreshing `created_at` each time (so the steal CAS's
+        // aged-out check restarts from the latest report).
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = user_actor_entity("room-4");
+        let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
+        let reporter = node_identity();
+
+        store
+            .report_steal_intent(&entity, &reporter)
+            .await
+            .expect("first report");
+        let intent_ttl = std::time::Duration::from_millis(150);
+        tokio::time::sleep(intent_ttl / 2).await;
+        // Refresh before the first report ages out.
+        store
+            .report_steal_intent(&entity, &reporter)
+            .await
+            .expect("refreshed report");
+        tokio::time::sleep(intent_ttl / 2 + std::time::Duration::from_millis(20)).await;
+
+        // If the refresh had not landed, the first report would already be
+        // stale enough to steal by now; it must not be.
+        let stealer = node_identity();
+        let err = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &stealer,
+            )
+            .await
+            .expect_err("a refreshed intent must not have aged out yet");
+        assert!(matches!(err, ClaimError::Conflict));
+
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM clustering_steal_intents", ())
+            .await
+            .expect("count query");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row present")
+            .expect("row present")
+            .get(0)
+            .expect("column present");
+        assert_eq!(count, 1, "repeated reports must refresh, not accumulate");
+    }
+
+    // FIX 1(d): a genuinely concurrent stress test proving the veto race is
+    // closed. Two real Postgres connections hammer `clear_steal_intent`
+    // (the owner's veto) against `steal_stale(StealIntentExpired)` (a
+    // stealer's attempt) on the SAME entity, at the SAME observed epoch,
+    // across many rounds — re-seeding an already-aged intent each round
+    // (backdated directly via SQL rather than a real-time sleep, so the
+    // stress loop runs fast) and racing the two calls off a `Barrier` so
+    // both fire as close to simultaneously as async scheduling allows.
+    // Modeled on `steal_commit_interleaved_inside_a_fenced_transaction`'s
+    // concurrency style (hold-a-lock-then-race pattern), generalized here
+    // to genuinely-concurrent racing rather than a controlled hold/release.
+    //
+    // The invariant under test: a clear reporting `rows_affected > 0` (a
+    // real veto) and a steal succeeding against the SAME observed epoch
+    // must never both happen in one round — write skew would mean a
+    // "vetoed" owner was simultaneously deposed. FIX 1(c)'s deliberate
+    // opposite lock-acquisition order means Postgres may occasionally
+    // abort one side of a round with `40P01 deadlock_detected`; this test
+    // asserts that outcome — when it occurs — surfaces as an ordinary typed
+    // `ClaimError::Backend`, never a panic, and counts how often it
+    // happened for the test's own report (not an assertion, since a
+    // deadlock is a possible-but-not-guaranteed outcome of any given round).
+    #[tokio::test]
+    async fn steal_intent_veto_vs_steal_stress_never_both_succeed_same_round() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let store = std::sync::Arc::new(store);
+
+        let mut owner = node_identity();
+        let mut stealer = node_identity();
+        let entity = user_actor_entity("stress-veto-race");
+        let mut epoch = store.acquire(&entity, &owner).await.expect("acquire");
+
+        let intent_ttl = std::time::Duration::from_millis(30);
+        const ROUNDS: usize = 200;
+        let mut clears_won = 0usize;
+        let mut steals_won = 0usize;
+        let mut deadlocks_observed = 0usize;
+
+        fn mentions_deadlock(err: &ClaimError) -> bool {
+            matches!(err, ClaimError::Backend(msg) if msg.to_lowercase().contains("deadlock"))
+        }
+
+        for round in 0..ROUNDS {
+            // Re-seed an already-aged intent directly: `report_steal_intent`
+            // always stamps `created_at = now()`, so backdate it here
+            // instead of sleeping out a real `intent_ttl` every round (200
+            // rounds of real sleeps would make this test unreasonably
+            // slow).
+            {
+                let conn = store.db.guard().await.expect("guard");
+                conn.execute(
+                    r#"
+                    INSERT INTO clustering_steal_intents (entity, reporter_node, created_at)
+                    VALUES (?, ?, now() - (? || ' milliseconds')::interval)
+                    ON CONFLICT (entity, reporter_node)
+                        DO UPDATE SET created_at = EXCLUDED.created_at
+                    "#,
+                    crate::db_params![
+                        entity_key(&entity),
+                        stealer.node_id.clone(),
+                        (intent_ttl.as_millis() * 10).to_string(),
+                    ],
+                )
+                .await
+                .expect("seed an already-aged intent");
+            }
+
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+            let clear_task = {
+                let store = std::sync::Arc::clone(&store);
+                let owner = owner.clone();
+                let entity = entity.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    store.clear_steal_intent(&entity, &owner, epoch).await
+                })
+            };
+            let steal_task = {
+                let store = std::sync::Arc::clone(&store);
+                let stealer = stealer.clone();
+                let entity = entity.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    store
+                        .steal_stale(
+                            &entity,
+                            epoch,
+                            StalePredicate::StealIntentExpired { intent_ttl },
+                            &stealer,
+                        )
+                        .await
+                })
+            };
+
+            let clear_result = clear_task.await.expect("clear task must not panic");
+            let steal_result = steal_task.await.expect("steal task must not panic");
+
+            let clear_won = matches!(clear_result, Ok(rows) if rows > 0);
+            let steal_won = steal_result.is_ok();
+            assert!(
+                !(clear_won && steal_won),
+                "round {round}: both a veto-clear ({clear_result:?}) and a steal \
+                 ({steal_result:?}) succeeded against the same observed epoch {epoch:?} — \
+                 write skew between clear_steal_intent and steal_stale"
+            );
+
+            // Both results are already typed `Result<_, ClaimError>` at this
+            // point (propagated cleanly through the `?` operator inside
+            // `clear_steal_intent`/`steal_stale` — a panic would have
+            // already failed the `expect("... task must not panic")` calls
+            // above). This only distinguishes the FIX 1(c) deadlock outcome
+            // for the test's own report.
+            if let Err(error) = &clear_result {
+                if mentions_deadlock(error) {
+                    deadlocks_observed += 1;
+                }
+            }
+            if let Err(error) = &steal_result {
+                if mentions_deadlock(error) {
+                    deadlocks_observed += 1;
+                }
+            }
+
+            if steal_won {
+                steals_won += 1;
+                epoch = steal_result.expect("checked Ok above");
+                std::mem::swap(&mut owner, &mut stealer);
+            } else if clear_won {
+                clears_won += 1;
+                // Ownership/epoch unchanged: the veto held.
+            }
+            // Neither winning (both sides lost, e.g. one aborted on a
+            // deadlock while the other had already been overtaken by the
+            // seed step's own timing) is possible but rare; nothing to
+            // update in that case — the next round simply re-seeds and
+            // retries under the same owner/epoch.
+        }
+
+        eprintln!(
+            "steal_intent_veto_vs_steal_stress: {ROUNDS} rounds, clears_won={clears_won}, \
+             steals_won={steals_won}, deadlocks_observed={deadlocks_observed}"
+        );
+        assert!(
+            clears_won + steals_won <= ROUNDS,
+            "sanity: cannot win more rounds than were run"
+        );
     }
 }

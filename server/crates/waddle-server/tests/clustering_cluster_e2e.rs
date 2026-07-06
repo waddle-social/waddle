@@ -350,6 +350,7 @@ async fn cluster_exit_criteria_end_to_end() {
             lease_ttl: Duration::from_secs(10),
         },
         self_fence: waddle_server::config::ClusteringSelfFenceConfig::default(),
+        steal_intent: waddle_server::config::ClusteringStealIntentConfig::default(),
         pod_template_hash: None,
     };
     let handle = swarm::spawn(&config, &db, stop.clone())

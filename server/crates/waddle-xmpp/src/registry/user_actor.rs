@@ -431,6 +431,109 @@ impl kameo::message::Message<ResourceCount> for UserActor {
 }
 
 // ---------------------------------------------------------------------------
+// Ownership (ADR-0017 Phase 3 Slice 3: steal-intent owner-veto path)
+// ---------------------------------------------------------------------------
+
+/// Internal liveness probe for the owner-veto path (ADR-0017 Phase 3 Slice
+/// 3, element 4's "Unwedge" text): a successful reply proves this actor's
+/// mailbox loop is live and responsive right now. Kameo processes a mailbox
+/// strictly in order, so an actor wedged inside a prior handler never
+/// reaches this message — the caller observes a timeout, not a reply,
+/// which is exactly the signal [`health_check_or_wedge_kill`] acts on.
+///
+/// No production caller wires this yet: `UserActor` claims do not exist
+/// until Slice 5 wires the fenced `SmPersistenceStorage` (the only
+/// production `LocallyClaimedEntities` implementor today is
+/// `waddle_server::clustering::self_fence::NoLocallyClaimedEntities`, whose
+/// `owned()` is always empty). A future `LocallyClaimedEntities` impl's
+/// `health_check` is the intended caller of [`health_check_or_wedge_kill`].
+pub struct HealthCheck;
+
+impl kameo::message::Message<HealthCheck> for UserActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: HealthCheck,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+    }
+}
+
+/// Proactively tear down every locally-registered resource for this user
+/// (ADR-0017 Phase 3 Slice 3's "conflict-closes any live local socket for
+/// that user"). Internal actor message only: no wire stanza or stream error
+/// is synthesized here (hard rule — no new stanzas/namespaces this slice).
+/// Dropping each [`ConnectionEntry`]'s `sender` breaks delivery to that
+/// resource immediately; the resource's own connection task discovers its
+/// outbound channel has closed on its next send attempt and tears the
+/// socket down from there — the same path `BroadcastOutcome::DroppedClosed`
+/// already exercises for a single stale entry, applied here to every
+/// resource at once.
+///
+/// Returns the number of resources torn down (observability/tests).
+pub struct ConflictCloseAllResources;
+
+impl kameo::message::Message<ConflictCloseAllResources> for UserActor {
+    type Reply = usize;
+
+    async fn handle(
+        &mut self,
+        _msg: ConflictCloseAllResources,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let count = self.connections.len();
+        self.connections.clear();
+        self.presence_states.clear();
+        count
+    }
+}
+
+/// Health-ask `actor_ref` and, on failure, proactively wedge-kill it (the
+/// ADR's unwedge text, verbatim): "an owner whose internal health ask fails
+/// during steal-intent processing does not wait to be stolen from: it kills
+/// the wedged actor and conflict-closes its sockets before the steal lands
+/// at `intent_ttl`, since it already knows the steal will proceed."
+///
+/// Bounded by `timeout` on both mailbox admission and reply — mirrors
+/// `muc::room_registry_handle::RoomRegistry`'s bounded-ask pattern (#757):
+/// kameo processes messages strictly in mailbox order, so a wedged actor
+/// (stuck inside a prior handler) never reaches [`HealthCheck`] and the ask
+/// times out here rather than hanging the caller.
+///
+/// Returns `true` if the actor answered healthily (no action taken), `false`
+/// if it was wedge-killed (resources best-effort torn down, then the actor
+/// stopped outright). No production caller exists this slice — see
+/// [`HealthCheck`]'s doc comment.
+pub async fn health_check_or_wedge_kill(
+    actor_ref: &kameo::actor::ActorRef<UserActor>,
+    timeout: std::time::Duration,
+) -> bool {
+    let healthy = actor_ref
+        .ask(HealthCheck)
+        .mailbox_timeout(timeout)
+        .reply_timeout(timeout)
+        .await
+        .is_ok();
+    if healthy {
+        return true;
+    }
+    tracing::warn!(
+        "UserActor failed its internal health ask; proactively wedge-killing and \
+         conflict-closing its resources ahead of the pending steal"
+    );
+    // Best-effort: `tell` only enqueues, so this can still reach a jammed
+    // mailbox even though the bounded ask above could not complete in time.
+    // `kill()` below is what actually guarantees the outcome regardless —
+    // dropping the actor's state drops every `ConnectionEntry`'s `sender`
+    // too, closing every resource's outbound channel even if this enqueued
+    // message never gets to run.
+    let _ = actor_ref.tell(ConflictCloseAllResources).await;
+    actor_ref.kill();
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
