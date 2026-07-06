@@ -1426,6 +1426,58 @@ async fn tombstone_does_not_scrub_stanza_received_after_its_recording() {
 }
 
 #[tokio::test]
+async fn tombstone_scrubs_stanza_whose_receipt_reads_slightly_after_recording() {
+    // Round-4 review: recorded_at_utc and original_receipt_at can come
+    // from different clocks (persistence restore across a restart,
+    // multi-node stamps, NTP step-back). A retracted stanza whose
+    // receipt stamp reads seconds "after" the tombstone recording due
+    // to skew must still be scrubbed — the backward-only scope carries
+    // a skew slack.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    // Helper stamps original_receipt_at = Utc::now(); the tombstone
+    // reads 30s in the past — inside the slack, so this models a
+    // receipt stamp skewed up to 30s ahead of the scrubbing clock.
+    let session = detached_session_with_unacked(
+        "stream-skew",
+        full("alice@example.com/laptop"),
+        vec![dm_xml_with_id(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "retract-me",
+            "secret",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[waddle_xmpp::stream_management::RecentTombstoneRecord {
+            key: waddle_xmpp::stream_management::TombstoneKey {
+                target_id: "retract-me".to_string(),
+                archive_jid: "alice@example.com".to_string(),
+            },
+            recorded_at_utc: Utc::now() - chrono::Duration::seconds(30),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        summary.scrubbed, 1,
+        "a receipt stamp within the skew slack must still be scrubbed"
+    );
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert!(
+        transient_bodies(&rows).is_empty(),
+        "retracted content must not reach pending_delivery under clock skew"
+    );
+}
+
+#[tokio::test]
 async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_content() {
     // R2 end-to-end race: the janitor's drain moves the session off
     // both maps into a local; the retraction scrub then finds it

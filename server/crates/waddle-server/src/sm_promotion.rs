@@ -48,6 +48,13 @@ use pending::{insert_pending, promote_as_transient};
 use stanza::{parse_stanza, promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionSummary};
 
+/// Tolerance for comparing a stanza's `original_receipt_at` against a
+/// tombstone's `recorded_at_utc` when the two stamps may come from
+/// different clocks (persistence restore across a restart, multi-node
+/// stamps under ADR-0017, NTP step-back). A receipt reading up to this
+/// much "after" the recording still counts as predating it.
+const TOMBSTONE_CLOCK_SKEW_SLACK: chrono::Duration = chrono::Duration::seconds(60);
+
 /// Walk a session's unacked queue, promoting each stanza per the
 /// locked Q6 = B priority chain. Each promoted `pending_delivery`
 /// row's `original_receipt_at` is the per-stanza receipt time
@@ -89,7 +96,13 @@ pub async fn promote_session_unacked(
     // tombstone applies BACKWARD in time only — a stanza whose
     // original receipt postdates the tombstone's recording is a NEW
     // message that merely reuses the wire id in the same scope, not
-    // the retracted one, and must promote normally.
+    // the retracted one, and must promote normally. Round-4 review:
+    // the two stamps can come from different clocks (persistence
+    // restore across a restart, multi-node stamps, NTP step-back), so
+    // the boundary carries a skew slack — a receipt reading up to
+    // TOMBSTONE_CLOCK_SKEW_SLACK "after" the recording still scrubs.
+    // Real wire-id reuse arriving that close to its own retraction is
+    // implausible; retracted-content delivery is the worse failure.
     let tombstoned_sequences: std::collections::HashSet<u32> = if recent_tombstones.is_empty() {
         std::collections::HashSet::new()
     } else {
@@ -115,7 +128,9 @@ pub async fn promote_session_unacked(
                 .filter(|sequence| {
                     receipt_by_sequence
                         .get(sequence)
-                        .is_some_and(|received_at| *received_at <= record.recorded_at_utc)
+                        .is_some_and(|received_at| {
+                            *received_at <= record.recorded_at_utc + TOMBSTONE_CLOCK_SKEW_SLACK
+                        })
                 })
                 .collect::<Vec<u32>>()
             })
