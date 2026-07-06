@@ -250,19 +250,20 @@ async fn handle_muc_join_unlocked(
             }
         };
 
-        let effective_affiliation = if created_instant_room {
-            Affiliation::Owner
+        let affiliation_grant = if created_instant_room {
+            // XEP-0045 §10.1.1: only the actual room creator gets Owner.
+            JoinAffiliationGrant::CreatorOwner
         } else if let Some(affiliation) = managed_affiliation {
-            affiliation
+            JoinAffiliationGrant::Resolver(affiliation)
         } else {
-            Affiliation::None
+            JoinAffiliationGrant::Unaffiliated
         };
 
         let join_outcome = match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: sender_jid.clone(),
                 nick: nick.clone(),
-                effective_affiliation,
+                affiliation_grant,
                 local_domain: domain.clone(),
                 admission_revision,
             })

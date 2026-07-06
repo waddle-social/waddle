@@ -4220,7 +4220,7 @@ mod sfu_eviction_tests {
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use crate::server::routes::websocket::tests::RecordingSfu;
     use crate::server::AppState;
-    use waddle_xmpp::muc::room_actor::JoinWithAffiliation;
+    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::muc::RoomConfig;
 
     async fn fresh_state() -> AppState {
@@ -4253,7 +4253,7 @@ mod sfu_eviction_tests {
             .ask(JoinWithAffiliation {
                 sender_jid: bob.clone(),
                 nick: "bob".to_string(),
-                effective_affiliation: Affiliation::Member,
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "localhost".to_string(),
                 admission_revision: 0,
             })

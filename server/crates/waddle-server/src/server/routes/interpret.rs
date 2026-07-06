@@ -101,8 +101,8 @@ use waddle_xmpp::mam::{
     RichMessageId, RichText, STANZA_ID_NS,
 };
 use waddle_xmpp::muc::room_actor::{
-    ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation,
-    RoomActor, SetSubject,
+    ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
+    JoinWithAffiliation, RoomActor, SetSubject,
 };
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;

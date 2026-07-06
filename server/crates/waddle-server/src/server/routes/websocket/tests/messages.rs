@@ -1366,7 +1366,7 @@ async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -1453,7 +1453,7 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -1541,7 +1541,7 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
             .ask(JoinWithAffiliation {
                 sender_jid: alice_jid.clone(),
                 nick: "alice".to_string(),
-                effective_affiliation: Affiliation::Member,
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: current_admission_revision(&room_actor).await,
             })
@@ -1763,7 +1763,7 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
             .ask(JoinWithAffiliation {
                 sender_jid: alice_jid.clone(),
                 nick: "alice".to_string(),
-                effective_affiliation: Affiliation::Member,
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: current_admission_revision(&room_actor).await,
             })
@@ -1872,7 +1872,7 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -1968,7 +1968,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
             // via `room_affiliations`, satisfying the gate. The point
             // of this test is the `<active/>` recipient filter; the
             // sender's role is fixture scaffolding.
-            effective_affiliation: Affiliation::Admin,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -1978,7 +1978,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         .ask(JoinWithAffiliation {
             sender_jid: bob_jid,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -2066,7 +2066,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
             // actually classifies as `ActiveChannelMention` — otherwise
             // the assertion passes for the wrong reason (downgrade to
             // `NotifyAll` + no durable recipient = empty jobs).
-            effective_affiliation: Affiliation::Admin,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -2076,7 +2076,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
         .ask(JoinWithAffiliation {
             sender_jid: bob_jid,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::None,
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -2168,7 +2168,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
             // under the server's default `mentions#channel = moderators`
             // policy. Test focus is the live-occupancy + Always
             // members-only path; sender role is scaffolding.
-            effective_affiliation: Affiliation::Admin,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -2178,7 +2178,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         .ask(JoinWithAffiliation {
             sender_jid: bob_jid,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -3431,7 +3431,7 @@ async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
         .ask(JoinWithAffiliation {
             sender_jid: sender_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -3507,7 +3507,7 @@ async fn handle_message_groupchat_extension_envelope_preserves_non_occupant_erro
         .ask(JoinWithAffiliation {
             sender_jid: bob_jid,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -4123,7 +4123,7 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
         .ask(JoinWithAffiliation {
             sender_jid: sender_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })
@@ -4215,7 +4215,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
         .ask(JoinWithAffiliation {
             sender_jid: sender_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
         })

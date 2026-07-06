@@ -28,9 +28,9 @@ pub use admin_handlers::{
     GetAdminContext, IsOwner,
 };
 pub use occupancy_handlers::{
-    ClearMujiPresence, InCallPresenceUpdateOutcome, JoinWithAffiliation, LeaveByRealJid,
-    MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
-    UpsertInCallState, UpsertMujiPresence,
+    ClearMujiPresence, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
+    LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData,
+    ReconcileChannelBackedRoom, UpsertInCallState, UpsertMujiPresence,
 };
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,

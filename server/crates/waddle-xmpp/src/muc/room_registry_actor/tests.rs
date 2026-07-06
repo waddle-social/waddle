@@ -503,7 +503,7 @@ async fn runtime_outcast_demotion_excludes_hydrated_durable_member() {
 ///    candidate the interpreter persists.
 #[tokio::test]
 async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
-    use crate::muc::room_actor::JoinWithAffiliation;
+    use crate::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use crate::protocol::event::OutboundEvent;
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::room::inbox::MucInboxHandler;
@@ -532,7 +532,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         .ask(JoinWithAffiliation {
             sender_jid: sender.clone(),
             nick: "sender".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })

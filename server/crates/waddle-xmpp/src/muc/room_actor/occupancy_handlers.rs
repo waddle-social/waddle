@@ -10,10 +10,30 @@ use super::{
 use crate::muc::RoomConfig;
 use crate::types::Affiliation;
 
+/// The affiliation a join request carries into the room, typed by
+/// where it came from (#1110/#1134).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinAffiliationGrant {
+    /// The joiner brings no affiliation of their own; whatever the
+    /// room's affiliation list already stores applies.
+    Unaffiliated,
+    /// Derived by the join-path authz resolver from the managed
+    /// channel / space graph. Reconstructible on the next join, so it
+    /// is stored with [`AffiliationProvenance::ResolverDerived`] and
+    /// never blocks room dormancy.
+    ///
+    /// [`AffiliationProvenance::ResolverDerived`]: crate::muc::affiliation::AffiliationProvenance::ResolverDerived
+    Resolver(Affiliation),
+    /// XEP-0045 §10.1.1: this join created the room, so the joiner is
+    /// the room creator and receives Owner. Stored as an explicit
+    /// grant — it is not reconstructible from any resolver.
+    CreatorOwner,
+}
+
 pub struct JoinWithAffiliation {
     pub sender_jid: FullJid,
     pub nick: String,
-    pub effective_affiliation: Affiliation,
+    pub affiliation_grant: JoinAffiliationGrant,
     pub local_domain: String,
     pub admission_revision: u64,
 }
@@ -30,11 +50,18 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
 
-        if msg.effective_affiliation != Affiliation::None {
-            self.room.update_affiliation_from_resolver(
-                msg.sender_jid.to_bare(),
-                msg.effective_affiliation,
-            );
+        match msg.affiliation_grant {
+            JoinAffiliationGrant::Unaffiliated => {}
+            JoinAffiliationGrant::Resolver(affiliation) => {
+                if affiliation != Affiliation::None {
+                    self.room
+                        .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation);
+                }
+            }
+            JoinAffiliationGrant::CreatorOwner => {
+                self.room
+                    .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
+            }
         }
 
         if !self.room.can_user_join(&msg.sender_jid.to_bare()) {
