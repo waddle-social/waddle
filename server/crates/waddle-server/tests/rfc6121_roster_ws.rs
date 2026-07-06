@@ -982,7 +982,7 @@ async fn offline_subscribe_is_removed_when_requester_unsubscribes_before_deliver
 }
 
 #[tokio::test]
-async fn offline_subscribe_is_redelivered_until_answered() {
+async fn offline_subscribe_is_redelivered_on_new_sessions_until_answered() {
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
     let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
     let server = TestServer::start_with_extra_accounts(&[
@@ -1035,24 +1035,32 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         "pending subscribe should identify requester: {first}"
     );
 
-    alice
-        .send(r#"<presence xmlns="jabber:client" type="unavailable"/>"#)
-        .await
-        .expect("alice unavailable");
-    alice
+    // RFC 6121 §3.1.3 (issue #1104): re-delivery happens on a NEW session's
+    // initial available presence, not on presence flips within a session.
+    let _ = alice.close().await;
+    let mut alice_second = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-second-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice second session");
+    alice_second
         .send(r#"<presence xmlns="jabber:client"/>"#)
         .await
-        .expect("alice available again");
-    let second = alice
+        .expect("alice second session available");
+    let second = alice_second
         .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
-        .expect("unanswered pending subscribe is redelivered");
+        .expect("unanswered pending subscribe is redelivered to a fresh session");
     assert!(
         second.contains("from='bob@localhost'"),
         "redelivered subscribe should preserve requester: {second}"
     );
 
-    alice
+    alice_second
         .send(r#"<presence xmlns="jabber:client" type="unsubscribed" to="bob@localhost"/>"#)
         .await
         .expect("deny subscription");
@@ -1066,26 +1074,35 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         .recv_matching(|frame| frame.contains("type='unsubscribed'"))
         .await
         .expect("bob receives denial after roster push");
-    alice
-        .send(r#"<presence xmlns="jabber:client" type="unavailable"/>"#)
-        .await
-        .expect("alice unavailable after denial");
-    alice
+    let _ = alice_second.close().await;
+    let mut alice_third = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-third-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice third session");
+    alice_third
         .send(r#"<presence xmlns="jabber:client"/>"#)
         .await
-        .expect("alice available after denial");
-    let after_denial = alice.recv_timeout(Duration::from_millis(250)).await;
+        .expect("alice third session available");
+    let after_denial = alice_third.recv_timeout(Duration::from_millis(250)).await;
     assert!(
-        after_denial.is_err(),
+        !after_denial
+            .as_deref()
+            .map(|frame| frame.contains("type='subscribe'"))
+            .unwrap_or(false),
         "answered pending subscribe must not be redelivered: {after_denial:?}"
     );
 
-    let _ = alice.close().await;
+    let _ = alice_third.close().await;
     let _ = bob.close().await;
 }
 
 #[tokio::test]
-async fn live_subscribe_is_redelivered_until_answered() {
+async fn live_subscribe_is_redelivered_on_new_sessions_until_answered() {
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
     let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
     let server = TestServer::start_with_extra_accounts(&[
@@ -1130,24 +1147,33 @@ async fn live_subscribe_is_redelivered_until_answered() {
         "live subscribe should identify requester: {first}"
     );
 
-    alice
-        .send(r#"<presence xmlns="jabber:client" type="unavailable"/>"#)
-        .await
-        .expect("alice unavailable");
-    alice
+    // RFC 6121 §3.1.3 (issue #1104): the still-unanswered request is queued
+    // and re-delivered to a NEW session's initial available presence, not on
+    // presence flips within the session that already received it live.
+    let _ = alice.close().await;
+    let mut alice_second = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-live-second-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice second session");
+    alice_second
         .send(r#"<presence xmlns="jabber:client"/>"#)
         .await
-        .expect("alice available again");
-    let second = alice
+        .expect("alice second session available");
+    let second = alice_second
         .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
-        .expect("unanswered live subscribe is redelivered");
+        .expect("unanswered live subscribe is redelivered to a fresh session");
     assert!(
         second.contains("from='bob@localhost'"),
         "redelivered live subscribe should preserve requester: {second}"
     );
 
-    alice
+    alice_second
         .send(r#"<presence xmlns="jabber:client" type="unsubscribed" to="bob@localhost"/>"#)
         .await
         .expect("deny live subscription");
@@ -1156,6 +1182,114 @@ async fn live_subscribe_is_redelivered_until_answered() {
         .await
         .expect("bob receives live denial");
 
+    let _ = alice_second.close().await;
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn pending_subscribe_is_delivered_once_per_session_not_on_presence_flips() {
+    // RFC 6121 §3.1.3: the server delivers pending inbound subscription
+    // requests when a resource sends its INITIAL available presence.
+    // Subsequent presence updates within the same session (auto-away
+    // flips, status changes) must NOT re-deliver the request; a NEW
+    // session (fresh resource/connection) receives it again until it is
+    // answered.
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+    let _bob_initial = send_roster_get(&mut bob, "bob-flip-roster").await;
+
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("send subscribe while alice offline");
+    let _bob_pending_push = bob
+        .recv_matching(|frame| {
+            frame.contains("jabber:iq:roster")
+                && frame.contains("alice@localhost")
+                && frame.contains("ask='subscribe'")
+        })
+        .await
+        .expect("bob pending subscribe push");
+
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice initial available");
+    let first = alice
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("first available presence delivers the pending subscribe");
+    assert!(
+        first.contains("from='bob@localhost'"),
+        "pending subscribe should identify requester: {first}"
+    );
+
+    // Presence flips within the SAME session: auto-away then available
+    // again. Neither may re-prompt with the already-delivered subscribe.
+    alice
+        .send(r#"<presence xmlns="jabber:client"><show>away</show></presence>"#)
+        .await
+        .expect("alice flips to away");
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice flips back to available");
+    let redelivered = alice.recv_timeout(Duration::from_millis(400)).await;
+    assert!(
+        !redelivered
+            .as_deref()
+            .map(|frame| frame.contains("type='subscribe'"))
+            .unwrap_or(false),
+        "presence flips within a session must not re-deliver the pending subscribe: {redelivered:?}"
+    );
+
+    // A NEW session for alice (fresh resource) gets the still-unanswered
+    // request again on its first available presence.
     let _ = alice.close().await;
+    let mut alice2 = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice2-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice second session");
+    alice2
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice2 initial available");
+    let second_session = alice2
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("a fresh session receives the unanswered pending subscribe again");
+    assert!(
+        second_session.contains("from='bob@localhost'"),
+        "re-delivered subscribe should preserve requester: {second_session}"
+    );
+
+    let _ = alice2.close().await;
     let _ = bob.close().await;
 }

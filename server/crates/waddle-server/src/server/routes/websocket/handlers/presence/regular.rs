@@ -64,18 +64,33 @@ pub(super) async fn handle_regular_presence_update(
                 // delivery relays the real advertisements (issue #1101).
                 presence.payloads.clone(),
             );
-        for stanza in state
+        // RFC 6121 §3.1.3: deliver queued inbound subscription requests on
+        // this resource's INITIAL available presence only. The per-connection
+        // CAS mirrors `claim_offline_flush` so auto-away/available flips
+        // within a session never re-prompt the user (issue #1104). A subscribe
+        // arriving while the user is online is still delivered directly by
+        // `handle_subscription_presence`'s live path; the queue exists for the
+        // next fresh session until the request is answered.
+        let first_available = state
             .deps
             .protocol
             .connection_registry
-            .pending_subscription_stanzas(&sender_jid.to_bare())
-        {
-            let _ = state
+            .get_entry(sender_jid)
+            .is_some_and(|entry| entry.claim_pending_subscribes_flush());
+        if first_available {
+            for stanza in state
                 .deps
                 .protocol
                 .connection_registry
-                .send_to(sender_jid, stanza)
-                .await;
+                .pending_subscription_stanzas(&sender_jid.to_bare())
+            {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .send_to(sender_jid, stanza)
+                    .await;
+            }
         }
     } else {
         state
