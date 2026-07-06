@@ -144,13 +144,23 @@ impl InMemorySmSessionRegistry {
     /// retraction that raced the drain still scrubs the in-flight copy
     /// — but only stanzas received before `recorded_at_utc`.
     pub fn recent_tombstones(&self) -> Result<Vec<RecentTombstoneRecord>, SmRegistryError> {
-        let mut recent = self
+        // Read lock only (PR-review finding): every per-session
+        // promotion consults this, and a write lock here stalls
+        // concurrent `record_recent_tombstone` calls during a drain
+        // burst. Expired entries are filtered out of the SNAPSHOT
+        // without mutating the list — eviction happens on every
+        // insert, which also bounds the list's size.
+        let recent = self
             .recent_tombstones
-            .write()
+            .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        Self::evict_stale_tombstones(&mut recent, Instant::now());
+        let now = Instant::now();
         Ok(recent
             .iter()
+            .filter(|entry| {
+                now.checked_duration_since(entry.recorded_at)
+                    .is_none_or(|age| age <= RECENT_TOMBSTONE_TTL)
+            })
             .map(|entry| RecentTombstoneRecord {
                 key: entry.key.clone(),
                 recorded_at_utc: entry.recorded_at_utc,

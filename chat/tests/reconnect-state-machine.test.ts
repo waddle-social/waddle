@@ -527,6 +527,34 @@ describe("terminal classification requires the structured stream-error (C4)", ()
     state.reconnect.clearTimer();
   });
 
+  test("a free-text stream error merely containing 'conflict' stays recoverable", () => {
+    // PR-review finding: bare word-matching in free text latched
+    // terminal state on benign errors (e.g. a proxied transport
+    // message). Only a structured condition or the WASM ClientError's
+    // backtick-quoted `condition` may classify terminal.
+    const { state, statuses, scheduled, fireError, fireDisconnected } = createHarness();
+
+    (fireError as unknown as (payload: unknown) => void)(
+      "write conflict on shard while syncing presence",
+    );
+    fireDisconnected();
+
+    expect(statuses.at(-1)?.state).toBe("reconnecting");
+    expect(scheduled).toHaveLength(1);
+    state.reconnect.clearTimer();
+  });
+
+  test("an object payload whose detail merely mentions not-authorized stays recoverable", () => {
+    const { state, statuses, scheduled, fireError, fireDisconnected } = createHarness();
+
+    fireError({ detail: "proxy said: upstream not-authorized for CONNECT" });
+    fireDisconnected();
+
+    expect(statuses.at(-1)?.state).toBe("reconnecting");
+    expect(scheduled).toHaveLength(1);
+    state.reconnect.clearTimer();
+  });
+
   test("the WASM driver's SASL-rejection string still classifies terminal via set_on_error", () => {
     const { state, statuses, scheduled, fireError, fireDisconnected } = createHarness();
 

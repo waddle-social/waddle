@@ -208,18 +208,40 @@ type XmppStreamErrorPayload = string | {
  * "reconnecting" spinner. Maps each condition to the user-facing
  * status detail (`connection-notice.ts` renders the copy).
  */
-const TERMINAL_STREAM_CONDITION_DETAILS: Record<string, string> = {
+const TERMINAL_STREAM_CONDITION_DETAILS = {
   // RFC 6120 §4.9.3.12 / SASL failure surfaced as a stream error:
   // the session token is no longer accepted.
   "not-authorized": "Your session expired — sign in again to restore live messaging.",
   // RFC 6120 §4.9.3.3: the server closed this stream in favour of a
   // newer one for the same resource; reconnecting would just fight it.
   conflict: "This session was replaced by a newer sign-in for the same account.",
-};
+} as const;
+
+function isTerminalStreamCondition(
+  condition: string,
+): condition is keyof typeof TERMINAL_STREAM_CONDITION_DETAILS {
+  return condition in TERMINAL_STREAM_CONDITION_DETAILS;
+}
 
 function terminalDisconnectDetail(condition: string | undefined): string | null {
-  if (!condition) return null;
-  return TERMINAL_STREAM_CONDITION_DETAILS[condition] ?? null;
+  if (!condition || !isTerminalStreamCondition(condition)) return null;
+  return TERMINAL_STREAM_CONDITION_DETAILS[condition];
+}
+
+/**
+ * The condition allowed to drive TERMINAL classification. Real stream
+ * errors always arrive structured (`JsStreamError.condition` from the
+ * WASM core); the only free-text payload that legitimately names a
+ * terminal condition is waddle-xmpp-client's SASL ClientError display,
+ * which backtick-quotes it ("… with condition `not-authorized`").
+ * Loose word-matching (`streamErrorConditionFromText`) stays for the
+ * emitted event's diagnostic `condition` field only — a benign error
+ * whose text merely contains "conflict" must never latch terminal
+ * state.
+ */
+function terminalConditionFromPayload(payload: XmppStreamErrorPayload): string | undefined {
+  if (typeof payload !== "string") return payload.condition?.trim() || undefined;
+  return /\bcondition `([a-z0-9-]+)`/.exec(payload)?.[1];
 }
 
 function streamErrorConditionFromText(text: string | null | undefined): string | undefined {
@@ -2475,7 +2497,7 @@ export class BrowserXmppClient {
     xmpp.set_on_error?.((payload: XmppStreamErrorPayload) => {
       if (this.xmpp !== xmpp) return;
       const streamError = normalizeXmppStreamErrorPayload(payload);
-      const terminalDetail = terminalDisconnectDetail(streamError.condition);
+      const terminalDetail = terminalDisconnectDetail(terminalConditionFromPayload(payload));
       if (terminalDetail) this.terminalDisconnectDetail = terminalDetail;
       this.emitError({
         kind: "stream",
