@@ -2008,6 +2008,51 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
     );
 }
 
+#[tokio::test]
+async fn reinsert_for_retry_keeps_queue_when_session_was_never_persisted() {
+    // Round-6 review: the Finding D durable diff must not misread "no
+    // durable rows because the snapshot write FAILED" (Finding E's
+    // store_session error path leaves the new session in memory with
+    // no durable session row) as "rows scrubbed". A phase-4 scrub
+    // deletes unacked rows but leaves the durable session row, so the
+    // diff is authoritative only when that session row exists; when it
+    // does not, dropping the queue would silently lose messages on the
+    // very storage blip reinsert_for_retry claims to tolerate.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let mut session = realistic_test_session_for_jid(
+        "stream-never-persisted",
+        "user@example.com/resource".parse().unwrap(),
+    );
+    session.unacked_stanzas = vec![DetachedUnackedStanza {
+        sequence: 3,
+        stanza_xml: realistic_dm_stanza_xml(
+            "alice@example.com/web",
+            "user@example.com/resource",
+            "keep-me",
+            "safe",
+        ),
+        original_receipt_at: Utc::now(),
+    }];
+
+    // The session never went through a successful store_session
+    // snapshot: no durable session row, no durable unacked rows.
+    registry.reinsert_for_retry(session).await.unwrap();
+
+    let retried = registry.drain_expired().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(
+        retried[0]
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![3],
+        "a never-persisted queue must be kept verbatim (at-least-once), \
+         not dropped by the durable diff"
+    );
+}
+
 /// Persistence wrapper whose `store_session_atomic` fails while armed
 /// — models a durable-backend outage hitting exactly the snapshot
 /// write inside `store_session` (Finding E).

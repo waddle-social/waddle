@@ -203,21 +203,44 @@ impl InMemorySmSessionRegistry {
         // rows no longer exist — durable storage is the scrub's source
         // of truth. A read failure keeps the queue verbatim
         // (at-least-once beats dropping stanzas on a storage blip).
+        // The diff is authoritative only when the durable session row
+        // exists (round-6 review): a phase-4 scrub deletes unacked rows
+        // but leaves the session row, whereas a session whose
+        // store_session snapshot write FAILED has neither — dropping
+        // its queue would silently lose messages on the very storage
+        // blip this path tolerates.
         if let Some(storage) = &self.persistence {
             let session_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
-            match storage.list_unacked(&session_id).await {
-                Ok(rows) => {
-                    let durable: std::collections::HashSet<u32> =
-                        rows.iter().map(|row| row.sequence).collect();
-                    session
-                        .unacked_stanzas
-                        .retain(|entry| durable.contains(&entry.sequence));
+            match storage.get_session(&session_id).await {
+                Ok(Some(_)) => match storage.list_unacked(&session_id).await {
+                    Ok(rows) => {
+                        let durable: std::collections::HashSet<u32> =
+                            rows.iter().map(|row| row.sequence).collect();
+                        session
+                            .unacked_stanzas
+                            .retain(|entry| durable.contains(&entry.sequence));
+                    }
+                    Err(error) => {
+                        debug!(
+                            stream_id = %session.stream_id,
+                            error = %error,
+                            "reinsert_for_retry: durable list_unacked failed; keeping the \
+                             in-memory queue verbatim (at-least-once)"
+                        );
+                    }
+                },
+                Ok(None) => {
+                    debug!(
+                        stream_id = %session.stream_id,
+                        "reinsert_for_retry: no durable session row (snapshot never \
+                         landed); keeping the in-memory queue verbatim (at-least-once)"
+                    );
                 }
                 Err(error) => {
                     debug!(
                         stream_id = %session.stream_id,
                         error = %error,
-                        "reinsert_for_retry: durable list_unacked failed; keeping the \
+                        "reinsert_for_retry: durable get_session failed; keeping the \
                          in-memory queue verbatim (at-least-once)"
                     );
                 }
