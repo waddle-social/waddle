@@ -173,6 +173,161 @@ async fn test_destroy_room() {
     assert!(!exists);
 }
 
+/// #1108: the janitor's IsDormant → destroy sequence is a TOCTOU.
+/// A join that lands between the dormancy probe and the destroy must
+/// make the guarded destroy refuse — the revision it carries is stale
+/// and the seal re-check runs inside the room actor's own mailbox,
+/// serialized against the join.
+#[tokio::test]
+async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
+    use crate::muc::room_actor::{
+        IsDormant, JoinAffiliationGrant, JoinWithAffiliation, LeaveByRealJid, OccupantCount,
+        SealGuard,
+    };
+    use crate::types::Affiliation;
+
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("toctou");
+    let actor: ActorRef<RoomActor> = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+
+    // Janitor half 1: probe dormancy, capturing the revision.
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert!(probe.dormant, "fresh empty room is dormant");
+
+    // The race: a join lands between the probe and the destroy.
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("full jid");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("interleaved join");
+
+    // Janitor half 2: guarded destroy with the stale revision → refused.
+    let destroyed: bool = registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy ask");
+    assert!(
+        !destroyed,
+        "a join after the dormancy probe must refuse the guarded destroy \
+         — destroying here orphans the freshly-admitted occupant (#1108)"
+    );
+    assert!(
+        registry
+            .ask(RoomExists {
+                room_jid: jid.clone()
+            })
+            .await
+            .expect("exists"),
+        "the room stays registered"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("count"),
+        1,
+        "the interleaved occupant is intact"
+    );
+
+    // After the occupant leaves, a fresh probe + matching revision
+    // destroys the actually-dormant room.
+    actor
+        .ask(LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    let probe = actor.ask(IsDormant).await.expect("second probe");
+    assert!(probe.dormant, "room is dormant again after the leave");
+    let destroyed: bool = registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy ask");
+    assert!(destroyed, "an actually-dormant room is destroyed");
+    assert!(
+        !registry
+            .ask(RoomExists { room_jid: jid })
+            .await
+            .expect("exists"),
+        "the room is gone from the registry"
+    );
+}
+
+/// #1108 second half: a caller that grabbed the ActorRef before the
+/// guarded destroy and sends its join afterwards must get a typed,
+/// retryable refusal (the sealed actor never silently admits an
+/// occupant into a destroyed room), so the join handler can re-run
+/// the registry lookup and respawn the room.
+#[tokio::test]
+async fn sealed_room_refuses_late_join_with_retryable_error() {
+    use crate::muc::room_actor::{
+        IsDormant, JoinAffiliationGrant, JoinWithAffiliation, RoomActorError, SealGuard,
+    };
+    use crate::types::Affiliation;
+
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("sealed");
+    let stale_ref: ActorRef<RoomActor> = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    let probe = stale_ref.ask(IsDormant).await.expect("probe");
+    assert!(probe.dormant);
+
+    let destroyed: bool = registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy ask");
+    assert!(destroyed);
+
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("full jid");
+    let result = stale_ref
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ),
+        "a sealed room actor refuses late joins with the typed retryable \
+         error instead of admitting an occupant into a destroyed room; \
+         got: {result:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_destroy_non_existent_room_returns_false() {
     let registry = spawn_registry().await;

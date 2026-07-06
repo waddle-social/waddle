@@ -15,7 +15,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::affiliation::DurableMembershipSource;
-use super::room_actor::{HydrateDurableRecipients, RoomActor};
+use super::room_actor::{HydrateDurableRecipients, RoomActor, SealGuard, SealIfInactive};
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
 use crate::xep::xep0421::OccupantIdSecret;
@@ -278,6 +278,80 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         } else {
             warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
             false
+        }
+    }
+}
+
+/// Destroy a room only if it is still inactive (#1108).
+///
+/// Replaces the janitor's unconditional [`DestroyRoom`] for eviction
+/// paths. Inside this serialized registry handler, the room actor is
+/// asked to seal itself if it is still inactive at
+/// `expected_occupancy_revision` ([`SealIfInactive`]); the room
+/// actor's mailbox serializes that check against joins, so a join that
+/// raced the caller's dormancy probe either bumped the revision
+/// (→ seal refused) or is queued behind the seal and gets the typed
+/// [`RoomActorError::RoomSealed`](super::room_actor::RoomActorError::RoomSealed)
+/// refusal, which the join path retries through the registry.
+///
+/// Returns `true` when the room was sealed and removed.
+pub struct DestroyRoomIfInactive {
+    pub room_jid: BareJid,
+    pub expected_occupancy_revision: u64,
+    pub guard: SealGuard,
+}
+
+/// Bound for the in-handler seal ask so a wedged room actor cannot
+/// wedge the whole registry: shorter than
+/// [`ROOM_REGISTRY_REPLY_TIMEOUT`](super::room_registry_handle::ROOM_REGISTRY_REPLY_TIMEOUT)
+/// so the outer registry ask still gets a reply.
+const SEAL_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyRoomIfInactive,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(actor_ref) = self.rooms.get(&msg.room_jid).cloned() else {
+            return false;
+        };
+        let sealed = actor_ref
+            .ask(SealIfInactive {
+                expected_occupancy_revision: msg.expected_occupancy_revision,
+                guard: msg.guard,
+            })
+            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+            .reply_timeout(SEAL_ASK_TIMEOUT)
+            .await;
+        match sealed {
+            Ok(true) => {
+                self.rooms.remove(&msg.room_jid);
+                self.poisoned_rooms.remove(&msg.room_jid);
+                info!(room = %msg.room_jid, "Destroyed inactive room (guarded)");
+                true
+            }
+            Ok(false) => {
+                debug!(
+                    room = %msg.room_jid,
+                    "Guarded destroy refused: room no longer inactive at expected revision"
+                );
+                false
+            }
+            Err(error) => {
+                // Never remove on uncertainty. If the seal actually
+                // landed but the reply was lost, the seal is idempotent
+                // and the next sweep converges (a sealed room reports
+                // dormant and re-confirms the seal).
+                warn!(
+                    room = %msg.room_jid,
+                    error = ?error,
+                    "Guarded destroy seal ask failed; keeping the room"
+                );
+                false
+            }
         }
     }
 }

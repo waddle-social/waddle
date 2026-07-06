@@ -33,10 +33,10 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use super::affiliation::DurableMembershipSource;
-use super::room_actor::RoomActor;
+use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CreateInstantRoom, CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
-    RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom,
+    IsMucJid, ListRooms, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -311,6 +311,18 @@ impl RoomRegistry {
         destroy_room(room_jid: BareJid) -> bool,
         "destroy_room",
         DestroyRoom { room_jid }
+    );
+
+    registry_method!(
+        /// Destroy a room only if it is still inactive at the expected
+        /// occupancy revision (#1108). Returns whether it was destroyed.
+        destroy_room_if_inactive(
+            room_jid: BareJid,
+            expected_occupancy_revision: u64,
+            guard: SealGuard
+        ) -> bool,
+        "destroy_room_if_inactive",
+        DestroyRoomIfInactive { room_jid, expected_occupancy_revision, guard }
     );
 
     registry_method!(

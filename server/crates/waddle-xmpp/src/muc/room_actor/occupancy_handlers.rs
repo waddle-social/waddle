@@ -46,6 +46,12 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.sealed {
+            // #1108: the registry sealed this actor for destruction; a
+            // caller holding a stale ActorRef must retry through the
+            // registry, which respawns the room.
+            return Err(RoomActorError::RoomSealed);
+        }
         if msg.admission_revision != self.admission_revision {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
@@ -120,6 +126,10 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let new_occupant_role = new_occupant.role;
         let occupant_count = self.room.occupant_count();
         let room_jid = self.room.room_jid.clone();
+        // #1108: every successful admission bumps the occupancy
+        // revision so a dormancy probe taken before this join can no
+        // longer authorize a destroy.
+        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
 
         let subject_state = self.room.subject.clone();
 
@@ -201,6 +211,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         };
         let occupant_count = self.room.occupant_count();
         let is_persistent = self.room.config.persistent;
+        let occupancy_revision = self.occupancy_revision;
         Ok(Some(LeaveOutcome {
             nick,
             affiliation,
@@ -214,6 +225,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             remaining_nick_real_jid,
             occupant_count,
             is_persistent,
+            occupancy_revision,
         }))
     }
 }

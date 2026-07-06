@@ -1121,8 +1121,8 @@ pub(crate) struct DormancySweepCounts {
 pub(crate) async fn sweep_dormant_rooms_once(
     websocket_state: &WebSocketState,
 ) -> DormancySweepCounts {
-    use waddle_xmpp::muc::room_actor::IsDormant;
-    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, ListRooms, RoomCount};
+    use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
+    use waddle_xmpp::muc::room_registry_actor::{DestroyRoomIfInactive, ListRooms, RoomCount};
     let mut counts = DormancySweepCounts::default();
     let rooms = match websocket_state
         .deps
@@ -1163,7 +1163,7 @@ pub(crate) async fn sweep_dormant_rooms_once(
         // only skip its own check — timeout lands in the existing
         // warn-and-skip arm, treating the room as not-dormant (never reap
         // on uncertainty).
-        let is_dormant = match actor.ask(IsDormant).reply_timeout(REAPER_ASK_TIMEOUT).await {
+        let status = match actor.ask(IsDormant).reply_timeout(REAPER_ASK_TIMEOUT).await {
             Ok(value) => value,
             Err(error) => {
                 warn!(
@@ -1174,15 +1174,22 @@ pub(crate) async fn sweep_dormant_rooms_once(
                 continue;
             }
         };
-        if !is_dormant {
+        if !status.dormant {
             continue;
         }
+        // #1108: destruction is revision-guarded — the registry asks the
+        // room actor to seal itself only if it is still dormant at the
+        // probed occupancy revision (checked inside the room actor's
+        // serialized mailbox), so a join that landed after the probe
+        // above refuses the destroy instead of being orphaned.
         match websocket_state
             .deps
             .protocol
             .room_registry
-            .ask(DestroyRoom {
+            .ask(DestroyRoomIfInactive {
                 room_jid: room_jid.clone(),
+                expected_occupancy_revision: status.occupancy_revision,
+                guard: SealGuard::Dormant,
             })
             .await
         {
@@ -1195,7 +1202,7 @@ pub(crate) async fn sweep_dormant_rooms_once(
                 warn!(
                     room = %room_jid,
                     error = ?error,
-                    "room dormancy janitor: DestroyRoom ask failed; will retry next pass"
+                    "room dormancy janitor: DestroyRoomIfInactive ask failed; will retry next pass"
                 );
             }
         }

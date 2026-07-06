@@ -49,6 +49,13 @@ async fn handle_muc_join_unlocked(
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let mut retried_stale_admission = false;
+    // #1108: a room actor can be sealed+destroyed by the guarded
+    // dormancy eviction between our registry lookup and the join ask.
+    // The seal refuses the join with a typed retryable error (or the
+    // ask fails outright on the stopped actor); one retry re-runs the
+    // registry lookup, which respawns the room — the join must never
+    // be silently dropped.
+    let mut retried_dead_room = false;
     loop {
         let managed_channel = match get_managed_channel_for_room(state, room_jid).await {
             Ok(channel) => channel,
@@ -72,6 +79,14 @@ async fn handle_muc_join_unlocked(
             match actor.ask(GetSnapshot).await {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
+                    if !retried_dead_room
+                        && !matches!(&error, kameo::error::SendError::HandlerError(_))
+                    {
+                        // Room actor destroyed between lookup and
+                        // snapshot (#1108) — retry via the registry.
+                        retried_dead_room = true;
+                        continue;
+                    }
                     warn!(room = %room_jid, error = ?error, "Failed to snapshot MUC room before join");
                     return vec![build_muc_presence_error_xml(
                         room_jid,
@@ -271,6 +286,34 @@ async fn handle_muc_join_unlocked(
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                // #1108: sealed-for-destruction room actor, or an ask
+                // against an already-stopped actor. Retry once through
+                // the registry, which respawns the room; never drop the
+                // join silently.
+                let room_gone = matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+                    )
+                ) || !matches!(&error, kameo::error::SendError::HandlerError(_));
+                if room_gone {
+                    if !retried_dead_room {
+                        retried_dead_room = true;
+                        continue;
+                    }
+                    warn!(room = %room_jid, nick = %nick, error = ?error, "MUC join failed twice against a destroyed room actor");
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "Room was evicted while joining; please retry.",
+                        ),
+                    )];
+                }
                 let nick_collision = matches!(
                     &error,
                     kameo::error::SendError::HandlerError(

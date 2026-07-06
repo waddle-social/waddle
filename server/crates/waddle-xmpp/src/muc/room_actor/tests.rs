@@ -1227,7 +1227,13 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
 #[tokio::test]
 async fn is_dormant_true_for_fresh_empty_room() {
     let actor = spawn_room_actor().await;
-    assert!(actor.ask(crate::muc::room_actor::IsDormant).await.unwrap());
+    assert!(
+        actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant
+    );
 }
 
 #[tokio::test]
@@ -1242,7 +1248,13 @@ async fn is_dormant_false_while_occupants_present() {
         })
         .await
         .expect("join");
-    assert!(!actor.ask(crate::muc::room_actor::IsDormant).await.unwrap());
+    assert!(
+        !actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant
+    );
 }
 
 #[tokio::test]
@@ -1257,7 +1269,11 @@ async fn is_dormant_false_when_affiliation_is_set() {
         .await
         .expect("change affiliation");
     assert!(
-        !actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        !actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
         "in-memory affiliation grants must keep the room non-dormant \
          so eviction does not drop them"
     );
@@ -1288,7 +1304,11 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
         .expect("leave")
         .expect("outcome");
     assert!(
-        actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
         "a resolver-derived member affiliation is re-derived on the next \
          join, so it must not block dormancy after the last leave — \
          otherwise every managed room lives forever (#1110)"
@@ -1325,7 +1345,11 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
         .expect("leave")
         .expect("outcome");
     assert!(
-        !actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        !actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
         "an explicit ban is memory-only; evicting the room would let \
          the banned user back in, so the room must stay non-dormant"
     );
@@ -1350,7 +1374,11 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
         .expect("leave")
         .expect("outcome");
     assert!(
-        actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
         "an empty room with no subject/pins/affiliations is dormant \
          and safe for the room dormancy janitor to reap"
     );

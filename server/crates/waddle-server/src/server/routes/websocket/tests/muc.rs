@@ -33,6 +33,84 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
     assert_eq!(room.occupant_count(), 1);
 }
 
+/// #1108: after the dormancy janitor's guarded destroy evicts a room,
+/// a join must transparently respawn it through the registry — the
+/// "room not registered; dropping" failure mode must not exist for a
+/// joining occupant.
+#[tokio::test]
+async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
+    use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoomIfInactive, RoomCount};
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "evicted-then-joined@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    // Seed a persistent, dormant room (like topology seeding does),
+    // then evict it exactly as the janitor would.
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w".to_string(),
+            channel_id: "c".to_string(),
+            config: waddle_xmpp::muc::RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    let probe = actor.ask(IsDormant).await.expect("probe");
+    assert!(probe.dormant);
+    let destroyed: bool = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: room_jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy");
+    assert!(destroyed, "dormant room evicted");
+
+    // The join after eviction must succeed against a respawned room.
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+    let self_presence = Element::from_str(&responses[0]).expect("self presence xml");
+    assert_eq!(self_presence.name(), "presence");
+    assert_ne!(
+        self_presence.attr("type"),
+        Some("error"),
+        "join after eviction must not error: {responses:?}"
+    );
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.find_nick_by_real_jid(&sender_jid), Some("alice"));
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("count"),
+        1,
+        "the registry holds the respawned room"
+    );
+}
+
 #[tokio::test]
 async fn muc_join_responses_use_client_namespace() {
     let state = create_test_websocket_state().await;
