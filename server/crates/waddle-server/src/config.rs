@@ -499,11 +499,28 @@ impl ClusteringConfig {
             .filter(|value| !value.is_empty())
         {
             None => Vec::new(),
-            Some(raw) => raw
-                .split(',')
-                .map(|entry| entry.trim().to_string())
-                .filter(|entry| !entry.is_empty())
-                .collect(),
+            Some(raw) => {
+                let entries: Vec<String> = raw
+                    .split(',')
+                    .map(|entry| entry.trim().to_string())
+                    .filter(|entry| !entry.is_empty())
+                    .collect();
+                // Two slots holding the same keypair would let two live nodes
+                // share a PeerId — exactly what the slot lease exists to
+                // prevent. The entries are secrets, so the error names slot
+                // positions, never values.
+                let mut seen = std::collections::HashMap::new();
+                for (index, entry) in entries.iter().enumerate() {
+                    if let Some(first) = seen.insert(entry.as_str(), index) {
+                        return Err(format!(
+                            "WADDLE_CLUSTERING_KEYPAIR_POOL entries at positions {first} and \
+                             {index} are identical: duplicate keypairs would let two live \
+                             nodes share a PeerId"
+                        ));
+                    }
+                }
+                entries
+            }
         };
 
         let lease_defaults = ClusteringLeaseConfig::default();
@@ -1311,6 +1328,21 @@ mod tests {
             "Debug output leaked keypair seed material: {rendered}"
         );
         assert!(rendered.contains("[2 keys redacted]"), "{rendered}");
+    }
+
+    #[test]
+    fn clustering_rejects_duplicate_keypair_pool_entries() {
+        let err = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_KEYPAIR_POOL",
+            "c2VjcmV0QQ==, c2VjcmV0Qg==, c2VjcmV0QQ==",
+        )])
+        .unwrap_err();
+        assert!(err.contains("positions 0 and 2"), "{err}");
+        // The entries are secrets — the diagnostic must not echo them.
+        assert!(
+            !err.contains("c2VjcmV0"),
+            "error leaked pool material: {err}"
+        );
     }
 
     #[test]

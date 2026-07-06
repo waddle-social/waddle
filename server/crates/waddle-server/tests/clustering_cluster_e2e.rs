@@ -33,7 +33,9 @@ use base64::Engine;
 use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStore};
 use waddle_server::clustering::codec::RemoteStanza;
+use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
 use waddle_server::clustering::relay::RelayHandle;
 use waddle_server::clustering::swarm;
 use waddle_server::clustering::NodeId;
@@ -80,16 +82,17 @@ async fn open_control_db(url: &str) -> Database {
 
 /// Reset the clustering control-plane tables and enroll every pool PeerId.
 async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
+    // Provision the schema through the production `ensure_schema` path — an
+    // inline DDL copy here could silently diverge as the schema evolves.
+    PostgresKeypairSlotLease::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("lease schema");
+    PostgresAllowlistStore::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("allowlist schema");
     let conn = db.guard().await.expect("guard");
-    for ddl in [
-        "CREATE TABLE IF NOT EXISTS clustering_peer_allowlist (\
-             peer_id TEXT PRIMARY KEY, enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-        "CREATE TABLE IF NOT EXISTS clustering_keypair_slots (\
-             slot_index INTEGER PRIMARY KEY, holder_node TEXT, holder_epoch TEXT, \
-             heartbeat TIMESTAMPTZ NOT NULL DEFAULT now(), expired BOOLEAN NOT NULL DEFAULT TRUE)",
-    ] {
-        conn.execute(ddl, ()).await.expect("ensure schema");
-    }
     conn.execute("DELETE FROM clustering_keypair_slots", ())
         .await
         .expect("clean slots");

@@ -15,8 +15,11 @@ use crate::config::ClusteringConfig;
 use crate::db::{Database, DatabaseDriver};
 use tokio_util::sync::CancellationToken;
 
+/// Peer-allowlist store. Public: the multi-process cluster harness
+/// provisions the control-plane schema through the same `ensure_schema`
+/// path production uses, never a diverging inline DDL copy.
 #[cfg(feature = "clustering")]
-mod allowlist;
+pub mod allowlist;
 #[cfg(feature = "clustering")]
 mod behaviour;
 /// Remote XML-text serde codec for stanzas/elements crossing the kameo
@@ -28,8 +31,10 @@ pub mod codec;
 mod dns;
 #[cfg(feature = "clustering")]
 mod identity;
+/// Keypair-slot lease store. Public for the same reason as [`allowlist`]:
+/// the harness provisions schema via the production path.
 #[cfg(feature = "clustering")]
-mod lease;
+pub mod lease;
 #[cfg(feature = "clustering")]
 mod metrics;
 /// Per-node supervised relay actor + client handle. Public: the multi-process
