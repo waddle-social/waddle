@@ -609,41 +609,6 @@ fn test_build_caps_element_with_extensions_uses_extension_hash() {
 }
 
 #[test]
-fn test_build_waddle_caps_element() {
-    let elem = build_waddle_caps_element();
-
-    assert_eq!(elem.name(), "c");
-    assert_eq!(elem.ns(), NS_CAPS);
-    assert_eq!(elem.attr("node"), Some(WADDLE_CAPS_NODE));
-    assert_eq!(elem.attr("hash"), Some("sha-1"));
-}
-
-#[test]
-fn test_ensure_caps_payload_adds_caps_once() {
-    let mut payloads = Vec::new();
-
-    ensure_caps_payload(&mut payloads);
-    ensure_caps_payload(&mut payloads);
-
-    let caps_payloads: Vec<_> = payloads
-        .iter()
-        .filter(|payload| payload.name() == "c" && payload.ns() == NS_CAPS)
-        .collect();
-    assert_eq!(caps_payloads.len(), 1);
-    assert_eq!(caps_payloads[0].attr("node"), Some(WADDLE_CAPS_NODE));
-}
-
-#[test]
-fn test_ensure_caps_payload_preserves_existing_caps() {
-    let existing = Caps::new("https://example.com/caps", "existing").build_element();
-    let mut payloads = vec![existing.clone()];
-
-    ensure_caps_payload(&mut payloads);
-
-    assert_eq!(payloads, vec![existing]);
-}
-
-#[test]
 fn test_extract_caps_from_presence() {
     let caps_elem = Caps::new("https://test.com", "abc123").build_element();
     let presence = Element::builder("presence", "jabber:client")

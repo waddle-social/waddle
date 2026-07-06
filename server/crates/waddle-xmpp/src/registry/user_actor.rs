@@ -281,9 +281,9 @@ impl kameo::message::Message<UpdatePresenceState> for UserActor {
                 show: msg.show,
                 status: msg.status,
                 priority: msg.priority,
-                // This actor store is not on the XEP-0319 idle relay path
-                // (the connection registry is); it never carries an idle stamp.
-                idle_since: None,
+                // This actor store is not on the payload relay path (the
+                // connection registry is); it never carries extension payloads.
+                payloads: Vec::new(),
             },
         );
     }

@@ -13,14 +13,6 @@ pub(super) async fn handle_regular_presence_update(
 ) {
     let available = presence.type_ != xmpp_parsers::presence::Type::Unavailable;
     let priority: i8 = priority_to_i8(&presence.priority);
-    // XEP-0319 last-interaction instant, parsed once from the inbound stanza.
-    // Carried through the rebuilt presence so subscribers see the idle age,
-    // and persisted so a later probe of this resource keeps it.
-    let idle_since = if available {
-        waddle_xmpp::xep::xep0319::extract_idle_from_presence(&presence).map(|info| info.since)
-    } else {
-        None
-    };
     if available {
         state
             .deps
@@ -52,7 +44,10 @@ pub(super) async fn handle_regular_presence_update(
                     .map(|show| show_name(show).to_string()),
                 presence.statuses.values().next().cloned(),
                 priority,
-                idle_since,
+                // The client's extension payloads (XEP-0115 caps, XEP-0319
+                // idle, ...) are stored verbatim so probe/subscription
+                // delivery relays the real advertisements (issue #1101).
+                presence.payloads.clone(),
             );
         for stanza in state
             .deps
@@ -87,7 +82,7 @@ pub(super) async fn handle_regular_presence_update(
                 presence.statuses.values().next().cloned(),
             );
     }
-    broadcast_presence_to_subscribers(state, sender_jid, &presence, available, idle_since).await;
+    broadcast_presence_to_subscribers(state, sender_jid, &presence).await;
 }
 
 /// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering
@@ -171,13 +166,10 @@ async fn broadcast_presence_to_subscribers(
     state: &WebSocketState,
     sender_jid: &FullJid,
     presence: &xmpp_parsers::presence::Presence,
-    available: bool,
-    idle_since: Option<chrono::DateTime<chrono::Utc>>,
 ) {
     let Some(storage) = roster_storage(state).await else {
         return;
     };
-    let priority = priority_to_i8(&presence.priority);
     let subscribers = match storage
         .get_presence_subscribers(&sender_jid.to_bare())
         .await
@@ -195,27 +187,13 @@ async fn broadcast_presence_to_subscribers(
         if recipient_blocks_sender(state, &subscriber_bare, &sender_jid.to_bare()).await {
             continue;
         }
-        let stanza = if available {
-            let show = presence.show.as_ref().map(show_name);
-            let mut rebuilt = build_available_presence(
-                sender_jid,
-                &subscriber_bare,
-                show,
-                presence.statuses.values().next().map(String::as_str),
-                priority,
-            );
-            // Carry the XEP-0319 idle stamp the rebuild would otherwise drop,
-            // so subscribers can render the contact's idle age.
-            if let Some(since) = idle_since {
-                waddle_xmpp::xep::xep0319::add_idle(&mut rebuilt, since);
-            }
-            Stanza::Presence(rebuilt)
-        } else {
-            let mut unavailable = presence.clone();
-            unavailable.from = Some(Jid::from(sender_jid.clone()));
-            unavailable.to = Some(Jid::from(subscriber_bare.clone()));
-            Stanza::Presence(unavailable)
-        };
+        // RFC 6121 §4.4.2: relay the user's own stanza (readdressed), never a
+        // rebuild — a rebuild drops extensions and would misattribute the
+        // server's XEP-0115 caps to the contact (issue #1101).
+        let mut relayed = presence.clone();
+        relayed.from = Some(Jid::from(sender_jid.clone()));
+        relayed.to = Some(Jid::from(subscriber_bare.clone()));
+        let stanza = Stanza::Presence(relayed);
         let mut delivered_resources = Vec::new();
         for resource in state
             .deps

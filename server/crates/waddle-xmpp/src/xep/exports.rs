@@ -33,10 +33,9 @@ pub use super::xep0077::{
 };
 
 pub use super::xep0115::{
-    build_caps_element, build_caps_element_with_extensions, build_waddle_caps_element,
-    compute_caps_hash, compute_caps_hash_with_extensions, ensure_caps_payload,
-    extract_caps_from_presence, is_caps_node_query, parse_caps_node, CachedDiscoInfo, Caps,
-    CapsCache, NS_CAPS, WADDLE_CAPS_NODE,
+    build_caps_element, build_caps_element_with_extensions, compute_caps_hash,
+    compute_caps_hash_with_extensions, extract_caps_from_presence, is_caps_node_query,
+    parse_caps_node, CachedDiscoInfo, Caps, CapsCache, NS_CAPS, WADDLE_CAPS_NODE,
 };
 
 pub use super::xep0249::{

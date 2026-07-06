@@ -1134,3 +1134,83 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
 
     let _ = admin.close().await;
 }
+
+/// XEP-0115 §1: caps describe the *generating entity*. Presence relayed to a
+/// subscriber must carry the publishing client's own `<c/>` verbatim — the
+/// server must never substitute its own caps element (issue #1101), or
+/// subscribers cache a wrong ver hash per contact resource and feature
+/// detection (e.g. Jingle) breaks.
+#[tokio::test]
+async fn caps_element_in_broadcast_presence_is_the_publishing_clients_own() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = extra_client(&server, "alice", &alice_password, "caps-relay-alice").await;
+    let mut bob = extra_client(&server, "bob", &bob_password, "caps-relay-bob").await;
+
+    // Roster interest is required before subscription pushes are delivered.
+    for (client, id) in [
+        (&mut alice, "caps-relay-roster-alice"),
+        (&mut bob, "caps-relay-roster-bob"),
+    ] {
+        client
+            .send(&format!(
+                r#"<iq xmlns="jabber:client" type="get" id="{id}"><query xmlns="jabber:iq:roster"/></iq>"#
+            ))
+            .await
+            .expect("send roster get");
+        client
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("roster result");
+    }
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("bob subscribes");
+    alice
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("alice sees subscribe");
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("alice approves");
+    bob.recv_matching(|frame| frame.contains("type='subscribed'"))
+        .await
+        .expect("bob sees approval");
+    bob.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob available");
+
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><c xmlns="http://jabber.org/protocol/caps" hash="sha-1" node="https://client.example/caps" ver="8RovUdtOmiAjzj+xI7SK5BCw3A8="/></presence>"#,
+        )
+        .await
+        .expect("alice advertises her client's caps");
+    let relayed = bob
+        .recv_matching(|frame| frame.contains("from='alice@localhost/") && frame.contains(NS_CAPS))
+        .await
+        .expect("bob receives relayed caps presence");
+    assert!(
+        relayed.contains("https://client.example/caps")
+            && relayed.contains("8RovUdtOmiAjzj+xI7SK5BCw3A8="),
+        "relayed presence must carry the client's own node/ver: {relayed}"
+    );
+    assert!(
+        !relayed.contains("https://waddle.social/caps"),
+        "server caps must never be substituted into relayed user presence: {relayed}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}

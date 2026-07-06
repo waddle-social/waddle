@@ -174,6 +174,164 @@ async fn websocket_full_jid_probe_returns_rich_resource_presence() {
     let _ = alice.close().await;
 }
 
+/// The Waddle server's own XEP-0115 caps node. Relayed *user* presence must
+/// never carry it — caps belong to the generating entity (XEP-0115 §1).
+const SERVER_CAPS_NODE: &str = "https://waddle.social/caps";
+
+#[tokio::test]
+async fn websocket_presence_broadcast_relays_contacts_own_caps_not_servers() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><c xmlns="http://jabber.org/protocol/caps" hash="sha-1" node="https://example.com/client" ver="zHyEOgxTrkpSdGcQKH8EFPLsriY="/></presence>"#,
+        )
+        .await
+        .expect("alice sends presence with her own caps");
+    let broadcast = bob
+        .recv_matching(|frame| {
+            frame.contains("from='alice@localhost/")
+                && frame.contains("http://jabber.org/protocol/caps")
+        })
+        .await
+        .expect("bob receives alice's broadcast presence with a caps element");
+    assert!(
+        broadcast.contains("zHyEOgxTrkpSdGcQKH8EFPLsriY=")
+            && broadcast.contains("https://example.com/client"),
+        "broadcast must carry the contact's own caps hash: {broadcast}"
+    );
+    assert!(
+        !broadcast.contains(SERVER_CAPS_NODE),
+        "broadcast must not substitute the server's caps: {broadcast}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn websocket_presence_broadcast_relays_arbitrary_extensions_verbatim() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><show>away</show><idle xmlns="urn:xmpp:idle:1" since="2026-07-06T10:00:00Z"/><x xmlns="urn:example:future-extension:0"><detail>opaque</detail></x></presence>"#,
+        )
+        .await
+        .expect("alice sends presence with idle and an unknown extension");
+    let broadcast = bob
+        .recv_matching(|frame| {
+            frame.contains("from='alice@localhost/")
+                && frame.contains("urn:example:future-extension:0")
+        })
+        .await
+        .expect("bob receives the relayed presence with the unknown extension");
+    assert!(
+        broadcast.contains("<detail>opaque</detail>"),
+        "extension content must survive relay verbatim: {broadcast}"
+    );
+    assert!(
+        broadcast.contains("urn:xmpp:idle:1") && broadcast.contains("2026-07-06T10:00:00"),
+        "XEP-0319 idle must survive relay without hand re-attachment: {broadcast}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn websocket_presence_probe_returns_contacts_own_caps_and_extensions() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+    let alice_jid = alice.full_jid.clone().expect("alice full jid");
+
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><show>away</show><c xmlns="http://jabber.org/protocol/caps" hash="sha-1" node="https://example.com/client" ver="zHyEOgxTrkpSdGcQKH8EFPLsriY="/><x xmlns="urn:example:future-extension:0"/></presence>"#,
+        )
+        .await
+        .expect("alice sends presence with her own caps and an extension");
+    bob.recv_matching(|frame| frame.contains("urn:example:future-extension:0"))
+        .await
+        .expect("bob receives alice's broadcast");
+
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" type="probe" to="{alice_jid}"/>"#
+    ))
+    .await
+    .expect("bob probes alice");
+    let probe = bob
+        .recv_matching(|frame| {
+            frame.contains("from='alice@localhost/") && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("probe response");
+    assert!(
+        probe.contains("zHyEOgxTrkpSdGcQKH8EFPLsriY=")
+            && probe.contains("https://example.com/client")
+            && probe.contains("urn:example:future-extension:0"),
+        "probe response must carry the contact's stored caps and extensions: {probe}"
+    );
+    assert!(
+        !probe.contains(SERVER_CAPS_NODE),
+        "probe response must not substitute the server's caps: {probe}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn websocket_subscription_approval_push_carries_contacts_own_payloads() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    send_roster_get(&mut alice, "alice-approval-roster").await;
+    send_roster_get(&mut bob, "bob-approval-roster").await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><c xmlns="http://jabber.org/protocol/caps" hash="sha-1" node="https://example.com/client" ver="zHyEOgxTrkpSdGcQKH8EFPLsriY="/><x xmlns="urn:example:future-extension:0"/></presence>"#,
+        )
+        .await
+        .expect("alice is available with her own caps and an extension");
+    bob.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob is available");
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("bob subscribes to alice");
+    alice
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("alice receives subscribe");
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("alice approves bob");
+
+    let pushed = bob
+        .recv_matching(|frame| {
+            frame.contains("from='alice@localhost/")
+                && frame.contains("http://jabber.org/protocol/caps")
+        })
+        .await
+        .expect("bob receives alice's current presence after approval");
+    assert!(
+        pushed.contains("zHyEOgxTrkpSdGcQKH8EFPLsriY=")
+            && pushed.contains("https://example.com/client")
+            && pushed.contains("urn:example:future-extension:0"),
+        "approval push must carry the contact's stored caps and extensions: {pushed}"
+    );
+    assert!(
+        !pushed.contains(SERVER_CAPS_NODE),
+        "approval push must not substitute the server's caps: {pushed}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
 #[tokio::test]
 async fn websocket_blocking_prevents_presence_probe_response() {
     let (_server, mut alice, mut bob) = connect_alice_bob().await;

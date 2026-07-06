@@ -484,28 +484,6 @@ pub fn build_caps_element_with_extensions(
     Caps::new(node, &ver).build_element()
 }
 
-/// Build Waddle's standard entity capabilities element for presence stanzas.
-pub fn build_waddle_caps_element() -> Element {
-    let identities = vec![crate::disco::Identity::server(Some("Waddle XMPP Server"))];
-    let features = crate::disco::server_features();
-    build_caps_element(WADDLE_CAPS_NODE, &identities, &features)
-}
-
-/// Ensure a payload list contains an entity capabilities advertisement.
-///
-/// If the payload list already contains any XEP-0115 `<c/>` element, it is
-/// preserved as-is to avoid duplicating caps payloads in the same stanza.
-pub fn ensure_caps_payload(payloads: &mut Vec<Element>) {
-    if payloads
-        .iter()
-        .any(|payload| payload.name() == "c" && payload.ns() == NS_CAPS)
-    {
-        return;
-    }
-
-    payloads.push(build_waddle_caps_element());
-}
-
 /// Extract Caps from a presence stanza.
 pub fn extract_caps_from_presence(presence: &Element) -> Option<Caps> {
     presence
