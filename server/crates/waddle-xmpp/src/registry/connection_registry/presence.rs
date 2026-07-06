@@ -21,14 +21,16 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Update full presence state (show/status/priority/idle) for a connected resource.
+    /// Update full presence state (show/status/priority/payloads) for a
+    /// connected resource. XEP-0319 idle rides in `payloads` verbatim, like
+    /// every other presence extension (issue #1101).
     pub fn update_presence_state(
         &self,
         jid: &FullJid,
         show: Option<String>,
         status: Option<String>,
         priority: i8,
-        idle_since: Option<chrono::DateTime<Utc>>,
+        payloads: Vec<minidom::Element>,
     ) {
         self.presence_states.insert(
             jid.clone(),
@@ -36,7 +38,7 @@ impl ConnectionRegistry {
                 show,
                 status,
                 priority,
-                idle_since,
+                payloads,
             },
         );
     }

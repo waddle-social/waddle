@@ -97,7 +97,7 @@ pub(super) async fn handle_presence_probe(
             .protocol
             .connection_registry
             .get_presence_state(&resource);
-        let presence = Stanza::Presence(build_available_presence(
+        let mut probe_response = build_available_presence(
             &resource,
             &from,
             presence_state
@@ -110,7 +110,16 @@ pub(super) async fn handle_presence_probe(
                 .as_ref()
                 .map(|state| state.priority)
                 .unwrap_or(0),
-        ));
+        );
+        // Relay the resource's own stored extension payloads (XEP-0115 caps,
+        // XEP-0319 idle, anything else) verbatim — never server-rebuilt ones
+        // (issue #1101).
+        if let Some(stored) = &presence_state {
+            probe_response
+                .payloads
+                .extend(stored.payloads.iter().cloned());
+        }
+        let presence = Stanza::Presence(probe_response);
         for requester_resource in &requester_resources {
             let _ = state
                 .deps

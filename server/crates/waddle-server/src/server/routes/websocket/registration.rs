@@ -118,10 +118,11 @@ pub(super) async fn register_bound_connection_after_frame(
                     .map(str::to_string),
                 conn.presence_status.clone(),
                 conn.presence_priority,
-                // XEP-0198 resume restores show/status/priority; idle is not
-                // carried in SM session state yet (deferred), so a probe during
-                // a detached window omits the stamp until the next live update.
-                None,
+                // XEP-0198 resume restores show/status/priority; extension
+                // payloads (idle, caps, ...) are not carried in SM session
+                // state yet (deferred), so a probe during a detached window
+                // omits them until the next live update.
+                Vec::new(),
             );
     }
 

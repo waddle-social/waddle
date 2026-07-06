@@ -1098,10 +1098,23 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
     admin.send(&presence).await.expect("second caps presence");
     admin.send(&presence).await.expect("third caps presence");
 
-    // FIFO anchor: everything the server emitted in response to the
-    // three presences is on the wire before the ping result. Collect
-    // every frame up to the anchor and count the disco#info queries
-    // among them.
+    // The disco#info query is emitted from the async caps-resolution path,
+    // so it is NOT FIFO-ordered against a ping anchor sent after the
+    // presences (issue #1188 flake). Wait for the query itself first, then
+    // anchor and assert no *further* query snuck out for the repeats.
+    let first_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("one disco#info query for the unresolved (hash, ver)");
+    assert!(
+        first_query.contains(&format!(r#"node='{node}#{ver}'"#)),
+        "query targets the advertised node#ver: {first_query}"
+    );
+
     admin
         .send(r#"<iq xmlns="jabber:client" type="get" id="caps-pending-anchor-1"><ping xmlns="urn:xmpp:ping"/></iq>"#)
         .await
@@ -1113,7 +1126,7 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
         .await
         .expect("frames up to ping anchor");
 
-    let disco_queries: Vec<&String> = frames
+    let extra_queries: Vec<&String> = frames
         .iter()
         .filter(|frame| {
             frame.contains("<iq")
@@ -1121,16 +1134,108 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
                 && frame.contains(NS_DISCO_INFO)
         })
         .collect();
-    assert_eq!(
-        disco_queries.len(),
-        1,
-        "exactly one disco#info may be in flight for a repeated (hash, ver): {disco_queries:?}"
-    );
     assert!(
-        disco_queries[0].contains(&format!(r#"node='{node}#{ver}'"#)),
-        "query targets the advertised node#ver: {}",
-        disco_queries[0]
+        extra_queries.is_empty(),
+        "exactly one disco#info may be in flight for a repeated (hash, ver); got extras: {extra_queries:?}"
     );
 
     let _ = admin.close().await;
+}
+
+/// Serialize a roster-get `<iq id=…>` via minidom — stanzas with interpolated
+/// values are built with the XML builder, never `format!`.
+fn roster_get_iq_xml(id: &str) -> String {
+    let attr = |name: &str| {
+        <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from(name)
+            .expect("static ncname is valid")
+    };
+    let element = minidom::Element::builder("iq", "jabber:client")
+        .attr(attr("type"), "get")
+        .attr(attr("id"), id)
+        .append(minidom::Element::builder("query", "jabber:iq:roster").build())
+        .build();
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize element");
+    String::from_utf8(bytes).expect("serializer emits utf-8")
+}
+
+/// XEP-0115 §1: caps describe the *generating entity*. Presence relayed to a
+/// subscriber must carry the publishing client's own `<c/>` verbatim — the
+/// server must never substitute its own caps element (issue #1101), or
+/// subscribers cache a wrong ver hash per contact resource and feature
+/// detection (e.g. Jingle) breaks.
+#[tokio::test]
+async fn caps_element_in_broadcast_presence_is_the_publishing_clients_own() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = extra_client(&server, "alice", &alice_password, "caps-relay-alice").await;
+    let mut bob = extra_client(&server, "bob", &bob_password, "caps-relay-bob").await;
+
+    // Roster interest is required before subscription pushes are delivered.
+    for (client, id) in [
+        (&mut alice, "caps-relay-roster-alice"),
+        (&mut bob, "caps-relay-roster-bob"),
+    ] {
+        client
+            .send(&roster_get_iq_xml(id))
+            .await
+            .expect("send roster get");
+        client
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("roster result");
+    }
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("bob subscribes");
+    alice
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("alice sees subscribe");
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("alice approves");
+    bob.recv_matching(|frame| frame.contains("type='subscribed'"))
+        .await
+        .expect("bob sees approval");
+    bob.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob available");
+
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><c xmlns="http://jabber.org/protocol/caps" hash="sha-1" node="https://client.example/caps" ver="8RovUdtOmiAjzj+xI7SK5BCw3A8="/></presence>"#,
+        )
+        .await
+        .expect("alice advertises her client's caps");
+    let relayed = bob
+        .recv_matching(|frame| frame.contains("from='alice@localhost/") && frame.contains(NS_CAPS))
+        .await
+        .expect("bob receives relayed caps presence");
+    assert!(
+        relayed.contains("https://client.example/caps")
+            && relayed.contains("8RovUdtOmiAjzj+xI7SK5BCw3A8="),
+        "relayed presence must carry the client's own node/ver: {relayed}"
+    );
+    assert_eq!(
+        relayed
+            .matches("<c xmlns='http://jabber.org/protocol/caps'")
+            .count(),
+        1,
+        "relayed presence must carry exactly the client's own caps element: {relayed}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }

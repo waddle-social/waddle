@@ -574,22 +574,22 @@ fn test_compute_caps_hash_different_for_different_inputs() {
 }
 
 #[test]
-fn test_build_caps_element() {
+fn test_caps_element_from_computed_hash() {
     let identities = vec![Identity::server(Some("Waddle"))];
     let features = vec![Feature::disco_info()];
 
-    let elem = build_caps_element(WADDLE_CAPS_NODE, &identities, &features);
+    let ver = compute_caps_hash(&identities, &features);
+    let elem = Caps::new(WADDLE_CAPS_NODE, &ver).build_element();
 
     assert_eq!(elem.name(), "c");
     assert_eq!(elem.ns(), NS_CAPS);
     assert_eq!(elem.attr("hash"), Some("sha-1"));
     assert_eq!(elem.attr("node"), Some(WADDLE_CAPS_NODE));
-    let ver = elem.attr("ver").unwrap();
-    assert!(BASE64.decode(ver).is_ok());
+    assert!(BASE64.decode(&ver).is_ok());
 }
 
 #[test]
-fn test_build_caps_element_with_extensions_uses_extension_hash() {
+fn test_extension_hash_matches_xep0115_spec_example() {
     let identities = vec![
         Identity::new("client", "pc", Some("Psi 0.11")).with_lang(Some("en")),
         Identity::new("client", "pc", Some("\u{03A8} 0.11")).with_lang(Some("el")),
@@ -602,45 +602,10 @@ fn test_build_caps_element_with_extensions_uses_extension_hash() {
     ];
     let extensions = vec![software_info_form()];
 
-    let elem =
-        build_caps_element_with_extensions(WADDLE_CAPS_NODE, &identities, &features, &extensions);
+    // XEP-0115 §5.3 complex generation example — known-good ver string.
+    let ver = compute_caps_hash_with_extensions(&identities, &features, &extensions);
 
-    assert_eq!(elem.attr("ver"), Some("q07IKJEyjvHSyhy//CH0CxmKi8w="));
-}
-
-#[test]
-fn test_build_waddle_caps_element() {
-    let elem = build_waddle_caps_element();
-
-    assert_eq!(elem.name(), "c");
-    assert_eq!(elem.ns(), NS_CAPS);
-    assert_eq!(elem.attr("node"), Some(WADDLE_CAPS_NODE));
-    assert_eq!(elem.attr("hash"), Some("sha-1"));
-}
-
-#[test]
-fn test_ensure_caps_payload_adds_caps_once() {
-    let mut payloads = Vec::new();
-
-    ensure_caps_payload(&mut payloads);
-    ensure_caps_payload(&mut payloads);
-
-    let caps_payloads: Vec<_> = payloads
-        .iter()
-        .filter(|payload| payload.name() == "c" && payload.ns() == NS_CAPS)
-        .collect();
-    assert_eq!(caps_payloads.len(), 1);
-    assert_eq!(caps_payloads[0].attr("node"), Some(WADDLE_CAPS_NODE));
-}
-
-#[test]
-fn test_ensure_caps_payload_preserves_existing_caps() {
-    let existing = Caps::new("https://example.com/caps", "existing").build_element();
-    let mut payloads = vec![existing.clone()];
-
-    ensure_caps_payload(&mut payloads);
-
-    assert_eq!(payloads, vec![existing]);
+    assert_eq!(ver, "q07IKJEyjvHSyhy//CH0CxmKi8w=");
 }
 
 #[test]

@@ -47,9 +47,12 @@ use xmpp_parsers::presence::Presence;
 
 use crate::roster::{AskType, RosterItem, Subscription};
 use crate::XmppError;
+// `build_available_presence` is re-exported without caps decoration: relayed
+// user presence must carry the *client's* own XEP-0115 caps, never
+// server-substituted ones (issue #1101).
 pub use waddle_xmpp_core::presence::subscription::{
-    build_subscription_presence, build_unavailable_presence, PendingSubscription, PresenceAction,
-    PresenceSubscriptionRequest, SubscriptionType,
+    build_available_presence, build_subscription_presence, build_unavailable_presence,
+    PendingSubscription, PresenceAction, PresenceSubscriptionRequest, SubscriptionType,
 };
 
 /// Parse a presence stanza and determine if it's subscription-related.
@@ -59,21 +62,6 @@ pub fn parse_subscription_presence(
 ) -> Result<PresenceAction, XmppError> {
     waddle_xmpp_core::presence::subscription::parse_subscription_presence(pres, sender_jid)
         .map_err(Into::into)
-}
-
-/// Build an available presence stanza for broadcasting to subscribers.
-pub fn build_available_presence(
-    from: &jid::FullJid,
-    to: &BareJid,
-    show: Option<&str>,
-    status: Option<&str>,
-    priority: i8,
-) -> Presence {
-    let mut pres = waddle_xmpp_core::presence::subscription::build_available_presence(
-        from, to, show, status, priority,
-    );
-    crate::xep::ensure_caps_payload(&mut pres.payloads);
-    pres
 }
 
 /// Subscription state machine for managing state transitions.

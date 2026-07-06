@@ -460,30 +460,34 @@ fn test_presence_state_tracking() {
     // No state initially
     assert!(registry.get_presence_state(&jid).is_none());
 
-    // Store presence state, including an XEP-0319 idle stamp.
-    let idle_since = "2024-06-01T12:00:00Z"
-        .parse::<chrono::DateTime<chrono::Utc>>()
-        .expect("valid xs:dateTime");
+    // Store presence state, including the resource's extension payloads
+    // (relayed verbatim on probe/subscription delivery — issue #1101).
+    let idle_payload = minidom::Element::builder("idle", "urn:xmpp:idle:1")
+        .attr(
+            minidom::rxml::xml_ncname!("since").to_owned(),
+            "2024-06-01T12:00:00Z",
+        )
+        .build();
     registry.update_presence_state(
         &jid,
         Some("away".to_string()),
         Some("Gone fishing".to_string()),
         5,
-        Some(idle_since),
+        vec![idle_payload.clone()],
     );
 
     let state = registry.get_presence_state(&jid).expect("should exist");
     assert_eq!(state.show.as_deref(), Some("away"));
     assert_eq!(state.status.as_deref(), Some("Gone fishing"));
     assert_eq!(state.priority, 5);
-    assert_eq!(state.idle_since, Some(idle_since));
+    assert_eq!(state.payloads, vec![idle_payload]);
 
-    // Update with different values — and no idle (return from idle).
-    registry.update_presence_state(&jid, None, None, 0, None);
+    // Update with different values — and no payloads (return from idle).
+    registry.update_presence_state(&jid, None, None, 0, Vec::new());
     let state = registry.get_presence_state(&jid).expect("should exist");
     assert!(state.show.is_none());
     assert!(state.status.is_none());
-    assert!(state.idle_since.is_none());
+    assert!(state.payloads.is_empty());
     assert_eq!(state.priority, 0);
 
     // Clean up on unregister
