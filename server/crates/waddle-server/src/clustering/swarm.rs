@@ -365,13 +365,13 @@ async fn run_event_loop(
     let mut routing_peers: HashSet<PeerId> = HashSet::new();
     let mut conn_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr> = HashMap::new();
     // Which peer answered at each dialed address, learned from outbound
-    // establishments and never expired (bounded by the seed set; a same-port
-    // replacement pod overwrites its entry on the next outbound dial). Lets
-    // the dial loop skip a seed whose owner is connected *inbound-only* —
-    // `conn_addrs` alone cannot, because an inbound connection's remote
-    // address is an ephemeral source port that never matches the seed addr,
-    // so every interval would churn a duplicate connection for the
-    // duplicate-PeerId defense to close.
+    // establishments and pruned when the owner's last connection closes (so
+    // the map stays bounded by connected peers under pod churn, and a fully
+    // disconnected peer stays redialable). Lets the dial loop skip a seed
+    // whose owner is connected *inbound-only* — `conn_addrs` alone cannot,
+    // because an inbound connection's remote address is an ephemeral source
+    // port that never matches the seed addr, so every interval would churn a
+    // duplicate connection for the duplicate-PeerId defense to close.
     let mut addr_owners: HashMap<Multiaddr, PeerId> = HashMap::new();
 
     // `interval` fires its first tick immediately, so the first dial round
@@ -615,9 +615,14 @@ fn handle_swarm_event(
             ..
         } => {
             conn_addrs.remove(&connection_id);
-            // Only drop the peer when its last connection closes.
+            // Only drop the peer when its last connection closes. Its
+            // addr-ownership entries go with it: a fully disconnected peer
+            // must be redialable (the skip would be wrong), and pruning here
+            // keeps the map bounded by *connected* peers under pod churn
+            // instead of accumulating every address ever dialed.
             if num_established == 0 {
                 track_peer_disconnected(peer_id, connected);
+                addr_owners.retain(|_, owner| *owner != peer_id);
             }
         }
         SwarmEvent::Behaviour(WaddleBehaviourEvent::Kameo(remote::Event::Registry(

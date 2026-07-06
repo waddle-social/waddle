@@ -285,8 +285,8 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
 /// A client handle to some node's relay, caching the resolved
 /// `RemoteActorRef` and refreshing it via bounded-backoff kademlia re-lookup
 /// when the transport reports the cached ref dead
-/// (`ActorNotRunning`/`UnknownActor`/`BadActorType` — e.g. after a supervised
-/// respawn minted a new `ActorId` under the same name).
+/// (`ActorNotRunning`/`ActorStopped`/`UnknownActor`/`BadActorType` — e.g.
+/// after a supervised respawn minted a new `ActorId` under the same name).
 ///
 /// Every ask carries the ADR element-5 receiver-side timeouts
 /// (`mailbox_timeout`/`reply_timeout`), defaulting to the compiled
