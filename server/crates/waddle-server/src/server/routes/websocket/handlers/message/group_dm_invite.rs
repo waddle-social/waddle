@@ -322,6 +322,17 @@ async fn queue_offline_group_dm_invite(
     }
 }
 
+/// Undo a partially granted group-DM invite.
+///
+/// Ordering is load-bearing: the channel-member permission tuple MUST
+/// be deleted before `ChangeAffiliation(None)` reaches the room actor,
+/// because the `None`-affiliation handler re-hydrates the durable
+/// recipient mirror from the permission tuples — a still-existing
+/// tuple would resurrect the rolled-back invitee as a durable inbox
+/// recipient (content leak to a user who was never told they are in
+/// the room). Every other removal path (`run_group_dm_leave`, the
+/// admin kick/affiliation paths) orders tuple-delete first for the
+/// same reason.
 async fn rollback_group_dm_invite_grant(
     state: &WebSocketState,
     room_actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -329,22 +340,22 @@ async fn rollback_group_dm_invite_grant(
     room_jid: &jid::BareJid,
     invitee: &jid::BareJid,
 ) {
-    let _ = room_actor
-        .ask(ChangeAffiliation {
-            jid: invitee.clone(),
-            affiliation: waddle_xmpp::Affiliation::None,
-        })
-        .await;
-    let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
-    let _ =
-        crate::admin::channels::retract_group_dm_bookmark(&state.deps.app_state, invitee, room_jid)
-            .await;
     crate::admin::channels::rollback_group_dm_member_tuple(
         &state.deps.app_state,
         channel_id,
         invitee,
     )
     .await;
+    let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
+    let _ =
+        crate::admin::channels::retract_group_dm_bookmark(&state.deps.app_state, invitee, room_jid)
+            .await;
+    let _ = room_actor
+        .ask(ChangeAffiliation {
+            jid: invitee.clone(),
+            affiliation: waddle_xmpp::Affiliation::None,
+        })
+        .await;
 }
 
 async fn record_group_dm_archive_boundary(
@@ -367,6 +378,92 @@ async fn record_group_dm_archive_boundary(
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kameo::actor::Spawn;
+    use waddle_xmpp::muc::room_actor::{GetRoomSnapshot, HydrateDurableRecipients, RoomActor};
+    use waddle_xmpp::muc::{MucRoom, RoomConfig};
+
+    async fn durable_recipients(
+        room_actor: &kameo::actor::ActorRef<RoomActor>,
+    ) -> Vec<jid::BareJid> {
+        room_actor
+            .ask(GetRoomSnapshot {
+                sender_jid: "observer@example.com/res".parse().expect("observer jid"),
+            })
+            .await
+            .expect("room snapshot")
+            .durable_recipient_bare_jids
+    }
+
+    /// Rolled-back invitee must not survive in the durable-recipient
+    /// mirror: `rollback_group_dm_invite_grant` has to delete the
+    /// channel-member permission tuple BEFORE asking the room actor to
+    /// change the affiliation to `None`, because the `None`-affiliation
+    /// handler re-hydrates the mirror from the permission tuples. In
+    /// the reverse order the re-hydration reads the still-existing
+    /// tuple and resurrects the invitee, who then receives inbox rows
+    /// with full message bodies until the actor respawns — despite
+    /// never being told they are in the room.
+    #[tokio::test]
+    async fn rollback_prunes_invitee_from_durable_recipient_mirror() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let channel_id = "gdm-rollback-order";
+        let room_jid: jid::BareJid = format!("{channel_id}@muc.example.com")
+            .parse()
+            .expect("room jid");
+        let invitee: jid::BareJid = "invitee@example.com".parse().expect("invitee jid");
+
+        // Invite path already persisted the member tuple.
+        crate::admin::channels::persist_group_dm_member_tuple(
+            &state.deps.app_state,
+            channel_id,
+            &invitee,
+        )
+        .await
+        .expect("persist group-DM member tuple");
+
+        // Spawn the room actor hydrated from the SAME permission store
+        // the rollback mutates, exactly like the registry does in
+        // production.
+        let room_actor = RoomActor::spawn(RoomActor::new(
+            MucRoom::new(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                channel_id.to_string(),
+                RoomConfig::default(),
+            ),
+            waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+                b"test-occupant-id-secret-32-bytes-long".to_vec(),
+            )
+            .expect("test secret meets length floor"),
+        ));
+        let source = std::sync::Arc::new(
+            crate::server::durable_membership::PermissionDurableMembershipSource::new(
+                state.deps.app_state.permission_actor.clone(),
+            ),
+        );
+        room_actor
+            .ask(HydrateDurableRecipients { source })
+            .await
+            .expect("hydrate durable recipients");
+        assert!(
+            durable_recipients(&room_actor).await.contains(&invitee),
+            "precondition: the granted invitee hydrates into the mirror"
+        );
+
+        rollback_group_dm_invite_grant(&state, room_actor.clone(), channel_id, &room_jid, &invitee)
+            .await;
+
+        assert!(
+            !durable_recipients(&room_actor).await.contains(&invitee),
+            "a rolled-back invitee must not remain a durable inbox \
+             recipient (tuple delete must precede ChangeAffiliation(None))"
+        );
+    }
 }
 
 async fn group_dm_archive_boundary(

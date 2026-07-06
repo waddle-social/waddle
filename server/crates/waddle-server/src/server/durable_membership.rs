@@ -92,23 +92,34 @@ impl DurableMembershipSource for PermissionDurableMembershipSource {
             // (`AppStateAffiliationResolver`): channel- AND
             // space-level owner/admin/member all grant Member+;
             // a channel-level outcast relation excludes the user.
+            //
+            // All seven `ListSubjects` asks are issued CONCURRENTLY
+            // (S6 round-3): hydration runs inside the room actor's
+            // handler, so with a wedged (not dead) permission actor a
+            // sequential chain would stall the room's entire mailbox
+            // for up to seven reply timeouts; concurrent asks bound
+            // the worst case to one. `try_join_all` preserves the
+            // fail-open contract exactly — any single failure yields
+            // `Err` and the caller keeps its existing mirror.
             let scopes = [
                 Object::new(ObjectType::Channel, channel_id.clone()),
                 Object::new(ObjectType::Space, waddle_id),
             ];
-            let mut members = Vec::new();
-            for scope in &scopes {
-                for relation in MEMBER_RELATIONS {
-                    for subject in self.subjects(scope.clone(), relation).await? {
-                        if let Some(jid) = subject_bare_jid(&subject) {
-                            members.push(jid);
-                        }
-                    }
-                }
-            }
-            let outcasts: HashSet<BareJid> = self
-                .subjects(Object::new(ObjectType::Channel, channel_id), "outcast")
-                .await?
+            let member_queries = scopes.iter().flat_map(|scope| {
+                MEMBER_RELATIONS
+                    .into_iter()
+                    .map(move |relation| self.subjects(scope.clone(), relation))
+            });
+            let outcast_query =
+                self.subjects(Object::new(ObjectType::Channel, channel_id), "outcast");
+            let (member_results, outcast_subjects) =
+                futures::try_join!(futures::future::try_join_all(member_queries), outcast_query,)?;
+            let mut members: Vec<BareJid> = member_results
+                .iter()
+                .flatten()
+                .filter_map(subject_bare_jid)
+                .collect();
+            let outcasts: HashSet<BareJid> = outcast_subjects
                 .iter()
                 .filter_map(subject_bare_jid)
                 .collect();

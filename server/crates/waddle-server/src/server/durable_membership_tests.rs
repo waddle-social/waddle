@@ -59,9 +59,11 @@ impl kameo::message::Message<HangForever> for PermissionActor {
 /// S6: a hung permission actor must not wedge room hydration forever.
 /// Every `ListSubjects` ask is bounded by
 /// [`super::MEMBERSHIP_LOOKUP_REPLY_TIMEOUT`]; on timeout the source
-/// fails open with an `Err`, matching the ask-failure path. The outer
-/// 30s virtual-time budget comfortably exceeds the per-ask timeout, so
-/// without the bound this test fails (the ask never resolves).
+/// fails open with an `Err`, matching the ask-failure path. All seven
+/// asks are issued concurrently (S6 round-3), so total hydration
+/// latency against a wedged actor is bounded by ~ONE reply timeout —
+/// the outer virtual-time budget is deliberately below two timeouts to
+/// pin that bound (a per-ask sequential wait of 7 x 5s would fail it).
 #[tokio::test]
 async fn hung_permission_actor_times_out_instead_of_hanging_hydration() {
     let actor = spawn_test_permission_actor("durable-membership-hung-actor").await;
@@ -76,11 +78,11 @@ async fn hung_permission_actor_times_out_instead_of_hanging_hydration() {
 
     let source = PermissionDurableMembershipSource::new(actor);
     let result = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(9),
         source.list_durable_member_jids("w-1", "c-1"),
     )
     .await
-    .expect("hydration must complete within the reply-timeout budget");
+    .expect("hydration must complete within roughly one reply timeout");
 
     let error = result.expect_err("hung permission actor must fail open with Err");
     assert!(
