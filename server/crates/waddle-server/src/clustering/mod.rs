@@ -47,6 +47,11 @@ mod metrics;
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+/// Self-fencing, isolation detection, and re-registration hysteresis
+/// (ADR-0017 Phase 3 Slice 2). Public for the same reason as
+/// [`claims`]/[`lease`]: the harness drives the node-lease loop directly.
+#[cfg(feature = "clustering")]
+pub mod self_fence;
 /// Owned swarm bring-up. Public so the multi-process cluster harness can run
 /// a swarm inside the test process (kameo's `init_global` is a process
 /// singleton, so multi-node behaviour is only testable across processes —
@@ -97,6 +102,44 @@ pub(crate) fn allowlist_table_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Shared client-facing HTTP readiness signal for the clustering control
+/// plane (ADR-0017 element 4, Phase 3 Slice 2): flipped to not-ready the
+/// instant a node self-fences (node-lease heartbeat CAS returns zero rows,
+/// or Postgres is unreachable past the lease deadline) and back to ready
+/// only once the node has re-registered under a fresh `node_id`/
+/// `node_epoch` and satisfied the re-acquisition hysteresis gate. Cloning
+/// shares the same underlying flag (cheap `Arc` clone).
+///
+/// Unconditionally compiled (no `clustering` feature gate) so `AppState`
+/// and the `/ready`/`/readyz` handlers can hold one field regardless of
+/// build: a non-clustering deployment (or a `clustering`-feature build with
+/// `clustering.enabled = false`) never flips it, so it stays ready forever
+/// — today's behavior, unchanged.
+#[derive(Clone)]
+pub struct ClusteringReadiness(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl ClusteringReadiness {
+    pub fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        )))
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn set_ready(&self, ready: bool) {
+        self.0.store(ready, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Default for ClusteringReadiness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Startup failures for the clustering subsystem. The human-facing `Display`
 /// text is surfaced as the server-startup diagnostic.
 #[derive(Debug, thiserror::Error)]
@@ -122,6 +165,13 @@ pub enum ClusteringError {
     #[cfg(feature = "clustering")]
     #[error(transparent)]
     Swarm(#[from] swarm::SwarmError),
+
+    /// The node-lease's initial registration (ADR-0017 Phase 3 Slice 2)
+    /// failed. Fails startup rather than starting a node-lease loop that can
+    /// never renew.
+    #[cfg(feature = "clustering")]
+    #[error("clustering node-lease registration failed: {0}")]
+    NodeLease(waddle_xmpp::ownership::ClaimError),
 }
 
 /// Derive the clustering subsystem's own cancellation scope from the
@@ -149,6 +199,7 @@ pub async fn start_if_enabled(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: &CancellationToken,
+    readiness: ClusteringReadiness,
 ) -> Result<(), ClusteringError> {
     if !config.enabled {
         return Ok(());
@@ -161,7 +212,7 @@ pub async fn start_if_enabled(
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (db, stop_token, driver);
+        let _ = (db, stop_token, driver, readiness);
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -171,13 +222,14 @@ pub async fn start_if_enabled(
             return Err(ClusteringError::RequiresPostgres { driver });
         }
         // Every clustering task (swarm event loop, lease heartbeat, relay
-        // supervisor, allowlist/DNS timers) is driven off this child, never
-        // the raw process-wide `stop_token` — see `clustering_scope_token`.
+        // supervisor, allowlist/DNS timers, and — from Phase 3 Slice 2 — the
+        // node-lease/self-fence loop) is driven off this child, never the
+        // raw process-wide `stop_token` — see `clustering_scope_token`.
         let clustering_stop = clustering_scope_token(stop_token);
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
-        let handle = swarm::spawn(config, db, clustering_stop).await?;
+        let handle = swarm::spawn(config, db, clustering_stop.clone()).await?;
         tracing::info!(
             local_peer_id = %handle.local_peer_id,
             node_id = %handle.node_id,
@@ -185,8 +237,56 @@ pub async fn start_if_enabled(
             request_timeout_ms = config.messaging.request_timeout.as_millis() as u64,
             "ADR-0017 Phase 2: clustering swarm started (node discovery only)"
         );
+
+        // ADR-0017 Phase 3 Slice 2: the entity-ownership node lease is a
+        // *different* lease from the keypair-slot lease `swarm::spawn` just
+        // heartbeat-started above — this one guards this node's
+        // `clustering_claims` ownership, not its libp2p identity (Q5's "no
+        // coupling" precedent). Register once, up front (fail startup on a
+        // genuine registration failure, exactly like the keypair-slot
+        // acquire above), then hand the loop off to the background task.
+        let node_lease = claims::PostgresClaimStore::new(db.clone());
+        let node_identity = waddle_xmpp::ownership::NodeIdentity::new(
+            handle.node_id.as_str().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        // FIX 6: read through the typed `ClusteringConfig::pod_template_hash`
+        // (parsed once in `config.rs`'s `from_vars` pipeline, like every
+        // sibling var) rather than a raw `std::env::var` at this call site.
+        let pod_template_hash = config.pod_template_hash.clone();
+        register_node_lease(&node_lease, &node_identity, pod_template_hash.clone()).await?;
+        tokio::spawn(self_fence::run_node_lease(
+            node_lease,
+            node_identity,
+            clustering_stop,
+            self_fence::NodeLeaseRunConfig {
+                pod_template_hash,
+                lease_config: config.node_lease.clone(),
+                self_fence_config: config.self_fence.clone(),
+                connected_peers: handle.connected_peers.clone(),
+                local_claims: std::sync::Arc::new(self_fence::NoLocallyClaimedEntities),
+                readiness,
+            },
+        ));
         Ok(())
     }
+}
+
+/// Register this node's initial node-lease row, mapping the store's
+/// `ClaimError` into [`ClusteringError`] so a genuine registration failure
+/// fails server startup exactly like the keypair-slot acquire above, rather
+/// than silently starting a node-lease loop that can never renew.
+#[cfg(feature = "clustering")]
+async fn register_node_lease(
+    node_lease: &claims::PostgresClaimStore,
+    identity: &waddle_xmpp::ownership::NodeIdentity,
+    pod_template_hash: Option<String>,
+) -> Result<(), ClusteringError> {
+    use claims::NodeLeaseStore as _;
+    node_lease
+        .register(identity, pod_template_hash)
+        .await
+        .map_err(ClusteringError::NodeLease)
 }
 
 #[cfg(all(test, feature = "clustering"))]

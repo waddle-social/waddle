@@ -19,7 +19,7 @@
 //! hit/miss and NotOwner NACK sent/received have no caller yet
 //! (cross-node stanza routing is out of Phase 3 scope) and land later too.
 
-use opentelemetry::metrics::{Counter, Gauge, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use std::sync::OnceLock;
 
 static METER: OnceLock<Meter> = OnceLock::new();
@@ -109,6 +109,39 @@ pub fn record_relay_respawn() {
             .build()
     })
     .add(1, &[]);
+}
+
+/// Set the current age (in milliseconds) since this node's last
+/// successfully committed node-lease heartbeat (ADR-0017 Phase 3 Slice 2,
+/// element 12: "a heartbeat-write-latency histogram + alert watches the
+/// cause, not just the heartbeat-age symptom" — this gauge is the symptom
+/// side). First caller: `self_fence::run_node_lease`.
+pub fn record_node_heartbeat_age_ms(age_ms: f64) {
+    static G: OnceLock<Gauge<f64>> = OnceLock::new();
+    G.get_or_init(|| {
+        meter()
+            .f64_gauge("waddle.clustering.node_heartbeat_age_ms")
+            .with_description("Milliseconds since this node's last successful node-lease heartbeat")
+            .with_unit("ms")
+            .build()
+    })
+    .record(age_ms, &[]);
+}
+
+/// Record one node-lease heartbeat CAS statement's wall-clock latency (pool
+/// wait + statement execution) — the cause-side instrument element 12
+/// names alongside the age gauge above. First caller:
+/// `self_fence::run_node_lease`.
+pub fn record_node_heartbeat_write_latency_ms(latency_ms: f64) {
+    static H: OnceLock<Histogram<f64>> = OnceLock::new();
+    H.get_or_init(|| {
+        meter()
+            .f64_histogram("waddle.clustering.node_heartbeat_write_latency_ms")
+            .with_description("Node-lease heartbeat CAS statement latency (pool wait + execution)")
+            .with_unit("ms")
+            .build()
+    })
+    .record(latency_ms, &[]);
 }
 
 /// Count peers revoked by an allowlist refresh (live connections closed).

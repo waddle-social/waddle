@@ -55,6 +55,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         occupant_id_secret,
         permission_actor,
         server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),
+        clustering_readiness: crate::clustering::ClusteringReadiness::new(),
     }));
 
     (Arc::new(UploadState::new(app_state)), upload_dir)

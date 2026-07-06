@@ -604,17 +604,37 @@ are per node, not per entity" framing), sibling to `ClaimStore` but not part of 
 #[async_trait]
 pub trait NodeLeaseStore: Send + Sync {
     async fn register(&self, me: &NodeIdentity, pod_template_hash: Option<String>) -> Result<(), ClaimError>;
-    async fn heartbeat(&self, me: &NodeIdentity) -> Result<bool, ClaimError>; // false ⇒ fencing loss
+    // Correction (implementation-time finding): `heartbeat` also takes
+    // `lease_ttl` — the CAS's own `AND heartbeat >= now() - lease_ttl`
+    // freshness predicate needs the value bound in, exactly like `expire`
+    // below; the original sketch omitted it.
+    async fn heartbeat(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError>; // false ⇒ fencing loss
     async fn expire(&self, owner: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError>;
     async fn mark_draining(&self, me: &NodeIdentity) -> Result<(), ClaimError>; // Slice 10: stop acquiring new claims, keep serving owned ones
+    // Added during implementation (not in the original sketch): the
+    // isolation rule and the demotion-reconciliation query both need a
+    // `clustering_nodes`/`clustering_claims` read this store already owns
+    // the pool/table for, so both land here rather than inventing a third
+    // store for two read-only queries.
+    async fn count_other_live_nodes(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<usize, ClaimError>;
+    async fn reconcile(&self, me: &NodeIdentity, locally_owned: &[Entity]) -> Result<Vec<Entity>, ClaimError>;
 }
 ```
 
 `register` covers both fresh startup and post-fence re-registration under a new
 `node_id`/`node_epoch` (Q7/element 4). The Postgres impl lives alongside
-`PostgresClaimStore` in `clustering/claims.rs` (same file, same control-plane pool);
-the in-process/single-node arm is trivial (`register`/`heartbeat` always succeed,
-`expire` never fires — there is only one node).
+`PostgresClaimStore` in `clustering/claims.rs` (same file, same control-plane pool).
+Correction (implementation-time finding, supersedes the original sketch's "the
+in-process/single-node arm is trivial" line): **no in-process/single-node
+`NodeLeaseStore` implementation exists, and none is needed.** Unlike `ClaimStore`
+(Q1/Q2), `NodeLeaseStore` itself lives entirely in `waddle-server`'s
+`clustering/claims.rs`, gated `#[cfg(feature = "clustering")]` — no ordinary
+single-node `waddle-xmpp` code has, or needs, a node-lease concept, since
+`start_if_enabled` (the sole call site that constructs a `NodeLeaseStore` at all)
+returns immediately when `clustering.enabled` is false, before any `NodeLeaseStore`
+is ever constructed. There is exactly one production implementor
+(`PostgresClaimStore`) plus a test double (`self_fence.rs`'s `FakeLease`) — never a
+trivial single-node arm standing in for "no clustering."
 
 **Files**: `server/crates/waddle-server/src/clustering/claims.rs` (reconciliation
 query + demote/tombstone), new `server/crates/waddle-server/src/clustering/
@@ -781,6 +801,22 @@ types living in the crate that actually owns the transaction.
 impl — "not a decorator" extends to file layout too), implementing `waddle_xmpp::
 stream_management::persistence::SmPersistenceStorage` for `PostgresFencedSmPersistence`.
 No new schema: same `sm_sessions`/`sm_unacked` tables, byte-identical for SQLite.
+
+**Slice 4+ follow-up plumbing, flagged now so it is not rediscovered as a surprise
+later (FIX 8(c))**: `self_fence::run_node_lease` (Slice 2) holds this node's current
+`NodeIdentity` as a plain loop-local variable — reassigned in place on every
+re-registration — with no getter or shared handle exposing "the identity this node
+currently believes it holds" to any other call site. That is sufficient for Slice 2
+(nothing outside the loop needs it yet), but `SmPersistenceStorage`'s `<enable/>`-time
+`ClaimStore::acquire` call (this slice) and any later Slice 4+ claim-reacquisition path
+(deviation 19) both need to bind the *current* live `NodeIdentity` into their CAS calls
+— a stale identity captured once at startup would silently keep acquiring claims under
+a `node_epoch` that stopped being current the moment this node last self-fenced and
+re-registered. This slice's implementation must expose the live identity (e.g. a
+`Arc<ArcSwap<NodeIdentity>>`-style shared handle updated alongside `identity =
+fresh` in `run_node_lease`, or an equivalent readable-snapshot mechanism mirroring
+`ConnectedPeerCount`'s own shared-handle shape) rather than each new claim-acquiring
+call site inventing its own copy.
 
 **Tests**: dedicated Postgres-gated test module (new, alongside
 `sm_persistence/tests.rs`'s existing style) covering: every trait method under the
@@ -1545,3 +1581,62 @@ concern).
     disambiguate. The tag set (`user_actor`/`room_actor`/`sm_session`) is closed and
     pairwise prefix-free, so the encoding is unambiguous even when `id` itself contains
     `:` (Slice 1, `waddle-server/src/clustering/claims.rs`).
+17. **The coarse isolation signal (`ConnectedPeerCount`, `self_fence.rs`) can only
+    ever UNDER-fence, never over-fence — the previous revision of this plan's Slice 2
+    doc comment had the safety direction backwards** (council-adjudicated fix): "zero
+    connected swarm peers of any kind" is a safe approximation of "reaches none of the
+    live peers" in exactly one direction. If this node is connected to at least one
+    *live* peer, both the real condition and the approximation agree ("not isolated");
+    if it is connected to zero peers of any kind, it cannot be connected to a live one
+    either, so both again agree (isolated). The gap is a node connected to one or more
+    *stale/non-live* peers (a peer whose own `clustering_nodes` row has since gone
+    `expired`/`draining`, connection not yet torn down) while reaching zero live
+    peers: the real condition is true (isolated from every live peer) but
+    `reachable_peers >= 1`, so the approximation says "not isolated" and fails to
+    fence when the ADR's literal per-node rule would. Accepted as an interim gap
+    pending the Phase 4 `PeerId` ↔ `NodeId` correlation this phase does not build.
+18. **`NodeLeaseStore::reconcile` (and, by the same reasoning, `expire`) has no
+    production caller this slice** — `LocallyClaimedEntities` is wired to
+    `NoLocallyClaimedEntities` (an always-empty stub) in `start_if_enabled`, per
+    Slice 2's own doc comment, because no code acquires a Postgres-backed claim
+    in production until the fenced `SmPersistenceStorage` (Slice 4) starts calling
+    `ClaimStore::acquire` at `<enable/>` time. `reconcile`'s query and demote-callback
+    plumbing are real and store-level tested (mirroring the Slice 1 precedent of
+    `ClaimStore::fence` landing with zero production callers), not dead code by the
+    repo's hard rule — they simply have nothing to reconcile against yet. Likewise,
+    nothing in production calls `expire` this slice (the only sanctioned caller,
+    `steal_stale`'s `OwnerStale` path, itself has no production caller until claims
+    exist to steal) — `count_other_live_nodes`'s own heartbeat-freshness filter (fix
+    below) is what keeps the isolation heuristic truthful in the meantime, without
+    depending on `expire` ever running.
+19. **Readiness clears on `register` + hysteresis alone this slice — the ADR's "plus
+    claim re-acquisition" conjunct is not yet real, and becomes real only once Slice
+    4+ wires `LocallyClaimedEntities` to something non-empty.** Element 4's text reads
+    "cleared only on successful re-registration under a fresh `node_id`/`node_epoch`
+    **plus claim re-acquisition**"; `run_node_lease`'s re-registration path (Slice 2)
+    flips readiness back to ready as soon as `register` succeeds and
+    `can_reacquire_claims` is satisfied, with no claim-reacquisition step at all —
+    because there is nothing to reacquire yet (deviation 18: no production claims
+    exist this slice). Once Slice 4+ makes `LocallyClaimedEntities` real, the
+    re-registration path must gain an actual claim-reacquisition wait (e.g. re-issuing
+    `ClaimStore::acquire`/`steal_for_resume` for this node's own previously-owned
+    entity set) before flipping readiness — a short constraint comment is left at
+    that call site in `run_node_lease` (`self_fence.rs`) marking this as
+    Slice-4-plus-onward follow-up work, so it is not silently forgotten once claims
+    exist to reacquire.
+20. **`count_other_live_nodes` reads the raw `heartbeat` column (heartbeat-freshness
+    filter), not only the committed `expired`/`draining` flags** (FIX 1(c),
+    council-adjudicated): this does not violate the "never infer expiry from raw
+    heartbeat" rule from element 4/Slice 1's steal-CAS design — that ban is scoped to
+    fencing CAS predicates deciding whether *another node's claim* may be taken
+    (`steal_stale`'s `OwnerStale` predicate), where a race between reading a stale
+    heartbeat and the owner's own renewal landing a moment later could let two nodes
+    believe they both hold the same claim. `count_other_live_nodes` makes no fencing
+    decision over anyone's claims; it is a purely advisory count feeding this node's
+    *own* isolation heuristic. Without this filter, a hard-killed node's
+    `clustering_nodes` row — never explicitly expired, since nothing calls `expire`
+    this slice (deviation 18) — would count as "live" forever, permanently inflating
+    every other node's isolation count; the filter also excludes `draining` rows
+    (Slice 10's marker, and the just-fenced identity's row per FIX 1(b)) regardless of
+    heartbeat freshness, so a node that has just self-fenced stops inflating others'
+    counts immediately rather than waiting out the full TTL window.

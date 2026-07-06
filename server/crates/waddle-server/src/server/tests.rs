@@ -561,6 +561,76 @@ async fn test_readyz_alias_endpoint() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// ADR-0017 Phase 3 Slice 2: a node that has self-fenced its clustering
+// entity-ownership claims must report not-ready, distinct from (and
+// checked before) the database-health branch — a self-fenced node's DB
+// pool may otherwise look perfectly healthy.
+#[tokio::test]
+async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
+    let state = create_test_state().await;
+    state.clustering_readiness.set_ready(false);
+    // FIX 7(a): clone the readiness handle before `state` moves into the
+    // router below, so this test can flip it back and prove recovery on
+    // the SAME router/app instance, not just the not-ready direction.
+    let readiness_handle = state.clustering_readiness.clone();
+    let server_config = ServerConfig::test_homeserver();
+    let mam_storage = http::create_websocket_mam_storage(None).await.unwrap();
+    let pubsub_database_storage = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("test pubsub storage"),
+    );
+    let app = http::create_router(http::RouterDeps {
+        state,
+        server_config,
+        xmpp_config: test_xmpp_config(),
+        mam_storage,
+        pubsub_database_storage,
+        acme_http01_challenge_service: None,
+        shutdown_handle: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
+            .handle(),
+        drain_complete: std::sync::Arc::new(tokio::sync::Notify::new()),
+    })
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "not_ready");
+    assert_eq!(json["clustering"], "self-fenced");
+
+    // FIX 7(a): recovery — once a node re-registers and clears its
+    // self-fenced state, `/ready` must report healthy again on the same
+    // router/state, not just flip one direction and stay stuck.
+    readiness_handle.set_ready(true);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ready");
+}
+
 #[tokio::test]
 async fn test_metrics_endpoint() {
     let app = test_app().await;

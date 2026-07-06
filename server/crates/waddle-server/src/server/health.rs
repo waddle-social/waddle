@@ -144,8 +144,27 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
 
 /// Readiness check endpoint (for orchestrators).
 ///
-/// Readiness is stricter than liveness and validates overall DB pool health.
+/// Readiness is stricter than liveness and validates overall DB pool health
+/// **and** the ADR-0017 Phase 3 Slice 2 clustering readiness signal: a node
+/// that has self-fenced its entity-ownership claims (node-lease heartbeat
+/// lost, or Postgres unreachable past the lease deadline) must not stay in
+/// the client Service/Ingress endpoint set — clients whose sockets it just
+/// closed would otherwise be routed straight back to the still-refusing
+/// node. Non-clustering deployments never flip this signal, so it is
+/// always ready — today's behavior, unchanged.
 pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.clustering_readiness.is_ready() {
+        warn!("Readiness check: this node has self-fenced its clustering claims");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "service": "waddle-server",
+                "version": env!("CARGO_PKG_VERSION"),
+                "clustering": "self-fenced"
+            })),
+        );
+    }
     match state.db_pool.health_check().await {
         Ok(health) if health.is_healthy() => (
             StatusCode::OK,

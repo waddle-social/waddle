@@ -185,12 +185,20 @@ pub async fn start_with_config(
     room_registry_gauge::spawn(room_registry_handle.clone(), stop_token.clone());
     let room_registry = room_registry_handle.actor_ref().clone();
 
-    // ADR-0017 Phase 2: conditionally start the owned libp2p swarm subsystem
-    // (node discovery only), gated behind `clustering.enabled` + the
+    // ADR-0017 Phase 2/3: conditionally start the owned libp2p swarm
+    // subsystem (node discovery only) plus the Phase 3 Slice 2 node-lease/
+    // self-fencing loop, gated behind `clustering.enabled` + the
     // `clustering` build feature + the Postgres control plane. A no-op when
-    // disabled — the default single-replica path is byte-for-byte unchanged.
-    crate::clustering::start_if_enabled(&server_config.clustering, db_pool.global(), &stop_token)
-        .await?;
+    // disabled — the default single-replica path is byte-for-byte unchanged,
+    // and `clustering_readiness` simply never flips (stays ready forever).
+    let clustering_readiness = crate::clustering::ClusteringReadiness::new();
+    crate::clustering::start_if_enabled(
+        &server_config.clustering,
+        db_pool.global(),
+        &stop_token,
+        clustering_readiness.clone(),
+    )
+    .await?;
 
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
@@ -212,6 +220,7 @@ pub async fn start_with_config(
         occupant_id_secret: server_config.occupant_id_secret.clone(),
         permission_actor: permission_actor.clone(),
         server_owner_jids,
+        clustering_readiness,
     }));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;

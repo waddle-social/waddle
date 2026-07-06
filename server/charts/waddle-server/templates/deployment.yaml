@@ -109,6 +109,20 @@ spec:
                   name: {{ $runtimeSecretName | quote }}
                   key: WADDLE_OCCUPANT_ID_SECRET
                   optional: false
+            {{- /*
+              ADR-0017 Phase 3 Slice 2 (Q5): this pod's `pod-template-hash`
+              label, read from the downward API so a node can stamp its
+              deployment generation onto its `clustering_nodes` row for the
+              rollout-aware claim-acquisition backoff rule (Slice 10). Wired
+              unconditionally — cheap, and harmless while clustering.enabled
+              stays hard-locked false (Phase 0 guard) — so the mechanism
+              ships ahead of Phase 4's chart unlock rather than needing a
+              second chart change then.
+            */}}
+            - name: WADDLE_CLUSTERING_POD_TEMPLATE_HASH
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['pod-template-hash']
             - name: WADDLE_UPLOAD_DIR
               value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.uploadSubPath | quote }}
             {{- if and .Values.xmpp.enabled .Values.xmpp.tls.secretName }}

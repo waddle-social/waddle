@@ -12,6 +12,7 @@ use super::behaviour::{WaddleBehaviour, WaddleBehaviourEvent};
 use super::lease::{
     KeypairSlotLease, LeaseError, LeaseIdentity, LeasedSlot, PostgresKeypairSlotLease,
 };
+use super::self_fence::ConnectedPeerCount;
 use super::{dns, identity, metrics, relay, NodeId};
 use crate::config::{ClusteringBootstrapConfig, ClusteringConfig};
 use crate::db::Database;
@@ -81,6 +82,12 @@ pub enum SwarmError {
 pub struct SwarmHandle {
     pub local_peer_id: PeerId,
     pub node_id: NodeId,
+    /// Readable snapshot of the swarm's current connected-peer count (Phase
+    /// 2 Slice 1's gauge, reused here per ADR-0017 Phase 3 Slice 2's
+    /// isolation rule — see `self_fence::ConnectedPeerCount`'s doc comment
+    /// for why a coarse peer count, not per-node reachability, is what the
+    /// isolation check reads).
+    pub connected_peers: ConnectedPeerCount,
 }
 
 /// Build the swarm, install the global `ActorSwarm`, start listening, spawn
@@ -242,6 +249,7 @@ async fn bring_up(
             })?;
     }
 
+    let connected_peers = ConnectedPeerCount::new();
     let bootstrap_peers = config.bootstrap_peers.clone();
     tokio::spawn(run_event_loop(
         swarm,
@@ -252,6 +260,7 @@ async fn bring_up(
             current: enrolled,
             interval: config.allowlist_refresh_interval,
         },
+        connected_peers.clone(),
         stop_token.clone(),
     ));
 
@@ -269,6 +278,7 @@ async fn bring_up(
     let handle = SwarmHandle {
         local_peer_id,
         node_id,
+        connected_peers,
     };
 
     // Publish the node identity for the multi-process harness (mirrors the
@@ -528,6 +538,7 @@ async fn run_event_loop(
     bootstrap_peers: Vec<ClusteringBootstrapConfig>,
     dial_interval: Duration,
     mut allowlist: AllowlistRefresh,
+    connected_peers: ConnectedPeerCount,
     stop_token: CancellationToken,
 ) {
     // Peers we currently hold a connection to (authoritative from connection
@@ -675,6 +686,7 @@ async fn run_event_loop(
                     &mut routing_peers,
                     &mut conn_addrs,
                     &mut addr_owners,
+                    &connected_peers,
                 );
             }
         }
@@ -722,20 +734,31 @@ fn apply_allowlist(
     allowlist.current = enrolled;
 }
 
-/// Record a newly connected peer, updating the connected-peer gauge on the
-/// first connection to that peer.
-fn track_peer_connected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
+/// Record a newly connected peer, updating the connected-peer gauge (and the
+/// readable [`ConnectedPeerCount`] ADR-0017 Phase 3 Slice 2's isolation
+/// check reads) on the first connection to that peer.
+fn track_peer_connected(
+    peer_id: PeerId,
+    connected: &mut HashSet<PeerId>,
+    connected_peers: &ConnectedPeerCount,
+) {
     if connected.insert(peer_id) {
         metrics::record_connected_peers(connected.len() as i64);
+        connected_peers.set(connected.len() as i64);
         tracing::debug!(%peer_id, "clustering peer connected");
     }
 }
 
 /// Record a peer whose last connection closed, updating the connected-peer
-/// gauge if it was tracked.
-fn track_peer_disconnected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
+/// gauge (and [`ConnectedPeerCount`]) if it was tracked.
+fn track_peer_disconnected(
+    peer_id: PeerId,
+    connected: &mut HashSet<PeerId>,
+    connected_peers: &ConnectedPeerCount,
+) {
     if connected.remove(&peer_id) {
         metrics::record_connected_peers(connected.len() as i64);
+        connected_peers.set(connected.len() as i64);
         tracing::debug!(%peer_id, "clustering peer disconnected");
     }
 }
@@ -750,6 +773,7 @@ fn handle_swarm_event(
     routing_peers: &mut HashSet<PeerId>,
     conn_addrs: &mut HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
     addr_owners: &mut HashMap<Multiaddr, PeerId>,
+    connected_peers: &ConnectedPeerCount,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -786,7 +810,7 @@ fn handle_swarm_event(
                 );
                 swarm.close_connection(connection_id);
             } else {
-                track_peer_connected(peer_id, connected);
+                track_peer_connected(peer_id, connected, connected_peers);
             }
         }
         SwarmEvent::ConnectionClosed {
@@ -802,7 +826,7 @@ fn handle_swarm_event(
             // keeps the map bounded by *connected* peers under pod churn
             // instead of accumulating every address ever dialed.
             if num_established == 0 {
-                track_peer_disconnected(peer_id, connected);
+                track_peer_disconnected(peer_id, connected, connected_peers);
                 addr_owners.retain(|_, owner| *owner != peer_id);
             }
         }

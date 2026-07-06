@@ -40,6 +40,7 @@ use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStore};
+use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
 use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
@@ -185,6 +186,18 @@ async fn spawn_cluster_server(
             ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "1000"),
             ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "1000"),
             ("WADDLE_CLUSTERING_LEASE_TTL_MS", "10000"),
+            // ADR-0017 Phase 3 Slice 2 (FIX 4): equally tight node-lease/
+            // self-fence timing, exercised by `lone_survivor_and_isolation_fencing`
+            // below — every server this harness spawns is a real production
+            // subprocess that runs `clustering::start_if_enabled`'s node-lease/
+            // self-fence loop unconditionally, so these envs simply make that
+            // already-running production loop observable on a modest wall
+            // clock instead of introducing a second harness-only code path.
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "300"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "1200"),
+            ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "2"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "200"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "1000"),
         ];
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
@@ -253,6 +266,17 @@ fn thread_message(id: &str, body_size: usize) -> RemoteStanza {
     RemoteStanza(waddle_xmpp::Stanza::Message(message))
 }
 
+/// Serializes the heavy subprocess tests in this binary. They share the
+/// mutable control-plane tables (`clustering_nodes`/`clustering_claims`/
+/// `clustering_peer_allowlist`/`clustering_keypair_slots`) in one Postgres
+/// and each starts by DELETE-resetting them — running concurrently (the
+/// cargo test default) would wipe rows the other test's live subprocess
+/// servers depend on mid-run.
+fn cluster_e2e_serial_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// The whole Phase 2 exit-criteria suite runs as ONE test: the test process
 /// hosts a single swarm (kameo `init_global` is a process singleton), and the
 /// scenario steps build on each other.
@@ -262,6 +286,7 @@ async fn cluster_exit_criteria_end_to_end() {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
+    let _serial = cluster_e2e_serial_lock().lock().await;
 
     // Surface the test-process swarm's own tracing (lookups, connections,
     // relay registration) when debugging with --nocapture.
@@ -320,6 +345,12 @@ async fn cluster_exit_criteria_end_to_end() {
         },
         fault_injection: false,
         node_id_file: None,
+        node_lease: waddle_server::config::ClusteringNodeLeaseConfig {
+            heartbeat_interval: Duration::from_secs(1),
+            lease_ttl: Duration::from_secs(10),
+        },
+        self_fence: waddle_server::config::ClusteringSelfFenceConfig::default(),
+        pod_template_hash: None,
     };
     let handle = swarm::spawn(&config, &db, stop.clone())
         .await
@@ -550,12 +581,201 @@ async fn cluster_exit_criteria_end_to_end() {
     drop(server_a2);
 }
 
-/// DEFERRED (Phase 3): lone-survivor at N=2 keeps serving while a node
-/// isolated from all live swarm peers (Postgres reachable) fences — requires
-/// the `nodes` heartbeat fencing that lands with the ownership control plane.
-#[tokio::test]
-#[ignore = "Phase 3: requires nodes-table heartbeat fencing"]
-async fn lone_survivor_and_isolation_fencing() {}
+/// Wipe the `clustering_nodes`/`clustering_claims` tables (provisioning the
+/// schema first via the production `ensure_schema` path, in case this is
+/// the first test in the binary to touch it — mirrors `reset_and_enroll`'s
+/// own "provision through the production path" convention). Residual rows
+/// from an earlier scenario in the same shared Postgres instance are
+/// otherwise invisible garbage that can pollute `count_other_live_nodes`:
+/// `lone_survivor_and_isolation_fencing` needs a truthful "other live node"
+/// count, and nothing expires these rows on its own within a single test
+/// run (`NodeLeaseStore::expire` has no production caller this slice).
+async fn reset_node_lease_tables(db: &Database) {
+    use waddle_xmpp::ownership::ClaimStore as _;
+    let store = PostgresClaimStore::new(db.clone());
+    store
+        .ensure_schema()
+        .await
+        .expect("ensure node-lease schema");
+    let conn = db.guard().await.expect("guard");
+    conn.execute("DELETE FROM clustering_claims", ())
+        .await
+        .expect("clean claims");
+    conn.execute("DELETE FROM clustering_nodes", ())
+        .await
+        .expect("clean nodes");
+}
+
+/// Poll a spawned cluster server's `/ready` endpoint once; `None` if the
+/// request itself fails (e.g. the process hasn't bound its HTTP listener
+/// yet), `Some(true)`/`Some(false)` for a 2xx/non-2xx response.
+async fn readiness_status(server: &TestServer) -> Option<bool> {
+    let url = format!("{}/ready", server.http_base_url());
+    reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .ok()
+        .map(|response| response.status().is_success())
+}
+
+/// Poll until a spawned cluster server's `/ready` endpoint reports
+/// `want_ready`, or panic once `deadline` elapses.
+async fn wait_for_readiness(server: &TestServer, want_ready: bool, deadline: Duration) {
+    let until = Instant::now() + deadline;
+    loop {
+        if readiness_status(server).await == Some(want_ready) {
+            return;
+        }
+        assert!(
+            Instant::now() < until,
+            "server did not report {} within {deadline:?}",
+            if want_ready { "ready" } else { "not-ready" }
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// ADR-0017 Phase 3 Slice 2: lone-survivor-at-N=2 keeps serving despite zero
+/// reachable swarm peers (the N=2 carve-out — a single other live row is
+/// never enough corroboration to blame isolation on); isolation-fencing DOES
+/// trip once a node is swarm-isolated from >= 2 other live nodes for the
+/// configured M consecutive intervals.
+///
+/// Exercises the REAL production node-lease/self-fence loop end-to-end, not
+/// a harness-only reimplementation: every node spawned here
+/// (`spawn_cluster_server`) is a full `waddle-server` subprocess that runs
+/// `clustering::start_if_enabled`'s production bring-up unconditionally
+/// (`server::start_with_config` always calls it — see `server/mod.rs`), so
+/// `run_node_lease` is already driving each subprocess's readiness signal
+/// with no harness-side wiring required. The one gap this fills: the
+/// pre-existing harness never drove a *third* in-process node through this
+/// path (the test-process node C in `cluster_exit_criteria_end_to_end` calls
+/// `swarm::spawn` directly, bypassing `start_if_enabled`) — but this
+/// scenario needs no in-process node at all, only real HTTP `/ready` polling
+/// against subprocess servers, so it sidesteps that gap entirely rather than
+/// needing to close it.
+///
+/// Wall clock: node-lease heartbeat/TTL/isolation-interval envs are tuned to
+/// a few hundred milliseconds (see `spawn_cluster_server`), so both legs
+/// below complete in single-digit seconds of real time.
+#[tokio::test(flavor = "multi_thread")]
+async fn lone_survivor_and_isolation_fencing() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    // --- Part 1: N=2 lone survivor. Kill one of two nodes; the survivor
+    // sees at most one other "live" `clustering_nodes` row and zero
+    // reachable swarm peers, but must never isolation-fence — element 4's
+    // N=2 carve-out requires >= 2 other live rows before swarm
+    // unreachability alone is trusted to mean isolation.
+    {
+        let pool = generate_pool();
+        let db = open_control_db(&postgres_url).await;
+        reset_and_enroll(&db, &pool).await;
+        reset_node_lease_tables(&db).await;
+
+        let port_a = free_tcp_port();
+        let port_b = free_tcp_port();
+        let (server_a, _node_a, _peer_a) =
+            spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+        let (server_b, _node_b, _peer_b) =
+            spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+
+        wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+        wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+        // Hard-kill B (SIGKILL via `Drop`) — an unclean death, exactly the
+        // shape `cluster_exit_criteria_end_to_end`'s own rolling-restart leg
+        // uses. Nothing calls `NodeLeaseStore::expire` on B's row this
+        // slice (no production caller yet), so B's `clustering_nodes` row
+        // stays "live" from A's point of view for a while — the harder
+        // version of the carve-out, since A initially observes 1 other
+        // live row (dropping to 0 once B's heartbeat goes stale under the
+        // freshness filter; both values are < 2, so the carve-out holds
+        // across the whole window either way).
+        drop(server_b);
+
+        // Poll across several node-lease heartbeat/isolation-interval
+        // windows: the survivor must stay ready the whole time.
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline {
+            assert_eq!(
+                readiness_status(&server_a).await,
+                Some(true),
+                "lone survivor at N=2 must never isolation-fence, even with zero \
+                 reachable swarm peers"
+            );
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        drop(server_a);
+    }
+
+    // --- Part 2: N>=3 isolation DOES fence. Three live nodes; isolate one
+    // of them (D) from the swarm by revoking its OWN peer-allowlist entry
+    // (symmetric enforcement, per `cluster_exit_criteria_end_to_end`'s own
+    // revocation leg: A and B's refreshes close their side of the
+    // connection to D within one allowlist-refresh interval, which tears
+    // down D's side too, and D's own re-dials are rejected by A/B's
+    // accept-side check) while A and B stay genuinely alive and
+    // heartbeating throughout, so `clustering_nodes` truthfully shows D
+    // >= 2 other live rows for the whole window — this is swarm isolation
+    // with Postgres fully reachable to D, not a Postgres partition.
+    {
+        let pool = generate_pool();
+        let db = open_control_db(&postgres_url).await;
+        reset_and_enroll(&db, &pool).await;
+        reset_node_lease_tables(&db).await;
+
+        let port_a = free_tcp_port();
+        let port_b = free_tcp_port();
+        let port_d = free_tcp_port();
+        let (server_a, _node_a, _peer_a) =
+            spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b, port_d]).await;
+        let (server_b, _node_b, _peer_b) =
+            spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a, port_d]).await;
+        let (server_d, _node_d, peer_d) =
+            spawn_cluster_server(&postgres_url, &pool.pool_env, port_d, &[port_a, port_b]).await;
+
+        wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+        wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+        wait_for_readiness(&server_d, true, Duration::from_secs(15)).await;
+
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "DELETE FROM clustering_peer_allowlist WHERE peer_id = ?",
+            waddle_server::db_params![peer_d.clone()],
+        )
+        .await
+        .expect("revoke D");
+
+        // D must self-fence: readiness flips not-ready within a modest
+        // deadline (a few allowlist-refresh + isolation-interval windows).
+        wait_for_readiness(&server_d, false, Duration::from_secs(15)).await;
+
+        // A and B were never isolated from each other — they must stay
+        // ready throughout, proving this is a targeted fence of the
+        // isolated node, not a cluster-wide wobble.
+        assert_eq!(
+            readiness_status(&server_a).await,
+            Some(true),
+            "uninvolved peer A must stay ready"
+        );
+        assert_eq!(
+            readiness_status(&server_b).await,
+            Some(true),
+            "uninvolved peer B must stay ready"
+        );
+
+        drop(server_a);
+        drop(server_b);
+        drop(server_d);
+    }
+}
 
 /// DEFERRED (Phase 3): a single dead link between two of three nodes degrades
 /// routing to the durable fallback without fencing either endpoint — requires

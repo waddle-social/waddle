@@ -62,6 +62,12 @@ pub struct AppState {
     /// startup). Used to seed `Affiliation::Owner` rows on Spaces PubSub
     /// nodes so XEP-0060 admin operations work for these accounts.
     pub server_owner_jids: Arc<[BareJid]>,
+    /// Client-facing clustering readiness signal (ADR-0017 Phase 3 Slice 2):
+    /// the `/ready`/`/readyz` handlers report not-ready whenever this node
+    /// has self-fenced its entity-ownership claims. Non-clustering
+    /// deployments (and clustering-disabled builds) never flip it, so it
+    /// stays ready forever — today's behavior, unchanged.
+    pub clustering_readiness: crate::clustering::ClusteringReadiness,
 }
 
 impl AppState {
@@ -110,6 +116,7 @@ impl AppState {
             occupant_id_secret,
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
+            clustering_readiness: crate::clustering::ClusteringReadiness::new(),
         })
     }
 
@@ -130,6 +137,7 @@ impl AppState {
             occupant_id_secret,
             permission_actor,
             server_owner_jids,
+            clustering_readiness,
         } = deps;
         Self {
             db_pool,
@@ -144,6 +152,7 @@ impl AppState {
             occupant_id_secret,
             permission_actor,
             server_owner_jids,
+            clustering_readiness,
         }
     }
 }
@@ -164,6 +173,7 @@ pub struct AppStateDeps {
     pub occupant_id_secret: OccupantIdSecret,
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
+    pub clustering_readiness: crate::clustering::ClusteringReadiness,
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against

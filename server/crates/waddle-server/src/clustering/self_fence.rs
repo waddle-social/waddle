@@ -1,0 +1,1219 @@
+//! Self-fencing, isolation detection with the N=2 lone-survivor carve-out,
+//! and re-registration hysteresis (ADR-0017 Phase 3 Slice 2, element 4).
+//!
+//! Mirrors `swarm.rs`'s keypair-slot lease heartbeat
+//! ([`super::swarm`]'s `run_heartbeat`): single-flight renewals, a `biased`
+//! deadline-arm `select!` (never a timeout-dropped in-flight sqlx future —
+//! see that function's doc comment for why), and a fencing loss that
+//! cancels only the clustering scope, never the whole process. What
+//! differs: **what is fenced**. The keypair-slot lease (`lease.rs`) guards
+//! *which libp2p identity* a process holds — losing it means another node
+//! may already be using this node's `PeerId`, so the swarm/relay subsystem
+//! must stop entirely. The node lease here guards *entity-ownership
+//! claims* (`clustering_claims`, via [`super::claims::NodeLeaseStore`]) —
+//! losing it means this node no longer authoritatively owns any of its
+//! claimed entities, but its libp2p identity and swarm membership remain
+//! valid. The two leases are orthogonal (Q5's "no coupling" precedent
+//! between distinct clustering leases applies here too): a node that loses
+//! its node lease demotes locally-claimed entities and flips readiness, but
+//! does not tear down the swarm — it works to re-register under a fresh
+//! node identity and resume serving.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
+
+use waddle_xmpp::ownership::{Entity, NodeIdentity};
+
+use super::claims::NodeLeaseStore;
+use super::metrics;
+use super::ClusteringReadiness;
+use crate::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
+
+/// Readable snapshot of the swarm's current connected-peer count (Phase 2
+/// Slice 1's connected-peer gauge, reused here rather than inventing a
+/// second peer-tracking mechanism — the plan's own Files line for this
+/// module says to reuse it).
+///
+/// **Deliberate simplification, noted as a resolved ambiguity — and FIX 5's
+/// corrected safety direction (the previous revision of this doc comment
+/// had it backwards)**: element 4's isolation rule is "this node can reach
+/// **none of** [the two-or-more other live nodes] over the swarm." Exact
+/// per-node reachability would require correlating specific `PeerId`s to
+/// specific `clustering_nodes` rows, which needs an allowlist/kademlia
+/// identity mapping this phase does not build (that correlation is a Phase
+/// 4 concern, once cross-node routing needs to address a specific node).
+/// Slice 2 approximates "reaches none of the live peers" as "zero
+/// connected swarm peers, of *any* kind" — coarser than per-node
+/// reachability, and **the approximation can only ever UNDER-fence,
+/// never over-fence**:
+///
+/// - If this node is connected to at least one *live* peer, the real
+///   condition is false (not isolated) — and `reachable_peers >= 1`, so
+///   the approximation also correctly says "not isolated." The two agree.
+/// - If this node is connected to **zero** peers of any kind, it cannot
+///   possibly be connected to a live one either, so the real condition is
+///   also true — the two again agree, and this is the case that fences.
+/// - The gap: this node could be connected to one or more **stale/
+///   non-live** peers (a peer whose own `clustering_nodes` row has since
+///   gone `expired`/`draining`, but whose libp2p connection has not yet
+///   been torn down) while reaching **zero** live peers. Here the real
+///   condition is true (isolated from every live peer) but
+///   `reachable_peers >= 1` (the stale connection still counts toward the
+///   coarse swarm-level gauge), so the approximation says "not isolated"
+///   and **fails to fence when the ADR's literal rule would**.
+///
+/// So the coarse signal is a safe approximation in exactly one direction:
+/// it can never manufacture isolation that isn't real (no false
+/// self-fence), but it can under-count real isolation and delay or skip a
+/// self-fence the exact per-node rule would have triggered. Accepted as an
+/// interim gap pending the Phase 4 `PeerId` ↔ `NodeId` correlation (plan
+/// deviation #17).
+#[derive(Debug, Clone, Default)]
+pub struct ConnectedPeerCount(Arc<AtomicI64>);
+
+impl ConnectedPeerCount {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicI64::new(0)))
+    }
+
+    pub fn set(&self, count: i64) {
+        self.0.store(count, Ordering::Release);
+    }
+
+    pub fn get(&self) -> i64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// Supplies the local owned-entity set the demotion-reconciliation diff
+/// runs against, and demotes entities Postgres no longer attributes to
+/// this node.
+///
+/// **No production implementor lands in Slice 2** — the mechanism and its
+/// tests land here, but no code acquires a Postgres-backed `sm_session`
+/// claim in production until the fenced `SmPersistenceStorage` (Phase 3
+/// Slice 4) starts calling `ClaimStore::acquire` at `<enable/>` time. Until
+/// then, [`start_if_enabled`](super::start_if_enabled) wires
+/// [`NoLocallyClaimedEntities`].
+#[async_trait]
+pub trait LocallyClaimedEntities: Send + Sync {
+    /// Every entity this process currently believes it owns, from local
+    /// bookkeeping only — never a Postgres read.
+    fn owned(&self) -> Vec<Entity>;
+
+    /// Demote local state for an entity Postgres no longer attributes to
+    /// this node (claim stolen, or this node's own claim row is gone).
+    /// Purely local: must succeed even when Postgres is unreachable — the
+    /// self-fencing trigger this method exists to serve. Best-effort and
+    /// idempotent.
+    async fn demote(&self, entity: &Entity);
+}
+
+/// No claimed entities — see the trait doc for why this is the only
+/// production wiring Slice 2 has.
+pub struct NoLocallyClaimedEntities;
+
+#[async_trait]
+impl LocallyClaimedEntities for NoLocallyClaimedEntities {
+    fn owned(&self) -> Vec<Entity> {
+        Vec::new()
+    }
+
+    async fn demote(&self, _entity: &Entity) {}
+}
+
+/// Isolation-with-hysteresis decision state (element 4's locked spec).
+/// Pure and synchronous — no timer of its own — so [`run_node_lease`] (and
+/// this module's own unit tests) drive it once per heartbeat interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IsolationTracker {
+    consecutive_isolated_intervals: u32,
+}
+
+impl IsolationTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one interval's observation and return whether renewal should be
+    /// refused *this* interval (isolation fencing).
+    ///
+    /// `other_live_nodes` is this interval's live-row count from
+    /// `clustering_nodes`, excluding self (fresh per Postgres, the
+    /// authority); `reachable_peers` is the current swarm connected-peer
+    /// count. Fencing requires **both**: `other_live_nodes >= 2` (the N=2
+    /// lone-survivor carve-out — with exactly one other live node, swarm
+    /// unreachability alone never fences: there is no witness to assign
+    /// blame) and zero reachable peers for `isolation_intervals` (M)
+    /// consecutive intervals running (a single blip does not fence).
+    pub fn observe(
+        &mut self,
+        other_live_nodes: usize,
+        reachable_peers: usize,
+        isolation_intervals: u32,
+    ) -> bool {
+        let isolated_this_interval = other_live_nodes >= 2 && reachable_peers == 0;
+        if isolated_this_interval {
+            self.consecutive_isolated_intervals =
+                self.consecutive_isolated_intervals.saturating_add(1);
+        } else {
+            self.consecutive_isolated_intervals = 0;
+        }
+        self.consecutive_isolated_intervals >= isolation_intervals.max(1)
+    }
+
+    /// Reset after a re-registration, so a freshly re-registered identity
+    /// starts with a clean isolation history.
+    pub fn reset(&mut self) {
+        self.consecutive_isolated_intervals = 0;
+    }
+
+    #[cfg(test)]
+    fn consecutive_isolated_intervals(&self) -> u32 {
+        self.consecutive_isolated_intervals
+    }
+}
+
+/// Re-acquisition hysteresis gate (element 4): after a fence, claims are
+/// re-acquired only once this holds — "whenever other live node rows
+/// exist, only after observing swarm reachability to at least one of
+/// them." With no other live rows at all (this node is the sole survivor
+/// of its own re-registration), there is nothing to wait for.
+pub fn can_reacquire_claims(other_live_nodes: usize, reachable_peers: usize) -> bool {
+    other_live_nodes == 0 || reachable_peers >= 1
+}
+
+/// Exponential backoff between post-fence re-registration attempts
+/// (element 4: without it, two mutually swarm-partitioned survivors
+/// oscillate forever — fence, re-register, observe still-isolated, fence
+/// again).
+pub struct ReregistrationBackoff {
+    base: Duration,
+    max: Duration,
+    attempts: u32,
+}
+
+impl ReregistrationBackoff {
+    pub fn new(base: Duration, max: Duration) -> Self {
+        Self {
+            base,
+            max,
+            attempts: 0,
+        }
+    }
+
+    /// The delay before the next re-registration attempt; advances the
+    /// attempt counter so the *following* call doubles again.
+    pub fn next_delay(&mut self) -> Duration {
+        let shift = self.attempts.min(31);
+        let scaled = self
+            .base
+            .checked_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
+            .unwrap_or(self.max);
+        self.attempts = self.attempts.saturating_add(1);
+        scaled.min(self.max)
+    }
+
+    /// Reset after a successful re-registration.
+    pub fn reset(&mut self) {
+        self.attempts = 0;
+    }
+
+    #[cfg(test)]
+    fn attempts(&self) -> u32 {
+        self.attempts
+    }
+}
+
+/// Grouped configuration for [`run_node_lease`] — construction args bundled
+/// into a struct rather than widening a positional argument list (clippy
+/// `too_many_arguments`; mirrors this codebase's `AppStateDeps` precedent
+/// for the same concern, per the repo's no-`#[allow]` hard rule).
+pub struct NodeLeaseRunConfig {
+    pub pod_template_hash: Option<String>,
+    pub lease_config: ClusteringNodeLeaseConfig,
+    pub self_fence_config: ClusteringSelfFenceConfig,
+    pub connected_peers: ConnectedPeerCount,
+    pub local_claims: Arc<dyn LocallyClaimedEntities>,
+    pub readiness: ClusteringReadiness,
+}
+
+/// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
+/// `swarm.rs::release_slot_bounded`'s pattern exactly, one lease kind over:
+/// a hung call must not stall the caller, whether that caller is the
+/// re-registration loop marking a just-fenced identity draining (FIX 1(b))
+/// or ordinary shutdown marking the still-live identity draining before
+/// returning (FIX 3). Marking draining is advisory cleanup only — the row
+/// ages out on its own via its own lapsed heartbeat/TTL either way, and
+/// [`super::claims::PostgresClaimStore::count_other_live_nodes`] already
+/// excludes draining rows regardless of heartbeat freshness (FIX 1(c)) — so
+/// a timed-out or failed attempt here is logged and ignored, never retried
+/// or escalated: it only narrows how quickly other nodes stop counting this
+/// row as live, never a correctness requirement.
+async fn mark_draining_bounded<L>(lease: &L, identity: &NodeIdentity, budget: Duration)
+where
+    L: NodeLeaseStore + Send + Sync,
+{
+    match tokio::time::timeout(budget, lease.mark_draining(identity)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                node_id = %identity.node_id,
+                "clustering: failed to mark node-lease row draining"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: marking node-lease row draining timed out; row ages out via \
+                 its own lapsed heartbeat"
+            );
+        }
+    }
+}
+
+/// Drive node-lease renewal, demotion reconciliation, isolation-aware
+/// self-fencing, and post-fence re-registration until `stop_token` fires.
+///
+/// Two independent fencing triggers, exactly per element 4: (1) the
+/// heartbeat CAS affects zero rows (`Ok(false)` — another registration or
+/// steal already invalidated this identity); (2) `lease_ttl` elapses since
+/// the last successful renewal without one landing (Postgres unreachable)
+/// — the same deadline-arm shape as `swarm::run_heartbeat`, for the same
+/// reason: an abandoned in-flight sqlx future during a sustained partition
+/// would otherwise wedge the pool's background `ping()` re-vetting, one
+/// connection per tick. A hung renewal is polled to completion, raced only
+/// against the deadline and shutdown (single-flight — never more than one
+/// renewal in flight, never dropped except on fence/shutdown).
+///
+/// **FIX 2**: `count_other_live_nodes` and `reconcile` are control-plane
+/// calls too, and are deadline-armed identically — raced against the same
+/// `sleep_until(last_success + lease_ttl)` deadline the heartbeat itself
+/// uses (biased, so the deadline always wins a simultaneous wakeup): a hung
+/// call here fences exactly as if the heartbeat call itself had blown its
+/// deadline, rather than parking the loop indefinitely with no bound. As
+/// with the heartbeat, at most one abandoned in-flight future is ever
+/// dropped per fence (never per-tick) — the deadline fires at most once
+/// before the loop exits to the self-fenced block below.
+///
+/// On either trigger: locally demote every entity `local_claims.owned()`
+/// currently lists (a purely local action that must succeed even while
+/// Postgres is unreachable), flip `readiness` to not-ready, **mark the
+/// just-fenced identity's row draining (FIX 1(b), bounded best-effort)**,
+/// then loop re-registration attempts (exponential backoff) until one
+/// succeeds *and* the hysteresis gate ([`can_reacquire_claims`]) is
+/// satisfied — at which point readiness flips back to ready and normal
+/// heartbeat/reconciliation resumes under the freshly minted identity.
+///
+/// **FIX 1(a)**: the fresh `node_id`/`node_epoch` identity for
+/// re-registration is minted **once per fence**, before the retry loop —
+/// every retry within that fence's re-registration loop reuses the same
+/// identity. Minting a fresh random identity on every retry (including
+/// hysteresis-rejected ones, which do not indicate a registration
+/// failure) was a row-leak wedge: `register`'s `INSERT ... ON CONFLICT
+/// (node_id) DO UPDATE` only refreshes an existing row when called
+/// repeatedly with the *same* `node_id` — called with a fresh `node_id`
+/// every time, it INSERTs a new phantom row per retry instead, and nothing
+/// in production ever expires node rows (`NodeLeaseStore::expire` has no
+/// production caller this slice), so `clustering_nodes` would grow without
+/// bound across a single sustained fence and permanently inflate every
+/// node's `count_other_live_nodes` — eventually making
+/// [`can_reacquire_claims`] impossible to satisfy again (a permanent
+/// not-ready wedge) and polluting the cluster-wide isolation heuristic.
+pub async fn run_node_lease<L>(
+    lease: L,
+    mut identity: NodeIdentity,
+    stop_token: CancellationToken,
+    run_config: NodeLeaseRunConfig,
+) where
+    L: NodeLeaseStore + Send + Sync + 'static,
+{
+    let NodeLeaseRunConfig {
+        pod_template_hash,
+        lease_config: config,
+        self_fence_config: self_fence_cfg,
+        connected_peers,
+        local_claims,
+        readiness,
+    } = run_config;
+    let mut isolation = IsolationTracker::new();
+    let mut backoff = ReregistrationBackoff::new(
+        self_fence_cfg.reregister_backoff_base,
+        self_fence_cfg.reregister_backoff_max,
+    );
+
+    'registered: loop {
+        let mut timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + config.heartbeat_interval,
+            config.heartbeat_interval,
+        );
+        timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut last_success = tokio::time::Instant::now();
+
+        // Runs until this identity self-fences (either trigger). Both
+        // trigger paths converge on identical handling below, so this
+        // block's exit is unconditional (never a plain `break`).
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    return;
+                }
+                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                    break;
+                }
+                _ = timer.tick() => {}
+            }
+
+            metrics::record_node_heartbeat_age_ms(last_success.elapsed().as_secs_f64() * 1000.0);
+
+            let write_started = tokio::time::Instant::now();
+            let renewal = std::pin::pin!(lease.heartbeat(&identity, config.lease_ttl));
+            let renewed = tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    return;
+                }
+                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                    break;
+                }
+                result = renewal => result,
+            };
+            metrics::record_node_heartbeat_write_latency_ms(
+                write_started.elapsed().as_secs_f64() * 1000.0,
+            );
+
+            match renewed {
+                Ok(true) => {
+                    last_success = tokio::time::Instant::now();
+                }
+                Ok(false) => {
+                    tracing::error!(
+                        node_id = %identity.node_id,
+                        "clustering node-lease heartbeat lost (fencing): stopping local claims"
+                    );
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        node_id = %identity.node_id,
+                        "clustering node-lease heartbeat error; will retry next tick"
+                    );
+                    continue;
+                }
+            }
+
+            // Isolation check + demotion reconciliation, once per
+            // successful renewal — "each heartbeat interval, alongside the
+            // renewal CAS" (element 4). FIX 2: both control-plane calls
+            // below are deadline-armed identically to the heartbeat above
+            // — see this function's doc comment.
+            let count_future =
+                std::pin::pin!(lease.count_other_live_nodes(&identity, config.lease_ttl));
+            let other_live_result = tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    return;
+                }
+                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                    break;
+                }
+                result = count_future => result,
+            };
+            let other_live = match other_live_result {
+                Ok(count) => count,
+                Err(error) => {
+                    tracing::warn!(%error, "clustering: failed to count other live nodes this interval");
+                    continue;
+                }
+            };
+            let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
+            if isolation.observe(other_live, reachable, self_fence_cfg.isolation_intervals) {
+                tracing::error!(
+                    node_id = %identity.node_id,
+                    other_live,
+                    "clustering node self-fencing: swarm-isolated from >= 2 live nodes for the \
+                     configured interval count"
+                );
+                break;
+            }
+
+            let owned = local_claims.owned();
+            let reconcile_future = std::pin::pin!(lease.reconcile(&identity, &owned));
+            let reconcile_result = tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    return;
+                }
+                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                    break;
+                }
+                result = reconcile_future => result,
+            };
+            match reconcile_result {
+                Ok(lost) => {
+                    for entity in &lost {
+                        local_claims.demote(entity).await;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "clustering demotion-reconciliation query failed; will retry next interval");
+                }
+            }
+        }
+
+        // Self-fenced (either trigger): stop serving before the lease
+        // becomes stealable, then flip client-facing readiness.
+        for entity in local_claims.owned() {
+            local_claims.demote(&entity).await;
+        }
+        readiness.set_ready(false);
+        isolation.reset();
+
+        // FIX 1(b): best-effort mark the just-fenced identity's row
+        // draining, bounded — narrows how long other nodes keep counting
+        // it as live (FIX 1(c) already excludes draining rows regardless
+        // of heartbeat freshness).
+        mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+
+        // FIX 1(a): mint the fresh re-registration identity ONCE per
+        // fence — every retry below (including hysteresis-rejected ones)
+        // reuses it. See this function's doc comment for the row-leak
+        // wedge this closes.
+        let fresh = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+
+        // Re-registration with hysteresis + exponential backoff.
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    // FIX 3: `fresh` may already be live in
+                    // `clustering_nodes` from an earlier hysteresis-rejected
+                    // retry in this same fence (or may not exist yet at
+                    // all, in which case this is a harmless no-op) — mark
+                    // it draining too before returning on ordinary
+                    // shutdown.
+                    mark_draining_bounded(&lease, &fresh, config.heartbeat_interval).await;
+                    return;
+                }
+                _ = tokio::time::sleep(backoff.next_delay()) => {}
+            }
+            match lease.register(&fresh, pod_template_hash.clone()).await {
+                Ok(()) => {
+                    let other_live = lease
+                        .count_other_live_nodes(&fresh, config.lease_ttl)
+                        .await
+                        .unwrap_or(usize::MAX);
+                    let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
+                    if can_reacquire_claims(other_live, reachable) {
+                        identity = fresh;
+                        backoff.reset();
+                        // Readiness clears on register + hysteresis alone
+                        // this slice: no production `LocallyClaimedEntities`
+                        // exists yet, so the ADR's "plus claim
+                        // re-acquisition" conjunct is vacuous. Once Slice 4+
+                        // wires real claims, a claim-reacquisition wait MUST
+                        // land here, before this flip (plan deviation #19).
+                        readiness.set_ready(true);
+                        tracing::info!(
+                            node_id = %identity.node_id,
+                            "clustering node re-registered; readiness restored"
+                        );
+                        continue 'registered;
+                    }
+                    tracing::warn!(
+                        "clustering node re-registered but the re-acquisition hysteresis gate \
+                         is not yet satisfied; retrying"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "clustering node re-registration failed; retrying with backoff");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lone_survivor_never_isolation_fences() {
+        // N=2 carve-out: exactly one other live node, zero reachable peers,
+        // for many intervals — must never fence.
+        let mut tracker = IsolationTracker::new();
+        for _ in 0..50 {
+            assert!(!tracker.observe(1, 0, 3));
+        }
+    }
+
+    #[test]
+    fn two_other_live_nodes_fences_after_m_consecutive_isolated_intervals() {
+        let mut tracker = IsolationTracker::new();
+        assert!(!tracker.observe(2, 0, 3));
+        assert!(!tracker.observe(2, 0, 3));
+        assert!(tracker.observe(2, 0, 3));
+    }
+
+    #[test]
+    fn a_single_reachable_peer_resets_the_isolation_counter() {
+        let mut tracker = IsolationTracker::new();
+        assert!(!tracker.observe(2, 0, 3));
+        assert!(!tracker.observe(2, 0, 3));
+        // A blip of reachability resets the streak — a single dropped-then
+        // -restored link must not accumulate toward fencing.
+        assert!(!tracker.observe(2, 1, 3));
+        assert_eq!(tracker.consecutive_isolated_intervals(), 0);
+        assert!(!tracker.observe(2, 0, 3));
+        assert!(!tracker.observe(2, 0, 3));
+        assert!(tracker.observe(2, 0, 3));
+    }
+
+    #[test]
+    fn reachable_peers_never_fence_regardless_of_other_live_count() {
+        let mut tracker = IsolationTracker::new();
+        for _ in 0..10 {
+            assert!(!tracker.observe(5, 1, 3));
+        }
+    }
+
+    #[test]
+    fn reset_clears_the_isolation_streak() {
+        let mut tracker = IsolationTracker::new();
+        tracker.observe(2, 0, 3);
+        tracker.observe(2, 0, 3);
+        tracker.reset();
+        assert_eq!(tracker.consecutive_isolated_intervals(), 0);
+        assert!(!tracker.observe(2, 0, 3));
+    }
+
+    #[test]
+    fn reacquire_gate_requires_reachability_only_when_other_rows_exist() {
+        assert!(
+            can_reacquire_claims(0, 0),
+            "sole survivor: nothing to wait for"
+        );
+        assert!(
+            !can_reacquire_claims(1, 0),
+            "other rows exist: must observe reachability"
+        );
+        assert!(can_reacquire_claims(1, 1));
+        assert!(can_reacquire_claims(3, 1));
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_the_configured_ceiling() {
+        let mut backoff =
+            ReregistrationBackoff::new(Duration::from_millis(100), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(100));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(200));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(400));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(800));
+        // Would be 1600ms uncapped — clamped to the 1s ceiling.
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.attempts(), 6);
+    }
+
+    #[test]
+    fn backoff_reset_restarts_from_the_base_delay() {
+        let mut backoff =
+            ReregistrationBackoff::new(Duration::from_millis(50), Duration::from_secs(10));
+        backoff.next_delay();
+        backoff.next_delay();
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(50));
+    }
+
+    #[test]
+    fn connected_peer_count_reads_back_what_was_set() {
+        let count = ConnectedPeerCount::new();
+        assert_eq!(count.get(), 0);
+        count.set(4);
+        assert_eq!(count.get(), 4);
+        let cloned = count.clone();
+        cloned.set(7);
+        assert_eq!(count.get(), 7, "clones share the same underlying counter");
+    }
+
+    // --- `run_node_lease` deadline-arm + fencing-loss behavior, driven with
+    // paused tokio time and a fake `NodeLeaseStore` — mirrors
+    // `swarm.rs`'s own `PartitionedLease`-based heartbeat tests exactly,
+    // one level up (node lease instead of keypair-slot lease).
+
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+    use waddle_xmpp::ownership::ClaimError;
+
+    struct FakeLease {
+        heartbeat_result: std::sync::Mutex<Box<dyn FnMut() -> Result<bool, ClaimError> + Send>>,
+        registrations: Arc<AtomicU32>,
+        /// Every distinct `node_id` ever passed to `register` — lets tests
+        /// assert FIX 1(a)'s invariant directly: a single fence's
+        /// re-registration retries must all reuse the same identity, never
+        /// mint a fresh one per retry.
+        registered_node_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        /// Count of `mark_draining` calls — lets tests assert FIX 1(b)/FIX 3
+        /// actually fire (bounded best-effort call issued, not skipped).
+        draining_calls: Arc<AtomicU32>,
+        /// What `count_other_live_nodes` reports, overridable per test so
+        /// the re-acquisition hysteresis gate can be made to genuinely
+        /// reject several retries before succeeding.
+        other_live_nodes: Arc<AtomicU32>,
+    }
+
+    impl FakeLease {
+        fn new(heartbeat_result: Box<dyn FnMut() -> Result<bool, ClaimError> + Send>) -> Self {
+            Self {
+                heartbeat_result: std::sync::Mutex::new(heartbeat_result),
+                registrations: Arc::new(AtomicU32::new(0)),
+                registered_node_ids: Arc::new(std::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                )),
+                draining_calls: Arc::new(AtomicU32::new(0)),
+                other_live_nodes: Arc::new(AtomicU32::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NodeLeaseStore for FakeLease {
+        async fn register(
+            &self,
+            me: &NodeIdentity,
+            _pod_template_hash: Option<String>,
+        ) -> Result<(), ClaimError> {
+            self.registrations.fetch_add(1, Ordering::SeqCst);
+            self.registered_node_ids
+                .lock()
+                .expect("lock")
+                .insert(me.node_id.clone());
+            Ok(())
+        }
+        async fn heartbeat(
+            &self,
+            _me: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<bool, ClaimError> {
+            (self.heartbeat_result.lock().expect("lock"))()
+        }
+        async fn expire(
+            &self,
+            _owner: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<bool, ClaimError> {
+            Ok(true)
+        }
+        async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+            self.draining_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn count_other_live_nodes(
+            &self,
+            _me: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<usize, ClaimError> {
+            Ok(self.other_live_nodes.load(Ordering::SeqCst) as usize)
+        }
+        async fn reconcile(
+            &self,
+            _me: &NodeIdentity,
+            _locally_owned: &[Entity],
+        ) -> Result<Vec<Entity>, ClaimError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn identity() -> NodeIdentity {
+        NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// Advance the paused clock in small steps, yielding after each, until
+    /// `condition` holds or the step budget is exhausted. A single
+    /// `tokio::time::advance` call wakes elapsed timers but does not itself
+    /// drive a woken task through however many subsequent polls its
+    /// synchronous follow-up work needs, so asserting immediately after one
+    /// `advance` + one `yield_now` can flake; stepping in a loop is the
+    /// robust pattern.
+    async fn advance_until(step: Duration, max_steps: u32, mut condition: impl FnMut() -> bool) {
+        for _ in 0..max_steps {
+            if condition() {
+                return;
+            }
+            tokio::time::advance(step).await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_self_fences_once_deadline_blown_without_postgres() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(200);
+        let lease = FakeLease::new(Box::new(|| {
+            Err(ClaimError::Backend(
+                "simulated Postgres partition".to_string(),
+            ))
+        }));
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+            },
+        ));
+
+        advance_until(Duration::from_millis(20), 5, || !readiness.is_ready()).await;
+        assert!(
+            readiness.is_ready(),
+            "must not self-fence before the lease deadline elapses"
+        );
+
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        assert!(
+            !readiness.is_ready(),
+            "must self-fence once the node-lease deadline is exceeded"
+        );
+        stop_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_self_fences_on_heartbeat_cas_zero_rows() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(10);
+        let lease = FakeLease::new(Box::new(|| Ok(false)));
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+            },
+        ));
+
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        assert!(
+            !readiness.is_ready(),
+            "a zero-rows-affected heartbeat CAS is fencing loss, not a retryable error"
+        );
+        stop_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_re_registers_and_restores_readiness_after_a_fence() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(150);
+        let fenced_once = Arc::new(AtomicBool::new(false));
+        let fenced_once_writer = Arc::clone(&fenced_once);
+        let lease = FakeLease::new(Box::new(move || {
+            if fenced_once_writer.load(Ordering::SeqCst) {
+                Ok(true)
+            } else {
+                fenced_once_writer.store(true, Ordering::SeqCst);
+                Ok(false)
+            }
+        }));
+        let draining_calls = Arc::clone(&lease.draining_calls);
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+            },
+        ));
+
+        // First tick fences (heartbeat_result returns Ok(false) once).
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        assert!(!readiness.is_ready(), "must fence on the first CAS miss");
+
+        // The re-registration loop retries on its own backoff timer with no
+        // other live nodes (`count_other_live_nodes` fakes 0), so the
+        // hysteresis gate is trivially satisfied and readiness recovers.
+        advance_until(Duration::from_millis(10), 20, || readiness.is_ready()).await;
+        assert!(
+            readiness.is_ready(),
+            "must re-register and restore readiness once the sole-survivor gate is satisfied"
+        );
+        // FIX 1(b): the just-fenced identity must have been marked draining.
+        assert!(
+            draining_calls.load(Ordering::SeqCst) >= 1,
+            "the fenced identity must be marked draining before re-registration"
+        );
+        stop_token.cancel();
+    }
+
+    // FIX 1(a): the row-leak wedge regression test. With `other_live_nodes`
+    // fixed at 1 and `connected_peers` at 0, `can_reacquire_claims(1, 0)` is
+    // always false, so every re-registration attempt succeeds at
+    // `register()` but is then rejected by the hysteresis gate — forcing
+    // several retries within a single fence. Before the fix, each retry
+    // minted a brand-new random identity (a phantom row per retry); after
+    // the fix, every retry within the same fence reuses one identity.
+    #[tokio::test(start_paused = true)]
+    async fn re_registration_retries_within_one_fence_reuse_the_same_identity() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(150);
+        let lease = FakeLease::new(Box::new(|| Ok(false)));
+        lease.other_live_nodes.store(1, Ordering::SeqCst);
+        let registered_node_ids = Arc::clone(&lease.registered_node_ids);
+        let registrations = Arc::clone(&lease.registrations);
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(15),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+            },
+        ));
+
+        // Fences on the very first heartbeat, then retries re-registration
+        // repeatedly (the hysteresis gate never clears — `other_live_nodes`
+        // stays 1, `connected_peers` stays 0) until several attempts have
+        // definitely landed.
+        advance_until(interval, 5, || !readiness.is_ready()).await;
+        assert!(!readiness.is_ready(), "must fence on the first CAS miss");
+        advance_until(Duration::from_millis(10), 50, || {
+            registrations.load(Ordering::SeqCst) >= 5
+        })
+        .await;
+        assert!(
+            registrations.load(Ordering::SeqCst) >= 5,
+            "the retry loop must have actually retried several times"
+        );
+        assert!(
+            !readiness.is_ready(),
+            "the hysteresis gate never clears in this test, so readiness must stay down"
+        );
+        assert_eq!(
+            registered_node_ids.lock().expect("lock").len(),
+            1,
+            "every retry within a single fence must reuse the same freshly-minted \
+             identity, never mint a new one per retry (the row-leak wedge)"
+        );
+        stop_token.cancel();
+    }
+
+    // --- FIX 1(d): Postgres-gated regression test driving several real
+    // fence -> re-register cycles through the ACTUAL production
+    // identity-lifecycle logic (`PostgresClaimStore`, not `FakeLease`) —
+    // proves the row-leak fix holds against the real CAS, not merely the
+    // fake double's bookkeeping. Real time, not `start_paused`: mixing
+    // paused virtual time with real Postgres network I/O is unreliable, so
+    // this uses short real-millisecond intervals instead, mirroring every
+    // other Postgres-gated test in this crate.
+
+    async fn count_clustering_nodes_rows(db: &crate::db::Database) -> i64 {
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM clustering_nodes", ())
+            .await
+            .expect("count query");
+        rows.next()
+            .await
+            .expect("row present")
+            .expect("row present")
+            .get::<i64>(0)
+            .expect("column present")
+    }
+
+    async fn force_expire_row(db: &crate::db::Database, node_id: &str) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET expired = true WHERE node_id = ?",
+            crate::db_params![node_id.to_string()],
+        )
+        .await
+        .expect("force-expire row");
+    }
+
+    async fn wait_until(mut condition: impl FnMut() -> bool, step: Duration, deadline: Duration) {
+        let start = tokio::time::Instant::now();
+        loop {
+            if condition() {
+                return;
+            }
+            assert!(
+                start.elapsed() < deadline,
+                "condition did not become true within {deadline:?}"
+            );
+            tokio::time::sleep(step).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_fence_and_reregister_cycles_keep_clustering_nodes_bounded() {
+        use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+        use crate::db::{
+            Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE,
+        };
+        use waddle_xmpp::ownership::ClaimStore as _;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let db = Database::from_config(
+            "self-fence-lifecycle-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+        let store = PostgresClaimStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure schema");
+        {
+            let conn = db.guard().await.expect("guard");
+            conn.execute("DELETE FROM clustering_claims", ())
+                .await
+                .expect("clean claims");
+            conn.execute("DELETE FROM clustering_nodes", ())
+                .await
+                .expect("clean nodes");
+        }
+
+        // A second, permanently-live node row: gives `count_other_live_nodes`
+        // a nonzero count so the re-acquisition hysteresis gate genuinely
+        // rejects re-registration attempts until `connected_peers` reports
+        // reachability — forcing several retries against the SAME
+        // freshly-minted identity within each fence, exactly the shape the
+        // row-leak bug manifested in.
+        let other = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        store
+            .register(&other, None)
+            .await
+            .expect("register other live node");
+
+        let initial_identity = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        store
+            .register(&initial_identity, None)
+            .await
+            .expect("register initial identity");
+
+        let interval = Duration::from_millis(80);
+        let lease_ttl = Duration::from_millis(300);
+        let connected_peers = ConnectedPeerCount::new();
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+
+        let task_store = PostgresClaimStore::new(db.clone());
+        tokio::spawn(run_node_lease(
+            task_store,
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    // Isolation fencing is not what this test drives —
+                    // fencing is forced directly via `expired = true`.
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(30),
+                    reregister_backoff_max: Duration::from_millis(60),
+                },
+                connected_peers: connected_peers.clone(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+            },
+        ));
+
+        assert!(readiness.is_ready(), "starts ready");
+        assert_eq!(
+            count_clustering_nodes_rows(&db).await,
+            2,
+            "other + initial identity"
+        );
+
+        // --- Fence cycle 1: force the active identity's row to
+        // committed-expired, simulating fencing loss on the next heartbeat.
+        force_expire_row(&db, &initial_identity.node_id).await;
+        wait_until(
+            || !readiness.is_ready(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // While not-ready, the re-registration loop retries repeatedly
+        // (the hysteresis gate never clears: `other` keeps
+        // `count_other_live_nodes` at 1, and `connected_peers` is still 0)
+        // — sample the row count several times across that retry storm and
+        // assert it never exceeds "other + fenced-old + fresh-new", proving
+        // retries do not leak rows.
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let count = count_clustering_nodes_rows(&db).await;
+            assert!(
+                count <= 3,
+                "clustering_nodes must stay bounded across re-registration retries \
+                 within one fence, got {count} rows"
+            );
+        }
+
+        // Satisfy the re-acquisition hysteresis gate and let the loop
+        // recover.
+        connected_peers.set(1);
+        wait_until(
+            || readiness.is_ready(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            count_clustering_nodes_rows(&db).await,
+            3,
+            "other + fenced-old (draining) + the one fresh identity from this fence"
+        );
+
+        // Identify cycle 1's fresh identity for the second fence below.
+        let cycle1_node_id = {
+            let conn = db.guard().await.expect("guard");
+            let mut rows = conn
+                .query(
+                    "SELECT node_id FROM clustering_nodes WHERE node_id != ? AND node_id != ?",
+                    crate::db_params![other.node_id.clone(), initial_identity.node_id.clone()],
+                )
+                .await
+                .expect("query cycle1 identity");
+            rows.next()
+                .await
+                .expect("row present")
+                .expect("exactly one row: cycle1's fresh identity")
+                .get::<String>(0)
+                .expect("column present")
+        };
+
+        // --- Fence cycle 2: repeat, forcing cycle 1's identity to expire.
+        connected_peers.set(0);
+        force_expire_row(&db, &cycle1_node_id).await;
+        wait_until(
+            || !readiness.is_ready(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let count = count_clustering_nodes_rows(&db).await;
+            assert!(
+                count <= 4,
+                "clustering_nodes must stay bounded across the SECOND fence's \
+                 re-registration retries too, got {count} rows"
+            );
+        }
+
+        connected_peers.set(1);
+        wait_until(
+            || readiness.is_ready(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            count_clustering_nodes_rows(&db).await,
+            4,
+            "other + 2 fenced-and-draining old identities + the current fresh identity"
+        );
+
+        // FIX 1(c): `count_other_live_nodes` must have recovered to the
+        // truthful value from `other`'s perspective — exactly the current
+        // (cycle 2) identity, not an accumulation of every identity ever
+        // minted across both fences.
+        let truthful_count = store
+            .count_other_live_nodes(&other, lease_ttl)
+            .await
+            .expect("count call succeeds");
+        assert_eq!(
+            truthful_count, 1,
+            "count_other_live_nodes must return to the truthful live count after \
+             repeated fence/re-register cycles, not an inflated count from \
+             accumulated phantom/draining rows"
+        );
+
+        stop_token.cancel();
+    }
+}

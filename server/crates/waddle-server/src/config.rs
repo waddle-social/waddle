@@ -177,6 +177,28 @@ pub struct ClusteringConfig {
     /// (`WADDLE_CLUSTERING_NODE_ID_FILE`) so the harness can resolve this
     /// node's relay name — mirrors the `WADDLE_HTTP_PORT_FILE` convention.
     pub node_id_file: Option<std::path::PathBuf>,
+    /// Node-lease (`clustering_nodes`) heartbeat/TTL timing (ADR-0017 Phase 3
+    /// Slice 2, Q6): a **second**, conceptually distinct lease from
+    /// `lease` above — that one guards a leased keypair-pool slot (libp2p
+    /// identity); this one guards this node's entity-ownership claims. Q6
+    /// rejected a `nodes`-table config row (bootstrap chicken-and-egg) in
+    /// favor of the same env-var mechanism Phase 2 already established.
+    pub node_lease: ClusteringNodeLeaseConfig,
+    /// Isolation-fencing + re-registration hysteresis timing (ADR-0017 Phase
+    /// 3 Slice 2, element 4's "N=2 lone-survivor carve-out" and
+    /// re-registration hysteresis text).
+    pub self_fence: ClusteringSelfFenceConfig,
+    /// This pod's `pod-template-hash` label, read once at startup from the
+    /// Kubernetes downward API (`WADDLE_CLUSTERING_POD_TEMPLATE_HASH`) and
+    /// stamped onto this node's `clustering_nodes` row (Q5/element 4/Slice
+    /// 2): identifies which deployment generation this node belongs to, for
+    /// the rollout-aware claim-acquisition backoff rule (Slice 10). `None`
+    /// outside Kubernetes (e.g. the multi-process harness, or a Deployment
+    /// that omits the downward-API env var) — every acquire-backoff site
+    /// treats a missing hash as "no generation to compare," never a parse
+    /// failure. Parsed the same way as every other `ClusteringConfig` string
+    /// field: trimmed, empty ⇒ `None`.
+    pub pod_template_hash: Option<String>,
 }
 
 /// Manual `Debug`: `keypair_pool` holds base64-encoded ed25519 secret-key
@@ -203,6 +225,9 @@ impl std::fmt::Debug for ClusteringConfig {
             .field("dial_interval", &self.dial_interval)
             .field("fault_injection", &self.fault_injection)
             .field("node_id_file", &self.node_id_file)
+            .field("node_lease", &self.node_lease)
+            .field("self_fence", &self.self_fence)
+            .field("pod_template_hash", &self.pod_template_hash)
             .finish()
     }
 }
@@ -221,6 +246,53 @@ impl Default for ClusteringLeaseConfig {
         Self {
             heartbeat_interval: Duration::from_secs(10),
             lease_ttl: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Timing for the node-lease (`clustering_nodes`) heartbeat/expiry CAS
+/// (ADR-0017 element 4). Same shape and same `lease_ttl >=
+/// heartbeat_interval * 2` invariant as [`ClusteringLeaseConfig`], but a
+/// distinct value: this TTL bounds the node's entity-ownership claims, not
+/// its keypair-slot identity (Q6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringNodeLeaseConfig {
+    pub heartbeat_interval: Duration,
+    pub lease_ttl: Duration,
+}
+
+impl Default for ClusteringNodeLeaseConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: Duration::from_secs(10),
+            lease_ttl: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Isolation-fencing + re-registration hysteresis timing (ADR-0017 element
+/// 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringSelfFenceConfig {
+    /// M: consecutive heartbeat intervals of total swarm unreachability
+    /// (with `clustering_nodes` showing >= 2 other live nodes — the N=2
+    /// lone-survivor carve-out never fences on isolation alone) required
+    /// before this node refuses to renew its node lease.
+    pub isolation_intervals: u32,
+    /// Initial delay before the first post-fence re-registration attempt;
+    /// doubles on each subsequent failed/gated attempt up to
+    /// `reregister_backoff_max`.
+    pub reregister_backoff_base: Duration,
+    /// Ceiling on the re-registration backoff delay.
+    pub reregister_backoff_max: Duration,
+}
+
+impl Default for ClusteringSelfFenceConfig {
+    fn default() -> Self {
+        Self {
+            isolation_intervals: 3,
+            reregister_backoff_base: Duration::from_secs(1),
+            reregister_backoff_max: Duration::from_secs(60),
         }
     }
 }
@@ -288,6 +360,9 @@ impl Default for ClusteringConfig {
             dial_interval: Duration::from_secs(15),
             fault_injection: false,
             node_id_file: None,
+            node_lease: ClusteringNodeLeaseConfig::default(),
+            self_fence: ClusteringSelfFenceConfig::default(),
+            pod_template_hash: None,
         }
     }
 }
@@ -574,6 +649,80 @@ impl ClusteringConfig {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from);
+        // FIX 6: moved from a raw `std::env::var` read at the `mod.rs`
+        // clustering-bringup call site into the typed config pipeline, like
+        // every sibling var — trimmed, empty ⇒ `None`, never a parse
+        // failure (this is deployment-generation metadata, not something
+        // that gates startup).
+        let pod_template_hash = vars
+            .get("WADDLE_CLUSTERING_POD_TEMPLATE_HASH")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let node_lease_defaults = ClusteringNodeLeaseConfig::default();
+        let node_lease_heartbeat_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+            millis_u64(node_lease_defaults.heartbeat_interval),
+        )?);
+        let node_lease_ttl = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS",
+            millis_u64(node_lease_defaults.lease_ttl),
+        )?);
+        if node_lease_heartbeat_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS must be greater than 0"
+                    .to_string(),
+            );
+        }
+        if node_lease_ttl < node_lease_heartbeat_interval * 2 {
+            return Err(format!(
+                "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}) must be at least 2x \
+                 WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS ({})",
+                node_lease_ttl.as_millis(),
+                node_lease_heartbeat_interval.as_millis()
+            ));
+        }
+
+        let self_fence_defaults = ClusteringSelfFenceConfig::default();
+        let isolation_intervals = parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_ISOLATION_INTERVALS",
+            u64::from(self_fence_defaults.isolation_intervals),
+        )?;
+        let isolation_intervals = u32::try_from(isolation_intervals).map_err(|_| {
+            format!(
+                "WADDLE_CLUSTERING_ISOLATION_INTERVALS ({isolation_intervals}) does not fit in u32"
+            )
+        })?;
+        if isolation_intervals == 0 {
+            return Err("WADDLE_CLUSTERING_ISOLATION_INTERVALS must be at least 1".to_string());
+        }
+        let reregister_backoff_base = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS",
+            millis_u64(self_fence_defaults.reregister_backoff_base),
+        )?);
+        let reregister_backoff_max = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS",
+            millis_u64(self_fence_defaults.reregister_backoff_max),
+        )?);
+        if reregister_backoff_base.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS must be greater than 0".to_string(),
+            );
+        }
+        if reregister_backoff_max < reregister_backoff_base {
+            return Err(format!(
+                "WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS ({}) must be >= \
+                 WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS ({})",
+                reregister_backoff_max.as_millis(),
+                reregister_backoff_base.as_millis()
+            ));
+        }
 
         Ok(Self {
             enabled,
@@ -596,6 +745,16 @@ impl ClusteringConfig {
             dial_interval,
             fault_injection,
             node_id_file,
+            node_lease: ClusteringNodeLeaseConfig {
+                heartbeat_interval: node_lease_heartbeat_interval,
+                lease_ttl: node_lease_ttl,
+            },
+            self_fence: ClusteringSelfFenceConfig {
+                isolation_intervals,
+                reregister_backoff_base,
+                reregister_backoff_max,
+            },
+            pod_template_hash,
         })
     }
 }
@@ -1399,11 +1558,109 @@ mod tests {
         assert!(err.contains("WADDLE_CLUSTERING_DIAL_INTERVAL_MS"));
     }
 
+    // FIX 6: `pod_template_hash` moved from a raw `std::env::var` read at the
+    // clustering-bringup call site into this typed pipeline — trimmed, empty
+    // ⇒ `None`, absent ⇒ `None`, never a parse failure.
+    #[test]
+    fn clustering_parses_pod_template_hash() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_POD_TEMPLATE_HASH",
+            "  waddle-server-7f8b9c6d5-  ",
+        )])
+        .unwrap();
+        assert_eq!(
+            config.pod_template_hash.as_deref(),
+            Some("waddle-server-7f8b9c6d5-")
+        );
+
+        let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert!(defaults.pod_template_hash.is_none());
+
+        let blank =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_POD_TEMPLATE_HASH", "   ")]).unwrap();
+        assert!(
+            blank.pod_template_hash.is_none(),
+            "a blank/whitespace-only value must parse as absent, not an empty string"
+        );
+    }
+
     #[test]
     fn clustering_rejects_zero_heartbeat_interval() {
         let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "0")])
             .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn clustering_defaults_have_a_valid_node_lease_and_self_fence_config() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.node_lease, ClusteringNodeLeaseConfig::default());
+        assert_eq!(config.self_fence, ClusteringSelfFenceConfig::default());
+        assert_eq!(config.self_fence.isolation_intervals, 3);
+    }
+
+    #[test]
+    fn clustering_parses_node_lease_timing() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "5000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "20000"),
+        ])
+        .unwrap();
+        assert_eq!(config.node_lease.heartbeat_interval.as_millis(), 5000);
+        assert_eq!(config.node_lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_rejects_node_lease_ttl_below_two_heartbeats() {
+        let err = ClusteringConfig::from_vars([
+            (
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+                "10000",
+            ),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "15000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_node_lease_heartbeat_interval() {
+        let err = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+            "0",
+        )])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn clustering_parses_self_fence_timing() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "5"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "500"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "30000"),
+        ])
+        .unwrap();
+        assert_eq!(config.self_fence.isolation_intervals, 5);
+        assert_eq!(config.self_fence.reregister_backoff_base.as_millis(), 500);
+        assert_eq!(config.self_fence.reregister_backoff_max.as_millis(), 30000);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_isolation_intervals() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ISOLATION_INTERVALS"));
+    }
+
+    #[test]
+    fn clustering_rejects_reregister_backoff_max_below_base() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "5000"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "1000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS"));
     }
 
     #[test]
