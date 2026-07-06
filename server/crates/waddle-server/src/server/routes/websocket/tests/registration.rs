@@ -174,6 +174,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             presence_show: Some(xmpp_parsers::presence::Show::Chat),
             presence_status: Some("back".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached session");
@@ -309,6 +310,7 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached session");

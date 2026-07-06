@@ -33,6 +33,25 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .claimed_sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            // Issue #1139: if a resume claim for this EXACT stream id
+            // is in flight, the claiming connection owns the handoff.
+            // The old connection's late detach must not evict the
+            // claim (that made the resume fail <failed
+            // item-not-found/>), and it must not store a stale
+            // duplicate either — a shadow `sessions` entry (and a
+            // fresh durable snapshot) would outlive the claim's
+            // persist-first `complete_claim` delete and resurrect an
+            // already-resumed stream. Skip the store entirely; the
+            // handoff ends in complete_claim (durably erased) or
+            // release_claim (session returned to the detached pool),
+            // both of which supersede this stale copy.
+            if claimed.contains_key(&stream_id) {
+                debug!(
+                    stream_id = %stream_id,
+                    "store_session skipped: resume claim in flight owns this stream"
+                );
+                return Ok(displaced);
+            }
             // Capture jid-collision evictions in `sessions` before
             // retain mutates; same for `claimed`.
             for (id, existing) in sessions.iter() {
@@ -48,8 +67,11 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             sessions.retain(|existing_stream_id, existing| {
                 existing_stream_id == &stream_id || existing.jid != jid
             });
+            // Same-stream claimed entries are unreachable here (early
+            // return above), but keep the predicate symmetric with
+            // `sessions` so a claim is never evicted by its own stream.
             claimed.retain(|existing_stream_id, existing| {
-                existing_stream_id != &stream_id && existing.jid != jid
+                existing_stream_id == &stream_id || existing.jid != jid
             });
 
             if sessions.len() >= self.max_sessions {

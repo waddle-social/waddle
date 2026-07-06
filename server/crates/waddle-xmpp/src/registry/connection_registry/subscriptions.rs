@@ -58,8 +58,11 @@ impl ConnectionRegistry {
     }
 
     /// Return queued subscription stanzas for a bare JID without removing
-    /// them. RFC 6121 pending inbound subscribe requests are re-delivered
-    /// whenever the contact becomes available until approval or denial.
+    /// them. RFC 6121 §3.1.3: pending inbound subscribe requests stay queued
+    /// until approved or denied and are delivered once per session, on each
+    /// fresh resource's initial available presence (the caller gates on
+    /// `ConnectionEntry::claim_pending_subscribes_flush`, issue #1104) — not
+    /// on every subsequent presence update within a session.
     pub fn pending_subscription_stanzas(&self, bare_jid: &BareJid) -> Vec<Stanza> {
         self.pending_subscription_stanzas
             .get(bare_jid)

@@ -88,6 +88,13 @@ pub struct DetachedSession {
     pub presence_status: Option<String>,
     /// Last advertised priority while available.
     pub presence_priority: i8,
+    /// The resource's presence extension payloads (XEP-0115 caps,
+    /// XEP-0319 idle, anything else) as last broadcast while available,
+    /// relayed verbatim by probe/subscription delivery for detached
+    /// resources (issue #1103). In-memory only: the durable persisted
+    /// shape does not carry payloads, so sessions rehydrated after a
+    /// process restart report bare show/status/priority.
+    pub presence_payloads: Vec<minidom::Element>,
 }
 
 impl DetachedSession {

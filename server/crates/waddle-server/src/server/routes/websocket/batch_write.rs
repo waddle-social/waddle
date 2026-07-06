@@ -219,7 +219,27 @@ where
                     // ever grows a side effect that is not keyed on
                     // sequence <= h, it must move to the deferred
                     // queue instead of running inline.
-                    apply_sm_ack(state, &mut conn.sm_state, h).await;
+                    // Issue #1099: a handled-count-too-high `h` makes
+                    // apply_sm_ack return the stream error + close
+                    // frames and flip the phase to Closing instead of
+                    // purging the replay queue. Write them and end the
+                    // batch — the connection is terminating.
+                    let responses =
+                        apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    for response in responses {
+                        if !send_ws_message(
+                            sender,
+                            Message::Text(response.into()),
+                            "Failed to send SM ack stream error",
+                        )
+                        .await
+                        {
+                            return DrainSignal::TransportClosed;
+                        }
+                    }
+                    if conn.phase.is_closing() {
+                        return DrainSignal::TransportClosed;
+                    }
                 } else {
                     conn.deferred_inbound.push_back(text);
                 }
