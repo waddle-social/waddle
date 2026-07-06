@@ -293,11 +293,14 @@ async fn cluster_exit_criteria_end_to_end() {
         },
         allowlist_refresh_interval: Duration::from_secs(1),
         dial_interval: Duration::from_secs(1),
-        // The binding transport cap for the timeout criterion below.
+        // The binding transport cap for the timeout criterion below. This
+        // literal bypasses env parsing, so it must uphold the same element-5
+        // invariant the parser enforces: mailbox + reply <= request
+        // (0.5s + 1.5s <= 2s).
         messaging: waddle_server::config::ClusteringMessagingConfig {
             request_timeout: Duration::from_secs(2),
-            reply_timeout: Duration::from_secs(2),
-            mailbox_timeout: Duration::from_secs(1),
+            reply_timeout: Duration::from_millis(1_500),
+            mailbox_timeout: Duration::from_millis(500),
             ..waddle_server::config::ClusteringMessagingConfig::default()
         },
         fault_injection: false,
@@ -366,19 +369,19 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
-    // --- Exit criterion: an ask whose receiver handler exceeds the sender's
-    // transport request_timeout (2s here) fails SENDER-side — the transport
-    // cap, not reply_timeout, is the binding bound.
+    // --- Exit criterion: an ask whose receiver handler exceeds every
+    // configured timeout (reply 1.5s, transport cap 2s) fails SENDER-side
+    // within the budget — never by waiting out the 5s handler.
     let started = Instant::now();
     let result = relay_a.sleep(5_000).await;
     let elapsed = started.elapsed();
     assert!(
         result.is_err(),
-        "5s receiver handler must fail a 2s request_timeout sender-side"
+        "5s receiver handler must fail sender-side within the 2s transport cap"
     );
     assert!(
         elapsed < Duration::from_secs(4),
-        "failure must occur at the ~2s transport cap, not after the 5s handler (took {elapsed:?})"
+        "failure must occur within the ~2s timeout budget, not after the 5s handler (took {elapsed:?})"
     );
 
     // --- Exit criterion: relay crash → supervised respawn + same-name
