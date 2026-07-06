@@ -123,7 +123,13 @@ behaviour is unchanged and asserted by the unchanged e2e suite.
   (committed `expired` flag); Release on drain — all on Postgres `now()`),
   behind a `KeypairSlotLease` trait. Startup leases one slot from the configured
   keypair pool and selects that keypair; a heartbeat janitor renews; drain
-  releases. `rows_affected==0` on renewal ⇒ fencing loss ⇒ refuse to serve.
+  releases. `rows_affected==0` on renewal ⇒ fencing loss ⇒ self-fence the
+  clustering subsystem. Additionally, if a full `lease_ttl` elapses without a
+  single successful renewal (e.g. persistent database errors keep every
+  heartbeat from landing), the node defensively self-fences the same way — it
+  can no longer prove it still holds the slot. Self-fencing cancels a
+  clustering-scoped child token, tearing down only the clustering subsystem
+  (swarm, relay, janitors) — never the whole server.
   Duplicate-PeerId rejection at the swarm behaviour layer (reject a second live
   session for an already-connected PeerId) as defence in depth. Runs on the
   shared global pool in Phase 2; the **dedicated small control-plane
@@ -134,12 +140,19 @@ behaviour is unchanged and asserted by the unchanged e2e suite.
 - **Slice 3 — peer allowlist enforcement + live-connection revocation.**
   `peer_allowlist` table (enrolled PeerIds); runtime role `SELECT`-only
   (grants documented here, enforced by the Phase 4 chart). `AllowlistStore`
-  trait + impl. Swarm-layer enforcement: reject non-allowlisted peers at
-  connection establishment (Noise handshake necessary, never sufficient); every
-  inbound remote message re-checks the origin is *currently* allowlisted.
-  Periodic refresh janitor diffs the enrolled set and **actively
-  closes/bans live connections** whose PeerId is no longer enrolled. Containment
-  bound asserted: revoked peer disconnected within one refresh interval.
+  trait + impl. Swarm-layer enforcement is **connection-level**: reject
+  non-allowlisted peers at connection establishment (Noise handshake
+  necessary, never sufficient), and a periodic refresh janitor diffs the
+  enrolled set and **actively closes/bans live connections** whose PeerId is
+  no longer enrolled — so a revoked peer loses its live connections within one
+  refresh interval and cannot re-dial. Containment bound asserted: revoked
+  peer disconnected within one refresh interval. **Deferred:** per-message
+  origin re-validation — kameo's remote ask/tell handlers are not handed the
+  transport-level sender PeerId, so re-checking the allowlist per inbound
+  message requires sender identity surfaced to handlers; it lands with Phase
+  4's cross-node routing (alongside the claim-epoch checks). Until then the
+  enforcement guarantee is exactly: denial at connection establishment, plus
+  revocation of already-connected peers within one refresh interval.
   Postgres-gated tests + the harness revoked-peer-with-live-connection case.
 
 - **Slice 4 — remote codec (XML-text serde wrappers).**
@@ -171,17 +184,32 @@ behaviour is unchanged and asserted by the unchanged e2e suite.
   panic + recover, revoked-peer-with-live-connection. Assert the Phase 2 spike
   exit criteria:
   - cross-node `UserActor`/relay ask round-trip;
-  - **ordering under concurrent large + small stanzas** (libp2p per-substream
-    flow control reorders naive-parallel requests);
-  - **an ask whose receiver handler exceeds `request_timeout` fails sender-side
-    with `OutboundFailure(Timeout)`** — proving the transport cap, not
-    `reply_timeout`, is the binding bound;
-  - kademlia re-discovery after all bootstrap peers churn in a rolling restart;
+  - **integrity under concurrent large + small stanzas** (libp2p per-substream
+    flow control interleaves naive-parallel requests; every interleaved ask
+    comes back intact — per-pair *sequencing* is Phase 4);
+  - **the timeout hierarchy, both halves.** (1) Receiver-applied ask budgets:
+    a handler that outlives `reply_timeout` fails with the typed
+    `ReplyTimeout` classification inside the reply budget. Note that with the
+    validated invariant `mailbox + reply <= request` the receiver *always*
+    replies (success or `ReplyTimeout`) before the transport cap, so this case
+    alone can never exercise `request_timeout`. (2) The transport cap as the
+    binding bound: a dedicated ask deliberately inflates the receiver budgets
+    past both the handler and the cap — the receiver then cannot proactively
+    reply in time, and the sender's libp2p `request_timeout` fails the ask
+    with the typed `Transport` classification (kameo `NetworkTimeout`) at
+    ≈ the cap, proving the `request_timeout` wiring is live;
+  - kademlia re-discovery through a sequential rolling restart of **both**
+    bootstrap peers (at most one node down at any instant; one leg hard-kill,
+    one leg graceful drain): each replacement — fresh node_id, relay name, and
+    leased slot on the same swarm port — is re-discovered, and both
+    replacements are reachable once no original peer survives;
   - **measured visibility window of a dead publisher's provider+metadata
     records** against an explicit acceptance threshold (go/no-go: the window is
     dominated by the hardcoded 1h TTL / 30min republish and cannot be tuned;
     graceful stops proactively unregister so the bound applies to hard-killed
-    nodes);
+    nodes) — carried as an ignored scaffold in the harness and performed as a
+    manual out-of-band measurement, since the window is set by kademlia
+    constants, not by anything the suite could regress;
   - relay respawn re-registration + peer re-resolution after `ActorNotRunning`;
   - revoked-peer disconnect within one allowlist refresh interval.
   **Deferred to Phase 3** (pending scaffolds): lone-survivor at N=2 keeps
