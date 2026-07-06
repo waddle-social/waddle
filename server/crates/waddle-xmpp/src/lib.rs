@@ -33,6 +33,7 @@ pub mod isr;
 pub mod mam;
 pub mod metrics;
 pub mod muc;
+pub mod ownership;
 pub mod parser;
 pub mod pending_delivery;
 pub mod presence;

@@ -2260,3 +2260,87 @@ async fn claim_of_expired_session_keeps_it_drainable_for_promotion() {
     assert_eq!(drained[0].stream_id, "stream-claim-expired");
     assert_eq!(drained[0].unacked_stanzas.len(), 3);
 }
+
+use crate::ownership::ClaimStore as _;
+
+#[tokio::test]
+async fn jid_collision_eviction_of_a_claimed_session_releases_its_claim() {
+    // `store_session`'s jid-collision retain evicts claimed sessions too
+    // (exercised on every connection detach via the cleanup path). The
+    // eviction must release the `ClaimStore` entry, or the stream id is
+    // stranded as claimed forever (an unbounded leak under the in-process
+    // store, a stuck `clustering_claims` row under Postgres).
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::local();
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store.clone(), crate::ownership::NodeIdentity::local());
+
+    registry
+        .store_session(make_test_session("stream-collide-old"))
+        .await
+        .expect("store old session");
+    registry
+        .claim_session("stream-collide-old")
+        .await
+        .expect("claim")
+        .expect("claimable");
+
+    // Same jid, different stream id: displaces the claimed old session.
+    registry
+        .store_session(make_test_session("stream-collide-new"))
+        .await
+        .expect("store colliding session");
+
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "stream-collide-old".to_string(),
+    );
+    store
+        .acquire(&entity, &me)
+        .await
+        .expect("evicted claimed session's claim must have been released");
+}
+
+#[tokio::test]
+async fn take_session_of_a_claimed_copy_releases_its_claim() {
+    // `take_session` unconditionally removes any claimed copy; that ends
+    // the claim and must release the `ClaimStore` entry. The
+    // sessions-AND-claimed double residency is not constructible through
+    // the public API today (claim_session moves; store_session's retain
+    // evicts) — this pins the DEFENSIVE branch by building the state
+    // directly, so a future path that reaches it inherits the release.
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::local();
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store.clone(), crate::ownership::NodeIdentity::local());
+
+    registry
+        .store_session(make_test_session("stream-take-claimed"))
+        .await
+        .expect("store session");
+    registry
+        .claim_session("stream-take-claimed")
+        .await
+        .expect("claim")
+        .expect("claimable");
+    // Re-create the `sessions` copy so take_session's existence peek
+    // passes while the claimed copy (and its live claim) still exists.
+    registry.sessions.write().expect("sessions lock").insert(
+        "stream-take-claimed".to_string(),
+        make_test_session("stream-take-claimed"),
+    );
+
+    registry
+        .take_session("stream-take-claimed")
+        .await
+        .expect("take");
+
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "stream-take-claimed".to_string(),
+    );
+    store
+        .acquire(&entity, &me)
+        .await
+        .expect("taken claimed session's claim must have been released");
+}

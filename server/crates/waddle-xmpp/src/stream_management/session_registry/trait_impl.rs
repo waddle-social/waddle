@@ -24,6 +24,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // queues (issue #1097) — previously they were silently
         // dropped and their durable rows mirror-deleted.
         let mut displaced: Vec<DetachedSession> = Vec::new();
+        let mut claimed_evicted: Vec<String> = Vec::new();
         let count = {
             let mut sessions = self
                 .sessions
@@ -45,6 +46,17 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     displaced.push(existing.clone());
                 }
             }
+            // Every removal from `claimed_sessions` must release its
+            // `ClaimStore` entry (after the guards drop — release awaits),
+            // or the claim is stranded and the stream id can never be
+            // claimed again. Capture the evicted ids the retain below
+            // removes: same-stream re-store and jid-collision.
+            claimed_evicted.extend(
+                claimed
+                    .iter()
+                    .filter(|(id, existing)| *id == &stream_id || existing.jid == jid)
+                    .map(|(id, _)| id.clone()),
+            );
             sessions.retain(|existing_stream_id, existing| {
                 existing_stream_id == &stream_id || existing.jid != jid
             });
@@ -69,6 +81,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             sessions.insert(stream_id.clone(), session.clone());
             sessions.len()
         };
+        // The claimed evictions above ended those sessions' claims —
+        // release their `ClaimStore` entries now that the guards are
+        // dropped. Correct on the snapshot-failure path below too: the
+        // evictees re-enter `sessions` UNCLAIMED via the retry
+        // re-insertion, so the claim must not survive either way.
+        for evicted_id in &claimed_evicted {
+            self.release_claim_store_entry(evicted_id).await;
+        }
         // Durable rows for displaced sessions are deliberately NOT
         // deleted here. They follow the drain_expired/confirm_drained
         // persist-until-confirmed contract: the caller promotes each
@@ -146,7 +166,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             return Ok(None);
         }
         self.persist_delete_session(stream_id).await?;
-        let removed = {
+        let (removed, claimed_removed) = {
             let mut sessions = self
                 .sessions
                 .write()
@@ -166,12 +186,19 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     None
                 }
             };
-            self.claimed_sessions
+            let claimed_removed = self
+                .claimed_sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                .remove(stream_id);
-            removed
+                .remove(stream_id)
+                .is_some();
+            (removed, claimed_removed)
         };
+        // Removing a claimed copy ends that claim: release its
+        // `ClaimStore` entry (after the guards drop — release awaits).
+        if claimed_removed {
+            self.release_claim_store_entry(stream_id).await;
+        }
         Ok(removed)
     }
 

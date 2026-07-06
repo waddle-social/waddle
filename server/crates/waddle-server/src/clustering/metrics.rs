@@ -9,10 +9,15 @@
 //!   0.20, so this is the peer set we have seen enter the routing table), and
 //! - a bootstrap-dial retry counter.
 //!
-//! ADR-0017 Phase 3's element-12 load-model instruments (routing-cache
-//! hit/miss, NotOwner NACK sent/received, claims-table point-read rate) land
-//! here alongside their first callers in Slices 1-3, per the repo's dead-code
-//! hard rule — not forward-declared ahead of time.
+//! ADR-0017 Phase 3's element-12 load-model instruments land here alongside
+//! their first callers, per the repo's dead-code hard rule — not
+//! forward-declared ahead of time. `PostgresClaimStore::fence` has zero
+//! production callers this slice (Slice 1 lands the method, not a wired
+//! caller), so its claims-table point-read counter does not land here
+//! either — same reasoning, one level up: the instrument arrives with
+//! `fence`'s first production caller in a later slice. Routing-cache
+//! hit/miss and NotOwner NACK sent/received have no caller yet
+//! (cross-node stanza routing is out of Phase 3 scope) and land later too.
 
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use std::sync::OnceLock;

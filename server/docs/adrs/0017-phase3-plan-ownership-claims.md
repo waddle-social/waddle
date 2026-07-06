@@ -101,9 +101,13 @@ inject a single `Arc<dyn ClaimStore>` into session/registry code — see Q2.
 
 **Decision: retrofit, not wrap.** `session_registry/claims.rs`'s inherent methods are
 refactored to delegate to an injected `Arc<dyn ClaimStore>` field on
-`InMemorySmSessionRegistry` rather than owning the claim/lock bookkeeping directly. The
-single-node semantics that exist today (always-uncontested acquire, no cross-process
-lock) become the body of `InProcessClaimStore` in `waddle-xmpp/src/ownership/
+`InMemorySmSessionRegistry` rather than owning the claim/lock bookkeeping directly —
+the store's result *gates* whether a claim is granted (`AlreadyClaimed` reproduces the
+registry's pre-Slice-1 already-claimed outcome exactly), and every terminal path that
+ends a claim (`release_claim`, every branch of `complete_claim`/
+`complete_claim_if_resumable`, and `invalidate_sessions_for_jid`'s removal of a claimed
+session) releases the store entry, so it cannot leak. The claim/lock bookkeeping that
+exists today becomes the body of `InProcessClaimStore` in `waddle-xmpp/src/ownership/
 in_process.rs`; `InMemorySmSessionRegistry` keeps its existing `stream_locks` shard
 array only as the in-process **contention optimization** the ADR already names for
 `StreamLockMap` in the SM-persistence context (element 4: "the lock map remains only as
@@ -118,11 +122,20 @@ once.
 
 `UserActor`/`RoomActor` claims (which do not exist as claims at all today — they are
 pure in-memory ownership by construction, one process, no contention) get trivial
-`InProcessClaimStore` semantics too: `acquire`/`steal_stale`/`steal_for_resume` always
-succeed locally (there is only one node), `heartbeat`/`demotion_reconciliation` are
-no-ops. This gives every entity type — not just SM sessions — one `ClaimStore`
-abstraction from day one of the trait's existence, so Phase 3's Postgres impl is a drop
--in substitution, never a parallel concept invented later for MUC/UserActor claims.
+`InProcessClaimStore` semantics too, but **"trivial" is not "idempotent" or
+"unconditional"**: single-node `acquire` succeeds iff the entity is currently
+unclaimed — the exact same contract `PostgresClaimStore::acquire` enforces across
+nodes — so it returns `ClaimError::AlreadyClaimed` on a second acquire against a
+still-held entity. What *is* trivial about the single-node case is that there is only
+one node to contend with on the entity's actual state transition once a claim is
+granted (`steal_stale`/`steal_for_resume` always succeed against an
+already-acquired entity, since there is no second node's CAS to lose to), and
+`heartbeat`/`demotion_reconciliation` are no-ops (there is no second node's liveness to
+track). Same-node contention on `acquire` (two connections racing to claim the same SM
+session) is real and enforced, not a no-op. This gives every entity type — not just SM
+sessions — one `ClaimStore` abstraction from day one of the trait's existence, so
+Phase 3's Postgres impl is a drop-in substitution, never a parallel concept invented
+later for MUC/UserActor claims.
 
 ### Q3 — D7 scope (settled by the epic)
 
@@ -391,7 +404,9 @@ CREATE TABLE IF NOT EXISTS clustering_nodes (
     pod_template_hash TEXT
 );
 
--- PROPOSED
+-- PROPOSED — `entity` stores `entity_key(entity)`'s `<entity_type_tag>:<id>`
+-- encoding (deviation 16), not the bare id: the type must be folded into the
+-- key itself so two different-typed entities sharing an id never collide.
 CREATE TABLE IF NOT EXISTS clustering_claims (
     entity      TEXT PRIMARY KEY,
     entity_type TEXT NOT NULL,   -- 'user_actor' | 'room_actor' | 'sm_session'
@@ -529,30 +544,34 @@ constructor lives in `ownership/mod.rs` itself; see Slice 6 for
 
 **Files**: `server/crates/waddle-xmpp/src/ownership/mod.rs` (trait + types, new
 module), `server/crates/waddle-xmpp/src/ownership/in_process.rs` (`InProcessClaimStore`
-— trivial always-succeeds semantics for single-node/no-clustering), `server/crates/
+— single-node semantics identical in contract to the Postgres impl: acquire succeeds
+iff the entity is unclaimed, same-node contention enforced, not idempotent-Ok'd),
+`server/crates/
 waddle-xmpp/src/ownership/resume.rs` (new — `verify_resume_identity`, the sole
 constructor of `ResumeIdentityProof`; stubbed here, fleshed out in Slice 6 once the
 resume call sites exist), `server/crates/waddle-server/src/clustering/claims.rs` (new,
 `#[cfg(feature = "clustering")]`, `PostgresClaimStore` — schema +
 Acquire/Steal-stale/Steal-consent + advisory `fence`/`release`/`release_many`, running
 on the Slice 0 control-plane pool), `server/crates/waddle-server/src/
-clustering/mod.rs` (`pub mod claims;`), `server/crates/waddle-server/src/
-clustering/metrics.rs` (gains the claims-table point-read and `NotOwner` NACK
-sent/received counters alongside their first callers here — see Slice 0's note),
-`server/crates/waddle-xmpp/src/
+clustering/mod.rs` (`pub mod claims;`), `server/crates/waddle-xmpp/src/
 stream_management/session_registry/claims.rs` + `core.rs` (retrofit onto `Arc<dyn
-ClaimStore>`, per Q2).
+ClaimStore>`, per Q2). `clustering/metrics.rs` gains no new instruments this slice —
+the claims-table point-read and `NotOwner` NACK sent/received counters land with
+their first *production* callers in later slices (`fence` has zero production
+callers this slice; see Slice 0's note).
 
 **Tests**: Postgres-gated integration tests (mirroring `lease.rs`'s test style
 exactly): acquire/steal/heartbeat/fencing races; **the interleaving race explicitly
 named by the ADR** — a steal commit interleaved inside a fenced multi-statement
 transaction (the cross-node resurrection/double-promotion case lockless join fencing
-fails); **the renewal-vs-expire interleaving** (renewal evaluated pre-expiry, committed
-post-steal, must return 0 rows — the expired-flag ordering point); steal-from
--vanished-node (missing `nodes` row); lapsed-lease heartbeat CAS (paused node observes
-fencing loss on wake). Unit tests: `steal_for_resume` is unreachable outside a module
-holding a `ResumeIdentityProof` (a compile-fail / type-level test, not a runtime
-assertion — matches the ADR's "unrepresentable rather than merely forbidden" framing).
+fails); steal-from-vanished-node (missing `nodes` row); cross-entity-type
+non-collision (a `UserActor` and a `RoomActor` sharing the same id must be two
+distinct claims — the `entity` primary key encodes `entity_type` into the key
+itself, not just the write-only column). Unit tests: `steal_for_resume` is
+unreachable outside a module holding a `ResumeIdentityProof` (a compile-fail /
+type-level test, not a runtime assertion — matches the ADR's "unrepresentable rather
+than merely forbidden" framing); `entity_key` injectivity across entity types and
+ids containing `:` (including ids equal to one of the tag strings themselves).
 
 **Dependencies**: Slice 0 (control-plane pool).
 
@@ -606,7 +625,12 @@ flipped by this module), `server/crates/waddle-server/src/clustering/metrics.rs`
 (heartbeat-age gauge, heartbeat-write-latency histogram + alert threshold).
 
 **Tests**: Postgres-gated: reconciliation demotes an entity whose claim was stolen out
-from under a live local actor. Harness (`clustering_cluster_e2e.rs`): the two
+from under a live local actor; **the renewal-vs-expire interleaving** (renewal
+evaluated pre-expiry, committed post-steal, must return 0 rows — the expired-flag
+ordering point; moved here from Slice 1 since it exercises `NodeLeaseStore`'s
+heartbeat/expire CAS, which does not exist until this slice); **lapsed-lease
+heartbeat CAS** (paused node observes fencing loss on wake; moved here for the same
+reason). Harness (`clustering_cluster_e2e.rs`): the two
 previously-`#[ignore]`d scaffolds become fillable **here** at the fencing-primitive
 level (full activation is Slice 11, once Slice 5's durable-queue path also exists for
 `partial_partition_degrades_without_fencing`); `lone_survivor_and_isolation_fencing`
@@ -1292,7 +1316,14 @@ instrumenting commit/batch-append order, not only by the crash case); batched re
 preserves the writes-before-release-per-entity ordering under a forced early SIGKILL
 simulation (claims remain fenced-safe, merely un-released, if the budget overruns);
 drain-interrupted relay ask increments `claims_abandoned_on_drain` (the cancellation
-path above).
+path above); **`release_many`'s epoch-blind ABA window** (`ClaimStore::release_many`'s
+doc comment, Slice 1) — an entity queued for the release batch that this same
+draining node re-claims at a higher epoch (e.g. a XEP-0198 `steal_for_resume` landing
+back on this node) before the batched DELETE actually runs must not have that
+brand-new claim silently deleted by the stale batch entry; this interleaving belongs
+in the drain test suite alongside the ordinary batch-construction-ordering test above,
+proving the Slice 2 draining-marker + Slice 10 batch-ordering mitigations narrow the
+window in practice, not merely in the doc comment's argument.
 
 **Dependencies**: Slice 5 (claim-scoped consumers must exist for "final fenced writes"
 to mean anything), Slice 7 (room state drain), Slice 6 (SM detach-on-drain).
@@ -1505,3 +1536,12 @@ concern).
     Option<ResumeIdentityProof>` — is now the sole constructor in either crate, so
     holding a proof implies the real identity pair passed the check (Slices 1/6, reused
     by ISR consume in Slice 8).
+16. **`clustering_claims.entity` stores a type-prefixed key (`entity_key`,
+    `<entity_type_tag>:<id>`), not the bare `Entity::id`** (council fix): the ADR's
+    element-4 column shapes name `entity`/`entity_type` as separate columns but do not
+    say the primary key must fold the type in; binding `entity.id` alone would let a
+    `UserActor` and a `RoomActor` sharing the same id collide on one row, since
+    `entity_type` would otherwise only ever be written, never consulted to
+    disambiguate. The tag set (`user_actor`/`room_actor`/`sm_session`) is closed and
+    pairwise prefix-free, so the encoding is unambiguous even when `id` itself contains
+    `:` (Slice 1, `waddle-server/src/clustering/claims.rs`).

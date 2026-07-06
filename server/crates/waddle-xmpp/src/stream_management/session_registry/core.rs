@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 
 use tracing::debug;
 
+use crate::ownership::{ClaimEpoch, ClaimStore, InProcessClaimStore, NodeIdentity};
+
 use super::persistence_codec::{
     detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
 };
@@ -22,7 +24,8 @@ const STREAM_LOCK_SHARDS: usize = 256;
 /// finds sessions that detached before the most recent restart.
 ///
 /// Custom Debug skips the persistence handle (the
-/// [`SmPersistenceStorage`] trait does not require `Debug`).
+/// [`SmPersistenceStorage`] trait does not require `Debug`) and the
+/// claim store (`dyn ClaimStore` does not require `Debug` either).
 pub struct InMemorySmSessionRegistry {
     pub(super) sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
@@ -38,6 +41,37 @@ pub struct InMemorySmSessionRegistry {
     /// this via [`Self::with_persistence`] before Arc-wrapping.
     pub(super) persistence:
         Option<std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>>,
+    /// The entity-ownership authority for this registry's SM-session claims
+    /// (ADR-0017 Phase 3 Slice 1, Q2 "retrofit, not wrap"). Defaults to
+    /// [`InProcessClaimStore`] — correct for every build today, since no
+    /// caller yet constructs this registry with `clustering.enabled`; a
+    /// later slice injects a Postgres-backed store via
+    /// [`Self::with_claim_store`] once `SmPersistenceStorage` itself
+    /// becomes claim-scoped (Slice 4+).
+    ///
+    /// This is the **authority** on whether a claim is granted
+    /// (`claims.rs`'s `claim_session` gates its own outcome on
+    /// [`ClaimStore::acquire`]'s result) and on when a claim ends
+    /// (`release_claim`, every terminal branch of `complete_claim`/
+    /// `complete_claim_if_resumable`, and `invalidate_sessions_for_jid`'s
+    /// removal of a claimed session all call back into it). `stream_locks`/
+    /// `sessions`/`claimed_sessions` remain exactly the in-process
+    /// contention optimization and session-*state* holders the ADR names
+    /// for `StreamLockMap` (element 4) — never a second source of
+    /// ownership truth alongside this store, which is precisely the
+    /// *wrap* design Q2 rejected.
+    pub(super) claim_store: Arc<dyn ClaimStore>,
+    /// This node's identity, as presented to `claim_store`. Single-node
+    /// deployments use [`NodeIdentity::local`]; a later slice threads the
+    /// real per-process clustering identity through
+    /// [`Self::with_claim_store`].
+    pub(super) node_identity: NodeIdentity,
+    /// Tracks the epoch this registry last observed for each currently
+    /// claimed SM-session entity, so `release_claim`/`complete_claim` can
+    /// hand the right epoch back to `claim_store.release`. Purely local
+    /// bookkeeping — the `ClaimStore` implementation itself is the
+    /// authority on what epoch is actually current.
+    pub(super) claim_epochs: RwLock<HashMap<String, ClaimEpoch>>,
 }
 
 impl Default for InMemorySmSessionRegistry {
@@ -60,6 +94,7 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
             )
             .field("stream_lock_shards", &self.stream_locks.len())
             .field("persistence_attached", &self.persistence.is_some())
+            .field("node_identity", &self.node_identity)
             .finish()
     }
 }
@@ -74,6 +109,9 @@ impl InMemorySmSessionRegistry {
             max_sessions: DEFAULT_MAX_SESSIONS,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: NodeIdentity::local(),
+            claim_epochs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -86,6 +124,9 @@ impl InMemorySmSessionRegistry {
             max_sessions,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: NodeIdentity::local(),
+            claim_epochs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -98,6 +139,17 @@ impl InMemorySmSessionRegistry {
         storage: std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>,
     ) -> Self {
         self.persistence = Some(storage);
+        self
+    }
+
+    /// Inject a `ClaimStore`/`NodeIdentity` pair other than the
+    /// single-node [`InProcessClaimStore`] default (ADR-0017 Phase 3, Q2).
+    /// Must be called once at construction time before the registry is
+    /// wrapped in `Arc`. A later slice calls this with a Postgres-backed
+    /// store when `clustering.enabled`.
+    pub fn with_claim_store(mut self, claim_store: Arc<dyn ClaimStore>, me: NodeIdentity) -> Self {
+        self.claim_store = claim_store;
+        self.node_identity = me;
         self
     }
 

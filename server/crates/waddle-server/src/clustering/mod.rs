@@ -22,6 +22,11 @@ use tokio_util::sync::CancellationToken;
 pub mod allowlist;
 #[cfg(feature = "clustering")]
 mod behaviour;
+/// Postgres-authoritative entity ownership claims (ADR-0017 Phase 3 Slice
+/// 1). Public for the same reason as [`allowlist`]/[`lease`]: the harness
+/// provisions schema via the production path.
+#[cfg(feature = "clustering")]
+pub mod claims;
 /// Remote XML-text serde codec for stanzas/elements crossing the kameo
 /// boundary. Public: the Slice 5 relay actors' message types embed these
 /// wrappers, and downstream phases (cross-node routing) build on them.
