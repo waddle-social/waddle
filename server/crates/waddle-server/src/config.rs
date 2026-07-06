@@ -439,6 +439,16 @@ impl ClusteringConfig {
         // transport cap; a `reply_timeout` above it is dead configuration (the
         // sender always observes `OutboundFailure(Timeout)` at the cap), and
         // the receiver-side `mailbox_timeout` must also fit under the cap.
+        // All three must be non-zero: a zero anywhere times out every ask
+        // instantly, and an all-zero triple would otherwise satisfy every
+        // ordering check below.
+        if request_timeout.is_zero() || reply_timeout.is_zero() || mailbox_timeout.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS, WADDLE_CLUSTERING_REPLY_TIMEOUT_MS, \
+                 and WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS must all be greater than 0"
+                    .to_string(),
+            );
+        }
         if reply_timeout > request_timeout {
             return Err(format!(
                 "WADDLE_CLUSTERING_REPLY_TIMEOUT_MS ({}) must be <= \
@@ -1220,6 +1230,27 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_timeouts() {
+        // An all-zero triple satisfies every ordering check (0 <= 0), so the
+        // non-zero guard must catch it — and each individually-zero value.
+        for vars in [
+            vec![
+                ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "0"),
+                ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "0"),
+                ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "0"),
+            ],
+            vec![("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "0")],
+            vec![("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "0")],
+        ] {
+            let err = ClusteringConfig::from_vars(vars.clone()).unwrap_err();
+            assert!(
+                err.contains("must all be greater than 0"),
+                "{vars:?}: {err}"
+            );
+        }
     }
 
     #[test]
