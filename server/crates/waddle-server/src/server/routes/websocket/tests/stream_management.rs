@@ -884,6 +884,7 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
     };
     conn.sm_state.restore_from_session(&detached);
 
