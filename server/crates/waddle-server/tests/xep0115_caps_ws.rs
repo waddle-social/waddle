@@ -1142,6 +1142,23 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
     let _ = admin.close().await;
 }
 
+/// Serialize a roster-get `<iq id=…>` via minidom — stanzas with interpolated
+/// values are built with the XML builder, never `format!`.
+fn roster_get_iq_xml(id: &str) -> String {
+    let attr = |name: &str| {
+        <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from(name)
+            .expect("static ncname is valid")
+    };
+    let element = minidom::Element::builder("iq", "jabber:client")
+        .attr(attr("type"), "get")
+        .attr(attr("id"), id)
+        .append(minidom::Element::builder("query", "jabber:iq:roster").build())
+        .build();
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize element");
+    String::from_utf8(bytes).expect("serializer emits utf-8")
+}
+
 /// XEP-0115 §1: caps describe the *generating entity*. Presence relayed to a
 /// subscriber must carry the publishing client's own `<c/>` verbatim — the
 /// server must never substitute its own caps element (issue #1101), or
@@ -1165,9 +1182,7 @@ async fn caps_element_in_broadcast_presence_is_the_publishing_clients_own() {
         (&mut bob, "caps-relay-roster-bob"),
     ] {
         client
-            .send(&format!(
-                r#"<iq xmlns="jabber:client" type="get" id="{id}"><query xmlns="jabber:iq:roster"/></iq>"#
-            ))
+            .send(&roster_get_iq_xml(id))
             .await
             .expect("send roster get");
         client

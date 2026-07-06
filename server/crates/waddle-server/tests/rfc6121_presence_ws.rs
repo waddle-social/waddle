@@ -152,11 +152,9 @@ async fn websocket_full_jid_probe_returns_rich_resource_presence() {
         .await
         .expect("bob receives broadcast rich presence");
 
-    bob.send(&format!(
-        r#"<presence xmlns="jabber:client" type="probe" to="{alice_jid}"/>"#
-    ))
-    .await
-    .expect("bob probes alice full jid");
+    bob.send(&probe_presence_xml(&alice_jid))
+        .await
+        .expect("bob probes alice full jid");
     let probe = bob
         .recv_matching(|frame| {
             frame.contains("from='alice@localhost/") || frame.contains("from='alice@localhost/")
@@ -187,6 +185,22 @@ fn caps_element_count(frame: &str) -> usize {
     frame
         .matches("<c xmlns='http://jabber.org/protocol/caps'")
         .count()
+}
+
+/// Serialize a `<presence type="probe" to=…/>` via minidom — stanzas with
+/// interpolated values (JIDs) are built with the XML builder, never `format!`.
+fn probe_presence_xml(to: &str) -> String {
+    let attr = |name: &str| {
+        <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from(name)
+            .expect("static ncname is valid")
+    };
+    let element = minidom::Element::builder("presence", "jabber:client")
+        .attr(attr("type"), "probe")
+        .attr(attr("to"), to)
+        .build();
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize element");
+    String::from_utf8(bytes).expect("serializer emits utf-8")
 }
 
 #[tokio::test]
@@ -261,6 +275,29 @@ async fn websocket_presence_broadcast_relays_arbitrary_extensions_verbatim() {
 }
 
 #[tokio::test]
+async fn websocket_error_typed_presence_is_not_broadcast_to_subscribers() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client" type="error"><status>bogus error relay</status></presence>"#,
+        )
+        .await
+        .expect("alice sends an error-typed presence");
+    assert_no_frame_matching(
+        &mut bob,
+        Duration::from_millis(250),
+        |frame| frame.contains("bogus error relay"),
+        "an error-typed presence must be dropped, not relayed to subscribers",
+    )
+    .await;
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
 async fn websocket_presence_probe_returns_contacts_own_caps_and_extensions() {
     let (_server, mut alice, mut bob) = connect_alice_bob().await;
     let alice_jid = alice.full_jid.clone().expect("alice full jid");
@@ -276,11 +313,9 @@ async fn websocket_presence_probe_returns_contacts_own_caps_and_extensions() {
         .await
         .expect("bob receives alice's broadcast");
 
-    bob.send(&format!(
-        r#"<presence xmlns="jabber:client" type="probe" to="{alice_jid}"/>"#
-    ))
-    .await
-    .expect("bob probes alice");
+    bob.send(&probe_presence_xml(&alice_jid))
+        .await
+        .expect("bob probes alice");
     let probe = bob
         .recv_matching(|frame| {
             frame.contains("from='alice@localhost/") && frame.contains("<show>away</show>")

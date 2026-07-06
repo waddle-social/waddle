@@ -11,6 +11,21 @@ pub(super) async fn handle_regular_presence_update(
     sender_jid: &FullJid,
     presence: xmpp_parsers::presence::Presence,
 ) {
+    // Defense in depth behind `parse_subscription_presence`: only the normal
+    // available/unavailable forms may update state and be relayed. The
+    // broadcast below forwards the stanza verbatim, so any other type leaking
+    // in here would reach subscribers.
+    if !matches!(
+        presence.type_,
+        xmpp_parsers::presence::Type::None | xmpp_parsers::presence::Type::Unavailable
+    ) {
+        warn!(
+            jid = %sender_jid,
+            presence_type = ?presence.type_,
+            "Dropping non-broadcastable presence type from regular update path"
+        );
+        return;
+    }
     let available = presence.type_ != xmpp_parsers::presence::Type::Unavailable;
     let priority: i8 = priority_to_i8(&presence.priority);
     if available {
