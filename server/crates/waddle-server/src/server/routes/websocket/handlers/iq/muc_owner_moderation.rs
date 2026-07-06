@@ -476,12 +476,20 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     // on PR #305).
                     use waddle_xmpp::stream_management::SmSessionRegistry as _;
                     let target_id = request.target_id.as_str();
-                    let room_jid_str = room_jid.to_string();
+                    // XEP-0425 moderation targets the room-assigned
+                    // XEP-0359 stanza-id: cached reflections are
+                    // matched ONLY on `<stanza-id by=room/>`, never on
+                    // the client-chosen wire id (which any occupant
+                    // could mint to collide with another reflection).
+                    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+                        stanza_id: request.target_id.clone(),
+                        room: room_jid.clone(),
+                    };
                     match state
                         .deps
                         .protocol
                         .sm_session_registry
-                        .scrub_unacked_for_tombstone(target_id, &room_jid_str)
+                        .scrub_unacked_for_tombstone(&scrub_target)
                         .await
                     {
                         Ok(removed) if removed > 0 => debug!(
@@ -496,6 +504,31 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                             target = target_id,
                             %error,
                             "XEP-0425 moderation: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
+                        ),
+                    }
+                    // F2: promotion (#1097/#1098) parks unacked copies
+                    // in pending_delivery — scrub that layer with the
+                    // same keys or the moderated content delivers
+                    // verbatim at the recipient's next login.
+                    match state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .scrub_for_tombstone(&scrub_target)
+                        .await
+                    {
+                        Ok(removed) if removed > 0 => debug!(
+                            room = %room_jid,
+                            target = target_id,
+                            removed,
+                            "XEP-0425 moderation: scrubbed pending_delivery rows"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => warn!(
+                            room = %room_jid,
+                            target = target_id,
+                            %error,
+                            "XEP-0425 moderation: pending_delivery scrub_for_tombstone failed; moderated content may still deliver at next login"
                         ),
                     }
                 }

@@ -223,6 +223,29 @@ pub trait PendingDeliveryStorage: Send + Sync {
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, PendingStorageError>;
 
+    /// Remove every pending row matching a XEP-0424 / XEP-0425
+    /// tombstone, returning the number of rows removed.
+    ///
+    /// Promotion (#1097/#1098) parks unacked stanzas here, so the
+    /// retraction/moderation scrub must reach this layer too or the
+    /// retracted content delivers verbatim at the recipient's next
+    /// login. Matching mirrors [`crate::tombstone`]:
+    ///
+    /// - `Transient` rows carry the message inline — matched by the
+    ///   shared typed predicate
+    ///   ([`crate::tombstone::TombstoneTarget::matches_message_element`]:
+    ///   room stanza-id for groupchat, author-scoped wire id for 1:1,
+    ///   both scoped to the conversation archive).
+    /// - `Archived` rows are MAM pointers — matched by exact
+    ///   `(stanza_id.id == target.id(), stanza_id.by bare-equals
+    ///   target.archive_jid())`; the MAM row itself has been
+    ///   tombstoned, so the pointer must not flush a stub for a
+    ///   message the recipient never saw.
+    async fn scrub_for_tombstone(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<u64, PendingStorageError>;
+
     /// Periodically GC backend-internal bookkeeping that grows with
     /// distinct keys seen by the process — e.g. per-recipient
     /// insert-serialization locks (issue #209 finding #4). Default
@@ -230,6 +253,25 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// Returns the number of entries removed for observability.
     fn sweep_internal_bookkeeping(&self) -> usize {
         0
+    }
+}
+
+/// Shared per-row tombstone predicate for [`PendingDeliveryStorage`]
+/// implementations that hold typed [`PendingRow`]s (the in-memory
+/// backend here; SQL backends match on their column representation
+/// with the same semantics).
+pub fn pending_row_matches_tombstone(
+    row: &PendingRow,
+    target: &crate::tombstone::TombstoneTarget,
+) -> bool {
+    match &row.payload {
+        super::PendingPayload::Transient(message) => {
+            let element: xmpp_parsers::minidom::Element = (**message).clone().into();
+            target.matches_message_element(&element)
+        }
+        super::PendingPayload::Archived(stanza_id) => {
+            stanza_id.id.as_str() == target.id() && &stanza_id.by.to_bare() == target.archive_jid()
+        }
     }
 }
 
@@ -637,6 +679,34 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 if row.original_receipt_at < cutoff {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
+        }
+        guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
+        Ok(removed)
+    }
+
+    async fn scrub_for_tombstone(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
+        for queue in guard.values_mut() {
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
+                if pending_row_matches_tombstone(&row, target) {
                     removed_ids.push(row.id);
                     removed += 1;
                 } else {

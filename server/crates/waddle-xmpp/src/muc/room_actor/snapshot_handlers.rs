@@ -118,6 +118,13 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
         let sender_nickname_generation = sender_nick
             .as_deref()
             .and_then(|nick| self.room.current_nickname_generation(nick));
+        // Durable recipients = session-observed Member+ affiliations ∪
+        // the spawn-time hydrated durable membership (#1135). The
+        // hydrated set covers offline members who never joined this
+        // actor incarnation; the affiliation-list side keeps runtime
+        // grants visible immediately. A runtime demotion to Outcast
+        // wins over the hydrated mirror so banned members drop out of
+        // inbox fan-out without waiting for a respawn.
         let mut durable_recipient_bare_jids = self
             .room
             .get_all_affiliations()
@@ -125,6 +132,12 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
             .filter(|entry| entry.affiliation >= Affiliation::Member)
             .map(|entry| entry.jid)
             .collect::<Vec<_>>();
+        durable_recipient_bare_jids.extend(
+            self.durable_member_recipients
+                .iter()
+                .filter(|jid| self.room.get_affiliation(jid) != Affiliation::Outcast)
+                .cloned(),
+        );
         durable_recipient_bare_jids.sort();
         durable_recipient_bare_jids.dedup();
 

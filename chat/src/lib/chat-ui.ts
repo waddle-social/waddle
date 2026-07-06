@@ -194,6 +194,13 @@ export interface ExtensionAnnotation {
   actions: ExtensionAnnotationAction[];
 }
 
+/** Per-sender XEP-0444 recency: a wire-derived RFC 3339 delay stamp, or
+ * a local-domain marker for a live undelayed reaction recording the
+ * newest wire stamp it superseded (`null` when none was seen). The two
+ * clock domains are never compared against each other — see
+ * `isStaleReactionUpdate` in `@/lib/messaging/reactions`. */
+export type ReactionRecencyStamp = string | { appliedAfterWire: string | null };
+
 export interface TimelineMessage {
   id: string;
   /** #1182: `id` is a fabricated UUID — the live stanza carried no wire
@@ -247,6 +254,11 @@ export interface TimelineMessage {
   reactions?: Record<string, string[]>;
   /** Archived reaction sender identities: emoji -> sender id -> display nick. */
   reactionSenders?: Record<string, Record<string, string>>;
+  /** XEP-0444 recency bookkeeping: sender key (MUC: senderId — real
+   * bare JID when known, else occupant JID; DM: nick) -> recency stamp
+   * of the last applied reaction, so an older delayed replay can't
+   * clobber it. */
+  reactionTimes?: Record<string, ReactionRecencyStamp>;
   /** Users who have seen this message (XEP-0333). */
   readBy?: string[];
   /** Whether this received message requested XEP-0333 displayed markers. */

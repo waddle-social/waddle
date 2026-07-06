@@ -13,12 +13,13 @@ mod persistence_codec;
 mod resources;
 mod sequence;
 mod session;
-mod tombstone;
+mod tombstones;
 mod trait_impl;
 mod traits;
 
 pub use core::InMemorySmSessionRegistry;
 pub use session::{DetachedSession, DetachedUnackedStanza};
+pub use tombstones::RecentTombstoneRecord;
 pub use traits::{SmClaimCompletion, SmRegistryError, SmSessionRegistry};
 
 /// Default session timeout (5 minutes)

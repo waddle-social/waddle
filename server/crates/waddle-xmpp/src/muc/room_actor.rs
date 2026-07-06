@@ -173,6 +173,24 @@ pub struct RoomActor {
     config_revision: u64,
     admission_revision: u64,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
+    /// Durable membership hydrated from the deployment's membership
+    /// source at spawn (#1135). Kept separate from
+    /// `MucRoom.affiliation_list` on purpose: it never grants join /
+    /// admin rights and never clobbers richer session-observed
+    /// affiliations (owner/admin) — it only widens the durable inbox
+    /// recipient set computed by [`GetRoomSnapshot`], and being a pure
+    /// mirror of the durable store it does not block room dormancy
+    /// ([`MucRoom::is_dormant`]) the way in-memory-only affiliations do.
+    durable_member_recipients: Vec<BareJid>,
+    /// The durable membership source received in
+    /// [`HydrateDurableRecipients`], retained so an affiliation change
+    /// to `None` can re-run hydration (round-2 review R1): the durable
+    /// union covers channel AND space relations, so revoking only the
+    /// explicit channel grant must not prune a user who remains
+    /// space-entitled. `None` until first hydration (tests spawning a
+    /// bare actor; pre-hydration mutations fall back to the plain
+    /// prune, which is the fail-closed direction).
+    membership_source: Option<std::sync::Arc<dyn super::affiliation::DurableMembershipSource>>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -212,6 +230,145 @@ impl RoomActor {
             config_revision: 0,
             admission_revision: 0,
             occupant_id_secret,
+            durable_member_recipients: Vec::new(),
+            membership_source: None,
+        }
+    }
+
+    /// Drop a JID from the spawn-time hydrated durable-recipient
+    /// mirror (#1135) when a runtime affiliation mutation removes its
+    /// membership (F1). Returns whether the caller must re-run
+    /// hydration afterwards via
+    /// [`Self::refresh_durable_recipients_from_source`].
+    ///
+    /// Every affiliation-mutating handler must call this with the JID
+    /// and the *requested* affiliation — unconditionally, even when
+    /// `MucRoom::set_affiliation` reports no stored change, because a
+    /// hydrated-only member has no affiliation-list entry (its stored
+    /// affiliation is already `None`) yet still needs pruning from the
+    /// mirror.
+    ///
+    /// - `Outcast` (ban) is unambiguous: the direct prune is final and
+    ///   needs no re-hydration — the snapshot's Outcast filter backs
+    ///   it up regardless of what the durable union reports.
+    /// - `None` only revokes the *requested channel affiliation*; the
+    ///   durable union hydrated at spawn also covers SPACE-level
+    ///   relations (round-2 review R1), so the caller must re-run
+    ///   hydration to converge the mirror to the durable truth —
+    ///   otherwise a space-entitled member silently loses inbox
+    ///   fan-out until respawn. The prune still runs first so a
+    ///   failed re-hydration fails toward NOT delivering (F1).
+    ///
+    /// A later re-grant to `Member`+ is covered by the
+    /// affiliation-list side of the durable-recipient union in
+    /// [`snapshot_handlers::GetRoomSnapshot`].
+    #[must_use]
+    fn prune_durable_recipient_if_removed(
+        &mut self,
+        jid: &BareJid,
+        new_affiliation: Affiliation,
+    ) -> bool {
+        match new_affiliation {
+            Affiliation::Outcast => {
+                self.durable_member_recipients
+                    .retain(|recipient| recipient != jid);
+                false
+            }
+            Affiliation::None => {
+                self.durable_member_recipients
+                    .retain(|recipient| recipient != jid);
+                true
+            }
+            Affiliation::Owner | Affiliation::Admin | Affiliation::Member => false,
+        }
+    }
+
+    /// Re-run durable-membership hydration against the retained source
+    /// (round-2 review R1), replacing the mirror with the query result.
+    ///
+    /// Called by affiliation handlers after a prune-to-`None` so the
+    /// mirror converges to the durable channel∪space truth (rare
+    /// event, one reply-timeout-bounded query). Because the query is
+    /// awaited *inside* the mutating handler and Kameo processes
+    /// messages sequentially, no [`snapshot_handlers::GetRoomSnapshot`]
+    /// can observe an intermediate state — the prune and the refresh
+    /// are atomic from the mailbox's perspective, so a pruned member
+    /// can never transiently resurrect. On query failure the mirror is
+    /// left as pruned: fail toward NOT delivering to the removed jid
+    /// (privacy beats availability — F1).
+    async fn refresh_durable_recipients_from_source(&mut self) {
+        let Some(source) = self.membership_source.clone() else {
+            return;
+        };
+        match source
+            .list_durable_member_jids(&self.room.waddle_id, &self.room.channel_id)
+            .await
+        {
+            Ok(mut members) => {
+                members.sort();
+                members.dedup();
+                self.durable_member_recipients = members;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable membership re-hydration after affiliation removal \
+                     failed; keeping the pruned mirror (fail toward not \
+                     delivering to the removed member)"
+                );
+            }
+        }
+    }
+}
+
+/// Hydrate this actor incarnation's durable-recipient set from the
+/// deployment's durable membership store (#1135).
+///
+/// The room registry enqueues this as the *first* message after
+/// spawning a `RoomActor`, before handing the actor ref to any caller.
+/// Because the mailbox is FIFO and the actor processes messages
+/// sequentially, every later [`GetRoomSnapshot`] observes the hydrated
+/// set — there is no window in which a groupchat message fans out
+/// against a not-yet-hydrated recipient list.
+///
+/// Fail-open on source errors: the actor keeps serving with
+/// session-observed affiliations only (pre-#1135 behavior) rather than
+/// wedging the room.
+pub struct HydrateDurableRecipients {
+    pub source: std::sync::Arc<dyn super::affiliation::DurableMembershipSource>,
+}
+
+impl kameo::message::Message<HydrateDurableRecipients> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HydrateDurableRecipients,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        // Retain the source so affiliation changes to `None` can
+        // re-run hydration later (round-2 review R1) instead of
+        // guessing whether the member is still space-entitled.
+        self.membership_source = Some(std::sync::Arc::clone(&msg.source));
+        match msg
+            .source
+            .list_durable_member_jids(&self.room.waddle_id, &self.room.channel_id)
+            .await
+        {
+            Ok(mut members) => {
+                members.sort();
+                members.dedup();
+                self.durable_member_recipients = members;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable membership hydration failed; durable inbox \
+                     recipients limited to session-observed affiliations"
+                );
+            }
         }
     }
 }
@@ -524,12 +681,16 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         msg: ChangeAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if self
             .room
             .set_affiliation(msg.jid, msg.affiliation)
             .is_some()
         {
             self.admission_revision = self.admission_revision.saturating_add(1);
+        }
+        if needs_rehydration {
+            self.refresh_durable_recipients_from_source().await;
         }
     }
 }

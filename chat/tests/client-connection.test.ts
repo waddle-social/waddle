@@ -195,6 +195,31 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(sends).toEqual([{ roomJid: "general@muc.example.com", body: "to general" }]);
   });
 
+  test("queueing while connected (room not joined) does not emit a reconnecting status (#1164)", () => {
+    const { queue, statuses } = createQueue({
+      canUseConnectedSession: () => true,
+      roomIsReady: () => false,
+    });
+
+    queue.queueRoomMessage("general@muc.example.com", "hello", { id: "room-q1" });
+
+    // The message still queues, but the global banner must stay online.
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["room-q1"]);
+    expect(statuses).toHaveLength(0);
+  });
+
+  test("queueing while the session is unusable still reports the reconnecting status", () => {
+    const { queue, statuses } = createQueue({
+      canUseConnectedSession: () => false,
+    });
+
+    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-q1" });
+
+    expect(statuses).toEqual([
+      { state: "reconnecting", detail: "Message queued until the connection returns" },
+    ]);
+  });
+
   test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", () => {
     const { queue, events } = createQueue();
     const depths: Array<{ persisted: number; inflight: number }> = [];
@@ -222,6 +247,7 @@ describe("ReconnectScheduler", () => {
       isDestroying: () => false,
       connect: async () => undefined,
       onScheduled: (info) => scheduled.push(info),
+      onExhausted: () => undefined,
     });
 
     scheduler.schedule();
@@ -241,12 +267,39 @@ describe("ReconnectScheduler", () => {
     expect(scheduled.at(-1)).toEqual({ attempt: 1, delayMs: 2000 });
   });
 
+  test("caps attempts at 10 and reports exhaustion instead of scheduling forever (#1164)", () => {
+    const scheduled: Array<{ attempt: number; delayMs: number }> = [];
+    let exhausted = 0;
+    const scheduler = new ReconnectScheduler({
+      isDestroying: () => false,
+      connect: async () => undefined,
+      onScheduled: (info) => scheduled.push(info),
+      onExhausted: () => { exhausted += 1; },
+    });
+
+    for (let i = 0; i < 12; i += 1) {
+      scheduler.schedule();
+      scheduler.clearTimer();
+    }
+
+    expect(scheduled).toHaveLength(10);
+    expect(scheduled.at(-1)).toEqual({ attempt: 10, delayMs: 60000 });
+    expect(exhausted).toBe(2);
+
+    // A successful session-ready resets the budget.
+    scheduler.resetAttempts();
+    scheduler.schedule();
+    scheduler.clearTimer();
+    expect(scheduled.at(-1)).toEqual({ attempt: 1, delayMs: 2000 });
+  });
+
   test("does not schedule while destroying and reports reconnect duration on completion", () => {
     const scheduled: Array<{ attempt: number; delayMs: number }> = [];
     const scheduler = new ReconnectScheduler({
       isDestroying: () => true,
       connect: async () => undefined,
       onScheduled: (info) => scheduled.push(info),
+      onExhausted: () => undefined,
     });
     scheduler.schedule();
     expect(scheduled).toHaveLength(0);

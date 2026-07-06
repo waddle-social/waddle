@@ -1387,6 +1387,12 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         ) -> Result<u64, PendingStorageError> {
             self.inner.delete_older_than(cutoff).await
         }
+        async fn scrub_for_tombstone(
+            &self,
+            target: &waddle_xmpp::tombstone::TombstoneTarget,
+        ) -> Result<u64, PendingStorageError> {
+            self.inner.scrub_for_tombstone(target).await
+        }
     }
 
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(DeleteRowFails {
@@ -1554,6 +1560,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         &storage,
         &waddle_xmpp::protocol::session_state::Blocklist::empty(),
         "example.com",
+        &[],
     )
     .await;
     assert_eq!(summary.queued, 1);
@@ -2422,5 +2429,104 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
     assert_eq!(
         body_of(&rx.try_recv().expect("delivered on retry").stanza),
         "after-the-blip"
+    );
+}
+
+fn transient_dm_row_with_id(recipient: &str, wire_id: &str, body: &str) -> PendingRow {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
+    m.id = Some(xmpp_parsers::message::Id(wire_id.to_string()));
+    m.type_ = MessageType::Chat;
+    m.bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), body.to_string());
+    PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: bare(recipient),
+        original_receipt_at: Utc::now(),
+        payload: PendingPayload::Transient(Box::new(m)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    }
+}
+
+#[tokio::test]
+async fn database_scrub_for_tombstone_removes_transient_and_archived_matches() {
+    // F2: a XEP-0424/0425 retraction must scrub promoted pending rows
+    // in the SQL backend too — a Transient row would otherwise deliver
+    // the retracted content verbatim on the recipient's next login,
+    // and an Archived pointer would flush a tombstone stub.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open");
+    storage
+        .insert(transient_dm_row_with_id(
+            "alice@example.com",
+            "retract-me",
+            "secret",
+        ))
+        .await
+        .expect("insert");
+    storage
+        .insert(transient_dm_row_with_id(
+            "alice@example.com",
+            "keep-me",
+            "safe",
+        ))
+        .await
+        .expect("insert");
+    // Same wire id in another conversation: scope guard keeps it.
+    storage
+        .insert(transient_dm_row_with_id(
+            "carol@example.com",
+            "retract-me",
+            "unrelated",
+        ))
+        .await
+        .expect("insert");
+    storage
+        .insert(archived_row("alice@example.com", "retract-me"))
+        .await
+        .expect("insert");
+    storage
+        .insert(archived_row("alice@example.com", "other-archive"))
+        .await
+        .expect("insert");
+
+    let removed = storage
+        .scrub_for_tombstone(&waddle_xmpp::tombstone::TombstoneTarget::Direct {
+            wire_id: "retract-me".to_string(),
+            author: bare("bob@elsewhere"),
+            archive: bare("alice@example.com"),
+        })
+        .await
+        .expect("scrub");
+    assert_eq!(
+        removed, 2,
+        "one transient + one archived in-scope match removed"
+    );
+
+    // Next-login flush proxy: the claim (what a fresh session flushes)
+    // must no longer surface the scrubbed rows.
+    let claimed = storage
+        .claim_for_session(&bare("alice@example.com"), &SmSessionId::new("s-next"))
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 2);
+    for row in &claimed {
+        match &row.payload {
+            PendingPayload::Transient(m) => {
+                assert_eq!(m.id.as_ref().map(|id| id.0.as_str()), Some("keep-me"));
+            }
+            PendingPayload::Archived(r) => assert_eq!(r.id.as_str(), "other-archive"),
+        }
+    }
+    // The out-of-scope conversation is untouched.
+    assert_eq!(
+        storage
+            .list(&bare("carol@example.com"))
+            .await
+            .expect("list")
+            .len(),
+        1
     );
 }

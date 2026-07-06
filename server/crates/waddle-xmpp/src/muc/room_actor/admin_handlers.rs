@@ -299,6 +299,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
         let mut removed_by_moderation: Vec<FullJid> = Vec::new();
         let mut occupants_to_kick: Vec<String> = Vec::new();
+        let mut needs_rehydration = false;
         if is_role_change_query(&msg.items) {
             for item in &msg.items {
                 let Some(target_nick) = item.nick.as_ref() else {
@@ -501,11 +502,13 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 let applied = apply_affiliation_change(
                     &mut self.room,
                     &self.occupant_id_secret,
-                    target_jid,
+                    target_jid.clone(),
                     new_affiliation,
                     Some(&actor),
                     item.reason.as_deref(),
                 )?;
+                needs_rehydration |=
+                    self.prune_durable_recipient_if_removed(&target_jid, new_affiliation);
                 if target_current_affiliation != new_affiliation {
                     self.admission_revision = self.admission_revision.saturating_add(1);
                 }
@@ -515,6 +518,13 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         }
         for nick in occupants_to_kick {
             self.room.remove_occupant(&nick);
+        }
+        if needs_rehydration {
+            // R1: converge the durable-recipient mirror to the durable
+            // channel∪space truth after any removal to `None` — a
+            // space-entitled member must not lose fan-out (see
+            // `RoomActor::refresh_durable_recipients_from_source`).
+            self.refresh_durable_recipients_from_source().await;
         }
         Ok(AdminItemsApplied {
             presence_updates,
@@ -541,13 +551,17 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         let updates = apply_affiliation_change(
             &mut self.room,
             &self.occupant_id_secret,
-            msg.jid,
+            msg.jid.clone(),
             msg.affiliation,
             msg.actor.as_ref(),
             None,
         )?;
+        let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if previous_affiliation != msg.affiliation {
             self.admission_revision = self.admission_revision.saturating_add(1);
+        }
+        if needs_rehydration {
+            self.refresh_durable_recipients_from_source().await;
         }
         Ok(updates)
     }
@@ -586,11 +600,17 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .values()
             .map(|occupant| occupant.real_jid.to_bare())
             .collect();
+        let mut needs_rehydration = false;
         for jid in occupied_jids {
             let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
+            needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
             if self.room.set_affiliation(jid, affiliation).is_some() {
                 self.admission_revision = self.admission_revision.saturating_add(1);
             }
+        }
+        if needs_rehydration {
+            // R1: see `RoomActor::refresh_durable_recipients_from_source`.
+            self.refresh_durable_recipients_from_source().await;
         }
         enforce_members_only(&mut self.room, &self.occupant_id_secret)
     }

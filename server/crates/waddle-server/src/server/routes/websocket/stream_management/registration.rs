@@ -161,6 +161,28 @@ async fn invalidate_older_detached_sessions(
         .await
     {
         Ok(removed) => {
+            if removed.is_empty() {
+                return;
+            }
+            // Issue #1097: the superseded sessions' unacked queues run
+            // the XEP-0198 §5 promote → confirm chain instead of being
+            // dropped. This runs AFTER the fresh bind registered its
+            // connection, so the promotion chain's alt-resource step
+            // naturally live-delivers to the newly bound resource;
+            // otherwise stanzas land in pending delivery storage.
+            // Durable SM rows are erased only after promotion succeeds
+            // (confirm_drained inside the helper).
+            crate::sm_promotion::promote_displaced_sessions(
+                removed.clone(),
+                crate::sm_promotion::DisplacedPromotionDeps {
+                    sm_registry: &state.deps.protocol.sm_session_registry,
+                    connection_registry: &state.deps.protocol.connection_registry,
+                    pending_storage: &state.deps.protocol.pending_delivery_storage,
+                    blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                },
+            )
+            .await;
             for detached in removed {
                 cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             }

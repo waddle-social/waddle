@@ -351,6 +351,30 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         .await
     }
 
+    #[instrument(skip(self, sequences), fields(stream_id = %stream_id, count = sequences.len()))]
+    async fn delete_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        let lock = self.lock_for(stream_id);
+        let _guard = lock.lock().await;
+        let mut removed = 0u64;
+        // One PK-targeted statement per sequence: tombstone scrubs
+        // remove a single stanza per session in practice, so the
+        // per-row round-trip is cheaper than building a dynamic IN
+        // clause the fixed-arity param binder can't express.
+        for sequence in sequences {
+            removed += self
+                .execute(
+                    "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+                    crate::db_params![stream_id.as_str().to_string(), i64::from(*sequence)],
+                )
+                .await?;
+        }
+        Ok(removed)
+    }
+
     async fn list_unacked(
         &self,
         stream_id: &SmSessionId,

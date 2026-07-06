@@ -285,7 +285,30 @@ pub(super) async fn cleanup_connection_shutdown(
                 .store_session(detached)
                 .await
             {
-                Ok(()) => {
+                Ok(displaced) => {
+                    // Issue #1097: sessions the registry displaced to make
+                    // room (max_sessions overflow, or a stale detached
+                    // stream for this same JID) carry unacked queues that
+                    // must run the XEP-0198 §5 promote → confirm chain
+                    // instead of being dropped. Promote before anything
+                    // else in this arm — the early-return below must not
+                    // skip it.
+                    if !displaced.is_empty() {
+                        crate::sm_promotion::promote_displaced_sessions(
+                            displaced.clone(),
+                            crate::sm_promotion::DisplacedPromotionDeps {
+                                sm_registry: &state.deps.protocol.sm_session_registry,
+                                connection_registry: &state.deps.protocol.connection_registry,
+                                pending_storage: &state.deps.protocol.pending_delivery_storage,
+                                blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                            },
+                        )
+                        .await;
+                        for dead in displaced {
+                            cleanup_invalidated_detached_session(state, dead, None).await;
+                        }
+                    }
                     if state
                         .deps
                         .protocol
@@ -293,13 +316,61 @@ pub(super) async fn cleanup_connection_shutdown(
                         .unregister_if_owner(&jid, owner)
                         .is_none()
                     {
-                        debug!(jid = %jid, "Removed detached SM session after ownership moved");
-                        let _ = state
+                        // Ownership moved: the same client fresh-bound on a
+                        // newer connection before this cleanup stored its
+                        // detached session, so the newer bind's
+                        // invalidation pass never saw this stream. The
+                        // just-stored session still carries the unacked
+                        // queue — run the XEP-0198 §5 promote →
+                        // confirm_drained chain on it (issue #1097
+                        // displaced contract) instead of erasing it, or
+                        // the queue is lost with no promotion.
+                        debug!(
+                            jid = %jid,
+                            stream_id = %stream_id,
+                            "detached SM session lost ownership race; promoting its queue"
+                        );
+                        match state
                             .deps
                             .protocol
                             .sm_session_registry
-                            .remove_stored_session_if_unclaimed(&stream_id)
-                            .await;
+                            .displace_stored_session_if_unclaimed(&stream_id)
+                            .await
+                        {
+                            Ok(Some(displaced)) => {
+                                crate::sm_promotion::promote_displaced_sessions(
+                                    vec![displaced],
+                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                        sm_registry: &state.deps.protocol.sm_session_registry,
+                                        connection_registry: &state
+                                            .deps
+                                            .protocol
+                                            .connection_registry,
+                                        pending_storage: &state
+                                            .deps
+                                            .protocol
+                                            .pending_delivery_storage,
+                                        blocking_storage: state
+                                            .deps
+                                            .protocol
+                                            .blocking_storage
+                                            .as_ref(),
+                                        server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                                    },
+                                )
+                                .await;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                warn!(
+                                    jid = %jid,
+                                    stream_id = %stream_id,
+                                    error = %error,
+                                    "ownership-moved detach: displace failed; durable rows \
+                                     remain for janitor/restart retry"
+                                );
+                            }
+                        }
                         return;
                     }
                     // ADR-0017 Phase 1: prune the actor-tree entry at detach

@@ -88,6 +88,15 @@ pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
 const MAX_NAME_LEN: usize = 80;
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+
+/// Upper bound on the admin-kick room-actor asks. The room actor
+/// awaits the durable-membership source inside its affiliation
+/// handlers, so a wedged (not dead) permission actor can stall the
+/// room's mailbox; a reply timeout keeps that stall from propagating
+/// into the admin command handler (timeout maps to the existing
+/// catch-all `Err` arm). Magnitude matches the `REAPER_ASK_TIMEOUT`
+/// precedent in `session_janitors.rs`.
+const ADMIN_ROOM_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 type RoomConfigLockMap = dashmap::DashMap<BareJid, Arc<Semaphore>>;
 
 // ---------------------------------------------------------------------------
@@ -3708,6 +3717,7 @@ async fn run_kick(
     // revocation above and synchronize the actor affiliation list.
     let occupants = actor
         .ask(ListOccupants)
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
         .map_err(send_err("room actor ListOccupants"))?;
     let Some(target_nick) = occupants
@@ -3753,6 +3763,7 @@ async fn run_kick(
             sender_role: Role::Moderator,
             items,
         })
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
     {
         Ok(applied) => applied,

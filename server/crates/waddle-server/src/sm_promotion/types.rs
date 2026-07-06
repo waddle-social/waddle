@@ -21,6 +21,11 @@ pub enum PromotedOutcome {
     /// Skipped — stanza could not be parsed back to a typed value
     /// (corrupt unacked queue entry). Logged for operator visibility.
     Unparseable,
+    /// Dropped because a recently applied XEP-0424/0425 tombstone
+    /// matches this stanza (round-2 review R2): the retraction raced
+    /// the drain, so the promotion-time re-check scrubs the in-flight
+    /// copy instead of delivering retracted content on next login.
+    Scrubbed,
     /// Storage backend failure — `pending_delivery.insert` returned
     /// `Err`. The caller MUST treat this as a transient promotion
     /// failure and SKIP `confirm_drained` for the owning session so
@@ -40,15 +45,27 @@ pub struct PromotionSummary {
     pub dropped: u32,
     pub not_promotable: u32,
     pub unparseable: u32,
+    /// Number of stanzas dropped by the promotion-time recent-
+    /// tombstone re-check (round-2 review R2). Counted separately
+    /// from `dropped` so retraction-race scrubs stay visible in the
+    /// per-session summary logs.
+    pub scrubbed: u32,
     /// Number of stanzas that failed to insert into pending storage.
     /// Non-zero means the session's promotion was lossy: the caller
     /// MUST NOT call `confirm_drained` for this session, so its
     /// durable SM row survives for restart-time retry.
     pub storage_failed: u32,
+    /// XEP-0198 sequences of every stanza this promotion pass fully
+    /// handled (every outcome except [`PromotedOutcome::StorageFailure`]).
+    /// On a partial failure the retry path durably deletes exactly
+    /// these `sm_unacked` rows and drops them from the reinserted
+    /// session, so the next tick retries only the failed stanzas
+    /// (round-2 review R4) instead of re-promoting the whole queue.
+    pub promoted_sequences: Vec<u32>,
 }
 
 impl PromotionSummary {
-    pub(super) fn record(&mut self, outcome: &PromotedOutcome) {
+    pub(super) fn record(&mut self, sequence: u32, outcome: &PromotedOutcome) {
         match outcome {
             PromotedOutcome::Redelivered { .. } => self.redelivered += 1,
             PromotedOutcome::Queued => self.queued += 1,
@@ -56,7 +73,11 @@ impl PromotionSummary {
             PromotedOutcome::Dropped => self.dropped += 1,
             PromotedOutcome::NotPromotable => self.not_promotable += 1,
             PromotedOutcome::Unparseable => self.unparseable += 1,
+            PromotedOutcome::Scrubbed => self.scrubbed += 1,
             PromotedOutcome::StorageFailure => self.storage_failed += 1,
+        }
+        if !matches!(outcome, PromotedOutcome::StorageFailure) {
+            self.promoted_sequences.push(sequence);
         }
     }
 

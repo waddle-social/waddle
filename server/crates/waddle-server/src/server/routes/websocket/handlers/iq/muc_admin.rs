@@ -1,6 +1,16 @@
 use super::*;
 use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
 
+/// Upper bound on the mutating room-actor asks below. The room actor
+/// awaits the durable-membership source inside its affiliation
+/// handlers, so a wedged (not dead) permission actor can stall the
+/// room's mailbox; without a reply timeout that stall would propagate
+/// into this stanza handler and hold the connection's IQ processing
+/// hostage. A timeout falls into each match's catch-all `Err` arm
+/// (internal-server-error reply). Magnitude matches the
+/// `REAPER_ASK_TIMEOUT` precedent in `session_janitors.rs`.
+const ADMIN_ROOM_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn admin_item_has_role_shape(item: &AdminItem) -> bool {
     item.role.is_some()
 }
@@ -138,6 +148,7 @@ pub(super) async fn handle_muc_admin_iq(
         .ask(GetAdminContext {
             sender_jid: sender_jid.clone(),
         })
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
     {
         Ok(context) => context,
@@ -161,7 +172,11 @@ pub(super) async fn handle_muc_admin_iq(
         )];
     }
     if query.is_get {
-        let snapshot = match room_actor.ask(GetSnapshot).await {
+        let snapshot = match room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+            .await
+        {
             Ok(snapshot) => snapshot.room,
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
@@ -245,7 +260,11 @@ pub(super) async fn handle_muc_admin_iq(
     let actor_previous_affiliations = if affiliation_updates.is_empty() {
         Vec::new()
     } else {
-        match room_actor.ask(GetSnapshot).await {
+        match room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+            .await
+        {
             Ok(snapshot) => {
                 let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> =
                     snapshot
@@ -400,6 +419,7 @@ pub(super) async fn handle_muc_admin_iq(
             sender_role: context.role,
             items,
         })
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
     {
         Ok(applied) => applied,
@@ -423,6 +443,7 @@ pub(super) async fn handle_muc_admin_iq(
                             jid: previous_jid.clone(),
                             affiliation: *previous_affiliation,
                         })
+                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                         .await;
                 }
             }
@@ -453,6 +474,7 @@ pub(super) async fn handle_muc_admin_iq(
                             jid: previous_jid.clone(),
                             affiliation: *previous_affiliation,
                         })
+                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                         .await;
                 }
             }
@@ -483,6 +505,7 @@ pub(super) async fn handle_muc_admin_iq(
                             jid: previous_jid.clone(),
                             affiliation: *previous_affiliation,
                         })
+                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                         .await;
                 }
             }
@@ -511,6 +534,7 @@ pub(super) async fn handle_muc_admin_iq(
                             jid: previous_jid.clone(),
                             affiliation: *previous_affiliation,
                         })
+                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                         .await;
                 }
             }
@@ -539,6 +563,7 @@ pub(super) async fn handle_muc_admin_iq(
                             jid: previous_jid.clone(),
                             affiliation: *previous_affiliation,
                         })
+                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                         .await;
                 }
             }

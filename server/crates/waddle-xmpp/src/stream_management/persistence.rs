@@ -140,6 +140,18 @@ pub trait SmPersistenceStorage: Send + Sync {
         up_to_sequence: u32,
     ) -> Result<u64, SmPersistenceError>;
 
+    /// Remove the named unacked entries — exact `(stream_id,
+    /// sequence)` primary-key matches — and return how many rows were
+    /// deleted. Used by the XEP-0424/0425 tombstone scrub (issue
+    /// #1145) so a retracted stanza cannot be rehydrated into a
+    /// replay queue after a restart. Sequences that do not exist are
+    /// ignored (idempotent).
+    async fn delete_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError>;
+
     /// Read every unacked stanza for a session in sequence order.
     /// Used by `<resumed/>` to replay and by the Q6 promotion path to
     /// drain on session expiry.
@@ -332,6 +344,24 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         };
         let before = queue.len();
         queue.retain(|s| s.sequence > up_to_sequence);
+        Ok((before - queue.len()) as u64)
+    }
+
+    async fn delete_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let queue = match guard.unacked.get_mut(stream_id) {
+            Some(q) => q,
+            None => return Ok(0),
+        };
+        let before = queue.len();
+        queue.retain(|s| !sequences.contains(&s.sequence));
         Ok((before - queue.len()) as u64)
     }
 

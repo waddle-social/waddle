@@ -26,8 +26,21 @@ pub enum SmRegistryError {
 pub trait SmSessionRegistry: Send + Sync {
     /// Store a detached session.
     ///
-    /// The session can be retrieved later using `take_session` with the stream_id.
-    async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError>;
+    /// The session can be retrieved later using `take_session` with the
+    /// stream_id.
+    ///
+    /// Returns the sessions this store displaced from the in-memory
+    /// pool — a superseded detached stream for the same full JID and/or
+    /// the oldest session evicted on `max_sessions` overflow. Their
+    /// unacked queues must NOT be discarded (XEP-0198 §5): the caller
+    /// runs the promote → confirm chain on each and calls
+    /// `confirm_drained` afterwards; durable rows for displaced
+    /// sessions survive until that confirmation so a crash mid-
+    /// promotion retries on the next startup.
+    async fn store_session(
+        &self,
+        session: DetachedSession,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError>;
 
     /// Take (retrieve and remove) a session by stream ID.
     ///
@@ -59,19 +72,14 @@ pub trait SmSessionRegistry: Send + Sync {
     /// Called when a tombstone is applied so a recipient mid-resume does
     /// not replay the pre-scrub stanza on the wire.
     ///
-    /// `target_id` matches either the cached message's wire `id`
-    /// attribute (typical for 1:1 retractions targeting the original
-    /// message id) **or** any XEP-0359 `<stanza-id id='…'/>` child
-    /// (typical for groupchat retractions that key by the room's
-    /// stanza-id per the "archive id == wire stanza-id" invariant).
-    ///
-    /// `archive_jid` scopes the match to a specific conversation: a
-    /// cached message is only removed if its `from` or `to` bare-equals
-    /// `archive_jid`. This prevents cross-conversation collateral
-    /// damage when two clients independently reuse a short message id
-    /// in different chats — without scoping, retracting "msg-1" in one
-    /// chat would silently delete unrelated "msg-1" stanzas queued for
-    /// other recipients.
+    /// `target` carries the typed tombstone identity
+    /// ([`crate::tombstone::TombstoneTarget`]): groupchat/moderation
+    /// scrubs match only the room-assigned XEP-0359 `<stanza-id
+    /// by=room/>`; 1:1 retraction scrubs match the author's wire id
+    /// only for messages FROM that author (plus the archive-stamped
+    /// stanza-id branch). Both are scoped to the conversation archive,
+    /// so a colliding client-chosen wire id from another sender or
+    /// another chat can never be scrubbed.
     ///
     /// Returns the number of stanza entries removed across all stored
     /// sessions. Default impl is a no-op so registry implementations
@@ -79,8 +87,7 @@ pub trait SmSessionRegistry: Send + Sync {
     /// overrides it.
     async fn scrub_unacked_for_tombstone(
         &self,
-        _target_id: &str,
-        _archive_jid: &str,
+        _target: &crate::tombstone::TombstoneTarget,
     ) -> Result<usize, SmRegistryError> {
         Ok(0)
     }

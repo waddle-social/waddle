@@ -28,6 +28,11 @@ pub struct InMemorySmSessionRegistry {
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) stream_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
     pub(super) max_sessions: usize,
+    /// Recently applied XEP-0424/0425 tombstones, kept for the
+    /// promotion-time re-check (round-2 review R2). Bounded by
+    /// [`super::tombstones::RECENT_TOMBSTONE_TTL`] +
+    /// [`super::tombstones::MAX_RECENT_TOMBSTONES`].
+    pub(super) recent_tombstones: RwLock<Vec<super::tombstones::RecentTombstone>>,
     /// Optional durable backing store. When `None` the registry is
     /// strictly in-memory (legacy behaviour); production wiring sets
     /// this via [`Self::with_persistence`] before Arc-wrapping.
@@ -67,6 +72,7 @@ impl InMemorySmSessionRegistry {
             claimed_sessions: RwLock::new(HashMap::new()),
             stream_locks: new_stream_locks(),
             max_sessions: DEFAULT_MAX_SESSIONS,
+            recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
         }
     }
@@ -78,6 +84,7 @@ impl InMemorySmSessionRegistry {
             claimed_sessions: RwLock::new(HashMap::new()),
             stream_locks: new_stream_locks(),
             max_sessions,
+            recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
         }
     }
@@ -116,22 +123,24 @@ impl InMemorySmSessionRegistry {
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
         let mut hydrated_sessions = Vec::with_capacity(stored.len());
-        let mut expired_ids = Vec::new();
+        let mut expired = 0usize;
         let mut bad_rows = 0usize;
         for (persisted, unacked) in stored {
-            // Filter expired-during-downtime: detached_at +
-            // max_resume_duration <= now means the resume window is
-            // already closed. Hydrating these would let them appear
-            // resumable on the wire and silently exceed
-            // max_sessions, plus they'd be re-loaded on every
-            // restart since the in-memory janitor doesn't drain
-            // durable rows. Mark for durable deletion below.
+            // Expired-during-downtime sessions (detached_at +
+            // max_resume_duration <= now) are hydrated too (issue
+            // #1098): deleting their rows here would silently discard
+            // their unacked queues, violating XEP-0198 §5 ("treat
+            // unacknowledged stanzas … like stanzas to an unavailable
+            // resource"). They are not resumable on the wire —
+            // peek/take/claim all gate on `is_expired()` — and the
+            // SM-expiry janitor's next `drain_expired` pass runs the
+            // promote → confirm chain, which is what finally deletes
+            // the durable rows via `confirm_drained`.
             let expires_at = persisted.detached_at
                 + chrono::Duration::from_std(persisted.max_resume_duration)
                     .unwrap_or(chrono::Duration::seconds(0));
             if expires_at <= now {
-                expired_ids.push(persisted.stream_id.clone());
-                continue;
+                expired += 1;
             }
             match persisted_to_detached(&persisted, &unacked) {
                 Ok(session) => hydrated_sessions.push(session),
@@ -143,17 +152,6 @@ impl InMemorySmSessionRegistry {
                     );
                     bad_rows += 1;
                 }
-            }
-        }
-        // Best-effort durable cleanup of expired rows. Failures here
-        // are non-fatal — the janitor's next pass will retry.
-        for stream_id in &expired_ids {
-            if let Err(error) = storage.delete_session(stream_id).await {
-                debug!(
-                    stream_id = %stream_id,
-                    error = %error,
-                    "failed to delete expired persisted SM session during restore; will retry"
-                );
             }
         }
         let hydrated = hydrated_sessions.len();
@@ -168,9 +166,7 @@ impl InMemorySmSessionRegistry {
         }
         debug!(
             hydrated,
-            expired = expired_ids.len(),
-            bad_rows,
-            "restored detached SM sessions from persistence"
+            expired, bad_rows, "restored detached SM sessions from persistence"
         );
         Ok(hydrated)
     }
@@ -220,6 +216,44 @@ impl InMemorySmSessionRegistry {
         }
         storage
             .store_session_atomic(persisted, unacked_rows)
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
+    /// Durably delete the named unacked rows for a stream — exact
+    /// `(stream_id, sequence)` matches, idempotent for absent rows.
+    ///
+    /// Used by the Q6 promotion retry path (round-2 review R4): after
+    /// a PARTIAL promotion failure, the successfully promoted stanzas'
+    /// `pending_delivery` rows are already committed, so their
+    /// `sm_unacked` rows must be erased before the session is
+    /// re-inserted for retry — otherwise every janitor tick re-promotes
+    /// the whole queue and duplicates the already-queued stanzas.
+    /// Ordering is crash-safe: the pending row commits BEFORE its
+    /// `sm_unacked` row is deleted here, preserving at-least-once.
+    ///
+    /// Takes the stream lock so the delete serializes with
+    /// detached-append full snapshots that could otherwise resurrect
+    /// the rows. No in-memory mutation happens here — the caller owns
+    /// the drained session and drops the entries from its local copy.
+    pub async fn delete_unacked_sequences(
+        &self,
+        stream_id: &str,
+        sequences: &[u32],
+    ) -> Result<u64, SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(0);
+        };
+        if sequences.is_empty() {
+            return Ok(0);
+        }
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+        storage
+            .delete_unacked(
+                &crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
+                sequences,
+            )
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
@@ -328,10 +362,24 @@ impl InMemorySmSessionRegistry {
             return Ok(true);
         }
 
-        // Fail closed if a future path removes the session without taking the
-        // stream lock. The snapshot was already written durably, so erase it
-        // rather than allowing restart to resurrect an already-consumed stream.
-        self.persist_delete_session(stream_id).await?;
+        // The session vanished from both maps between the stream-lock
+        // read and this recheck. The only remover that does NOT take
+        // this stream's lock is displacement by `store_session` (jid
+        // collision / max_sessions eviction, which holds only the NEW
+        // stream's shard lock) — and displaced sessions follow the
+        // persist-until-confirmed contract (traits.rs): their durable
+        // rows must survive until the promote → confirm_drained chain
+        // erases them. The previous fail-closed `persist_delete_session`
+        // here (PR #486, guarding against hypothetical lock-free
+        // removers resurrecting an already-consumed stream) deleted a
+        // displaced session's rows mid-promotion, losing the queue on a
+        // crash. Every consuming path (take_session, complete_claim,
+        // confirm_drained) takes
+        // this stream lock, so the consumed-stream-resurrection concern
+        // cannot arise here; deletion stays owned by
+        // confirm_drained / the janitor. Worst case is an orphan
+        // snapshot row that restore_from_persistence rehydrates and the
+        // janitor later promotes — at-least-once, never data loss.
         Ok(false)
     }
 }

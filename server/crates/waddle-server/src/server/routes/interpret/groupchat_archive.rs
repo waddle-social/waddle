@@ -142,6 +142,9 @@ pub(super) struct ArchiveStoreResult {
 pub(super) async fn apply_groupchat_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    pending_storage: Option<
+        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+    >,
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
@@ -153,7 +156,13 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     // room (the archived `to` is the room JID) — never by the wire `id`
     // attribute or the origin-id. Keyed identically to the
     // validation-time `lookup_groupchat_retraction_target` so both sites
-    // agree.
+    // agree. The scrub target mirrors this: cached reflections match
+    // ONLY on `<stanza-id by=room id=target/>`, never on the
+    // client-chosen wire id (which any occupant could mint to collide).
+    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+        stanza_id: target_message_id.to_string(),
+        room: room.clone(),
+    };
     let original = match mam_storage.get_message(target_message_id).await {
         Ok(Some(row)) if row.to.to_bare() == *room => row,
         Ok(_) => {
@@ -211,8 +220,8 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             );
             scrub_unacked_for_tombstone(
                 sm_session_registry,
-                target_message_id,
-                &room.to_string(),
+                pending_storage,
+                &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -227,8 +236,8 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             );
             scrub_unacked_for_tombstone(
                 sm_session_registry,
-                target_message_id,
-                &room.to_string(),
+                pending_storage,
+                &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -245,49 +254,81 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     // (Codex P1, Copilot review on PR #305).
     scrub_unacked_for_tombstone(
         sm_session_registry,
-        target_message_id,
-        &room.to_string(),
+        pending_storage,
+        &scrub_target,
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
     true
 }
 
-/// Walk the SM session registry and drop every unacked outbound
-/// `<message/>` entry that matches a XEP-0424 / XEP-0425 tombstone.
-/// `target_id` is matched against either the cached message's wire
-/// `id` attribute or any XEP-0359 `<stanza-id id='…'/>` child, scoped
-/// to `archive_jid` so cross-conversation collateral damage is
-/// impossible. Returns silently on any registry error (logged at
-/// WARN) — the archive scrub has already happened, and dropping the
-/// in-flight copy is best-effort.
+/// Walk the SM session registry AND the pending-delivery store and
+/// drop every cached `<message/>` copy that matches a XEP-0424 /
+/// XEP-0425 tombstone. `target` carries the typed identity
+/// ([`waddle_xmpp::tombstone::TombstoneTarget`]): groupchat scrubs
+/// match only the room-assigned XEP-0359 stanza-id; 1:1 scrubs match
+/// the author's wire id only for messages FROM that author. Both are
+/// scoped to the conversation archive so cross-conversation (and
+/// cross-sender wire-id-collision) collateral damage is impossible.
+/// Returns silently on any storage error (logged at WARN) — the
+/// archive scrub has already happened, and dropping the in-flight
+/// copies is best-effort.
+///
+/// Both layers are scrubbed from the same call sites because
+/// promotion (#1097/#1098) moves unacked SM stanzas into
+/// pending_delivery: scrubbing only the SM registry would let a
+/// promoted copy deliver the retracted content verbatim at the
+/// recipient's next login.
 pub(super) async fn scrub_unacked_for_tombstone(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    target_id: &str,
-    archive_jid: &str,
+    pending_storage: Option<
+        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+    >,
+    target: &waddle_xmpp::tombstone::TombstoneTarget,
     site: &'static str,
 ) {
-    let Some(sm) = sm_session_registry else {
-        return;
-    };
-    use waddle_xmpp::stream_management::SmSessionRegistry as _;
-    match sm.scrub_unacked_for_tombstone(target_id, archive_jid).await {
-        Ok(removed) if removed > 0 => {
-            debug!(
-                target = target_id,
-                archive = archive_jid,
-                removed,
-                "{site}: scrubbed unacked SM queue entries for tombstoned message"
-            );
+    if let Some(sm) = sm_session_registry {
+        use waddle_xmpp::stream_management::SmSessionRegistry as _;
+        match sm.scrub_unacked_for_tombstone(target).await {
+            Ok(removed) if removed > 0 => {
+                debug!(
+                    target = target.id(),
+                    archive = %target.archive_jid(),
+                    removed,
+                    "{site}: scrubbed unacked SM queue entries for tombstoned message"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(
+                    target = target.id(),
+                    archive = %target.archive_jid(),
+                    %error,
+                    "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
+                );
+            }
         }
-        Ok(_) => {}
-        Err(error) => {
-            warn!(
-                target = target_id,
-                archive = archive_jid,
-                %error,
-                "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
-            );
+    }
+    if let Some(pending) = pending_storage {
+        match pending.scrub_for_tombstone(target).await {
+            Ok(removed) if removed > 0 => {
+                debug!(
+                    target = target.id(),
+                    archive = %target.archive_jid(),
+                    removed,
+                    "{site}: scrubbed pending_delivery rows for tombstoned message"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(
+                    target = target.id(),
+                    archive = %target.archive_jid(),
+                    %error,
+                    "{site}: pending_delivery scrub_for_tombstone failed; retracted \
+                     content may still deliver at the recipient's next login"
+                );
+            }
         }
     }
 }

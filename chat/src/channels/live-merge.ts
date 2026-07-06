@@ -72,10 +72,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * resolves targets strictly through the room-assigned stanza-id mirror
    * (`reactionTargetId`) and keeps occupant-keyed sender bookkeeping.
    */
-  function applyReaction(messageId: string, nick: string, emojis: string[], senderId: string = nick) {
+  function applyReaction(messageId: string, nick: string, emojis: string[], senderId: string = nick, occurredAt?: string) {
     const next = applyReactionUpdate(
       messages.value,
-      { targetId: messageId, nick, emojis, senderId },
+      { targetId: messageId, nick, emojis, senderId, ...(occurredAt ? { occurredAt } : {}) },
       channelReactionPolicy,
     );
     if (next) messages.value = next;

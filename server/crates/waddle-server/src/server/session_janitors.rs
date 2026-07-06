@@ -151,6 +151,11 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                      record_promotion_failure also failed; preserving \
                                      session state for retry"
                                 );
+                                crate::sm_promotion::reinsert_failed_session_for_retry(
+                                    &state.deps.protocol.sm_session_registry,
+                                    session,
+                                )
+                                .await;
                                 continue;
                             }
                         };
@@ -180,15 +185,45 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                              preserve fail-closed XEP-0191 policy. Durable SM row will \
                              be retried on the next janitor pass."
                         );
+                        // Make the retry promise true: drain_expired scans only
+                        // memory, so the drained session must go back into the
+                        // map for the next tick to see it.
+                        crate::sm_promotion::reinsert_failed_session_for_retry(
+                            &state.deps.protocol.sm_session_registry,
+                            session,
+                        )
+                        .await;
                         continue;
                     }
                 };
+                // Round-2 review R2 + round-3 finding 1: retractions
+                // racing this drain window are invisible to the registry
+                // scrub (the sessions are off both maps); fetch the
+                // recent-tombstone record PER SESSION, immediately
+                // before this session's promotion, so even a retraction
+                // landing mid-batch is still seen.
+                let recent_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+                    &state.deps.protocol.sm_session_registry,
+                    "SM janitor",
+                );
                 let summary = crate::sm_promotion::promote_session_unacked(
                     &session,
                     &state.deps.protocol.connection_registry,
                     &state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     state.deps.auth_state.xmpp_domain.as_str(),
+                    &recent_tombstones,
+                )
+                .await;
+                // Finding B (retraction-vs-promotion TOCTOU): a
+                // retraction recorded after the snapshot above raced
+                // this session's promotion — re-scrub the pending rows
+                // it may have just inserted BEFORE confirm_drained.
+                crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                    &state.deps.protocol.sm_session_registry,
+                    &state.deps.protocol.pending_delivery_storage,
+                    &recent_tombstones,
+                    "SM janitor",
                 )
                 .await;
                 if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
@@ -203,6 +238,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         dropped = summary.dropped,
                         not_promotable = summary.not_promotable,
                         unparseable = summary.unparseable,
+                        scrubbed = summary.scrubbed,
                         storage_failed = summary.storage_failed,
                         "SM janitor: Q6 promotion completed"
                     );
@@ -226,6 +262,12 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 "SM janitor: record_promotion_failure failed; \
                                  preserving session state for retry"
                             );
+                            crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                                &state.deps.protocol.sm_session_registry,
+                                session,
+                                &summary,
+                            )
+                            .await;
                             continue;
                         }
                     };
@@ -254,6 +296,12 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         "SM janitor: promotion had storage failures; \
                          preserving session state for retry"
                     );
+                    crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        &state.deps.protocol.sm_session_registry,
+                        session,
+                        &summary,
+                    )
+                    .await;
                     continue;
                 }
                 state
@@ -836,12 +884,30 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         continue;
                     }
                 };
+                // Round-2 review R2 + round-3 finding 1: per-session
+                // recent-tombstone fetch so a retraction landing
+                // mid-batch during the shutdown drain is still seen.
+                let recent_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    "Graceful shutdown",
+                );
                 let summary = crate::sm_promotion::promote_session_unacked(
                     &session,
                     &websocket_state.deps.protocol.connection_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     websocket_state.deps.auth_state.xmpp_domain.as_str(),
+                    &recent_tombstones,
+                )
+                .await;
+                // Finding B: same TOCTOU close-out as the SM janitor —
+                // re-scrub pending rows for tombstones recorded during
+                // this session's promotion window before confirming.
+                crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    &websocket_state.deps.protocol.pending_delivery_storage,
+                    &recent_tombstones,
+                    "Graceful shutdown",
                 )
                 .await;
                 info!(
@@ -851,6 +917,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     bounced = summary.bounced,
                     dropped = summary.dropped,
                     unparseable = summary.unparseable,
+                    scrubbed = summary.scrubbed,
                     storage_failed = summary.storage_failed,
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
@@ -1092,7 +1159,11 @@ pub(crate) async fn sweep_dormant_rooms_once(
                 continue;
             }
         };
-        let is_dormant = match actor.ask(IsDormant).await {
+        // Bounded ask: a hung room actor (e.g. wedged on hydration) must
+        // only skip its own check — timeout lands in the existing
+        // warn-and-skip arm, treating the room as not-dormant (never reap
+        // on uncertainty).
+        let is_dormant = match actor.ask(IsDormant).reply_timeout(REAPER_ASK_TIMEOUT).await {
             Ok(value) => value,
             Err(error) => {
                 warn!(

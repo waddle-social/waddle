@@ -67,10 +67,10 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * self reactions are attributed via the orchestrator-side
    * `peerNameFromJid` mapping in onReaction.)
    */
-  function applyReaction(messageId: string, nick: string, emojis: string[]) {
+  function applyReaction(messageId: string, nick: string, emojis: string[], occurredAt?: string) {
     const next = applyReactionUpdate(
       messages.value,
-      { targetId: messageId, nick, emojis, senderId: nick },
+      { targetId: messageId, nick, emojis, senderId: nick, ...(occurredAt ? { occurredAt } : {}) },
       dmReactionPolicy,
     );
     if (next) messages.value = next;
