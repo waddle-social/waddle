@@ -376,7 +376,10 @@ async fn run_heartbeat<L>(
 ) where
     L: KeypairSlotLease + Send + Sync + 'static,
 {
-    let mut timer = tokio::time::interval(interval);
+    // The slot was acquired (heartbeat stamped) moments ago, so the first
+    // renewal is deferred one full interval (`interval_at`) — same pattern
+    // as the allowlist refresh timer.
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
