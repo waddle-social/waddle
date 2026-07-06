@@ -458,32 +458,6 @@ fn hash_verification_string(verification_string: &str) -> String {
     BASE64.encode(result)
 }
 
-/// Build a `<c>` caps element for presence stanzas.
-///
-/// ## Arguments
-///
-/// * `node` - The node URL (e.g., "https://waddle.social/caps")
-/// * `identities` - Server/client identities for hash computation
-/// * `features` - Supported features for hash computation
-///
-/// ## Returns
-///
-/// A minidom Element containing the `<c>` element with computed hash.
-pub fn build_caps_element(node: &str, identities: &[Identity], features: &[Feature]) -> Element {
-    build_caps_element_with_extensions(node, identities, features, &[])
-}
-
-/// Build a `<c>` caps element whose `ver` accounts for XEP-0128 extensions.
-pub fn build_caps_element_with_extensions(
-    node: &str,
-    identities: &[Identity],
-    features: &[Feature],
-    extensions: &[Element],
-) -> Element {
-    let ver = compute_caps_hash_with_extensions(identities, features, extensions);
-    Caps::new(node, &ver).build_element()
-}
-
 /// Extract Caps from a presence stanza.
 pub fn extract_caps_from_presence(presence: &Element) -> Option<Caps> {
     presence

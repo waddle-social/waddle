@@ -1098,10 +1098,23 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
     admin.send(&presence).await.expect("second caps presence");
     admin.send(&presence).await.expect("third caps presence");
 
-    // FIFO anchor: everything the server emitted in response to the
-    // three presences is on the wire before the ping result. Collect
-    // every frame up to the anchor and count the disco#info queries
-    // among them.
+    // The disco#info query is emitted from the async caps-resolution path,
+    // so it is NOT FIFO-ordered against a ping anchor sent after the
+    // presences (issue #1188 flake). Wait for the query itself first, then
+    // anchor and assert no *further* query snuck out for the repeats.
+    let first_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("one disco#info query for the unresolved (hash, ver)");
+    assert!(
+        first_query.contains(&format!(r#"node='{node}#{ver}'"#)),
+        "query targets the advertised node#ver: {first_query}"
+    );
+
     admin
         .send(r#"<iq xmlns="jabber:client" type="get" id="caps-pending-anchor-1"><ping xmlns="urn:xmpp:ping"/></iq>"#)
         .await
@@ -1113,7 +1126,7 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
         .await
         .expect("frames up to ping anchor");
 
-    let disco_queries: Vec<&String> = frames
+    let extra_queries: Vec<&String> = frames
         .iter()
         .filter(|frame| {
             frame.contains("<iq")
@@ -1121,15 +1134,9 @@ async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
                 && frame.contains(NS_DISCO_INFO)
         })
         .collect();
-    assert_eq!(
-        disco_queries.len(),
-        1,
-        "exactly one disco#info may be in flight for a repeated (hash, ver): {disco_queries:?}"
-    );
     assert!(
-        disco_queries[0].contains(&format!(r#"node='{node}#{ver}'"#)),
-        "query targets the advertised node#ver: {}",
-        disco_queries[0]
+        extra_queries.is_empty(),
+        "exactly one disco#info may be in flight for a repeated (hash, ver); got extras: {extra_queries:?}"
     );
 
     let _ = admin.close().await;
@@ -1206,9 +1213,12 @@ async fn caps_element_in_broadcast_presence_is_the_publishing_clients_own() {
             && relayed.contains("8RovUdtOmiAjzj+xI7SK5BCw3A8="),
         "relayed presence must carry the client's own node/ver: {relayed}"
     );
-    assert!(
-        !relayed.contains("https://waddle.social/caps"),
-        "server caps must never be substituted into relayed user presence: {relayed}"
+    assert_eq!(
+        relayed
+            .matches("<c xmlns='http://jabber.org/protocol/caps'")
+            .count(),
+        1,
+        "relayed presence must carry exactly the client's own caps element: {relayed}"
     );
 
     let _ = bob.close().await;

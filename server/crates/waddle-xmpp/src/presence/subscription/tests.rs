@@ -176,19 +176,21 @@ fn test_build_subscription_presence() {
 }
 
 #[test]
-fn test_build_available_presence_includes_waddle_caps() {
+fn test_build_available_presence_adds_no_payloads() {
     let from: jid::FullJid = "user@example.com/resource".parse().unwrap();
     let to: BareJid = "contact@example.com".parse().unwrap();
 
     let pres = build_available_presence(&from, &to, Some("chat"), Some("Ready"), 5);
 
-    let caps = pres
-        .payloads
-        .iter()
-        .find(|payload| payload.name() == "c" && payload.ns() == crate::xep::NS_CAPS)
-        .expect("available presence must include caps");
-
-    assert_eq!(caps.attr("node"), Some(crate::xep::WADDLE_CAPS_NODE));
+    // Issue #1101: relayed user presence must never be decorated with
+    // server-owned payloads (the old wrapper injected the server's XEP-0115
+    // caps here). Payloads are the caller's responsibility — they attach the
+    // client's own stored extensions verbatim.
+    assert!(
+        pres.payloads.is_empty(),
+        "builder must not inject payloads: {:?}",
+        pres.payloads
+    );
 }
 
 #[test]

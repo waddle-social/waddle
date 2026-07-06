@@ -169,14 +169,25 @@ async fn websocket_full_jid_probe_returns_rich_resource_presence() {
             && probe.contains("<priority>7</priority>"),
         "full-JID probe must preserve rich resource presence: {probe}"
     );
+    // Alice sent no <c/>: the probe response must not add one either
+    // (issue #1101 — server caps were previously injected here).
+    assert!(
+        !probe.contains("http://jabber.org/protocol/caps"),
+        "server must not attach caps to a caps-less probe response: {probe}"
+    );
 
     let _ = bob.close().await;
     let _ = alice.close().await;
 }
 
-/// The Waddle server's own XEP-0115 caps node. Relayed *user* presence must
-/// never carry it — caps belong to the generating entity (XEP-0115 §1).
-const SERVER_CAPS_NODE: &str = "https://waddle.social/caps";
+/// Count the `<c` XEP-0115 caps elements in a raw frame. Relayed user
+/// presence must carry exactly the caps the client sent — never an extra
+/// server-injected one (caps belong to the generating entity, XEP-0115 §1).
+fn caps_element_count(frame: &str) -> usize {
+    frame
+        .matches("<c xmlns='http://jabber.org/protocol/caps'")
+        .count()
+}
 
 #[tokio::test]
 async fn websocket_presence_broadcast_relays_contacts_own_caps_not_servers() {
@@ -201,9 +212,10 @@ async fn websocket_presence_broadcast_relays_contacts_own_caps_not_servers() {
             && broadcast.contains("https://example.com/client"),
         "broadcast must carry the contact's own caps hash: {broadcast}"
     );
-    assert!(
-        !broadcast.contains(SERVER_CAPS_NODE),
-        "broadcast must not substitute the server's caps: {broadcast}"
+    assert_eq!(
+        caps_element_count(&broadcast),
+        1,
+        "broadcast must carry exactly the client's caps element, nothing extra: {broadcast}"
     );
 
     let _ = bob.close().await;
@@ -235,6 +247,13 @@ async fn websocket_presence_broadcast_relays_arbitrary_extensions_verbatim() {
     assert!(
         broadcast.contains("urn:xmpp:idle:1") && broadcast.contains("2026-07-06T10:00:00"),
         "XEP-0319 idle must survive relay without hand re-attachment: {broadcast}"
+    );
+    // Alice sent no <c/>: the relay must not add one either — the historical
+    // bug (ensure_caps_payload) only decorated caps-less presence, so this
+    // negative assertion is what actually pins it down.
+    assert!(
+        !broadcast.contains("http://jabber.org/protocol/caps"),
+        "server must not attach any caps to a caps-less relayed presence: {broadcast}"
     );
 
     let _ = bob.close().await;
@@ -274,9 +293,10 @@ async fn websocket_presence_probe_returns_contacts_own_caps_and_extensions() {
             && probe.contains("urn:example:future-extension:0"),
         "probe response must carry the contact's stored caps and extensions: {probe}"
     );
-    assert!(
-        !probe.contains(SERVER_CAPS_NODE),
-        "probe response must not substitute the server's caps: {probe}"
+    assert_eq!(
+        caps_element_count(&probe),
+        1,
+        "probe response must carry exactly the client's caps element, nothing extra: {probe}"
     );
 
     let _ = bob.close().await;
@@ -323,9 +343,10 @@ async fn websocket_subscription_approval_push_carries_contacts_own_payloads() {
             && pushed.contains("urn:example:future-extension:0"),
         "approval push must carry the contact's stored caps and extensions: {pushed}"
     );
-    assert!(
-        !pushed.contains(SERVER_CAPS_NODE),
-        "approval push must not substitute the server's caps: {pushed}"
+    assert_eq!(
+        caps_element_count(&pushed),
+        1,
+        "approval push must carry exactly the client's caps element, nothing extra: {pushed}"
     );
 
     let _ = bob.close().await;
