@@ -1617,10 +1617,50 @@ mod tests {
     }
 }
 
+/// Typed validation failure for `WADDLE_DB_*` (ADR-0017 element 12: pool
+/// capacity is planned, not discovered — a fat-fingered size fails startup
+/// instead of silently reverting to sqlx's own default).
+///
+/// Per the typed-payloads rule, error results are typed enums; `Display` is
+/// the human-facing startup diagnostic surfaced by
+/// [`DatabaseRuntimeConfig::from_env`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DatabaseRuntimeConfigError {
+    /// `WADDLE_DB_DRIVER` is not `sqlite`/`postgres`/`postgresql`.
+    #[error("invalid WADDLE_DB_DRIVER: {0}")]
+    InvalidDriver(String),
+    /// A `WADDLE_DB_*_POOL_SIZE` var is set but is not a base-10 unsigned
+    /// integer.
+    #[error("{key}='{value}' must be a positive integer")]
+    NotAnInteger { key: &'static str, value: String },
+    /// A pool size of 0 can never serve a connection.
+    #[error("{key}={value} must be at least 1")]
+    PoolSizeZero { key: &'static str, value: u32 },
+    /// `WADDLE_DATABASE_URL` or `WADDLE_DB_DRIVER` is set but blank
+    /// (empty or whitespace-only) after trimming. An empty-templated
+    /// secret/value in a Postgres deployment must fail loudly, never
+    /// silently fall back to the sqlite defaults — unset is the only
+    /// condition that takes the default.
+    #[error("{name} is set but empty; unset it to use the default, or provide a value")]
+    EmptyVar { name: &'static str },
+}
+
+/// Runtime database driver + DSN + pool-sizing contract, parsed from
+/// `WADDLE_DB_*`/`WADDLE_DATABASE_URL` (ADR-0017 element 12).
 #[derive(Debug, Clone)]
 pub struct DatabaseRuntimeConfig {
     pub driver: DatabaseDriver,
     pub database_url: String,
+    /// Main/shared pool connection cap (`WADDLE_DB_POOL_SIZE`, default
+    /// [`crate::db::DEFAULT_POOL_SIZE`]).
+    pub pool_size: u32,
+    /// Dedicated control-plane pool size (`WADDLE_DB_CONTROL_PLANE_POOL_SIZE`,
+    /// default [`crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE`]). Only used
+    /// when `driver` is Postgres — the clustering control plane has no
+    /// SQLite equivalent, so this value is parsed and validated regardless
+    /// of driver (a fat-fingered value should still fail fast) but is simply
+    /// unused by the SQLite path.
+    pub control_plane_pool_size: u32,
 }
 
 impl Default for DatabaseRuntimeConfig {
@@ -1628,27 +1668,222 @@ impl Default for DatabaseRuntimeConfig {
         Self {
             driver: DatabaseDriver::Sqlite,
             database_url: "sqlite::memory:".to_string(),
+            pool_size: crate::db::DEFAULT_POOL_SIZE,
+            control_plane_pool_size: crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE,
         }
     }
 }
 
 impl DatabaseRuntimeConfig {
-    pub fn from_env() -> Result<Self, String> {
-        let driver = std::env::var("WADDLE_DB_DRIVER")
-            .unwrap_or_else(|_| "sqlite".to_string())
-            .parse::<DatabaseDriver>()
-            .map_err(|e| format!("invalid WADDLE_DB_DRIVER: {}", e))?;
+    pub fn from_env() -> Result<Self, DatabaseRuntimeConfigError> {
+        Self::from_vars(std::env::vars())
+    }
 
-        let database_url = std::env::var("WADDLE_DATABASE_URL").unwrap_or_else(|_| match driver {
-            DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
-            DatabaseDriver::Postgres => {
-                "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, DatabaseRuntimeConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        // Unset falls back to the sqlite default; set-but-blank (empty or
+        // whitespace-only after trimming) is a typed error, never a silent
+        // fallback — an empty-templated secret in a Postgres deployment must
+        // never silently boot sqlite::memory:.
+        let driver = match vars.get("WADDLE_DB_DRIVER") {
+            None => DatabaseDriver::Sqlite,
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DB_DRIVER",
+                    });
+                }
+                trimmed
+                    .parse::<DatabaseDriver>()
+                    .map_err(|e| DatabaseRuntimeConfigError::InvalidDriver(e.to_string()))?
             }
-        });
+        };
+
+        let database_url = match vars.get("WADDLE_DATABASE_URL") {
+            None => match driver {
+                DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
+                DatabaseDriver::Postgres => {
+                    "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+                }
+            },
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DATABASE_URL",
+                    });
+                }
+                trimmed.to_string()
+            }
+        };
+
+        let pool_size =
+            db_pool_size_var(&vars, "WADDLE_DB_POOL_SIZE", crate::db::DEFAULT_POOL_SIZE)?;
+        let control_plane_pool_size = db_pool_size_var(
+            &vars,
+            "WADDLE_DB_CONTROL_PLANE_POOL_SIZE",
+            crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE,
+        )?;
 
         Ok(Self {
             driver,
             database_url,
+            pool_size,
+            control_plane_pool_size,
         })
+    }
+}
+
+/// Read a `WADDLE_DB_*_POOL_SIZE` var as `u32`, treating unset/blank as the
+/// default and rejecting zero (a zero-sized pool can never serve a
+/// connection).
+fn db_pool_size_var(
+    vars: &std::collections::HashMap<String, String>,
+    key: &'static str,
+    default: u32,
+) -> Result<u32, DatabaseRuntimeConfigError> {
+    match vars
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(default),
+        Some(raw) => {
+            let value =
+                raw.parse::<u32>()
+                    .map_err(|_| DatabaseRuntimeConfigError::NotAnInteger {
+                        key,
+                        value: raw.to_string(),
+                    })?;
+            if value == 0 {
+                return Err(DatabaseRuntimeConfigError::PoolSizeZero { key, value });
+            }
+            Ok(value)
+        }
+    }
+}
+
+#[cfg(test)]
+mod database_runtime_config_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sqlite_in_memory_with_historical_pool_sizes() {
+        let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.driver, DatabaseDriver::Sqlite);
+        assert_eq!(config.database_url, "sqlite::memory:");
+        assert_eq!(config.pool_size, crate::db::DEFAULT_POOL_SIZE);
+        assert_eq!(
+            config.control_plane_pool_size,
+            crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE
+        );
+    }
+
+    #[test]
+    fn parses_pool_size_overrides() {
+        let config = DatabaseRuntimeConfig::from_vars([
+            ("WADDLE_DB_DRIVER", "postgres"),
+            ("WADDLE_DB_POOL_SIZE", "25"),
+            ("WADDLE_DB_CONTROL_PLANE_POOL_SIZE", "6"),
+        ])
+        .unwrap();
+        assert_eq!(config.driver, DatabaseDriver::Postgres);
+        assert_eq!(config.pool_size, 25);
+        assert_eq!(config.control_plane_pool_size, 6);
+    }
+
+    #[test]
+    fn rejects_zero_pool_size() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_POOL_SIZE", "0")]).unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::PoolSizeZero {
+                key: "WADDLE_DB_POOL_SIZE",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_control_plane_pool_size() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_CONTROL_PLANE_POOL_SIZE", "0")])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::PoolSizeZero {
+                key: "WADDLE_DB_CONTROL_PLANE_POOL_SIZE",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_non_integer_pool_size() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_POOL_SIZE", "ten")]).unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::NotAnInteger {
+                key: "WADDLE_DB_POOL_SIZE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_driver() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_DRIVER", "mysql")]).unwrap_err();
+        assert!(matches!(err, DatabaseRuntimeConfigError::InvalidDriver(_)));
+    }
+
+    #[test]
+    fn rejects_empty_db_driver() {
+        for blank in ["", "  "] {
+            let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_DRIVER", blank)]).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DB_DRIVER"
+                    }
+                ),
+                "blank {blank:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_database_url() {
+        for blank in ["", "  "] {
+            let err =
+                DatabaseRuntimeConfig::from_vars([("WADDLE_DATABASE_URL", blank)]).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DATABASE_URL"
+                    }
+                ),
+                "blank {blank:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unset_db_driver_and_database_url_still_use_defaults() {
+        // Byte-for-byte-identical guarantee: unset (never set-but-blank)
+        // must still take the sqlite defaults.
+        let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.driver, DatabaseDriver::Sqlite);
+        assert_eq!(config.database_url, "sqlite::memory:");
     }
 }

@@ -12,9 +12,12 @@
 //! `now()`/interval SQL intact); it is only ever invoked on a Postgres
 //! deployment.
 //!
-//! The dedicated control-plane connection pool the ADR prescribes (element 4/12)
-//! lands with the Phase 3 ownership control plane; Phase 2's only control-plane
-//! traffic is this slot heartbeat.
+//! The dedicated control-plane connection pool the ADR prescribes (element
+//! 4/12) lands here (ADR-0017 Phase 3 Slice 0): [`PostgresKeypairSlotLease::heartbeat`]
+//! renews through [`Database::control_plane_guard`], so this per-node
+//! liveness beat never queues behind fenced bulk writes on the main pool.
+//! `acquire`/`release` are not the periodic liveness beat the pool split
+//! protects and stay on the main pool.
 
 use super::NodeId;
 use crate::db::{Database, DatabaseError};
@@ -194,7 +197,11 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
         slot: LeasedSlot,
         lease_ttl: Duration,
     ) -> Result<(), LeaseError> {
-        let conn = self.db.guard().await?;
+        // Runs on the dedicated control-plane pool (ADR-0017 element 4/12,
+        // Phase 3 Slice 0): this per-node liveness renewal must never queue
+        // behind fenced bulk writes, backstop fencing SELECTs, or claims-read
+        // storms on the main pool.
+        let conn = self.db.control_plane_guard().await?;
         // Freshness-gated renewal CAS (ADR element 4): renew only while we
         // still hold the slot under our epoch and the lease has not lapsed.
         let affected = conn
@@ -283,9 +290,13 @@ mod tests {
 
     async fn clean_store() -> Option<PostgresKeypairSlotLease> {
         let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        // `heartbeat` now renews through the control-plane pool, so the test
+        // database needs one provisioned exactly like production's global
+        // database does.
         let db = Database::from_config(
             "clustering-lease-test",
-            &DatabaseConfig::new(DatabaseDriver::Postgres, url),
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
         )
         .await
         .expect("open test postgres");

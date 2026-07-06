@@ -78,9 +78,15 @@ fn generate_pool() -> EnrolledPool {
 }
 
 async fn open_control_db(url: &str) -> Database {
+    // The test-process node (C) leases a keypair-pool slot and heartbeats it
+    // exactly like a production pod, so it needs the same dedicated
+    // control-plane pool `swarm::spawn`'s `run_heartbeat` renews through
+    // (ADR-0017 element 4/12, Phase 3 Slice 0) — otherwise every renewal
+    // would error and self-fence this node almost immediately.
     Database::from_config(
         "clustering-e2e-harness",
-        &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string()),
+        &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string())
+            .with_control_plane_pool(waddle_server::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
     )
     .await
     .expect("open harness postgres")

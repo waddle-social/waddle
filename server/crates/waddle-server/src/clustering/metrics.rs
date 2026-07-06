@@ -8,6 +8,11 @@
 //!   `RoutingUpdated` events — the `kademlia` field itself is private in kameo
 //!   0.20, so this is the peer set we have seen enter the routing table), and
 //! - a bootstrap-dial retry counter.
+//!
+//! ADR-0017 Phase 3's element-12 load-model instruments (routing-cache
+//! hit/miss, NotOwner NACK sent/received, claims-table point-read rate) land
+//! here alongside their first callers in Slices 1-3, per the repo's dead-code
+//! hard rule — not forward-declared ahead of time.
 
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use std::sync::OnceLock;

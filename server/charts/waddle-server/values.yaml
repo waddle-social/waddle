@@ -109,6 +109,14 @@ database:
   xmppMamUrl: ""
   xmppInboxUrl: ""
   xmppPubsubUrl: ""
+  # Main/shared pool connection cap (ADR-0017 element 12). Matches the
+  # historical hardcoded sqlx `.max_connections(10)`.
+  poolSize: 10
+  # Dedicated control-plane pool size (ADR-0017 element 4/12) — hosts only
+  # node/claim liveness statements (keypair-slot lease heartbeat, claims CAS).
+  # Only opened when clustering.enabled is true on a Postgres deployment; a
+  # small default since this pool never carries bulk writes.
+  controlPlanePoolSize: 4
 
 xmpp:
   enabled: true

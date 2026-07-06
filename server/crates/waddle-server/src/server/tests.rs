@@ -374,6 +374,7 @@ fn push_service_durability_guard_rejects_sqlite_memory_urls() {
     let runtime = |database_url: &str| crate::config::DatabaseRuntimeConfig {
         driver: crate::db::DatabaseDriver::Sqlite,
         database_url: database_url.to_string(),
+        ..Default::default()
     };
 
     for database_url in [
@@ -398,6 +399,7 @@ fn push_service_durability_guard_rejects_sqlite_memory_urls() {
         &crate::config::DatabaseRuntimeConfig {
             driver: crate::db::DatabaseDriver::Postgres,
             database_url: "postgres://postgres:postgres@localhost/waddle".to_string(),
+            ..Default::default()
         }
     ));
 }

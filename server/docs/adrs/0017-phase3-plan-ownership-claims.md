@@ -337,19 +337,32 @@ backstop fencing SELECT queuing on the control-plane pool would violate element 
 letting fenced-write contention degrade lease liveness, the exact metastable failure
 this pool split exists to prevent. Slices 4, 7, and 8 below state this pool
 assignment explicitly at their own dependency sections so it isn't left implicit
-per-slice. Metrics: routing-cache hit/miss, NotOwner NACK (sent/received, by entity
-type), claims-table point-read rate — all named in element 12's load model — get their
-counter/gauge definitions here even though most only get non-zero readings once
-Slice 1+ lands, following the `clustering/metrics.rs` OTel-pattern already established
-in Phase 2 Slice 1.
+per-slice. Metrics (blocker fix — corrects a dead-code-forward-declaration
+contradiction in the original draft): routing-cache hit/miss, NotOwner NACK
+(sent/received, by entity type), and claims-table point-read rate — all named in
+element 12's load model — do **not** get their counter/gauge definitions here. The
+repo's dead-code hard rule prefers landing an instrument with its first caller over
+`pub`-widening a forward-declared-but-uncalled function, so each instrument lands in
+`clustering/metrics.rs` alongside the Slice 1-3 code that actually calls it (see
+Slice 1's Files line) rather than ahead of time in this slice.
 
 **Files**: `server/crates/waddle-server/src/db/backend.rs` (both adapters), `server/
 crates/waddle-server/src/db/mod.rs` (or wherever `DatabaseConfig` lives — control-plane
-pool field + accessor), `server/crates/waddle-server/src/config.rs` (Helm-surfaced
+pool field + accessor, plus a `pool_size`/`control_plane_pool.size >= 1` guard so a
+misconfigured zero fails construction immediately instead of hanging on sqlx's
+`acquire_timeout`), `server/crates/waddle-server/src/config.rs` (Helm-surfaced
 `pool_size` + control-plane pool size env vars, same `from_env`/typed-error pattern),
-`server/crates/waddle-server/src/clustering/metrics.rs` (new counters/gauges), `server/
-crates/waddle-server/src/clustering/lease.rs` (heartbeat moves to the control-plane
+`server/crates/waddle-server/src/clustering/lease.rs` (heartbeat moves to the control-plane
 pool — a small, behavior-preserving edit).
+
+**Gating (blocker fix — corrects an eager-provisioning contradiction in the original
+draft)**: the control-plane pool is opened only when the configured driver is Postgres
+**AND** `clustering.enabled` is true, wired at the `main.rs` call site that builds
+`DatabaseConfig` from `DatabaseRuntimeConfig` + `ServerConfig`. Every non-clustered
+Postgres deployment (the common case today) has no code path that issues a
+control-plane statement, so provisioning the pool anyway would only hold idle
+connections against the database and expose server startup to a transient failure on
+a second connect-validate — for a feature that specific deployment never requested.
 
 **Tests**: unit tests for config parsing/defaults (mirrors existing `ClusteringConfig`
 test style); a Postgres-gated test asserting the control-plane pool is a distinct
@@ -523,7 +536,10 @@ resume call sites exist), `server/crates/waddle-server/src/clustering/claims.rs`
 `#[cfg(feature = "clustering")]`, `PostgresClaimStore` — schema +
 Acquire/Steal-stale/Steal-consent + advisory `fence`/`release`/`release_many`, running
 on the Slice 0 control-plane pool), `server/crates/waddle-server/src/
-clustering/mod.rs` (`pub mod claims;`), `server/crates/waddle-xmpp/src/
+clustering/mod.rs` (`pub mod claims;`), `server/crates/waddle-server/src/
+clustering/metrics.rs` (gains the claims-table point-read and `NotOwner` NACK
+sent/received counters alongside their first callers here — see Slice 0's note),
+`server/crates/waddle-xmpp/src/
 stream_management/session_registry/claims.rs` + `core.rs` (retrofit onto `Arc<dyn
 ClaimStore>`, per Q2).
 

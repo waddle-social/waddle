@@ -39,7 +39,21 @@ async fn main() -> Result<()> {
         driver = ?db_runtime.driver,
         "Using configured database runtime"
     );
-    let db_config = db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
+    // The dedicated control-plane pool (ADR-0017 element 4/12) hosts only
+    // node/claim liveness statements (the keypair-slot lease heartbeat, and —
+    // from Phase 3 Slice 1 — the claims CAS), which no code path issues
+    // unless clustering is actually running. Provisioning it on every
+    // Postgres deployment regardless of `clustering.enabled` would open and
+    // connect-validate a second pool nothing uses, holding idle connections
+    // against the database for a feature never requested, and a transient
+    // failure on that second connect would fail startup for that same unused
+    // feature. So it is gated on BOTH the configured driver being Postgres
+    // AND clustering being enabled for this run.
+    let mut db_config = db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
+    db_config.pool_size = db_runtime.pool_size;
+    if db_runtime.driver == db::DatabaseDriver::Postgres && server_config.clustering.enabled {
+        db_config = db_config.with_control_plane_pool(db_runtime.control_plane_pool_size);
+    }
 
     let pool_config = db::PoolConfig;
     let db_pool = db::DatabasePool::new(db_config, pool_config)

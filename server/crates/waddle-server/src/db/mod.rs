@@ -47,13 +47,76 @@ pub enum DatabaseError {
 
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
+
+    /// `DatabaseConfig::control_plane_pool` was set on a non-Postgres
+    /// config. The clustering control plane (ADR-0017 element 4/12) has no
+    /// SQLite equivalent — clustering itself requires Postgres — so a
+    /// control-plane pool on any other driver is a caller bug, not an
+    /// environmental failure.
+    #[error(
+        "control-plane pool configured for non-Postgres driver: the clustering control plane \
+         has no SQLite equivalent (ADR-0017 Phase 3)"
+    )]
+    ControlPlanePoolRequiresPostgres,
+
+    /// [`Database::control_plane_guard`] was called on a `Database` opened
+    /// without a control-plane pool (`DatabaseConfig::control_plane_pool` was
+    /// `None`).
+    #[error(
+        "control-plane pool not configured for this database (set \
+         DatabaseConfig::control_plane_pool)"
+    )]
+    ControlPlanePoolUnavailable,
+
+    /// `DatabaseConfig::pool_size` or `ControlPlanePoolConfig::size` was 0.
+    /// A zero-sized pool can never serve a connection: left unchecked, the
+    /// first query against it would instead hang for sqlx's ~30s
+    /// `acquire_timeout` before failing — this rejects the config at
+    /// construction time instead.
+    #[error("{which} pool size must be at least 1 (got 0)")]
+    PoolSizeZero { which: &'static str },
 }
+
+/// Default main-pool connection cap, preserving the behavior that was
+/// hardcoded at both adapters' `.max_connections(10)` before this field
+/// existed (ADR-0017 element 12).
+pub const DEFAULT_POOL_SIZE: u32 = 10;
+
+/// Sizing for the ADR-0017 Phase 3 control-plane pool (element 4/12): a
+/// second, independently-sized pool so node/claim liveness statements
+/// (keypair-slot lease heartbeat, and — from Slice 1 — the claims CAS) never
+/// queue behind fenced bulk writes, backstop fencing SELECTs, claims-read
+/// storms, or janitor batches on the main pool. Constructed via the same
+/// [`DatabaseAdapter`]/`connect_backend` machinery as the main pool — no
+/// separate connection-management type.
+///
+/// Postgres-only: the clustering control plane has no SQLite equivalent
+/// (clustering itself requires Postgres), so `DatabaseConfig::control_plane_pool`
+/// must be `None` whenever `driver` is [`DatabaseDriver::Sqlite`] —
+/// [`Database::from_config`] rejects the combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlPlanePoolConfig {
+    pub size: u32,
+}
+
+/// Default control-plane pool size (small — this pool only ever carries
+/// single-statement CAS/heartbeat traffic, never bulk writes).
+pub const DEFAULT_CONTROL_PLANE_POOL_SIZE: u32 = 4;
 
 /// Configuration for database connections.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     pub driver: DatabaseDriver,
     pub database_url: String,
+    /// Main/shared pool connection cap (ADR-0017 element 12). Default
+    /// [`DEFAULT_POOL_SIZE`], preserving today's hardcoded behavior.
+    pub pool_size: u32,
+    /// Dedicated control-plane pool, if this `Database` should provision
+    /// one. `None` (the default) means no control-plane pool is opened —
+    /// only the production global database sets this, and only when the
+    /// driver is Postgres AND clustering is enabled (see `main.rs`); no code
+    /// path issues control-plane statements otherwise.
+    pub control_plane_pool: Option<ControlPlanePoolConfig>,
 }
 
 impl Default for DatabaseConfig {
@@ -61,6 +124,8 @@ impl Default for DatabaseConfig {
         Self {
             driver: DatabaseDriver::Sqlite,
             database_url: "sqlite::memory:".to_string(),
+            pool_size: DEFAULT_POOL_SIZE,
+            control_plane_pool: None,
         }
     }
 }
@@ -70,7 +135,17 @@ impl DatabaseConfig {
         Self {
             driver,
             database_url: database_url.into(),
+            pool_size: DEFAULT_POOL_SIZE,
+            control_plane_pool: None,
         }
+    }
+
+    /// Provision a dedicated control-plane pool alongside the main pool.
+    /// Postgres-only — see [`ControlPlanePoolConfig`]; [`Database::from_config`]
+    /// rejects this combined with a non-Postgres `driver`.
+    pub fn with_control_plane_pool(mut self, size: u32) -> Self {
+        self.control_plane_pool = Some(ControlPlanePoolConfig { size });
+        self
     }
 }
 
@@ -78,6 +153,10 @@ impl DatabaseConfig {
 #[derive(Clone, kameo::Reply)]
 pub struct Database {
     backend: DatabaseBackend,
+    /// The dedicated control-plane pool (ADR-0017 element 4/12), present
+    /// only when [`DatabaseConfig::control_plane_pool`] was set. Hosts only
+    /// node/claim liveness statements — see [`Database::control_plane_guard`].
+    control_plane_backend: Option<DatabaseBackend>,
     name: String,
     driver: DatabaseDriver,
 }
@@ -109,17 +188,42 @@ impl Database {
 
     #[instrument(skip_all, fields(name = %name))]
     pub async fn from_config(name: &str, config: &DatabaseConfig) -> Result<Self, DatabaseError> {
+        if config.control_plane_pool.is_some() && config.driver != DatabaseDriver::Postgres {
+            return Err(DatabaseError::ControlPlanePoolRequiresPostgres);
+        }
+        if config.pool_size == 0 {
+            return Err(DatabaseError::PoolSizeZero { which: "main" });
+        }
+        if let Some(ControlPlanePoolConfig { size }) = config.control_plane_pool {
+            if size == 0 {
+                return Err(DatabaseError::PoolSizeZero {
+                    which: "control-plane",
+                });
+            }
+        }
+
         debug!(driver = ?config.driver, "Opening database");
-        let backend = connect_backend(config.driver, &config.database_url).await?;
+        let backend =
+            connect_backend(config.driver, &config.database_url, config.pool_size).await?;
+
+        let control_plane_backend = match config.control_plane_pool {
+            Some(ControlPlanePoolConfig { size }) => {
+                Some(connect_backend(config.driver, &config.database_url, size).await?)
+            }
+            None => None,
+        };
 
         info!(
             name = %name,
             driver = ?config.driver,
+            pool_size = config.pool_size,
+            control_plane_pool_size = config.control_plane_pool.map(|p| p.size),
             "Opened database"
         );
 
         Ok(Self {
             backend,
+            control_plane_backend,
             name: name.to_string(),
             driver: config.driver,
         })
@@ -127,6 +231,22 @@ impl Database {
 
     pub async fn guard(&self) -> Result<ConnectionGuard, DatabaseError> {
         Ok(ConnectionGuard::new(self.backend.clone()))
+    }
+
+    /// A `ConnectionGuard` against the dedicated control-plane pool (ADR-0017
+    /// element 4/12), for node/claim liveness statements only — the keypair
+    /// -slot lease heartbeat, and (from Slice 1) the claims CAS. Never for
+    /// fenced write transactions or their fencing `SELECT ... FOR SHARE`,
+    /// which must share the *same* connection as the write they guard and so
+    /// always run on the main pool via [`Database::begin`].
+    ///
+    /// Errs with [`DatabaseError::ControlPlanePoolUnavailable`] if this
+    /// `Database` was opened without a control-plane pool.
+    pub async fn control_plane_guard(&self) -> Result<ConnectionGuard, DatabaseError> {
+        match &self.control_plane_backend {
+            Some(backend) => Ok(ConnectionGuard::new(backend.clone())),
+            None => Err(DatabaseError::ControlPlanePoolUnavailable),
+        }
     }
 
     /// Begin a database transaction.
@@ -185,6 +305,118 @@ mod tests {
     async fn test_in_memory_database() {
         let db = Database::in_memory("test").await.unwrap();
         assert_eq!(db.name(), "test");
+    }
+
+    #[test]
+    fn database_config_defaults_preserve_historical_pool_size() {
+        // Byte-for-byte-identical guarantee: before `pool_size` existed both
+        // adapters hardcoded `.max_connections(10)` — the default must not
+        // silently change that for existing deployments.
+        let config = DatabaseConfig::default();
+        assert_eq!(config.pool_size, DEFAULT_POOL_SIZE);
+        assert_eq!(DEFAULT_POOL_SIZE, 10);
+        assert!(config.control_plane_pool.is_none());
+    }
+
+    #[test]
+    fn database_config_new_defaults_have_no_control_plane_pool() {
+        let config = DatabaseConfig::new(DatabaseDriver::Postgres, "postgres://example");
+        assert_eq!(config.pool_size, DEFAULT_POOL_SIZE);
+        assert!(config.control_plane_pool.is_none());
+    }
+
+    #[test]
+    fn with_control_plane_pool_sets_the_configured_size() {
+        let config = DatabaseConfig::new(DatabaseDriver::Postgres, "postgres://example")
+            .with_control_plane_pool(4);
+        assert_eq!(
+            config.control_plane_pool,
+            Some(ControlPlanePoolConfig { size: 4 })
+        );
+    }
+
+    #[tokio::test]
+    async fn control_plane_pool_requires_postgres() {
+        // `Database` intentionally does not implement `Debug` (it would leak
+        // a live SQLx pool handle into `{:?}` output), so this asserts via
+        // `match` rather than `expect_err`/`unwrap_err` (both require `T:
+        // Debug` on the `Ok` type).
+        let config = DatabaseConfig::new(DatabaseDriver::Sqlite, "sqlite::memory:")
+            .with_control_plane_pool(4);
+        match Database::from_config("bad-control-plane", &config).await {
+            Err(DatabaseError::ControlPlanePoolRequiresPostgres) => {}
+            Err(other) => panic!("expected ControlPlanePoolRequiresPostgres, got {other}"),
+            Ok(_) => panic!("SQLite + control-plane pool must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn from_config_rejects_zero_main_pool_size() {
+        let mut config = DatabaseConfig::new(DatabaseDriver::Sqlite, "sqlite::memory:");
+        config.pool_size = 0;
+        match Database::from_config("zero-main-pool", &config).await {
+            Err(DatabaseError::PoolSizeZero { which: "main" }) => {}
+            Err(other) => panic!("expected PoolSizeZero(main), got {other}"),
+            Ok(_) => panic!("zero main pool size must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn from_config_rejects_zero_control_plane_pool_size() {
+        let config = DatabaseConfig::new(DatabaseDriver::Postgres, "postgres://example")
+            .with_control_plane_pool(0);
+        match Database::from_config("zero-control-plane-pool", &config).await {
+            Err(DatabaseError::PoolSizeZero {
+                which: "control-plane",
+            }) => {}
+            Err(other) => panic!("expected PoolSizeZero(control-plane), got {other}"),
+            Ok(_) => panic!("zero control-plane pool size must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn control_plane_guard_errors_when_not_configured() {
+        let db = Database::in_memory("test").await.unwrap();
+        match db.control_plane_guard().await {
+            Err(DatabaseError::ControlPlanePoolUnavailable) => {}
+            Err(other) => panic!("expected ControlPlanePoolUnavailable, got {other}"),
+            Ok(_) => panic!("no control-plane pool was configured"),
+        }
+    }
+
+    // Postgres-gated: the control-plane CAS has no SQLite equivalent, so this
+    // is skipped unless `WADDLE_TEST_POSTGRES_URL` points at a Postgres —
+    // mirroring `clustering::lease`'s test convention.
+    #[tokio::test]
+    async fn control_plane_pool_is_distinct_from_main_pool() {
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let config = DatabaseConfig::new(DatabaseDriver::Postgres, url)
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE);
+        let db = Database::from_config("control-plane-pool-test", &config)
+            .await
+            .expect("open test postgres");
+
+        let main_max = match &db.backend {
+            DatabaseBackend::Postgres(pool) => pool.options().get_max_connections(),
+            DatabaseBackend::Sqlite(_) => panic!("expected a Postgres main backend"),
+        };
+        let control_max = match db
+            .control_plane_backend
+            .as_ref()
+            .expect("control-plane pool was configured")
+        {
+            DatabaseBackend::Postgres(pool) => pool.options().get_max_connections(),
+            DatabaseBackend::Sqlite(_) => panic!("expected a Postgres control-plane backend"),
+        };
+
+        assert_eq!(main_max, DEFAULT_POOL_SIZE);
+        assert_eq!(control_max, DEFAULT_CONTROL_PLANE_POOL_SIZE);
+        assert_ne!(
+            main_max, control_max,
+            "control-plane pool must be a distinct PgPool from the main pool"
+        );
     }
 
     #[tokio::test]
