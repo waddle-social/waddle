@@ -215,6 +215,17 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     &recent_tombstones,
                 )
                 .await;
+                // Finding B (retraction-vs-promotion TOCTOU): a
+                // retraction recorded after the snapshot above raced
+                // this session's promotion — re-scrub the pending rows
+                // it may have just inserted BEFORE confirm_drained.
+                crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                    &state.deps.protocol.sm_session_registry,
+                    &state.deps.protocol.pending_delivery_storage,
+                    &recent_tombstones,
+                    "SM janitor",
+                )
+                .await;
                 if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
                     > 0
                     || summary.storage_failed > 0
@@ -887,6 +898,16 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     &blocklist,
                     websocket_state.deps.auth_state.xmpp_domain.as_str(),
                     &recent_tombstones,
+                )
+                .await;
+                // Finding B: same TOCTOU close-out as the SM janitor —
+                // re-scrub pending rows for tombstones recorded during
+                // this session's promotion window before confirming.
+                crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    &websocket_state.deps.protocol.pending_delivery_storage,
+                    &recent_tombstones,
+                    "Graceful shutdown",
                 )
                 .await;
                 info!(

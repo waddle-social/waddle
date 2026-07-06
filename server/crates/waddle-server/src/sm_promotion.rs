@@ -119,20 +119,16 @@ pub async fn promote_session_unacked(
         recent_tombstones
             .iter()
             .flat_map(|record| {
-                waddle_xmpp::tombstone::matching_tombstone_sequences(
-                    &entries,
-                    &record.key.target_id,
-                    &record.key.archive_jid,
-                )
-                .into_iter()
-                .filter(|sequence| {
-                    receipt_by_sequence
-                        .get(sequence)
-                        .is_some_and(|received_at| {
-                            *received_at <= record.recorded_at_utc + TOMBSTONE_CLOCK_SKEW_SLACK
-                        })
-                })
-                .collect::<Vec<u32>>()
+                waddle_xmpp::tombstone::matching_tombstone_sequences(&entries, &record.key)
+                    .into_iter()
+                    .filter(|sequence| {
+                        receipt_by_sequence
+                            .get(sequence)
+                            .is_some_and(|received_at| {
+                                *received_at <= record.recorded_at_utc + TOMBSTONE_CLOCK_SKEW_SLACK
+                            })
+                    })
+                    .collect::<Vec<u32>>()
             })
             .collect()
     };
@@ -303,6 +299,70 @@ pub fn recent_tombstones_for_promotion(
     }
 }
 
+/// Close the retraction-vs-promotion TOCTOU (adversarial-review
+/// finding B): the recent-tombstone snapshot is fetched BEFORE
+/// `promote_session_unacked`. A retraction landing after that fetch
+/// finds the session off both registry maps (scrub phases 1-4 see
+/// nothing in memory; the pending row is not inserted yet), and the
+/// promotion then writes the retracted stanza into `pending_delivery`
+/// — delivered verbatim at the next login once `confirm_drained`
+/// erased the SM rows.
+///
+/// Called after `promote_session_unacked` returns and BEFORE
+/// `confirm_drained`: re-read the recent tombstones and, for every
+/// record NOT present in the pre-promotion snapshot (i.e. recorded
+/// during the promotion window), run the pending-delivery scrub so the
+/// just-inserted rows are removed again. Idempotent and best-effort —
+/// a scrub failure is logged; the row also stays covered by the
+/// interpret-layer scrub retry semantics.
+pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    pending_storage: &Arc<dyn PendingDeliveryStorage>,
+    pre_promotion: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
+    context: &'static str,
+) {
+    let post_promotion = match sm_registry.recent_tombstones() {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                context,
+                "post-promotion recent-tombstone read failed; a retraction that \
+                 raced this promotion window may deliver at next login"
+            );
+            return;
+        }
+    };
+    for record in post_promotion
+        .iter()
+        .filter(|record| !pre_promotion.contains(record))
+    {
+        match pending_storage.scrub_for_tombstone(&record.key).await {
+            Ok(removed) if removed > 0 => {
+                debug!(
+                    target = record.key.id(),
+                    archive = %record.key.archive_jid(),
+                    removed,
+                    context,
+                    "post-promotion re-check: scrubbed pending rows for a \
+                     tombstone recorded mid-promotion"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target = record.key.id(),
+                    archive = %record.key.archive_jid(),
+                    %error,
+                    context,
+                    "post-promotion re-check: pending scrub failed; retracted \
+                     content may deliver at the recipient's next login"
+                );
+            }
+        }
+    }
+}
+
 pub async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
@@ -357,6 +417,16 @@ pub async fn promote_displaced_sessions(
             &blocklist,
             deps.server_domain,
             &recent_tombstones,
+        )
+        .await;
+        // Finding B: a retraction recorded AFTER the snapshot above
+        // raced this session's promotion — re-scrub pending rows
+        // before the drain is confirmed (or the session reinserted).
+        scrub_pending_for_tombstones_recorded_during_promotion(
+            deps.sm_registry,
+            deps.pending_storage,
+            &recent_tombstones,
+            "displaced SM promotion",
         )
         .await;
         if summary.has_storage_failure() {

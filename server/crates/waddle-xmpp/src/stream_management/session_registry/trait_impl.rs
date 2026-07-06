@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::core::InMemorySmSessionRegistry;
 use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
-use crate::tombstone::matching_tombstone_sequences;
+use crate::tombstone::{matching_tombstone_sequences, TombstoneTarget};
 
 #[async_trait]
 impl SmSessionRegistry for InMemorySmSessionRegistry {
@@ -84,7 +84,40 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // append snapshots until the initial snapshot has landed; otherwise a
         // concurrent append can persist a newer queue and then get overwritten
         // by this stale first snapshot.
-        self.persist_detached_session_snapshot(&session).await?;
+        //
+        // Displaced-session limbo guard: at this point the displaced
+        // sessions are already off both maps. If the snapshot write
+        // fails we return Err and the caller drops the displaced vec —
+        // without re-insertion their durable rows would be stranded
+        // (invisible to drain_expired, which scans memory only) until
+        // a restart. Re-insert them as expired-for-retry BEFORE
+        // propagating the error so the SM-expiry janitor's next pass
+        // runs their promote → confirm chain. The map insert happens
+        // WITHOUT taking each displaced stream's shard lock — we hold
+        // this stream's shard lock, and two crossed store_session
+        // calls re-inserting each other's displaced sessions would
+        // otherwise deadlock.
+        if let Err(error) = self.persist_detached_session_snapshot(&session).await {
+            for displaced_session in displaced {
+                if displaced_session.stream_id == stream_id {
+                    // Already (re)inserted above as the new session's
+                    // map entry; taking it through the retry path would
+                    // clobber that entry.
+                    continue;
+                }
+                let displaced_stream_id = displaced_session.stream_id.clone();
+                if let Err(reinsert_error) = self.reinsert_for_retry_unlocked(displaced_session) {
+                    warn!(
+                        stream_id = %displaced_stream_id,
+                        error = %reinsert_error,
+                        "store_session: snapshot write failed and re-inserting a \
+                         displaced session for retry also failed; its durable rows \
+                         are stranded until restart"
+                    );
+                }
+            }
+            return Err(error);
+        }
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
         Ok(displaced)
@@ -216,15 +249,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
 
     async fn scrub_unacked_for_tombstone(
         &self,
-        target_id: &str,
-        archive_jid: &jid::BareJid,
+        target: &TombstoneTarget,
     ) -> Result<usize, SmRegistryError> {
         // Phase 0 (round-2 review R2): record the tombstone identity
         // BEFORE any scrub phase runs so a promotion already holding a
         // drained copy of a session (off both maps, pending row not
         // yet inserted) re-checks it and drops matching stanzas
         // instead of delivering retracted content on the next login.
-        self.record_recent_tombstone(target_id, archive_jid)?;
+        self.record_recent_tombstone(target)?;
         // Phase 1 (issue #1145 lock-scope fix): snapshot every queue
         // under READ locks only. XML parsing of every entry used to
         // run under the sessions write lock, stalling all detach /
@@ -268,7 +300,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // exact (stream_id, sequence) pairs below is safe regardless.
         let mut matched: Vec<(String, Vec<u32>)> = Vec::new();
         for (stream_id, entries) in snapshots {
-            let sequences = matching_tombstone_sequences(&entries, target_id, archive_jid);
+            let sequences = matching_tombstone_sequences(&entries, target);
             if !sequences.is_empty() {
                 matched.push((stream_id, sequences));
             }
@@ -383,13 +415,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 }
                 let sequences: Vec<u32> = unacked
                     .iter()
-                    .filter(|entry| {
-                        crate::tombstone::message_element_matches_tombstone(
-                            &entry.stanza.to_element(),
-                            target_id,
-                            archive_jid,
-                        )
-                    })
+                    .filter(|entry| target.matches_message_element(&entry.stanza.to_element()))
                     .map(|entry| entry.sequence)
                     .collect();
                 if sequences.is_empty() {

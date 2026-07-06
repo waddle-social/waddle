@@ -232,19 +232,18 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// login. Matching mirrors [`crate::tombstone`]:
     ///
     /// - `Transient` rows carry the message inline — matched by the
-    ///   shared per-stanza predicate
-    ///   ([`crate::tombstone::message_element_matches_tombstone`]:
-    ///   wire `id` or XEP-0359 `<stanza-id/>` equals `target_id`,
-    ///   scoped to `archive_jid` via bare-JID `from`/`to`).
+    ///   shared typed predicate
+    ///   ([`crate::tombstone::TombstoneTarget::matches_message_element`]:
+    ///   room stanza-id for groupchat, author-scoped wire id for 1:1,
+    ///   both scoped to the conversation archive).
     /// - `Archived` rows are MAM pointers — matched by exact
-    ///   `(stanza_id.id == target_id, stanza_id.by bare-equals
-    ///   archive_jid)`; the MAM row itself has been tombstoned, so the
-    ///   pointer must not flush a stub for a message the recipient
-    ///   never saw.
+    ///   `(stanza_id.id == target.id(), stanza_id.by bare-equals
+    ///   target.archive_jid())`; the MAM row itself has been
+    ///   tombstoned, so the pointer must not flush a stub for a
+    ///   message the recipient never saw.
     async fn scrub_for_tombstone(
         &self,
-        target_id: &str,
-        archive_jid: &BareJid,
+        target: &crate::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError>;
 
     /// Periodically GC backend-internal bookkeeping that grows with
@@ -263,16 +262,15 @@ pub trait PendingDeliveryStorage: Send + Sync {
 /// with the same semantics).
 pub fn pending_row_matches_tombstone(
     row: &PendingRow,
-    target_id: &str,
-    archive_jid: &BareJid,
+    target: &crate::tombstone::TombstoneTarget,
 ) -> bool {
     match &row.payload {
         super::PendingPayload::Transient(message) => {
             let element: xmpp_parsers::minidom::Element = (**message).clone().into();
-            crate::tombstone::message_element_matches_tombstone(&element, target_id, archive_jid)
+            target.matches_message_element(&element)
         }
         super::PendingPayload::Archived(stanza_id) => {
-            stanza_id.id.as_str() == target_id && &stanza_id.by.to_bare() == archive_jid
+            stanza_id.id.as_str() == target.id() && &stanza_id.by.to_bare() == target.archive_jid()
         }
     }
 }
@@ -697,8 +695,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
 
     async fn scrub_for_tombstone(
         &self,
-        target_id: &str,
-        archive_jid: &BareJid,
+        target: &crate::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError> {
         let mut guard = self
             .inner
@@ -709,7 +706,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         for queue in guard.values_mut() {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
-                if pending_row_matches_tombstone(&row, target_id, archive_jid) {
+                if pending_row_matches_tombstone(&row, target) {
                     removed_ids.push(row.id);
                     removed += 1;
                 } else {

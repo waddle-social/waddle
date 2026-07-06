@@ -584,8 +584,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
 
     async fn scrub_for_tombstone(
         &self,
-        target_id: &str,
-        archive_jid: &jid::BareJid,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError> {
         // Archived pointers: exact (stanza-id, archive-by) match —
         // pure SQL. The MAM row was tombstoned, so the pointer must
@@ -598,8 +597,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                    AND archive_stanza_by = ?",
                 crate::db_params![
                     PAYLOAD_KIND_ARCHIVED,
-                    target_id.to_string(),
-                    archive_jid.to_string(),
+                    target.id().to_string(),
+                    target.archive_jid().to_string(),
                 ],
             )
             .await?;
@@ -634,11 +633,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 // matcher's parse-error semantics.
                 continue;
             };
-            if waddle_xmpp::tombstone::message_element_matches_tombstone(
-                &element,
-                target_id,
-                archive_jid,
-            ) {
+            if target.matches_message_element(&element) {
                 matched_ids.push(row_id);
             }
         }

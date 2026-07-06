@@ -1389,10 +1389,9 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         }
         async fn scrub_for_tombstone(
             &self,
-            target_id: &str,
-            archive_jid: &jid::BareJid,
+            target: &waddle_xmpp::tombstone::TombstoneTarget,
         ) -> Result<u64, PendingStorageError> {
-            self.inner.scrub_for_tombstone(target_id, archive_jid).await
+            self.inner.scrub_for_tombstone(target).await
         }
     }
 
@@ -2494,7 +2493,11 @@ async fn database_scrub_for_tombstone_removes_transient_and_archived_matches() {
         .expect("insert");
 
     let removed = storage
-        .scrub_for_tombstone("retract-me", &bare("alice@example.com"))
+        .scrub_for_tombstone(&waddle_xmpp::tombstone::TombstoneTarget::Direct {
+            wire_id: "retract-me".to_string(),
+            author: bare("bob@elsewhere"),
+            archive: bare("alice@example.com"),
+        })
         .await
         .expect("scrub");
     assert_eq!(

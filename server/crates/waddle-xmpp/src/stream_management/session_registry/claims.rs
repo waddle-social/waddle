@@ -192,6 +192,52 @@ impl InMemorySmSessionRegistry {
     ) -> Result<(), SmRegistryError> {
         let stream_lock = self.stream_lock(&session.stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        // Retry-horizon guard (adversarial-review finding D): the
+        // uncounted retry path (record_promotion_failure itself
+        // erroring) re-inserted the in-memory copy VERBATIM forever.
+        // A XEP-0424/0425 scrub that ran while the session was off-map
+        // (phase 4) deleted only the durable rows, so once the
+        // RECENT_TOMBSTONE_TTL expired the retained in-memory copy
+        // promoted the retracted stanza anyway. Diff the queue against
+        // the durable rows under the stream lock and drop entries whose
+        // rows no longer exist — durable storage is the scrub's source
+        // of truth. A read failure keeps the queue verbatim
+        // (at-least-once beats dropping stanzas on a storage blip).
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+            match storage.list_unacked(&session_id).await {
+                Ok(rows) => {
+                    let durable: std::collections::HashSet<u32> =
+                        rows.iter().map(|row| row.sequence).collect();
+                    session
+                        .unacked_stanzas
+                        .retain(|entry| durable.contains(&entry.sequence));
+                }
+                Err(error) => {
+                    debug!(
+                        stream_id = %session.stream_id,
+                        error = %error,
+                        "reinsert_for_retry: durable list_unacked failed; keeping the \
+                         in-memory queue verbatim (at-least-once)"
+                    );
+                }
+            }
+        }
+        self.reinsert_for_retry_unlocked(session)
+    }
+
+    /// Map-insert half of [`Self::reinsert_for_retry`]: force the
+    /// session expired and publish it in the detached map WITHOUT
+    /// taking its stream shard lock. Only for callers that already
+    /// hold a (possibly different stream's) shard lock —
+    /// `store_session`'s snapshot-failure path re-inserts the sessions
+    /// it displaced while still holding the NEW stream's shard lock,
+    /// and two crossed store_session calls taking each other's shard
+    /// locks would deadlock.
+    pub(super) fn reinsert_for_retry_unlocked(
+        &self,
+        mut session: DetachedSession,
+    ) -> Result<(), SmRegistryError> {
         session.max_resume_time = Some(0);
         self.sessions
             .write()

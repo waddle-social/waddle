@@ -476,11 +476,20 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     // on PR #305).
                     use waddle_xmpp::stream_management::SmSessionRegistry as _;
                     let target_id = request.target_id.as_str();
+                    // XEP-0425 moderation targets the room-assigned
+                    // XEP-0359 stanza-id: cached reflections are
+                    // matched ONLY on `<stanza-id by=room/>`, never on
+                    // the client-chosen wire id (which any occupant
+                    // could mint to collide with another reflection).
+                    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+                        stanza_id: request.target_id.clone(),
+                        room: room_jid.clone(),
+                    };
                     match state
                         .deps
                         .protocol
                         .sm_session_registry
-                        .scrub_unacked_for_tombstone(target_id, &room_jid)
+                        .scrub_unacked_for_tombstone(&scrub_target)
                         .await
                     {
                         Ok(removed) if removed > 0 => debug!(
@@ -505,7 +514,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         .deps
                         .protocol
                         .pending_delivery_storage
-                        .scrub_for_tombstone(target_id, &room_jid)
+                        .scrub_for_tombstone(&scrub_target)
                         .await
                     {
                         Ok(removed) if removed > 0 => debug!(

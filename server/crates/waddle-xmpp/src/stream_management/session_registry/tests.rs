@@ -15,6 +15,21 @@ fn bare(s: &str) -> jid::BareJid {
     s.parse().expect("valid bare jid")
 }
 
+fn direct_target(wire_id: &str, author: &str, archive: &str) -> crate::tombstone::TombstoneTarget {
+    crate::tombstone::TombstoneTarget::Direct {
+        wire_id: wire_id.to_string(),
+        author: bare(author),
+        archive: bare(archive),
+    }
+}
+
+fn groupchat_target(stanza_id: &str, room: &str) -> crate::tombstone::TombstoneTarget {
+    crate::tombstone::TombstoneTarget::Groupchat {
+        stanza_id: stanza_id.to_string(),
+        room: bare(room),
+    }
+}
+
 fn message_stanza_xml_with_id(id: String) -> String {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message.id = Some(xmpp_parsers::message::Id(id));
@@ -159,7 +174,11 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("target", &bare("user@example.com"))
+        .scrub_unacked_for_tombstone(&direct_target(
+            "target",
+            "alice@example.com",
+            "user@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(removed, 1, "exactly one matching message should be removed");
@@ -286,7 +305,10 @@ async fn xep_0198_scrub_for_tombstone_matches_groupchat_stanza_id() {
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("canonical-archive-id", &bare("room@conf.example.com"))
+        .scrub_unacked_for_tombstone(&groupchat_target(
+            "canonical-archive-id",
+            "room@conf.example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -324,7 +346,11 @@ async fn xep_0198_scrub_for_tombstone_does_not_cross_conversations() {
     // remove the carol→user message even though it shares the
     // wire id, because alice is neither its `from` nor `to`.
     let removed = registry
-        .scrub_unacked_for_tombstone("msg-1", &bare("alice@example.com"))
+        .scrub_unacked_for_tombstone(&direct_target(
+            "msg-1",
+            "alice@example.com",
+            "alice@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -364,7 +390,11 @@ async fn xep_0198_scrub_for_tombstone_ignores_non_xep0359_stanza_id_namespace() 
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("target", &bare("user@example.com"))
+        .scrub_unacked_for_tombstone(&direct_target(
+            "target",
+            "alice@example.com",
+            "user@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -388,7 +418,11 @@ async fn xep_0198_scrub_for_tombstone_handles_no_match() {
             .await
             .unwrap();
     let removed = registry
-        .scrub_unacked_for_tombstone("not-here", &bare("user@example.com"))
+        .scrub_unacked_for_tombstone(&direct_target(
+            "not-here",
+            "alice@example.com",
+            "user@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(removed, 0);
@@ -1108,7 +1142,11 @@ async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("retracted-id", &bare("user@example.com"))
+        .scrub_unacked_for_tombstone(&direct_target(
+            "retracted-id",
+            "alice@example.com",
+            "user@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -1530,7 +1568,11 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
 
     // Retraction arrives during the window.
     let removed = registry
-        .scrub_unacked_for_tombstone("retract-me", &bare("user@example.com"))
+        .scrub_unacked_for_tombstone(&direct_target(
+            "retract-me",
+            "alice@example.com",
+            "user@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -1689,20 +1731,15 @@ async fn scrub_records_recent_tombstone_for_promotion_time_recheck() {
     // promotion path can re-check before inserting into pending
     // delivery.
     let registry = InMemorySmSessionRegistry::new();
+    let target = direct_target("retract-me", "alice@example.com", "user@example.com");
     let before = chrono::Utc::now();
-    registry
-        .scrub_unacked_for_tombstone("retract-me", &bare("user@example.com"))
-        .await
-        .unwrap();
+    registry.scrub_unacked_for_tombstone(&target).await.unwrap();
     let after = chrono::Utc::now();
 
     let records = registry.recent_tombstones().unwrap();
     assert_eq!(
         records.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
-        vec![TombstoneKey {
-            target_id: "retract-me".to_string(),
-            archive_jid: bare("user@example.com"),
-        }],
+        vec![target],
         "the scrub must record its tombstone identity for promotion-time re-check"
     );
     // Round-3 review finding 2: the record carries the wall-clock
@@ -1721,29 +1758,40 @@ async fn recent_tombstones_evicts_entries_past_ttl() {
     let registry = InMemorySmSessionRegistry::new();
     let stale = Instant::now() - (tombstones::RECENT_TOMBSTONE_TTL + Duration::from_secs(1));
     registry
-        .record_recent_tombstone_at("old-target", &bare("user@example.com"), stale)
+        .record_recent_tombstone_at(
+            &direct_target("old-target", "alice@example.com", "user@example.com"),
+            stale,
+        )
         .unwrap();
+    let fresh = direct_target("fresh-target", "alice@example.com", "user@example.com");
     registry
-        .record_recent_tombstone_at("fresh-target", &bare("user@example.com"), Instant::now())
+        .record_recent_tombstone_at(&fresh, Instant::now())
         .unwrap();
 
     let records = registry.recent_tombstones().unwrap();
     assert_eq!(
         records.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
-        vec![TombstoneKey {
-            target_id: "fresh-target".to_string(),
-            archive_jid: bare("user@example.com"),
-        }],
+        vec![fresh],
         "entries older than the TTL must be evicted; fresh ones retained"
     );
 }
 
 #[tokio::test]
-async fn recent_tombstones_bounds_entry_count() {
+async fn recent_tombstones_bounds_entry_count_across_archives() {
+    // Global backstop: distinct archives each get one record, so the
+    // per-archive cap never trips; the global hard cap must still
+    // bound the list, evicting the oldest overall.
     let registry = InMemorySmSessionRegistry::new();
     for i in 0..(tombstones::MAX_RECENT_TOMBSTONES + 5) {
         registry
-            .record_recent_tombstone_at(&format!("target-{i}"), &bare("user@example.com"), Instant::now())
+            .record_recent_tombstone_at(
+                &direct_target(
+                    &format!("target-{i}"),
+                    "alice@example.com",
+                    &format!("user{i}@example.com"),
+                ),
+                Instant::now(),
+            )
             .unwrap();
     }
     let records = registry.recent_tombstones().unwrap();
@@ -1753,9 +1801,79 @@ async fn recent_tombstones_bounds_entry_count() {
         "the recent-tombstone record must stay bounded"
     );
     assert_eq!(
-        records.last().map(|r| r.key.target_id.as_str()),
+        records.last().map(|r| r.key.id()),
         Some(format!("target-{}", tombstones::MAX_RECENT_TOMBSTONES + 4).as_str()),
         "overflow must evict the oldest entries, keeping the newest"
+    );
+}
+
+#[tokio::test]
+async fn tombstone_flood_on_one_archive_does_not_evict_other_archives_record() {
+    // FINDING C repro: an authenticated user retracting 1024+ of their
+    // own messages (all one archive) used to flush every other
+    // archive's unexpired record oldest-first, disabling the
+    // promotion-time re-check for the victim's retraction.
+    let registry = InMemorySmSessionRegistry::new();
+    let victim = direct_target("victim-retraction", "bob@example.com", "victim@example.com");
+    registry
+        .record_recent_tombstone_at(&victim, Instant::now())
+        .unwrap();
+
+    // Attacker floods well past the global cap from a single archive.
+    for i in 0..(tombstones::MAX_RECENT_TOMBSTONES + 100) {
+        registry
+            .record_recent_tombstone_at(
+                &direct_target(
+                    &format!("spam-{i}"),
+                    "mallory@example.com",
+                    "mallory-chat@example.com",
+                ),
+                Instant::now(),
+            )
+            .unwrap();
+    }
+
+    let records = registry.recent_tombstones().unwrap();
+    assert!(
+        records.iter().any(|r| r.key == victim),
+        "an unexpired record for another archive must survive a single-archive flood"
+    );
+    let flood_records = records
+        .iter()
+        .filter(|r| r.key.archive_jid() == &bare("mallory-chat@example.com"))
+        .count();
+    assert!(
+        flood_records <= tombstones::MAX_RECENT_TOMBSTONES_PER_ARCHIVE,
+        "one archive's records must be bounded by the per-archive cap \
+         (got {flood_records})"
+    );
+}
+
+#[tokio::test]
+async fn per_archive_cap_evicts_oldest_within_that_archive_only() {
+    let registry = InMemorySmSessionRegistry::new();
+    for i in 0..(tombstones::MAX_RECENT_TOMBSTONES_PER_ARCHIVE + 3) {
+        registry
+            .record_recent_tombstone_at(
+                &direct_target(&format!("id-{i}"), "alice@example.com", "chat@example.com"),
+                Instant::now(),
+            )
+            .unwrap();
+    }
+    let records = registry.recent_tombstones().unwrap();
+    assert_eq!(
+        records.len(),
+        tombstones::MAX_RECENT_TOMBSTONES_PER_ARCHIVE,
+        "same-archive records are bounded by the per-archive cap"
+    );
+    assert!(
+        !records.iter().any(|r| r.key.id() == "id-0"),
+        "the oldest same-archive record is the eviction victim"
+    );
+    assert_eq!(
+        records.last().map(|r| r.key.id()),
+        Some(format!("id-{}", tombstones::MAX_RECENT_TOMBSTONES_PER_ARCHIVE + 2).as_str()),
+        "the newest record survives"
     );
 }
 
@@ -1803,6 +1921,267 @@ async fn reinsert_for_retry_preserves_detached_at_for_eviction_ordering() {
             .is_some(),
         "the healthy resumable session must survive the eviction"
     );
+}
+
+#[tokio::test]
+async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
+    // FINDING D repro: the uncounted janitor retry path
+    // (record_promotion_failure erroring) re-inserted the drained
+    // session's IN-MEMORY queue verbatim. A XEP-0424/0425 scrub that
+    // ran while the session was off-map (durable phase-4 sweep)
+    // deleted only the durable rows, so after RECENT_TOMBSTONE_TTL
+    // expired the retained in-memory copy promoted the retracted
+    // stanza anyway. reinsert_for_retry must diff against durable
+    // rows and drop scrubbed entries.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let mut session = realistic_test_session_for_jid(
+        "stream-retry-scrubbed",
+        "user@example.com/resource".parse().unwrap(),
+    );
+    session.unacked_stanzas = vec![
+        DetachedUnackedStanza {
+            sequence: 6,
+            stanza_xml: realistic_dm_stanza_xml(
+                "alice@example.com/web",
+                "user@example.com/resource",
+                "retract-me",
+                "secret",
+            ),
+            original_receipt_at: Utc::now(),
+        },
+        DetachedUnackedStanza {
+            sequence: 7,
+            stanza_xml: realistic_dm_stanza_xml(
+                "alice@example.com/web",
+                "user@example.com/resource",
+                "keep-me",
+                "safe",
+            ),
+            original_receipt_at: Utc::now(),
+        },
+    ];
+    registry.store_session(session).await.unwrap();
+
+    // Janitor drains the session off both maps (mid-promotion).
+    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(drained.len(), 1);
+
+    // Retraction lands during the window: the off-map durable sweep
+    // (phase 4) deletes the durable row for sequence 6.
+    let removed = registry
+        .scrub_unacked_for_tombstone(&direct_target(
+            "retract-me",
+            "alice@example.com",
+            "user@example.com",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    // Promotion fails AND record_promotion_failure fails → the janitor
+    // re-inserts the drained (pre-scrub) copy for retry.
+    registry
+        .reinsert_for_retry(drained.into_iter().next().unwrap())
+        .await
+        .unwrap();
+
+    // The retry drain must NOT resurrect the scrubbed stanza.
+    let retried = registry.drain_expired().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    let sequences: Vec<u32> = retried[0]
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    assert_eq!(
+        sequences,
+        vec![7],
+        "a durably-scrubbed stanza must not survive reinsert_for_retry"
+    );
+    assert!(
+        !retried[0]
+            .unacked_stanzas
+            .iter()
+            .any(|entry| entry.stanza_xml.contains("secret")),
+        "retracted content must not be promotable after the retry re-insert"
+    );
+}
+
+/// Persistence wrapper whose `store_session_atomic` fails while armed
+/// — models a durable-backend outage hitting exactly the snapshot
+/// write inside `store_session` (Finding E).
+struct FailingSnapshotPersistence {
+    inner: super::super::persistence::InMemorySmPersistence,
+    fail_snapshots: std::sync::atomic::AtomicBool,
+}
+
+impl FailingSnapshotPersistence {
+    fn new() -> Self {
+        Self {
+            inner: super::super::persistence::InMemorySmPersistence::new(),
+            fail_snapshots: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersistence {
+    async fn upsert_session(
+        &self,
+        session: super::super::persistence::PersistedSession,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.upsert_session(session).await
+    }
+
+    async fn get_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session(stream_id).await
+    }
+
+    async fn delete_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.delete_session(stream_id).await
+    }
+
+    async fn append_unacked(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.append_unacked(stanza).await
+    }
+
+    async fn ack_through(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        up_to_sequence: u32,
+    ) -> Result<u64, super::super::persistence::SmPersistenceError> {
+        self.inner.ack_through(stream_id, up_to_sequence).await
+    }
+
+    async fn delete_unacked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, super::super::persistence::SmPersistenceError> {
+        self.inner.delete_unacked(stream_id, sequences).await
+    }
+
+    async fn list_unacked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedUnackedStanza>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_unacked(stream_id).await
+    }
+
+    async fn list_expired_sessions(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_expired_sessions(now).await
+    }
+
+    async fn list_all_sessions(
+        &self,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_all_sessions().await
+    }
+
+    async fn store_session_atomic(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        if self
+            .fail_snapshots
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "simulated snapshot-write failure".into(),
+            ));
+        }
+        self.inner.store_session_atomic(session, unacked).await
+    }
+}
+
+#[tokio::test]
+async fn store_session_snapshot_failure_reinserts_displaced_sessions_for_retry() {
+    // FINDING E repro: store_session removes displaced sessions from
+    // both maps, then writes the NEW session's snapshot. When that
+    // write fails, store_session returns Err and the caller drops the
+    // displaced vec — the displaced sessions are off-map with durable
+    // rows stranded until restart (drain_expired scans memory only).
+    // The failure path must re-insert them as expired-for-retry.
+    let storage = std::sync::Arc::new(FailingSnapshotPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "alice@example.com/web".parse().unwrap();
+    registry
+        .store_session(realistic_test_session_for_jid("stream-victim", jid.clone()))
+        .await
+        .unwrap();
+
+    // Fresh bind for the same JID displaces the victim, but its own
+    // snapshot write fails.
+    storage
+        .fail_snapshots
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = registry
+        .store_session(realistic_test_session_for_jid("stream-new", jid.clone()))
+        .await;
+    assert!(
+        result.is_err(),
+        "snapshot failure must surface to the caller"
+    );
+    storage
+        .fail_snapshots
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // The displaced victim must be back in the map, expired-for-retry:
+    // not resumable on the wire...
+    assert!(registry
+        .peek_session("stream-victim")
+        .await
+        .unwrap()
+        .is_none());
+    // ...but drainable by the janitor's next pass with its full queue.
+    let drained = registry.drain_expired().await.unwrap();
+    let drained_ids: Vec<&str> = drained.iter().map(|s| s.stream_id.as_str()).collect();
+    assert!(
+        drained_ids.contains(&"stream-victim"),
+        "displaced session must be re-inserted for janitor retry when the \
+         snapshot write fails (got {drained_ids:?})"
+    );
+    let victim = drained
+        .iter()
+        .find(|s| s.stream_id == "stream-victim")
+        .expect("victim drained");
+    assert_eq!(
+        victim.unacked_stanzas.len(),
+        2,
+        "the displaced session keeps its full unacked queue for promotion"
+    );
+    // Its durable rows are untouched (persist-until-confirmed).
+    assert!(storage
+        .get_session(&crate::pending_delivery::SmSessionId::new("stream-victim"))
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

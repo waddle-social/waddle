@@ -8,6 +8,14 @@ fn bare(s: &str) -> BareJid {
     s.parse().expect("valid bare jid")
 }
 
+fn direct_target(wire_id: &str, author: &str, archive: &str) -> crate::tombstone::TombstoneTarget {
+    crate::tombstone::TombstoneTarget::Direct {
+        wire_id: wire_id.to_string(),
+        author: bare(author),
+        archive: bare(archive),
+    }
+}
+
 fn archived_row(recipient: &str, id: &str) -> PendingRow {
     let archive_jid: jid::Jid = bare(recipient).into();
     PendingRow {
@@ -371,7 +379,11 @@ async fn scrub_for_tombstone_removes_matching_transient_row_only() {
         .unwrap();
 
     let removed = store
-        .scrub_for_tombstone("retract-me", &bare("alice@example.com"))
+        .scrub_for_tombstone(&direct_target(
+            "retract-me",
+            "bob@elsewhere",
+            "alice@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(removed, 1, "exactly the in-scope matching row is removed");
@@ -412,7 +424,11 @@ async fn scrub_for_tombstone_removes_matching_archived_pointer_row() {
         .unwrap();
 
     let removed = store
-        .scrub_for_tombstone("archive-1", &bare("alice@example.com"))
+        .scrub_for_tombstone(&direct_target(
+            "archive-1",
+            "bob@elsewhere",
+            "alice@example.com",
+        ))
         .await
         .unwrap();
     assert_eq!(removed, 1);

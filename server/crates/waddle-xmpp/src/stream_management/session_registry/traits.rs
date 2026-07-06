@@ -72,19 +72,14 @@ pub trait SmSessionRegistry: Send + Sync {
     /// Called when a tombstone is applied so a recipient mid-resume does
     /// not replay the pre-scrub stanza on the wire.
     ///
-    /// `target_id` matches either the cached message's wire `id`
-    /// attribute (typical for 1:1 retractions targeting the original
-    /// message id) **or** any XEP-0359 `<stanza-id id='…'/>` child
-    /// (typical for groupchat retractions that key by the room's
-    /// stanza-id per the "archive id == wire stanza-id" invariant).
-    ///
-    /// `archive_jid` scopes the match to a specific conversation: a
-    /// cached message is only removed if its `from` or `to` bare-equals
-    /// `archive_jid`. This prevents cross-conversation collateral
-    /// damage when two clients independently reuse a short message id
-    /// in different chats — without scoping, retracting "msg-1" in one
-    /// chat would silently delete unrelated "msg-1" stanzas queued for
-    /// other recipients.
+    /// `target` carries the typed tombstone identity
+    /// ([`crate::tombstone::TombstoneTarget`]): groupchat/moderation
+    /// scrubs match only the room-assigned XEP-0359 `<stanza-id
+    /// by=room/>`; 1:1 retraction scrubs match the author's wire id
+    /// only for messages FROM that author (plus the archive-stamped
+    /// stanza-id branch). Both are scoped to the conversation archive,
+    /// so a colliding client-chosen wire id from another sender or
+    /// another chat can never be scrubbed.
     ///
     /// Returns the number of stanza entries removed across all stored
     /// sessions. Default impl is a no-op so registry implementations
@@ -92,8 +87,7 @@ pub trait SmSessionRegistry: Send + Sync {
     /// overrides it.
     async fn scrub_unacked_for_tombstone(
         &self,
-        _target_id: &str,
-        _archive_jid: &jid::BareJid,
+        _target: &crate::tombstone::TombstoneTarget,
     ) -> Result<usize, SmRegistryError> {
         Ok(0)
     }
