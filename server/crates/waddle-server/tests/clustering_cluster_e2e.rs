@@ -10,15 +10,21 @@
 //!   wire (thread-preserving stanza echo);
 //! - integrity under concurrent large + small payloads (libp2p per-substream
 //!   flow control interleaves them; per-pair *sequencing* is Phase 4);
-//! - an ask whose receiver handler exceeds the sender's transport
-//!   `request_timeout` fails **sender-side** — the transport cap, not
-//!   `reply_timeout`, is the binding bound;
+//! - the receiver-applied ask budgets fail a slow handler with the typed
+//!   `ReplyTimeout` classification inside the reply budget, and — with those
+//!   budgets deliberately inflated past both the handler and the transport
+//!   cap, so the receiver cannot proactively reply in time — the sender's
+//!   libp2p `request_timeout` fails the ask with the typed `Transport`
+//!   classification at ≈ the cap, proving the transport cap is the binding
+//!   bound;
 //! - relay crash → supervised respawn + same-name re-registration, recovered
 //!   by the sender's stale-ref kademlia re-lookup;
 //! - revoked-peer-with-live-connection: containment within the allowlist
 //!   refresh interval, and recovery after re-enrollment;
-//! - node churn: a restarted node (fresh node_id + relay name) is
-//!   re-discovered via kademlia through the surviving mesh.
+//! - node churn: a sequential rolling restart of BOTH original bootstrap
+//!   peers (at most one node down at any instant) — each replacement (fresh
+//!   node_id + relay name) is re-discovered via kademlia, and both
+//!   replacements stay reachable once no original peer survives.
 //!
 //! Gated on the `clustering` feature and `WADDLE_TEST_POSTGRES_URL` (skips
 //! cleanly otherwise). Deferred to Phase 3 (needs heartbeat fencing + the
@@ -36,7 +42,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStore};
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
-use waddle_server::clustering::relay::RelayHandle;
+use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
 use waddle_server::clustering::swarm;
 use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
@@ -269,7 +275,7 @@ async fn cluster_exit_criteria_end_to_end() {
     // loopback seed per node.
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (server_a, node_a, peer_a) =
+    let (mut server_a, node_a, peer_a) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
     let (server_b, node_b, _peer_b) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
@@ -372,19 +378,80 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
-    // --- Exit criterion: an ask whose receiver handler exceeds every
-    // configured timeout (reply 1.5s, transport cap 2s) fails SENDER-side
-    // within the budget — never by waiting out the 5s handler.
+    // --- Exit criterion (part 1): the receiver-applied ask budgets. A 5s
+    // handler exceeds relay_a's receiver-side reply budget (1.5s): the
+    // receiver's local ask times out first and sends a ReplyTimeout error
+    // frame back over the wire — the sender observes the typed ReplyTimeout
+    // classification within the reply budget, never by waiting out the
+    // handler. (With the validated config invariant mailbox + reply <=
+    // request, the receiver ALWAYS replies before the transport cap, so this
+    // path can never exercise `request_timeout` — that is part 2 below.)
     let started = Instant::now();
     let result = relay_a.sleep(5_000).await;
     let elapsed = started.elapsed();
+    let error = match result {
+        Ok(_) => panic!("5s receiver handler must fail the ask, but it succeeded"),
+        Err(error) => error,
+    };
     assert!(
-        result.is_err(),
-        "5s receiver handler must fail sender-side within the 2s transport cap"
+        matches!(
+            error,
+            RelayAskError::Send {
+                failure: RelaySendFailure::ReplyTimeout,
+                ..
+            }
+        ),
+        "expected the typed ReplyTimeout classification, got: {error}"
     );
     assert!(
         elapsed < Duration::from_secs(4),
-        "failure must occur within the ~2s timeout budget, not after the 5s handler (took {elapsed:?})"
+        "ReplyTimeout must fire within the ~1.5s reply budget, not after the 5s handler (took {elapsed:?})"
+    );
+
+    // --- Exit criterion (part 2): the transport cap is the binding bound.
+    // A dedicated handle grants the receiver ask budgets (10s mailbox/reply)
+    // above BOTH the 5s handler and the sender's 2s transport
+    // `request_timeout`, so the receiver cannot proactively reply — neither a
+    // ReplyTimeout frame (budget outlives the handler) nor the success reply
+    // (handler outlives the transport window) can arrive in time. The only
+    // bound that can fire is the sender-side libp2p request_response
+    // `request_timeout`, surfacing as the typed Transport classification at
+    // ≈ the cap. Production config validation forbids this inversion
+    // (mailbox + reply <= request), which is exactly why part 1 alone could
+    // never prove the transport cap; the per-ask builder lets the harness
+    // construct it deliberately. Aimed at B so A's relay is idle for the
+    // crash scenario next.
+    let mut relay_b_slow = RelayHandle::new(NodeId::new(node_b.clone()))
+        .with_ask_timeouts(Duration::from_secs(10), Duration::from_secs(10));
+    ping_until(&mut relay_b_slow, &node_b, Duration::from_secs(30))
+        .await
+        .expect("warm-up ping resolves B before timing the transport cap");
+    let started = Instant::now();
+    let result = relay_b_slow.sleep(5_000).await;
+    let elapsed = started.elapsed();
+    let error = match result {
+        Ok(_) => panic!(
+            "5s receiver handler must fail sender-side at the 2s transport cap, but it succeeded"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            RelayAskError::Send {
+                failure: RelaySendFailure::Transport,
+                ..
+            }
+        ),
+        "expected the typed Transport classification (sender-side request_timeout), got: {error}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(1_500),
+        "transport-cap failure fired suspiciously early — not the 2s request_timeout (took {elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "transport-cap failure must fire at ~2s, not after the 5s handler (took {elapsed:?})"
     );
 
     // --- Exit criterion: relay crash → supervised respawn + same-name
@@ -429,11 +496,14 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("re-enrolled peer reachable again");
 
-    // --- Exit criterion: re-discovery after churn. Kill B and replace it
-    // with a fresh process on the SAME swarm port (exactly what a replacement
-    // pod behind the same headless Service looks like): new node_id, new
-    // relay name, new leased slot. The mesh's periodic re-dial reconnects and
-    // the newcomer's periodic re-registration makes its relay resolvable.
+    // --- Exit criterion: re-discovery through a rolling restart of BOTH
+    // bootstrap peers, sequential, at most one node down at any instant.
+    //
+    // Leg 1: hard-kill B (SIGKILL — an unclean pod death) and replace it with
+    // a fresh process on the SAME swarm port (exactly what a replacement pod
+    // behind the same headless Service looks like): new node_id, new relay
+    // name, new leased slot. The mesh's periodic re-dial reconnects and the
+    // newcomer's periodic re-registration makes its relay resolvable.
     drop(server_b);
     let (server_b2, node_b2, _peer_b2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
@@ -443,10 +513,35 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("restarted node re-discovered via kademlia");
 
+    // Leg 2: with B's replacement verified live, cycle A too — the graceful
+    // path this time (SIGTERM is what a real rolling restart sends), which
+    // drains: the keypair slot is released for the replacement and the relay
+    // proactively unregisters. After this NO original bootstrap peer
+    // survives, so the test process must reach both replacements via the
+    // periodic re-dial + kademlia re-discovery alone.
+    server_a.send_sigterm();
+    assert!(
+        server_a.wait_for_exit(Duration::from_secs(30)).await,
+        "node A did not exit after SIGTERM"
+    );
+    drop(server_a);
+    let (server_a2, node_a2, _peer_a2) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    assert_ne!(node_a2, node_a, "restarted node must mint a fresh node_id");
+    let mut relay_a2 = RelayHandle::new(NodeId::new(node_a2.clone()));
+    ping_until(&mut relay_a2, &node_a2, Duration::from_secs(45))
+        .await
+        .expect("A's replacement re-discovered via kademlia after the full rolling restart");
+    // Full cross-node discovery holds with zero original peers left: B's
+    // replacement must still answer alongside A's.
+    ping_until(&mut relay_b2, &node_b2, Duration::from_secs(30))
+        .await
+        .expect("B's replacement still reachable after the full rolling restart");
+
     // --- Shutdown.
     stop.cancel();
     drop(server_b2);
-    drop(server_a);
+    drop(server_a2);
 }
 
 /// DEFERRED (Phase 3): lone-survivor at N=2 keeps serving while a node
