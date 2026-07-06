@@ -643,6 +643,24 @@ fn handle_swarm_event(
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             tracing::debug!(?peer_id, %error, "clustering outgoing connection error");
         }
+        // A failing or closed listener silently degrades the node (peers can
+        // no longer dial it) — surface it loudly rather than letting it fall
+        // through the wildcard.
+        SwarmEvent::ListenerError { listener_id, error } => {
+            tracing::warn!(?listener_id, %error, "clustering swarm listener error");
+        }
+        SwarmEvent::ListenerClosed {
+            listener_id,
+            addresses,
+            reason,
+        } => {
+            tracing::warn!(
+                ?listener_id,
+                ?addresses,
+                ?reason,
+                "clustering swarm listener closed"
+            );
+        }
         _ => {}
     }
 }

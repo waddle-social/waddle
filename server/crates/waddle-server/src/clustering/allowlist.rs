@@ -145,8 +145,12 @@ pub struct AllowlistDiff {
 /// Compute the changes needed to move the swarm's allowed set from `current`
 /// to `next`.
 pub fn diff_allowlist(current: &HashSet<PeerId>, next: &HashSet<PeerId>) -> AllowlistDiff {
-    let added = next.difference(current).copied().collect();
-    let removed = current.difference(next).copied().collect();
+    let mut added: Vec<PeerId> = next.difference(current).copied().collect();
+    let mut removed: Vec<PeerId> = current.difference(next).copied().collect();
+    // `HashSet` iteration order is non-deterministic; sort so the diff (and
+    // anything logging or asserting on it) is stable across runs.
+    added.sort_unstable();
+    removed.sort_unstable();
     AllowlistDiff { added, removed }
 }
 
@@ -167,6 +171,16 @@ mod tests {
         let diff = diff_allowlist(&current, &next);
         assert_eq!(diff.added, vec![c]);
         assert_eq!(diff.removed, vec![a]);
+    }
+
+    #[test]
+    fn diff_output_is_deterministically_ordered() {
+        let peers: Vec<PeerId> = (0..8).map(|_| peer()).collect();
+        let next: HashSet<PeerId> = peers.iter().copied().collect();
+        let diff = diff_allowlist(&HashSet::new(), &next);
+        let mut expected = peers;
+        expected.sort_unstable();
+        assert_eq!(diff.added, expected);
     }
 
     #[test]
