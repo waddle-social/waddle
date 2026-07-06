@@ -87,6 +87,13 @@ pub struct SwarmHandle {
 /// the event loop and the supervised relay on `stop_token`, and return the
 /// node's swarm identity.
 ///
+/// `stop_token` is expected to be the clustering-scoped child token minted by
+/// `clustering::clustering_scope_token` (a child of the process-wide shutdown
+/// token): every task spawned here derives its own token from this same
+/// value, so a clustering-internal self-fence (lease fencing loss or a blown
+/// renewal deadline) cancels only this scope, while process shutdown still
+/// propagates in and tears clustering down.
+///
 /// When a keypair pool is configured the node leases one pool slot from the
 /// Postgres control plane and uses that keypair (and heartbeats it); otherwise
 /// it falls back to an ephemeral per-process identity.
@@ -132,6 +139,7 @@ pub async fn spawn(
                     pending.lease,
                     pending.node,
                     pending.slot,
+                    pending.acquired_at,
                     config.lease.heartbeat_interval,
                     config.lease.lease_ttl,
                     stop_token.clone(),
@@ -294,6 +302,11 @@ struct PendingLease {
     lease: PostgresKeypairSlotLease,
     node: LeaseIdentity,
     slot: LeasedSlot,
+    /// When the slot was acquired: the heartbeat's initial "last successful
+    /// renewal" instant, so the lease-deadline self-fence measures
+    /// from the real acquire time rather than from whenever `bring_up`
+    /// happens to finish and the heartbeat task is spawned.
+    acquired_at: tokio::time::Instant,
 }
 
 impl PendingLease {
@@ -342,9 +355,17 @@ async fn node_keypair(
     let slot = lease
         .acquire(&node, pool_size, config.lease.lease_ttl)
         .await?;
+    // The acquire itself counts as the first successful renewal for the
+    // lease-deadline self-fence.
+    let acquired_at = tokio::time::Instant::now();
     // `acquire` only ever returns an in-range slot, so this index is valid.
     let entry = &config.keypair_pool[slot.slot_index as usize];
-    let pending = PendingLease { lease, node, slot };
+    let pending = PendingLease {
+        lease,
+        node,
+        slot,
+        acquired_at,
+    };
     let keypair = match identity::keypair_from_pool_entry(entry) {
         Ok(keypair) => keypair,
         Err(error) => {
@@ -364,12 +385,32 @@ async fn node_keypair(
 }
 
 /// Renew the keypair-slot lease on a timer until shutdown; release the slot on
-/// graceful stop, and self-fence (cancel the swarm) on fencing loss so a
-/// superseded identity stops serving.
+/// graceful stop, and self-fence — cancel `stop_token` (the clustering scope,
+/// never the process-wide token; see `clustering::clustering_scope_token`) —
+/// on either a definitive fencing loss (CAS miss: another node already holds
+/// the slot) or once `lease_ttl` has elapsed since the last successful renewal
+/// without one landing (a node partitioned from Postgres but still alive on
+/// libp2p, which would otherwise keep using a PeerId that another node may
+/// legitimately have re-derived after stealing the now-expired slot).
+///
+/// Renewals are single-flight and a hung renewal is polled to completion
+/// rather than timeout-dropped: abandoning an in-flight sqlx future mid-poll
+/// makes the pool spawn an unbounded background `ping()` against the same
+/// dead socket to vet the connection, so dropping one renewal per tick during
+/// a sustained partition would wedge the entire shared pool (the server's hot
+/// path) within `max_connections` ticks. Instead the deadline arm below is
+/// the sole fencing trigger for a hang, and the one in-flight renewal is
+/// dropped at most once per process — on fence or shutdown. Worst case on the
+/// shutdown-mid-hang path is two abandoned connections (the dropped renewal
+/// plus a timed-out release), still a one-time bounded cost, never per-tick.
+/// The deadline is authoritative by construction (`biased` orders it ahead of
+/// renewal completion): a renewal landing in the same poll as the deadline
+/// loses the tie and the node fences conservatively.
 async fn run_heartbeat<L>(
     lease: L,
     node: LeaseIdentity,
     slot: LeasedSlot,
+    acquired_at: tokio::time::Instant,
     interval: Duration,
     lease_ttl: Duration,
     stop_token: CancellationToken,
@@ -382,25 +423,58 @@ async fn run_heartbeat<L>(
     let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    loop {
+    // Last instant a renewal (or the initial acquire) definitely succeeded.
+    // Only ever moves forward on `Ok`; a failed or hung renewal does not
+    // reset it, so retries do not silently extend the deadline.
+    let mut last_success = acquired_at;
+
+    'fenced: loop {
+        // Phase 1: wait for the next renewal to be due. The deadline arm
+        // fires here when every attempt has been failing fast (quick DB
+        // errors between ticks).
         tokio::select! {
+            biased;
             _ = stop_token.cancelled() => {
-                if let Err(error) = lease.release(&node, slot).await {
-                    tracing::warn!(%error, slot = slot.slot_index, "clustering keypair-slot release failed on shutdown");
-                }
-                break;
+                release_slot_bounded(&lease, &node, slot, interval).await;
+                return;
             }
-            _ = timer.tick() => {
-                match lease.heartbeat(&node, slot, lease_ttl).await {
-                    Ok(()) => {}
+            _ = tokio::time::sleep_until(last_success + lease_ttl) => {
+                break 'fenced;
+            }
+            _ = timer.tick() => {}
+        }
+
+        // Phase 2: drive exactly one renewal to completion, racing only the
+        // deadline and shutdown. A hung renewal parks here (single-flight —
+        // no new attempt piles up behind it) until it resolves or the
+        // deadline arm fences.
+        let renewal = std::pin::pin!(lease.heartbeat(&node, slot, lease_ttl));
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => {
+                // Dropping the hung renewal here is the shutdown-path
+                // exception to the never-drop rule: one abandoned
+                // connection, once.
+                release_slot_bounded(&lease, &node, slot, interval).await;
+                return;
+            }
+            _ = tokio::time::sleep_until(last_success + lease_ttl) => {
+                break 'fenced;
+            }
+            result = renewal => {
+                match result {
+                    Ok(()) => {
+                        last_success = tokio::time::Instant::now();
+                    }
                     Err(LeaseError::FencingLoss { slot_index }) => {
                         tracing::error!(
                             slot = slot_index,
-                            "clustering keypair-slot lease lost (fencing) — self-fencing swarm"
+                            "clustering keypair-slot lease lost (fencing) — self-fencing clustering scope"
                         );
-                        // The identity is no longer ours; stop the swarm.
+                        // The identity is no longer ours; stop clustering,
+                        // not the whole process.
                         stop_token.cancel();
-                        break;
+                        return;
                     }
                     Err(error) => {
                         tracing::warn!(%error, slot = slot.slot_index, "clustering keypair-slot heartbeat error; will retry next tick");
@@ -409,11 +483,46 @@ async fn run_heartbeat<L>(
             }
         }
     }
+
+    tracing::error!(
+        slot = slot.slot_index,
+        lease_ttl_ms = u64::try_from(lease_ttl.as_millis()).unwrap_or(u64::MAX),
+        "clustering keypair-slot lease deadline exceeded without successful renewal — self-fencing clustering scope"
+    );
+    stop_token.cancel();
 }
 
-/// Drive the swarm until `stop_token` fires: dial seed peers on a timer,
-/// refresh the peer allowlist on a timer (revoking removed peers), feed swarm
-/// events to the handler, and stop cleanly on shutdown.
+/// Best-effort, time-bounded slot release on shutdown: a hung release must
+/// not stall clustering teardown indefinitely (the slot frees itself via TTL
+/// expiry anyway). Dropping a hung release abandons at most one connection,
+/// once, at shutdown.
+async fn release_slot_bounded<L>(
+    lease: &L,
+    node: &LeaseIdentity,
+    slot: LeasedSlot,
+    budget: Duration,
+) where
+    L: KeypairSlotLease + Send + Sync,
+{
+    match tokio::time::timeout(budget, lease.release(node, slot)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, slot = slot.slot_index, "clustering keypair-slot release failed on shutdown");
+        }
+        Err(_) => {
+            tracing::warn!(
+                slot = slot.slot_index,
+                "clustering keypair-slot release timed out on shutdown; slot frees via TTL expiry"
+            );
+        }
+    }
+}
+
+/// Drive the swarm until `stop_token` (the clustering scope, a child of the
+/// process shutdown token) fires: dial seed peers on a timer, refresh the
+/// peer allowlist on a timer (revoking removed peers), feed swarm events to
+/// the handler, and stop cleanly on shutdown — whether that shutdown is the
+/// whole process draining or just this node self-fencing its lease.
 async fn run_event_loop(
     mut swarm: Swarm<WaddleBehaviour>,
     bootstrap_peers: Vec<ClusteringBootstrapConfig>,
@@ -859,5 +968,310 @@ mod tests {
             .await
             .expect_err("invalid addr rejected");
         assert!(matches!(err, SwarmError::ListenAddrInvalid { .. }));
+    }
+
+    // A `KeypairSlotLease` double that always fails renewal with a generic
+    // (non-fencing) database error, so `run_heartbeat` never sees
+    // `LeaseError::FencingLoss` and the only self-fence path exercised is the
+    // lease-deadline check.
+    struct PartitionedLease {
+        release_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl KeypairSlotLease for PartitionedLease {
+        async fn ensure_schema(&self) -> Result<(), LeaseError> {
+            Ok(())
+        }
+
+        async fn acquire(
+            &self,
+            _identity: &LeaseIdentity,
+            _pool_size: usize,
+            _lease_ttl: Duration,
+        ) -> Result<LeasedSlot, LeaseError> {
+            Ok(LeasedSlot { slot_index: 0 })
+        }
+
+        async fn heartbeat(
+            &self,
+            _identity: &LeaseIdentity,
+            _slot: LeasedSlot,
+            _lease_ttl: Duration,
+        ) -> Result<(), LeaseError> {
+            Err(LeaseError::Database(crate::db::DatabaseError::QueryFailed(
+                "simulated Postgres partition".to_string(),
+            )))
+        }
+
+        async fn release(
+            &self,
+            _identity: &LeaseIdentity,
+            _slot: LeasedSlot,
+        ) -> Result<(), LeaseError> {
+            self.release_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // A node that can no longer renew its lease (e.g. partitioned from
+    // Postgres, still alive on libp2p) must self-fence once `lease_ttl` has
+    // elapsed since the last successful renewal — never retry forever, which
+    // would let another node's legitimate steal-and-reuse of the same slot
+    // produce two live nodes sharing one PeerId indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_self_fences_once_lease_deadline_blown_without_postgres() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(200);
+        let release_called = Arc::new(AtomicBool::new(false));
+        let lease = PartitionedLease {
+            release_called: Arc::clone(&release_called),
+        };
+        let node = LeaseIdentity {
+            node_id: NodeId::generate(),
+            node_epoch: uuid::Uuid::new_v4(),
+        };
+        let slot = LeasedSlot { slot_index: 0 };
+        let stop_token = CancellationToken::new();
+        let acquired_at = tokio::time::Instant::now();
+
+        tokio::spawn(run_heartbeat(
+            lease,
+            node,
+            slot,
+            acquired_at,
+            interval,
+            lease_ttl,
+            stop_token.clone(),
+        ));
+
+        // A few failing renewals inside the TTL window must not self-fence.
+        tokio::time::advance(interval * 3).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !stop_token.is_cancelled(),
+            "must not self-fence before the lease deadline elapses"
+        );
+
+        // Once the deadline is blown, the next failing tick self-fences the
+        // clustering scope (not a graceful release — the slot may already be
+        // held by whoever legitimately stole it).
+        tokio::time::advance(lease_ttl).await;
+        tokio::task::yield_now().await;
+        assert!(
+            stop_token.is_cancelled(),
+            "must self-fence once the lease deadline is exceeded"
+        );
+        assert!(
+            !release_called.load(Ordering::SeqCst),
+            "deadline self-fence is not a graceful release"
+        );
+    }
+
+    // A `KeypairSlotLease` double whose renewal HANGS forever (a black-holed
+    // connection stuck in TCP retransmission), rather than erroring — the
+    // failure mode a timeout-free `Err`-only deadline check can never see.
+    struct HangingLease {
+        release_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl KeypairSlotLease for HangingLease {
+        async fn ensure_schema(&self) -> Result<(), LeaseError> {
+            Ok(())
+        }
+
+        async fn acquire(
+            &self,
+            _identity: &LeaseIdentity,
+            _pool_size: usize,
+            _lease_ttl: Duration,
+        ) -> Result<LeasedSlot, LeaseError> {
+            Ok(LeasedSlot { slot_index: 0 })
+        }
+
+        async fn heartbeat(
+            &self,
+            _identity: &LeaseIdentity,
+            _slot: LeasedSlot,
+            _lease_ttl: Duration,
+        ) -> Result<(), LeaseError> {
+            std::future::pending().await
+        }
+
+        async fn release(
+            &self,
+            _identity: &LeaseIdentity,
+            _slot: LeasedSlot,
+        ) -> Result<(), LeaseError> {
+            self.release_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // A renewal that never resolves must still self-fence at the deadline:
+    // the deadline select arm, not an `Err` from the renewal, is the fencing
+    // trigger, so a hang cannot suppress it.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_self_fences_when_renewal_hangs() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(200);
+        let release_called = Arc::new(AtomicBool::new(false));
+        let lease = HangingLease {
+            release_called: Arc::clone(&release_called),
+        };
+        let node = LeaseIdentity {
+            node_id: NodeId::generate(),
+            node_epoch: uuid::Uuid::new_v4(),
+        };
+        let slot = LeasedSlot { slot_index: 0 };
+        let stop_token = CancellationToken::new();
+        let acquired_at = tokio::time::Instant::now();
+
+        tokio::spawn(run_heartbeat(
+            lease,
+            node,
+            slot,
+            acquired_at,
+            interval,
+            lease_ttl,
+            stop_token.clone(),
+        ));
+
+        // The first tick starts a renewal that hangs; inside the TTL window
+        // that must not fence.
+        tokio::time::advance(interval * 3).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !stop_token.is_cancelled(),
+            "a hung renewal must not self-fence before the lease deadline"
+        );
+
+        // The deadline arm fires at `acquired_at + lease_ttl` even though the
+        // renewal never produced an `Err`.
+        tokio::time::advance(lease_ttl).await;
+        tokio::task::yield_now().await;
+        assert!(
+            stop_token.is_cancelled(),
+            "a hung renewal must self-fence once the lease deadline is exceeded"
+        );
+        assert!(
+            !release_called.load(Ordering::SeqCst),
+            "deadline self-fence is not a graceful release"
+        );
+    }
+
+    // A `KeypairSlotLease` double whose first renewal succeeds and every
+    // later one hangs, so `last_success` moves off `acquired_at` — pinning
+    // that the deadline is measured from the last SUCCESSFUL renewal, not
+    // from acquisition.
+    struct SucceedsOnceThenHangsLease {
+        renewals: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl KeypairSlotLease for SucceedsOnceThenHangsLease {
+        async fn ensure_schema(&self) -> Result<(), LeaseError> {
+            Ok(())
+        }
+
+        async fn acquire(
+            &self,
+            _identity: &LeaseIdentity,
+            _pool_size: usize,
+            _lease_ttl: Duration,
+        ) -> Result<LeasedSlot, LeaseError> {
+            Ok(LeasedSlot { slot_index: 0 })
+        }
+
+        async fn heartbeat(
+            &self,
+            _identity: &LeaseIdentity,
+            _slot: LeasedSlot,
+            _lease_ttl: Duration,
+        ) -> Result<(), LeaseError> {
+            if self.renewals.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                std::future::pending().await
+            }
+        }
+
+        async fn release(
+            &self,
+            _identity: &LeaseIdentity,
+            _slot: LeasedSlot,
+        ) -> Result<(), LeaseError> {
+            Ok(())
+        }
+    }
+
+    // Advance paused time in sub-interval steps, yielding between steps so
+    // the heartbeat task actually runs at each timer firing. A single coarse
+    // `advance` past several deadlines fires all their wakers before the task
+    // is polled once, and the biased deadline arm then wins over a tick that
+    // "happened" earlier — correct fencing behavior for a starved runtime,
+    // but not the scheduling the test means to simulate.
+    async fn advance_in_steps(total: Duration, step: Duration) {
+        let mut advanced = Duration::ZERO;
+        while advanced < total {
+            tokio::time::advance(step).await;
+            tokio::task::yield_now().await;
+            advanced += step;
+        }
+    }
+
+    // The deadline restarts from each successful renewal: after one success
+    // at ~1 interval, a subsequent hang must fence at `success + lease_ttl`,
+    // strictly LATER than `acquired_at + lease_ttl` — a regression to
+    // measuring from acquisition fences early and fails the mid-window
+    // assertion.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_deadline_measures_from_last_successful_renewal() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(200);
+        let step = Duration::from_millis(10);
+        let lease = SucceedsOnceThenHangsLease {
+            renewals: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        let node = LeaseIdentity {
+            node_id: NodeId::generate(),
+            node_epoch: uuid::Uuid::new_v4(),
+        };
+        let slot = LeasedSlot { slot_index: 0 };
+        let stop_token = CancellationToken::new();
+        let acquired_at = tokio::time::Instant::now();
+
+        tokio::spawn(run_heartbeat(
+            lease,
+            node,
+            slot,
+            acquired_at,
+            interval,
+            lease_ttl,
+            stop_token.clone(),
+        ));
+        // First poll at t=0 so the renewal timer is based at acquisition.
+        tokio::task::yield_now().await;
+
+        // t=60ms: the first renewal (tick at 50ms) succeeded, resetting the
+        // deadline to ~t=250-260ms; every later renewal hangs.
+        advance_in_steps(Duration::from_millis(60), step).await;
+        assert!(!stop_token.is_cancelled());
+
+        // t=220ms: past `acquired_at + lease_ttl` (200ms) but inside the
+        // renewed window — measuring from acquisition would fence here.
+        advance_in_steps(Duration::from_millis(160), step).await;
+        assert!(
+            !stop_token.is_cancelled(),
+            "deadline must restart from the successful renewal, not acquisition"
+        );
+
+        // t=280ms: past the renewed deadline — the hang must fence now.
+        advance_in_steps(Duration::from_millis(60), step).await;
+        assert!(
+            stop_token.is_cancelled(),
+            "a hang after a successful renewal must fence at success + lease_ttl"
+        );
     }
 }

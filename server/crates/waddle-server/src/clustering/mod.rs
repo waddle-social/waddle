@@ -119,6 +119,21 @@ pub enum ClusteringError {
     Swarm(#[from] swarm::SwarmError),
 }
 
+/// Derive the clustering subsystem's own cancellation scope from the
+/// process-wide shutdown token.
+///
+/// `CancellationToken::child_token` gives us both directions we need: parent
+/// cancellation (process shutdown) still propagates into the child, so
+/// server-wide shutdown always tears clustering down; but cancelling the
+/// child does NOT cancel the parent, so a clustering-internal self-fence
+/// (keypair-slot fencing loss, or a lease-renewal deadline blown while
+/// partitioned from Postgres — see `swarm::run_heartbeat`) only stops
+/// clustering. It must never drain axum, WebSocket admission, or ACME.
+#[cfg(feature = "clustering")]
+fn clustering_scope_token(parent: &CancellationToken) -> CancellationToken {
+    parent.child_token()
+}
+
 /// Conditionally start the clustering swarm subsystem.
 ///
 /// Returns `Ok(())` immediately, doing nothing, when clustering is disabled —
@@ -150,10 +165,14 @@ pub async fn start_if_enabled(
         if driver != DatabaseDriver::Postgres {
             return Err(ClusteringError::RequiresPostgres { driver });
         }
+        // Every clustering task (swarm event loop, lease heartbeat, relay
+        // supervisor, allowlist/DNS timers) is driven off this child, never
+        // the raw process-wide `stop_token` — see `clustering_scope_token`.
+        let clustering_stop = clustering_scope_token(stop_token);
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
-        let handle = swarm::spawn(config, db, stop_token.clone()).await?;
+        let handle = swarm::spawn(config, db, clustering_stop).await?;
         tracing::info!(
             local_peer_id = %handle.local_peer_id,
             node_id = %handle.node_id,
@@ -162,5 +181,34 @@ pub async fn start_if_enabled(
             "ADR-0017 Phase 2: clustering swarm started (node discovery only)"
         );
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod tests {
+    use super::*;
+
+    // Regression coverage for the cancellation-scope invariant: a
+    // clustering self-fence must not take down the whole process, but
+    // process shutdown must still take down clustering.
+    #[test]
+    fn clustering_scope_cancels_independently_of_parent() {
+        let parent = CancellationToken::new();
+        let child = clustering_scope_token(&parent);
+
+        child.cancel();
+
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    #[test]
+    fn parent_cancellation_still_tears_down_clustering_scope() {
+        let parent = CancellationToken::new();
+        let child = clustering_scope_token(&parent);
+
+        parent.cancel();
+
+        assert!(child.is_cancelled());
     }
 }
