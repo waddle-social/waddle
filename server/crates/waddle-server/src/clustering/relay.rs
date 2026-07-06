@@ -244,6 +244,10 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
             }
 
             let mut reregister = tokio::time::interval(REREGISTER_INTERVAL);
+            // Delayed ticks must not burst-catch-up (re-registration is
+            // idempotent but each burst tick is a wasted DHT write) — same
+            // policy as the swarm event-loop timers.
+            reregister.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // Skip the immediate first tick — we just registered above.
             reregister.tick().await;
 
