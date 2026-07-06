@@ -648,3 +648,88 @@ async fn websocket_unclean_disconnect_broadcasts_unavailable_to_subscribers() {
 
     let _ = bob.close().await;
 }
+
+#[tokio::test]
+async fn websocket_probe_returns_xep0319_idle_for_detached_resource() {
+    // XEP-0319 §2.2 + RFC 6121 §4.3: a probe response reports the contact's
+    // last broadcast presence, including the <idle xmlns='urn:xmpp:idle:1'
+    // since='…'/> stamp the client advertised. This must hold for a resource
+    // whose XEP-0198 session is DETACHED (awaiting resume): the stored
+    // presence payloads travel into the detached snapshot (issue #1103).
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    let alice_full = alice.full_jid.clone().expect("alice full jid");
+
+    // Make alice's session resumable so the abrupt drop below detaches the
+    // session instead of tearing it down.
+    alice
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("alice enables stream management");
+    let _enabled = alice
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("alice receives <enabled/>");
+
+    const IDLE_SINCE: &str = "2024-06-01T12:00:00Z";
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><show>away</show><idle xmlns="urn:xmpp:idle:1" since="{IDLE_SINCE}"/></presence>"#
+        ))
+        .await
+        .expect("alice sends away presence with XEP-0319 idle");
+    let live_broadcast = bob
+        .recv_matching(|frame| {
+            frame.contains(&format!("from='{alice_full}'")) && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("bob receives alice's live away broadcast");
+    assert!(
+        live_broadcast.contains("urn:xmpp:idle:1"),
+        "live broadcast relays the idle stamp verbatim (issue #1101): {live_broadcast}"
+    );
+
+    // Abrupt drop: the resumable session detaches, awaiting resume.
+    drop(alice);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    bob.send(&probe_presence_xml("alice@localhost"))
+        .await
+        .expect("bob probes alice");
+    let probe = bob
+        .recv_matching(|frame| {
+            frame.contains(&format!("from='{alice_full}'")) && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("probe response for the detached resource");
+    assert!(
+        probe.contains("urn:xmpp:idle:1") && probe.contains(IDLE_SINCE),
+        "probe response for a detached resource must carry the stored XEP-0319 idle stamp: {probe}"
+    );
+
+    let _ = bob.close().await;
+}

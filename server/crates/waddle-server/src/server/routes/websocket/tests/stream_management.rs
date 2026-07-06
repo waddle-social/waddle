@@ -277,6 +277,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
     };
     for sequence in 1..=(waddle_xmpp::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1)
     {
@@ -359,6 +360,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
     };
     state
         .deps
@@ -439,6 +441,7 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store");
@@ -515,6 +518,7 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store");
@@ -667,6 +671,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
     };
     state
         .deps
@@ -743,6 +748,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store");
@@ -823,6 +829,7 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store");
@@ -896,6 +903,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice");
@@ -965,6 +973,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice");
@@ -1042,6 +1051,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice laptop");
@@ -1105,6 +1115,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice laptop again");
@@ -1288,6 +1299,7 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached session");
@@ -1352,6 +1364,7 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached session");
@@ -1446,6 +1459,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             presence_show: Some(xmpp_parsers::presence::Show::Chat),
             presence_status: Some("ready from detach".to_string()),
             presence_priority: 7,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice web");
@@ -1535,6 +1549,7 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             presence_show: Some(xmpp_parsers::presence::Show::Away),
             presence_status: Some("stepped away".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice");
@@ -1635,6 +1650,7 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 presence_show: Some(show),
                 presence_status: Some(status.to_string()),
                 presence_priority: 5,
+                presence_payloads: Vec::new(),
             })
             .await
             .expect("store detached alice resource");
@@ -1706,6 +1722,7 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             presence_show: Some(xmpp_parsers::presence::Show::Away),
             presence_status: Some("private".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice");
@@ -1863,6 +1880,7 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached bob");
@@ -1922,6 +1940,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached alice");
@@ -1999,6 +2018,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store detached bob");
@@ -2085,6 +2105,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
     };
     state
         .deps
@@ -2429,6 +2450,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store");
@@ -2566,6 +2588,7 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("store");

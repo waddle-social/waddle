@@ -275,6 +275,9 @@ pub(super) async fn cleanup_connection_shutdown(
                     .as_ref()
                     .map(|state| state.priority)
                     .unwrap_or_else(|| entry.presence_priority()),
+                presence_payloads: presence_state
+                    .map(|state| state.payloads)
+                    .unwrap_or_default(),
             },
         ) {
             let stream_id = detached.stream_id.clone();

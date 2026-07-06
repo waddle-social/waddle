@@ -347,13 +347,11 @@ async fn presence_state_for_available_resource(
         .detached_presence_state(resource)
         .await
     {
-        Ok(Some((show, status, priority))) => Some(PresenceStateSnapshot {
-            show,
-            status,
-            priority,
-            // Detached (XEP-0198) presence state does not yet persist
-            // extension payloads (idle, caps, ...).
-            payloads: Vec::new(),
+        Ok(Some(detached)) => Some(PresenceStateSnapshot {
+            show: detached.show,
+            status: detached.status,
+            priority: detached.priority,
+            payloads: detached.payloads,
         }),
         Ok(None) => None,
         Err(error) => {
@@ -368,8 +366,8 @@ struct PresenceStateSnapshot {
     status: Option<String>,
     priority: i8,
     /// The resource's original presence extension payloads (XEP-0115 caps,
-    /// XEP-0319 idle, anything else), relayed verbatim (issue #1101). Only the
-    /// live registry persists them; the detached (XEP-0198) path has none yet.
+    /// XEP-0319 idle, anything else), relayed verbatim (issues #1101/#1103)
+    /// from either the live registry or the detached (XEP-0198) session.
     payloads: Vec<Element>,
 }
 

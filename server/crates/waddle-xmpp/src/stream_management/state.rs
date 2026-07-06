@@ -22,6 +22,11 @@ pub struct DetachedSessionSnapshot {
     pub presence_show: Option<xmpp_parsers::presence::Show>,
     pub presence_status: Option<String>,
     pub presence_priority: i8,
+    /// Presence extension payloads (XEP-0115 caps, XEP-0319 idle, ...)
+    /// last broadcast by the resource, carried into the detached session
+    /// so probe/subscription delivery can relay them verbatim while the
+    /// stream awaits resume (issue #1103).
+    pub presence_payloads: Vec<minidom::Element>,
 }
 
 /// Stream management state for a connection.
@@ -311,6 +316,7 @@ impl StreamManagementState {
             presence_show: snapshot.presence_show,
             presence_status: snapshot.presence_status,
             presence_priority: snapshot.presence_priority,
+            presence_payloads: snapshot.presence_payloads,
         })
     }
 
@@ -504,6 +510,7 @@ mod tests {
                 presence_show: Some(xmpp_parsers::presence::Show::Chat),
                 presence_status: Some("ready".to_string()),
                 presence_priority: 7,
+                presence_payloads: Vec::new(),
             })
             .expect("resumable state must produce detached session");
         assert!(
@@ -530,6 +537,7 @@ mod tests {
                 presence_show: None,
                 presence_status: None,
                 presence_priority: 0,
+                presence_payloads: Vec::new(),
             })
             .expect("resumable state must produce detached session");
         assert!(
@@ -603,6 +611,7 @@ mod tests {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         };
         let mut state = StreamManagementState::with_config(1000, 3);
         state.restore_from_session(&detached);

@@ -155,5 +155,10 @@ pub(super) fn persisted_to_detached(
         presence_show: persisted.presence_show.clone(),
         presence_status: persisted.presence_status.clone(),
         presence_priority: persisted.presence_priority,
+        // The durable shape does not persist presence extension payloads;
+        // a restart-rehydrated detached session reports bare
+        // show/status/priority (issue #1103 limitation, documented on
+        // `DetachedSession::presence_payloads`).
+        presence_payloads: Vec::new(),
     })
 }
