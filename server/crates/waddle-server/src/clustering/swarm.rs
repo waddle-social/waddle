@@ -305,14 +305,16 @@ async fn node_keypair(
 /// Renew the keypair-slot lease on a timer until shutdown; release the slot on
 /// graceful stop, and self-fence (cancel the swarm) on fencing loss so a
 /// superseded identity stops serving.
-async fn run_heartbeat(
-    lease: PostgresKeypairSlotLease,
+async fn run_heartbeat<L>(
+    lease: L,
     node: LeaseIdentity,
     slot: LeasedSlot,
     interval: Duration,
     lease_ttl: Duration,
     stop_token: CancellationToken,
-) {
+) where
+    L: KeypairSlotLease + Send + Sync + 'static,
+{
     let mut timer = tokio::time::interval(interval);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -378,7 +380,13 @@ async fn run_event_loop(
     // happens right away rather than after a full interval.
     let mut dial_timer = tokio::time::interval(dial_interval);
     dial_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut allowlist_timer = tokio::time::interval(allowlist.interval);
+    // The startup path already loaded the enrolled set synchronously before
+    // this loop started, so the first periodic refresh is deferred one full
+    // interval (`interval_at`) instead of immediately re-reading the table.
+    let mut allowlist_timer = tokio::time::interval_at(
+        tokio::time::Instant::now() + allowlist.interval,
+        allowlist.interval,
+    );
     allowlist_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // DNS resolution runs in a spawned task and hands resolved multiaddrs back

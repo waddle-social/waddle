@@ -10,10 +10,10 @@
 //! panics (removing this node from the routing fabric while its Postgres
 //! heartbeat stays fresh — a steady-state, cluster-wide degradation with no
 //! self-healing path), so an owning task respawns it and **re-registers it
-//! under the same name**. Sender-side `ActorNotRunning`/`UnknownActor`/
-//! `BadActorType` errors trigger a bounded-backoff kademlia re-lookup — the
-//! transport-layer refresh path, distinct from Phase 3's `NotOwner`
-//! claims-refresh path.
+//! under the same name**. Sender-side stale-ref errors (`ActorNotRunning`/
+//! `ActorStopped`/`UnknownActor`/`BadActorType`) trigger a bounded-backoff
+//! kademlia re-lookup — the transport-layer refresh path, distinct from
+//! Phase 3's `NotOwner` claims-refresh path.
 //!
 //! Phase 2 is **discovery only**: the relay's message set proves the
 //! cross-node ask round-trip and the XML codec on the wire (spike exit
@@ -306,9 +306,71 @@ pub enum RelayAskError {
     /// The relay name did not resolve in kademlia within the backoff budget.
     #[error("relay for node '{node_id}' not found in the swarm registry")]
     NotFound { node_id: NodeId },
-    /// The ask failed at the transport/handler layer.
-    #[error("relay ask failed: {0}")]
-    Send(String),
+    /// The ask failed at the transport/handler layer. `failure` is the typed,
+    /// matchable classification; `message` is the rendered kameo error, kept
+    /// for human-facing diagnostics only.
+    #[error("relay ask failed ({failure:?}): {message}")]
+    Send {
+        failure: RelaySendFailure,
+        message: String,
+    },
+}
+
+/// Typed classification of a failed relay ask. kameo's [`RemoteSendError`]
+/// is generic over each message's handler-error type, so this enum is the
+/// stable shape callers can match on (typed-payloads rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaySendFailure {
+    /// The cached `ActorId` is dead or wrong — the stale-ref re-lookup set.
+    StaleRef,
+    /// The receiver's mailbox refused the message (full / enqueue timeout).
+    MailboxFull,
+    /// The reply budget elapsed before the handler answered.
+    ReplyTimeout,
+    /// The handler itself returned an error.
+    Handler,
+    /// Message/reply (de)serialization failed at either end, or the peer
+    /// does not know this message type (protocol mismatch).
+    Codec,
+    /// Transport-level failure: dialing, network timeout, closed connection,
+    /// unsupported protocols, IO, or an unbootstrapped swarm.
+    Transport,
+}
+
+fn classify<E>(error: &RemoteSendError<E>) -> RelaySendFailure {
+    match error {
+        RemoteSendError::ActorNotRunning
+        | RemoteSendError::ActorStopped
+        | RemoteSendError::UnknownActor { .. }
+        | RemoteSendError::BadActorType => RelaySendFailure::StaleRef,
+        RemoteSendError::MailboxFull => RelaySendFailure::MailboxFull,
+        RemoteSendError::ReplyTimeout => RelaySendFailure::ReplyTimeout,
+        RemoteSendError::HandlerError(_) => RelaySendFailure::Handler,
+        RemoteSendError::UnknownMessage { .. }
+        | RemoteSendError::SerializeMessage(_)
+        | RemoteSendError::DeserializeMessage(_)
+        | RemoteSendError::SerializeReply(_)
+        | RemoteSendError::SerializeHandlerError(_)
+        | RemoteSendError::DeserializeHandlerError(_) => RelaySendFailure::Codec,
+        RemoteSendError::SwarmNotBootstrapped
+        | RemoteSendError::DialFailure
+        | RemoteSendError::NetworkTimeout
+        | RemoteSendError::ConnectionClosed
+        | RemoteSendError::UnsupportedProtocols
+        | RemoteSendError::Io(_) => RelaySendFailure::Transport,
+    }
+}
+
+/// Wrap a kameo send error as a [`RelayAskError`], preserving the typed
+/// classification alongside the rendered diagnostic.
+fn send_error<E>(error: RemoteSendError<E>) -> RelayAskError
+where
+    RemoteSendError<E>: std::fmt::Display,
+{
+    RelayAskError::Send {
+        failure: classify(&error),
+        message: error.to_string(),
+    }
 }
 
 impl RelayHandle {
@@ -388,9 +450,9 @@ impl RelayHandle {
                     .mailbox_timeout(self.mailbox_timeout)
                     .reply_timeout(self.reply_timeout)
                     .await
-                    .map_err(|error| RelayAskError::Send(error.to_string()))
+                    .map_err(send_error)
             }
-            Err(error) => Err(RelayAskError::Send(error.to_string())),
+            Err(error) => Err(send_error(error)),
         }
     }
 
@@ -420,7 +482,7 @@ impl RelayHandle {
             .mailbox_timeout(self.mailbox_timeout)
             .reply_timeout(self.reply_timeout)
             .await
-            .map_err(|error| RelayAskError::Send(error.to_string()))
+            .map_err(send_error)
     }
 
     /// Round-trip a stanza through the relay (codec proof), with the same
@@ -446,9 +508,9 @@ impl RelayHandle {
                     .mailbox_timeout(self.mailbox_timeout)
                     .reply_timeout(self.reply_timeout)
                     .await
-                    .map_err(|error| RelayAskError::Send(error.to_string()))
+                    .map_err(send_error)
             }
-            Err(error) => Err(RelayAskError::Send(error.to_string())),
+            Err(error) => Err(send_error(error)),
         }
     }
 }
@@ -457,13 +519,7 @@ impl RelayHandle {
 /// a live actor — the explicit re-lookup trigger (ADR element 6). Distinct
 /// from handler/timeout errors, which say nothing about registration state.
 fn is_stale_ref_error<E>(error: &RemoteSendError<E>) -> bool {
-    matches!(
-        error,
-        RemoteSendError::ActorNotRunning
-            | RemoteSendError::ActorStopped
-            | RemoteSendError::UnknownActor { .. }
-            | RemoteSendError::BadActorType
-    )
+    classify(error) == RelaySendFailure::StaleRef
 }
 
 #[cfg(test)]
@@ -494,5 +550,26 @@ mod tests {
         assert!(!is_stale_ref_error::<std::convert::Infallible>(
             &RemoteSendError::MailboxFull
         ));
+    }
+
+    #[test]
+    fn ask_failures_classify_into_typed_kinds() {
+        use std::convert::Infallible;
+        for (error, expected) in [
+            (RemoteSendError::ActorStopped, RelaySendFailure::StaleRef),
+            (RemoteSendError::MailboxFull, RelaySendFailure::MailboxFull),
+            (
+                RemoteSendError::ReplyTimeout,
+                RelaySendFailure::ReplyTimeout,
+            ),
+            (
+                RemoteSendError::SerializeMessage(String::new()),
+                RelaySendFailure::Codec,
+            ),
+            (RemoteSendError::DialFailure, RelaySendFailure::Transport),
+            (RemoteSendError::NetworkTimeout, RelaySendFailure::Transport),
+        ] {
+            assert_eq!(classify::<Infallible>(&error), expected, "{error:?}");
+        }
     }
 }
