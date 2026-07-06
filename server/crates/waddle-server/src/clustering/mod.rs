@@ -13,6 +13,7 @@
 
 use crate::config::ClusteringConfig;
 use crate::db::{Database, DatabaseDriver};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Peer-allowlist store. Public: the multi-process cluster harness
@@ -189,20 +190,70 @@ fn clustering_scope_token(parent: &CancellationToken) -> CancellationToken {
     parent.child_token()
 }
 
+/// Handles the clustering subsystem hands back to the caller of
+/// [`start_if_enabled`] for use by code outside `clustering` itself
+/// (ADR-0017 Phase 3 Slice 4 follow-up plumbing note).
+///
+/// Both fields are `None` whenever clustering is disabled, this binary
+/// lacks the `clustering` Cargo feature, or (defensively) the subsystem
+/// otherwise produced no live handles — callers must treat `None` as "no
+/// Postgres-fenced claim machinery is available; use the portable,
+/// single-node path instead," never as an error.
+///
+/// Unconditionally compiled (no `clustering` feature gate): both field
+/// types ([`waddle_xmpp::ownership::ClaimStore`],
+/// [`waddle_xmpp::ownership::SharedNodeIdentity`]) are themselves
+/// unconditionally compiled, so ordinary non-clustering builds can still
+/// name this type (e.g. on `AppState`) without conditional compilation
+/// leaking into shared struct definitions.
+#[derive(Clone, Default)]
+pub struct ClusteringHandles {
+    /// The same `ClaimStore` backing this node's entity-ownership claims —
+    /// **not** a second, independent store. Constructed by cloning the
+    /// same underlying `Database` the node-lease loop uses, so both views
+    /// observe the same `clustering_claims` rows.
+    pub claim_store: Option<Arc<dyn waddle_xmpp::ownership::ClaimStore>>,
+    /// Live view of this node's current claim identity — the same shared
+    /// handle `self_fence::run_node_lease` updates on every
+    /// re-registration. See [`waddle_xmpp::ownership::SharedNodeIdentity`].
+    pub node_identity: Option<waddle_xmpp::ownership::SharedNodeIdentity>,
+}
+
+impl ClusteringHandles {
+    /// `Some((claim_store, node_identity))` only when both handles are
+    /// present; `None` otherwise. Convenience for callers (e.g.
+    /// `sm_persistence::open_for_cluster_mode`) that only ever want the
+    /// pair together — a `ClaimStore` with no live identity to bind into
+    /// its CAS calls (or vice versa) is not a usable combination.
+    pub fn claim_pair(
+        &self,
+    ) -> Option<(
+        Arc<dyn waddle_xmpp::ownership::ClaimStore>,
+        waddle_xmpp::ownership::SharedNodeIdentity,
+    )> {
+        match (&self.claim_store, &self.node_identity) {
+            (Some(store), Some(identity)) => Some((Arc::clone(store), identity.clone())),
+            _ => None,
+        }
+    }
+}
+
 /// Conditionally start the clustering swarm subsystem.
 ///
-/// Returns `Ok(())` immediately, doing nothing, when clustering is disabled —
-/// the default single-replica path, unchanged. When enabled it validates the
-/// Postgres control-plane prerequisite and, on a `clustering`-feature build,
-/// brings up the owned libp2p swarm (later slices).
+/// Returns `Ok(ClusteringHandles::default())` immediately, doing nothing,
+/// when clustering is disabled — the default single-replica path,
+/// unchanged. When enabled it validates the Postgres control-plane
+/// prerequisite and, on a `clustering`-feature build, brings up the owned
+/// libp2p swarm (later slices) and returns live handles onto the same
+/// `ClaimStore`/node-identity the node-lease loop itself uses.
 pub async fn start_if_enabled(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: &CancellationToken,
     readiness: ClusteringReadiness,
-) -> Result<(), ClusteringError> {
+) -> Result<ClusteringHandles, ClusteringError> {
     if !config.enabled {
-        return Ok(());
+        return Ok(ClusteringHandles::default());
     }
 
     let driver = db.driver();
@@ -255,6 +306,24 @@ pub async fn start_if_enabled(
         // sibling var) rather than a raw `std::env::var` at this call site.
         let pod_template_hash = config.pod_template_hash.clone();
         register_node_lease(&node_lease, &node_identity, pod_template_hash.clone()).await?;
+
+        // ADR-0017 Phase 3 Slice 4 follow-up plumbing: hand back a
+        // `ClaimStore` view onto the same `clustering_claims` rows the
+        // node-lease loop guards, plus a live handle onto the identity it
+        // keeps current across re-registrations — so a caller outside
+        // `clustering` (the Postgres-fenced `SmPersistenceStorage`) can
+        // bind the *current* node identity into its own claim
+        // acquire/fence calls instead of capturing a stale one at
+        // construction time. `claim_store_handle` wraps the same `db`
+        // clone as `node_lease` — not a second, independent store.
+        let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(node_identity.clone());
+        let handles = ClusteringHandles {
+            claim_store: Some(claim_store_handle),
+            node_identity: Some(live_identity.clone()),
+        };
+
         tokio::spawn(self_fence::run_node_lease(
             node_lease,
             node_identity,
@@ -266,9 +335,10 @@ pub async fn start_if_enabled(
                 connected_peers: handle.connected_peers.clone(),
                 local_claims: std::sync::Arc::new(self_fence::NoLocallyClaimedEntities),
                 readiness,
+                live_identity,
             },
         ));
-        Ok(())
+        Ok(handles)
     }
 }
 

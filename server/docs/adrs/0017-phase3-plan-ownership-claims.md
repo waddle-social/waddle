@@ -514,6 +514,13 @@ pub struct ResumeIdentityProof { _private: () }
 pub trait ClaimStore: Send + Sync {
     async fn ensure_schema(&self) -> Result<(), ClaimError>;
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError>;
+    // Added post-implementation (Slice 4, deviation 26 — council-adjudicated FIX 1):
+    // acquire, or on conflict, an idempotent self-reacquire iff the existing row's
+    // owner is exactly `me` (same node_id AND node_epoch); otherwise `AlreadyClaimed`,
+    // exactly as `acquire` would return. `acquire` itself is unchanged and stays
+    // strictly "fail if already claimed" — this is a distinct method, not a behavior
+    // change to `acquire`.
+    async fn ensure_claimed(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError>;
     async fn steal_stale(&self, entity: &Entity, observed: ClaimEpoch, staleness: StalePredicate, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError>;
     async fn steal_for_resume(&self, entity: &Entity, observed: ClaimEpoch, witness: ResumeIdentityProof, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError>;
     async fn fence(&self, entity: &Entity, me: &NodeIdentity, mine: ClaimEpoch) -> Result<bool, ClaimError>; // advisory-only, own transaction — see Slice 4's design note; NEVER the write-path fencing mechanism
@@ -891,35 +898,82 @@ types living in the crate that actually owns the transaction.
 impl — "not a decorator" extends to file layout too), implementing `waddle_xmpp::
 stream_management::persistence::SmPersistenceStorage` for `PostgresFencedSmPersistence`.
 No new schema: same `sm_sessions`/`sm_unacked` tables, byte-identical for SQLite.
+As landed (FIX 5(d) — the full touched-paths list, corrected from the single-file
+description above): `server/crates/waddle-xmpp/src/ownership/mod.rs` (`ensure_claimed`
+trait method + `Entity`'s new `Display` impl, deviation 26/FIX 2),
+`server/crates/waddle-xmpp/src/ownership/in_process.rs` (`InProcessClaimStore`'s
+`ensure_claimed`, and its claim map widened to also track each claim's owning
+`NodeIdentity`, not just its epoch), `server/crates/waddle-xmpp/src/
+stream_management/persistence.rs` (`SmPersistenceError::NotOwner`'s field retyped from
+`String` to a typed `Entity`, FIX 2; new `ClusterColocationMismatch` variant, deviation
+27), `server/crates/waddle-server/src/clustering/claims.rs`
+(`PostgresClaimStore::ensure_claimed`), `server/crates/waddle-server/src/clustering/
+mod.rs` (new `ClusteringHandles` return type — see its own paragraph below — replacing
+`start_if_enabled`'s previous `Result<(), ClusteringError>`), `server/crates/
+waddle-server/src/clustering/self_fence.rs` (`NodeLeaseRunConfig` gains
+`live_identity: SharedNodeIdentity`, seeded and updated by `run_node_lease` alongside
+every `identity = fresh` reassignment — the Slice 4+ follow-up plumbing note below,
+now landed rather than merely flagged), `server/crates/waddle-server/src/lib.rs`
+(`#[cfg(feature = "clustering")] pub mod sm_persistence_fenced;`),
+`server/crates/waddle-server/src/server/mod.rs` (`start_with_config` threads
+`start_if_enabled`'s returned `ClusteringHandles` onto `AppStateDeps`),
+`server/crates/waddle-server/src/server/state.rs` (`AppState`/`AppStateDeps` gain
+`clustering_claims: ClusteringHandles`), `server/crates/waddle-server/src/server/
+http.rs` (`create_sm_session_registry` takes the `ClusteringHandles` and the global
+`Database` handle, calling `open_for_cluster_mode`), `server/crates/waddle-server/src/
+sm_persistence.rs` (`open_for_cluster_mode` dispatcher — the driver-selection function
+described above, now also carrying FIX 4's co-location check and a
+`crate::db::redact_database_url` helper for safely embedding DSNs in the resulting
+error), `server/crates/waddle-server/src/db/mod.rs` (`Database` gains a
+`database_url` field + `Database::database_url()` accessor, deviation 27).
 
-**Slice 4+ follow-up plumbing, flagged now so it is not rediscovered as a surprise
-later (FIX 8(c))**: `self_fence::run_node_lease` (Slice 2) holds this node's current
+**`ClusteringHandles` (FIX 8(c)'s plumbing, now landed)**: `start_if_enabled` returns
+`Result<ClusteringHandles, ClusteringError>` instead of `Result<(), ClusteringError>`.
+`ClusteringHandles` carries `claim_store: Option<Arc<dyn ClaimStore>>` and
+`node_identity: Option<SharedNodeIdentity>` — both `None` whenever clustering is
+disabled, this binary lacks the `clustering` feature, or (defensively) the subsystem
+produced no live handles. `claim_store` wraps the *same* `Database` clone the
+node-lease loop itself uses (not a second, independent store), and `node_identity` is
+the same `SharedNodeIdentity` `run_node_lease` updates on every re-registration —
+`ClusteringHandles::claim_pair()` hands both back together as
+`Option<(Arc<dyn ClaimStore>, SharedNodeIdentity)>`, since a `ClaimStore` with no live
+identity to bind into its CAS calls (or vice versa) is never a usable combination.
+`AppState`/`AppStateDeps` carry it as `clustering_claims`, and
+`server/http.rs::create_sm_session_registry` reads `state.clustering_claims.claim_pair()`
+to decide, alongside `server_config.clustering.enabled`, which `SmPersistenceStorage`
+`open_for_cluster_mode` constructs.
+
+**Slice 4+ follow-up plumbing (FIX 8(c)) — landed, not merely flagged**:
+`self_fence::run_node_lease` (Slice 2) previously held this node's current
 `NodeIdentity` as a plain loop-local variable — reassigned in place on every
 re-registration — with no getter or shared handle exposing "the identity this node
-currently believes it holds" to any other call site. That is sufficient for Slice 2
-(nothing outside the loop needs it yet), but `SmPersistenceStorage`'s `<enable/>`-time
-`ClaimStore::acquire` call (this slice) and any later Slice 4+ claim-reacquisition path
-(deviation 19) both need to bind the *current* live `NodeIdentity` into their CAS calls
-— a stale identity captured once at startup would silently keep acquiring claims under
-a `node_epoch` that stopped being current the moment this node last self-fenced and
-re-registered. This slice's implementation must expose the live identity (e.g. a
-`Arc<ArcSwap<NodeIdentity>>`-style shared handle updated alongside `identity =
-fresh` in `run_node_lease`, or an equivalent readable-snapshot mechanism mirroring
-`ConnectedPeerCount`'s own shared-handle shape) rather than each new claim-acquiring
-call site inventing its own copy.
+currently believes it holds" to any other call site. `NodeLeaseRunConfig` now carries
+`live_identity: SharedNodeIdentity`; `run_node_lease` seeds it with the loop's initial
+identity and calls `live_identity.set(identity.clone())` again alongside every
+`identity = fresh` reassignment, so any other holder of a clone — this slice's
+`PostgresFencedSmPersistence`, via the new `ClusteringHandles` — always observes the
+identity currently in force rather than a stale pre-fence snapshot.
 
 **Tests**: dedicated Postgres-gated test module (new, alongside
 `sm_persistence/tests.rs`'s existing style) covering: every trait method under the
 fenced impl behaves per divergence (a)/(b) above; a steal committed mid-transaction
 causes a concurrent fenced write to observe 0 rows from the `FOR SHARE` SELECT and
-abort before the write; `delete_session`/`record_promotion_failure` are genuinely
-atomic with their fencing check (no window where the SELECT passes but the steal lands
-before the subsequent statement).
+abort before the write; `delete_session`/`store_session_atomic`/
+`record_promotion_failure` are genuinely atomic with their fencing check (no window
+where the SELECT passes but the steal lands before the subsequent statement) —
+including a dedicated concurrent-race variant per method (FIX 6), not just
+`delete_session`'s; `list_all_sessions` round-trips every persisted session under the
+fenced impl (FIX 6); FIX 1's `ensure_claimed` idempotence for a self-reacquire and
+`AlreadyClaimed` for a foreign owner, on both `ClaimStore` implementations; a
+concurrent-first-writes race (two tasks, one fresh stream_id, both writes succeed,
+exactly one `clustering_claims` row) at both the bare-`ClaimStore` level and through
+`PostgresFencedSmPersistence` itself.
 
 **Dependencies (corrected — blocker fix 1)**: Slice 1 (`ClaimStore` — supplies the
-cached acquire-time `ClaimEpoch` this impl binds into its own inline `FOR SHARE` SELECT;
-see the design note above for why the fencing check is issued inline rather than
-delegated to `ClaimStore`). Slice 0 is a **transitive** dependency only, through Slice
+cached `ensure_claimed`-time `ClaimEpoch` (deviation 26) this impl binds into its own
+inline `FOR SHARE` SELECT; see the design note above for why the fencing check is
+issued inline rather than delegated to `ClaimStore`). Slice 0 is a **transitive**
+dependency only, through Slice
 1's own control-plane-pool CAS statements — the fencing SELECT here runs on the **main
 pool**, inside the same `Database::begin()` transaction as the write it guards, exactly
 like every other statement `PostgresFencedSmPersistence` issues. The previous draft's
@@ -942,6 +996,14 @@ self-claimed sessions; promotion executes under the row-locked fenced epoch."*
 Graceful drain *"releases claims per entity, after that entity's final fenced
 writes."* Orphan reaper: *"any node may steal such claims (fenced CAS) and then expire
 or promote them, after first committing the expire CAS on the owner's `nodes` row."*
+
+**Forward note (deviation 26)**: `restore_from_persistence`'s acquire-then-hydrate step
+should call `ClaimStore::ensure_claimed`, not a bare `acquire`, for the same reason
+Slice 4's own `claim_epoch_for` side channel does — a session already claimed by this
+exact node/epoch (e.g. re-observed across a retried hydration pass, or already picked
+up by Slice 4's lazy first-fenced-write path before startup hydration reaches it) must
+self-reacquire idempotently rather than spuriously failing with `AlreadyClaimed`. A
+genuinely different node's claim still correctly fails hydration for that session.
 
 **Design addition (major fix 6)**: restore-time expired-row deletion — today an
 unscoped delete of rows past their expiry window, run before/alongside the unscoped
@@ -1047,6 +1109,15 @@ SM-ID). Three branches:
 3. **Owner unreachable, lease fresh**: **hold** the `<resume/>` response (conformant —
    XEP-0198 mandates no response deadline) and retry the handshake with backoff, capped
    at `min(remaining lease TTL, resume-handshake timeout)`.
+
+**Forward note (deviation 26)**: the `<enable/>`-time claim-creation step above should
+call `ClaimStore::ensure_claimed`, not a bare `acquire` — a fresh `<enable/>` for a
+stream-id this node has never seen still gets a plain fresh claim (the self-reacquire
+path never fires when there is no existing row), but `ensure_claimed`'s self-idempotence
+is exactly what keeps this call from spuriously conflicting with Slice 4's own lazy
+first-fenced-write acquisition for the same stream-id on this same node — the two call
+sites coexist with no explicit hand-off protocol between them precisely because both go
+through the same idempotent-for-self primitive.
 
 **XEP fact-check (this plan's own verification pass against `xeps/xep-0198.xml`,
 confirming the ADR's claims)**: `<failed/>` is confirmed to optionally carry an `h`
@@ -1824,3 +1895,79 @@ concern).
     steal-variant block) is a **new, distinct** typed rejection —
     `ClaimError::SmSessionExcludedFromStealIntent` — not a repurposing of the removed
     variant.
+25. **Fencing extended to all seven `SmPersistenceStorage` write methods, not only the
+    three the locked spec names by name** (council-adjudicated, post-implementation
+    review of Slice 4): element 1's locked text singles out `delete_session`,
+    `store_session_atomic`, and `record_promotion_failure` as needing the fencing
+    `SELECT` moved *inside* a `Database::begin()` transaction, because those three
+    were already (or needed to become) multi-statement — the locked list identifies
+    which methods required that structural conversion from per-statement
+    `Database::guard()` calls to one transaction, not an exhaustive statement of which
+    methods must be fenced at all. `PostgresFencedSmPersistence` fences all seven
+    methods that write `sm_sessions`/`sm_unacked` on behalf of an SM-session entity —
+    `upsert_session`, `delete_session`, `append_unacked`, `ack_through`,
+    `delete_unacked`, `store_session_atomic`, `record_promotion_failure` — each inside
+    its own `Database::begin()` transaction with the `FOR SHARE` fencing `SELECT` as
+    the first statement, per the module's own "Fencing design (per-method)" doc
+    section. Reading the locked list as exhaustive would leave `upsert_session`,
+    `append_unacked`, `ack_through`, and `delete_unacked` writing `sm_sessions`/
+    `sm_unacked` with no fencing check at all — exactly the unscoped-write hazard this
+    whole slice exists to close. The four read-only methods (`get_session`,
+    `list_unacked`, `list_expired_sessions`, `list_all_sessions`) remain deliberately
+    unfenced, per their own doc comments (a resuming/stealing node must be able to read
+    a session it does not yet own, and cross-entity listings are not scoped to one
+    claim at all).
+26. **`ClaimStore::ensure_claimed` + a per-stream-id `tokio::sync::OnceCell`
+    single-flight, replacing this document's earlier "read the epoch once from the
+    `<enable/>`-time acquire" interim wording** (council-adjudicated FIX 1,
+    post-implementation review of Slice 4): the original Slice 4 design note describes
+    `PostgresFencedSmPersistence` caching a `ClaimEpoch` "read once from the
+    `<enable/>`-time `ClaimStore::acquire` call" — but nothing in Slice 4 itself calls
+    `<enable/>`-time `acquire` yet (that is Slice 5/6 wiring), so this slice's actual
+    `claim_epoch_for` side channel calls the CAS itself, lazily, on the first fenced
+    write for a stream-id it has not yet seen. A bare `acquire` there hits two
+    hazards: (1) two concurrent first writes for the same not-yet-claimed stream_id
+    can race two independent `acquire` calls, one of which spuriously loses with
+    `AlreadyClaimed` even though both are this same node; (2) once Slice 5/6 wires a
+    real `<enable/>`-time `acquire` ahead of this path's first fenced write, that
+    first write's own `claim_epoch_for` call would hit the same spurious
+    `AlreadyClaimed` against its own process's just-created row (a self-lock). The
+    fix adds `ClaimStore::ensure_claimed(entity, me) -> Result<ClaimEpoch, ClaimError>`
+    (Slice 1's trait — acquire, or on conflict, an idempotent self-reacquire iff the
+    existing row's owner is exactly `me`'s `node_id` **and** `node_epoch`; otherwise
+    `AlreadyClaimed`, exactly as `acquire` would return) to both `ClaimStore`
+    implementations, and layers a per-stream-id `Arc<tokio::sync::OnceCell<ClaimEpoch>>`
+    (stored in `claim_epochs: DashMap<SmSessionId, Arc<OnceCell<ClaimEpoch>>>`, not a
+    bare `DashMap<SmSessionId, ClaimEpoch>`) under it in
+    `PostgresFencedSmPersistence::claim_epoch_for`, so concurrent callers for the same
+    stream-id single-flight onto one in-flight `ensure_claimed` call. `acquire` itself
+    is unchanged — still strictly "fail if already claimed" — preserving Slice 1's own
+    contract and tests. **Forward note for Slice 5/6**: their `<enable/>`-time
+    acquire, and any later claim-reacquisition-on-resume path, may keep calling
+    `ensure_claimed` (or `acquire`, where a genuinely fresh claim is intended) freely —
+    `ensure_claimed`'s self-idempotence means a later Slice 4 fenced write for the same
+    stream-id under the same node identity observes the already-created row as a
+    self-reacquire rather than erroring, so the two mechanisms coexist without an
+    explicit hand-off protocol between them.
+27. **Clustered SM persistence must be co-located with the clustering claims tables in
+    the same Postgres database** (council-adjudicated FIX 4, post-implementation review
+    of Slice 4): `PostgresFencedSmPersistence` no longer opens an independent pool from
+    `WADDLE_XMPP_SM_DATABASE_URL` (or its `WADDLE_DATABASE_URL` fallback) — its fencing
+    `SELECT ... FOR SHARE` targets `clustering_claims`, which lives in the clustering
+    global database, so a second, independently-resolved database might not even have
+    that table. `sm_persistence::open_for_cluster_mode` now takes the same `Database`
+    handle `clustering::start_if_enabled` itself received (`db_pool.global()`) and
+    constructs `PostgresFencedSmPersistence` by cloning it, never by opening a fresh
+    pool from the resolved SM URL. Before that clone happens, the resolved SM
+    database URL is compared against the global database's own URL
+    (`Database::database_url`, a new accessor); a mismatch while `clustering.enabled`
+    fails startup with the new typed
+    `SmPersistenceError::ClusterColocationMismatch { sm_database_url, global_database_url }`
+    variant (both fields pre-redacted by the caller — DSNs commonly carry credentials —
+    via the new `crate::db::redact_database_url` helper) rather than silently running a
+    fencing check against a table that may not exist wherever the SM URL actually
+    points. When clustering is disabled, or the resolved SM URL is not a
+    `postgres://`/`postgresql://` DSN at all, this check is skipped entirely and
+    `open_for_cluster_mode` falls back to the portable implementation exactly as
+    before — the co-location invariant only binds the specific combination this
+    phase's fenced impl actually requires.

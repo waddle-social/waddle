@@ -99,6 +99,20 @@ impl Entity {
     }
 }
 
+/// `<entity_type_tag>:<id>` — the same injective encoding
+/// `waddle-server::clustering::claims::entity_key` uses for the
+/// `clustering_claims.entity` primary key. Giving `Entity` its own
+/// `Display` (FIX 2) lets error types embed a typed [`Entity`] field
+/// directly instead of pre-formatting it into a bare `String` at the
+/// construction site — the typed-payloads hard rule's whole point: the
+/// structured value flows through, and only `Display`/error-rendering
+/// ever turns it into text.
+impl std::fmt::Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.entity_type.as_db_str(), self.id)
+    }
+}
+
 /// A claim's fencing generation. Every successful acquire/steal bumps this;
 /// a durable write's fencing check compares the epoch it was granted against
 /// the epoch currently on file, so a stale epoch can never authorize a
@@ -131,6 +145,65 @@ impl NodeIdentity {
     /// node identity is not a meaningful concept (there is only one node).
     pub fn local() -> Self {
         Self::new("local", "local")
+    }
+}
+
+/// A live, shared view of this process's current [`NodeIdentity`].
+///
+/// Node identity is not fixed for the life of a process: ADR-0017 Phase 3
+/// Slice 2's `self_fence::run_node_lease` mints a fresh `node_id`/
+/// `node_epoch` pair every time this node re-registers after a self-fence,
+/// reassigning its loop-local identity in place. Any call site that binds
+/// an identity into a claim acquire/fence CAS on this node's behalf must
+/// observe whatever identity is *currently* in force, not a snapshot
+/// captured once at startup — a caller holding a stale, pre-fence identity
+/// would silently keep acquiring/fencing claims under a `node_epoch` that
+/// stopped being current the moment this node last self-fenced (ADR-0017
+/// Phase 3 plan, Slice 4 follow-up plumbing note). This type is that
+/// shared, updatable view: `self_fence::run_node_lease` calls [`Self::set`]
+/// every time it mints a fresh identity, and any other holder of a clone
+/// calls [`Self::current`] to read the latest value at the moment it
+/// actually needs it (never earlier, never cached across an `.await`).
+///
+/// Declared here (unconditionally compiled), not in `waddle-server`'s
+/// `clustering` module, so it is nameable from both the clustering
+/// subsystem that updates it and any unconditionally-compiled consumer
+/// (e.g. the Postgres-fenced `SmPersistenceStorage`, ADR-0017 Phase 3
+/// Slice 4) that only ever reads it, without forcing the reader to depend
+/// on the `clustering` Cargo feature.
+#[derive(Clone)]
+pub struct SharedNodeIdentity(std::sync::Arc<std::sync::RwLock<NodeIdentity>>);
+
+impl SharedNodeIdentity {
+    pub fn new(initial: NodeIdentity) -> Self {
+        Self(std::sync::Arc::new(std::sync::RwLock::new(initial)))
+    }
+
+    /// The identity this node currently believes it holds, cloned out
+    /// rather than returned by reference so callers never hold the lock
+    /// across an `.await`.
+    ///
+    /// A poisoned lock (a panicking holder) still yields a usable
+    /// identity: `NodeIdentity` has no invariant `set` can partially
+    /// break (both fields are plain, independently-assigned `String`s),
+    /// so recovering via the poison error's inner guard is safe and keeps
+    /// one panicking holder from cascading into every future
+    /// claim-fencing call this process ever makes.
+    pub fn current(&self) -> NodeIdentity {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replace the current identity. Called by `self_fence::run_node_lease`
+    /// every time this node mints a fresh identity (initial registration
+    /// and every post-fence re-registration).
+    pub fn set(&self, identity: NodeIdentity) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
     }
 }
 
@@ -230,6 +303,43 @@ pub trait ClaimStore: Send + Sync {
     /// Acquire a fresh claim on `entity` for `me`. Fails with
     /// [`ClaimError::AlreadyClaimed`] if another node already holds it.
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError>;
+
+    /// Idempotent, self-reacquiring claim ensure (ADR-0017 Phase 3, FIX 1 —
+    /// council-adjudicated). Attempts a fresh [`acquire`](Self::acquire);
+    /// when that loses the CAS race with [`ClaimError::AlreadyClaimed`],
+    /// reads the entity's existing claim row: if it is already held by `me`
+    /// (the same `node_id` **and** `node_epoch`), this is a *self*-reacquire
+    /// — return the row's current [`ClaimEpoch`] instead of erroring, since
+    /// re-observing a claim this exact node/epoch already holds is
+    /// idempotent, not a conflict. If a genuinely different node/epoch holds
+    /// it, this returns [`ClaimError::AlreadyClaimed`] exactly as `acquire`
+    /// would.
+    ///
+    /// This is what the Postgres-fenced `SmPersistenceStorage`'s
+    /// first-fenced-write-per-stream path (ADR-0017 Phase 3 Slice 4) calls
+    /// instead of a bare `acquire`, layered under a caller-side per-key
+    /// single-flight (see `sm_persistence_fenced::claim_epoch_for`) so that:
+    /// (a) two concurrent first writes for the same not-yet-claimed
+    /// stream_id never spuriously conflict with each other (both observe
+    /// `me`'s own successful acquire, one via the CAS, the other via this
+    /// self-reacquire read), and (b) a later slice's `<enable/>`-time
+    /// acquire — which creates the claims row under this node's own
+    /// identity before this path's first fenced write ever runs — is
+    /// observed here as a self-reacquire rather than an error (deviation
+    /// 26), closing the Slice 5/6 self-lock the bare-`acquire` design would
+    /// otherwise hit.
+    ///
+    /// The row read on conflict is deliberately **unlocked**: it only ever
+    /// decides which [`ClaimEpoch`] value to hand back to the caller for a
+    /// *later*, separate fencing check to bind — it is never itself the
+    /// authority over whether any write may proceed. The authoritative gate
+    /// over every actual write remains the per-write `SELECT ... FOR SHARE`
+    /// fence inside the write's own transaction (Slice 4's `assert_fenced`).
+    async fn ensure_claimed(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError>;
 
     /// Steal `entity` from a stale owner (element 4's owner-stale predicate,
     /// or — from Slice 3 — the steal-intent predicate). `observed` must
@@ -334,5 +444,17 @@ mod tests {
     #[test]
     fn claim_epoch_orders_by_value() {
         assert!(ClaimEpoch(0) < ClaimEpoch(1));
+    }
+
+    #[test]
+    fn shared_node_identity_set_is_visible_through_every_clone() {
+        let shared = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-0"));
+        let clone = shared.clone();
+        assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-0"));
+
+        shared.set(NodeIdentity::new("node-a", "epoch-1"));
+
+        assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-1"));
+        assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
     }
 }

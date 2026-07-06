@@ -454,7 +454,13 @@ async fn create_websocket_state(
         }
     }
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
-    let sm_session_registry = create_sm_session_registry(xmpp_config).await;
+    let sm_session_registry = create_sm_session_registry(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+    )
+    .await;
 
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
@@ -816,6 +822,9 @@ fn sm_max_sessions_from_env() -> usize {
 
 async fn create_sm_session_registry(
     xmpp_config: &XmppConfig,
+    server_config: &ServerConfig,
+    clustering: &crate::clustering::ClusteringHandles,
+    global_db: &crate::db::Database,
 ) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
     let sm_database_url = xmpp_config.sm_database_url.clone();
     if sm_database_url.is_none() {
@@ -826,12 +835,22 @@ async fn create_sm_session_registry(
              these env vars for durable session resumption (issue #209)."
         );
     }
+    // ADR-0017 Phase 3 Slice 4: cluster mode selects the Postgres-fenced
+    // `SmPersistenceStorage`; every other deployment shape (clustering
+    // disabled, non-Postgres, or a build without the `clustering` feature)
+    // keeps today's portable, single-node implementation. All of that
+    // branching — including FIX 4's co-location check against `global_db`,
+    // the same handle `clustering::start_if_enabled` itself received —
+    // lives inside `open_for_cluster_mode` itself.
     let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
-        Arc::new(
-            crate::sm_persistence::DatabaseSmPersistence::open(sm_database_url.as_deref())
-                .await
-                .expect("open SM persistence storage"),
-        );
+        crate::sm_persistence::open_for_cluster_mode(
+            sm_database_url.as_deref(),
+            server_config.clustering.enabled,
+            clustering.claim_pair(),
+            global_db,
+        )
+        .await
+        .expect("open SM persistence storage");
     let sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),

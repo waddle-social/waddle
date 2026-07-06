@@ -23,6 +23,14 @@ pub mod push_service;
 pub mod room_policy;
 pub mod server;
 pub mod sm_persistence;
+/// Postgres-fenced `SmPersistenceStorage` (ADR-0017 Phase 3 Slice 4).
+/// Gated behind the `clustering` Cargo feature, matching every other
+/// Postgres-cluster-only module (`clustering::claims`, `clustering::lease`,
+/// …): a default build links none of this, and `sm_persistence::
+/// open_for_cluster_mode` — itself unconditionally compiled — is the only
+/// call site that ever names it.
+#[cfg(feature = "clustering")]
+pub mod sm_persistence_fenced;
 pub mod sm_promotion;
 pub mod space_identity;
 pub mod spaces_metadata;

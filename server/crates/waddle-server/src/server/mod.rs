@@ -192,7 +192,7 @@ pub async fn start_with_config(
     // disabled — the default single-replica path is byte-for-byte unchanged,
     // and `clustering_readiness` simply never flips (stays ready forever).
     let clustering_readiness = crate::clustering::ClusteringReadiness::new();
-    crate::clustering::start_if_enabled(
+    let clustering_handles = crate::clustering::start_if_enabled(
         &server_config.clustering,
         db_pool.global(),
         &stop_token,
@@ -221,6 +221,7 @@ pub async fn start_with_config(
         permission_actor: permission_actor.clone(),
         server_owner_jids,
         clustering_readiness,
+        clustering_claims: clustering_handles,
     }));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;

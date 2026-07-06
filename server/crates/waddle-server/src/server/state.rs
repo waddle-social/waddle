@@ -68,6 +68,13 @@ pub struct AppState {
     /// deployments (and clustering-disabled builds) never flip it, so it
     /// stays ready forever — today's behavior, unchanged.
     pub clustering_readiness: crate::clustering::ClusteringReadiness,
+    /// Live `ClaimStore`/node-identity handles from the clustering
+    /// subsystem (ADR-0017 Phase 3 Slice 4 follow-up plumbing note), used
+    /// to select and construct the Postgres-fenced `SmPersistenceStorage`
+    /// at WebSocket-state build time. Both fields are `None` whenever
+    /// clustering is disabled or not compiled in — see
+    /// [`crate::clustering::ClusteringHandles`].
+    pub clustering_claims: crate::clustering::ClusteringHandles,
 }
 
 impl AppState {
@@ -117,6 +124,7 @@ impl AppState {
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             clustering_readiness: crate::clustering::ClusteringReadiness::new(),
+            clustering_claims: crate::clustering::ClusteringHandles::default(),
         })
     }
 
@@ -138,6 +146,7 @@ impl AppState {
             permission_actor,
             server_owner_jids,
             clustering_readiness,
+            clustering_claims,
         } = deps;
         Self {
             db_pool,
@@ -153,6 +162,7 @@ impl AppState {
             permission_actor,
             server_owner_jids,
             clustering_readiness,
+            clustering_claims,
         }
     }
 }
@@ -174,6 +184,7 @@ pub struct AppStateDeps {
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
     pub clustering_readiness: crate::clustering::ClusteringReadiness,
+    pub clustering_claims: crate::clustering::ClusteringHandles,
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against

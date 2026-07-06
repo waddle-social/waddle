@@ -29,10 +29,20 @@ use super::{
     ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, ResumeIdentityProof, StalePredicate,
 };
 
+/// A held claim's owner + current fencing epoch. `owner` is needed so
+/// [`InProcessClaimStore::ensure_claimed`] (FIX 1) can distinguish a
+/// self-reacquire (`owner == me`) from a genuine conflict — bare `ClaimEpoch`
+/// storage (the pre-FIX-1 shape) had no way to answer "who holds this."
+#[derive(Clone)]
+struct ClaimRecord {
+    owner: NodeIdentity,
+    epoch: ClaimEpoch,
+}
+
 /// In-memory claim bookkeeping for the single-node case.
 #[derive(Default)]
 pub struct InProcessClaimStore {
-    claims: Mutex<HashMap<Entity, ClaimEpoch>>,
+    claims: Mutex<HashMap<Entity, ClaimRecord>>,
 }
 
 impl InProcessClaimStore {
@@ -40,7 +50,7 @@ impl InProcessClaimStore {
         Self::default()
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<Entity, ClaimEpoch>>, ClaimError> {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<Entity, ClaimRecord>>, ClaimError> {
         self.claims.lock().map_err(|_| ClaimError::Poisoned)
     }
 }
@@ -52,7 +62,7 @@ impl ClaimStore for InProcessClaimStore {
         Ok(())
     }
 
-    async fn acquire(&self, entity: &Entity, _me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
+    async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
         let mut claims = self.lock()?;
         // Same contract as `PostgresClaimStore::acquire` (INSERT ... ON
         // CONFLICT DO NOTHING): a fresh claim only succeeds when the
@@ -64,8 +74,42 @@ impl ClaimStore for InProcessClaimStore {
         if claims.contains_key(entity) {
             return Err(ClaimError::AlreadyClaimed);
         }
-        claims.insert(entity.clone(), ClaimEpoch(0));
+        claims.insert(
+            entity.clone(),
+            ClaimRecord {
+                owner: me.clone(),
+                epoch: ClaimEpoch(0),
+            },
+        );
         Ok(ClaimEpoch(0))
+    }
+
+    async fn ensure_claimed(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        // FIX 1: same observable contract as `PostgresClaimStore::ensure_claimed`
+        // — a fresh acquire, or (on conflict) a self-reacquire iff the
+        // existing row's owner is exactly `me`. Implemented directly against
+        // the lock rather than by calling `acquire` and re-locking on
+        // conflict, since this store already holds everything it needs
+        // under one lock acquisition.
+        let mut claims = self.lock()?;
+        match claims.get(entity) {
+            None => {
+                claims.insert(
+                    entity.clone(),
+                    ClaimRecord {
+                        owner: me.clone(),
+                        epoch: ClaimEpoch(0),
+                    },
+                );
+                Ok(ClaimEpoch(0))
+            }
+            Some(record) if record.owner == *me => Ok(record.epoch),
+            Some(_) => Err(ClaimError::AlreadyClaimed),
+        }
     }
 
     async fn steal_stale(
@@ -73,15 +117,19 @@ impl ClaimStore for InProcessClaimStore {
         entity: &Entity,
         _observed: ClaimEpoch,
         _staleness: StalePredicate,
-        _me: &NodeIdentity,
+        me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
         // Single node: there is no other node to steal from, so this
         // trivially succeeds by bumping the epoch (mirroring what a fresh
         // acquire-after-steal would observe on the real CAS).
         let mut claims = self.lock()?;
-        let entry = claims.entry(entity.clone()).or_insert(ClaimEpoch(0));
-        entry.0 += 1;
-        Ok(*entry)
+        let entry = claims.entry(entity.clone()).or_insert(ClaimRecord {
+            owner: me.clone(),
+            epoch: ClaimEpoch(0),
+        });
+        entry.epoch.0 += 1;
+        entry.owner = me.clone();
+        Ok(entry.epoch)
     }
 
     async fn steal_for_resume(
@@ -104,7 +152,7 @@ impl ClaimStore for InProcessClaimStore {
         mine: ClaimEpoch,
     ) -> Result<bool, ClaimError> {
         let claims = self.lock()?;
-        Ok(claims.get(entity) == Some(&mine))
+        Ok(claims.get(entity).map(|record| record.epoch) == Some(mine))
     }
 
     async fn release(
@@ -117,7 +165,7 @@ impl ClaimStore for InProcessClaimStore {
         // Epoch-gated exactly like `PostgresClaimStore`'s CAS: a losing
         // epoch is a no-op (the claim was re-issued since the caller
         // observed `mine`), and releasing an absent claim is idempotent.
-        if claims.get(entity) == Some(&mine) {
+        if claims.get(entity).map(|record| record.epoch) == Some(mine) {
             claims.remove(entity);
         }
         Ok(())
@@ -214,6 +262,48 @@ mod tests {
             .acquire(&e, &me())
             .await
             .expect("entity claimable again after a current-epoch release");
+    }
+
+    #[tokio::test]
+    async fn ensure_claimed_is_a_fresh_acquire_when_unclaimed() {
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        let epoch = store
+            .ensure_claimed(&e, &me())
+            .await
+            .expect("ensure_claimed on an unclaimed entity acquires fresh");
+        assert_eq!(epoch, ClaimEpoch(0));
+    }
+
+    #[tokio::test]
+    async fn ensure_claimed_is_idempotent_for_the_same_node_and_epoch() {
+        // FIX 1: a second `ensure_claimed` call by the exact same node
+        // identity that already holds the claim must observe the existing
+        // epoch, not `AlreadyClaimed` — the whole point of the fix (closes
+        // the concurrent-first-write spurious-conflict case).
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        let first = store.ensure_claimed(&e, &me()).await.expect("first");
+        let second = store
+            .ensure_claimed(&e, &me())
+            .await
+            .expect("self-reacquire must not error");
+        assert_eq!(first, second);
+        assert_eq!(second, ClaimEpoch(0));
+    }
+
+    #[tokio::test]
+    async fn ensure_claimed_rejects_a_foreign_owner() {
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        store.acquire(&e, &me()).await.expect("acquire under me()");
+
+        let foreign = NodeIdentity::new("other-node", "other-epoch");
+        let err = store
+            .ensure_claimed(&e, &foreign)
+            .await
+            .expect_err("a different node/epoch must not self-reacquire");
+        assert!(matches!(err, ClaimError::AlreadyClaimed));
     }
 
     #[tokio::test]

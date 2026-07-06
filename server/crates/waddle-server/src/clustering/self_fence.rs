@@ -294,6 +294,15 @@ pub struct NodeLeaseRunConfig {
     pub connected_peers: ConnectedPeerCount,
     pub local_claims: Arc<dyn LocallyClaimedEntities>,
     pub readiness: ClusteringReadiness,
+    /// Live, shared view of this node's current identity (ADR-0017 Phase 3
+    /// Slice 4 follow-up plumbing note): [`run_node_lease`] calls
+    /// [`waddle_xmpp::ownership::SharedNodeIdentity::set`] on it every
+    /// time it mints a fresh identity (initial value and every post-fence
+    /// re-registration), so any other holder of a clone — e.g. the
+    /// Postgres-fenced `SmPersistenceStorage`'s claim-acquire calls —
+    /// always binds the identity currently in force, never a stale
+    /// pre-fence snapshot.
+    pub live_identity: waddle_xmpp::ownership::SharedNodeIdentity,
 }
 
 /// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
@@ -396,7 +405,13 @@ pub async fn run_node_lease<L>(
         connected_peers,
         local_claims,
         readiness,
+        live_identity,
     } = run_config;
+    // Seed the shared handle with the identity this loop starts under —
+    // see `live_identity`'s doc comment and the `identity = fresh;`
+    // reassignment below, which keeps it current across every
+    // re-registration.
+    live_identity.set(identity.clone());
     let mut isolation = IsolationTracker::new();
     let mut backoff = ReregistrationBackoff::new(
         self_fence_cfg.reregister_backoff_base,
@@ -719,6 +734,7 @@ pub async fn run_node_lease<L>(
                     let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
                     if can_reacquire_claims(other_live, reachable) {
                         identity = fresh;
+                        live_identity.set(identity.clone());
                         backoff.reset();
                         // Readiness clears on register + hysteresis alone
                         // this slice: no production `LocallyClaimedEntities`
@@ -1040,6 +1056,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1082,6 +1099,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1128,6 +1146,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1186,6 +1205,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1346,6 +1366,7 @@ mod tests {
                 connected_peers: connected_peers.clone(),
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1541,6 +1562,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims,
                 readiness,
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1601,6 +1623,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims,
                 readiness,
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 
@@ -1662,6 +1685,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims,
                 readiness,
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
             },
         ));
 

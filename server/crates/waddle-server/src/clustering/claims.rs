@@ -352,6 +352,61 @@ impl ClaimStore for PostgresClaimStore {
         }
     }
 
+    async fn ensure_claimed(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        // FIX 1: try the real CAS first — the common, uncontended case (a
+        // brand-new entity, or a genuine conflict with another node) needs
+        // nothing beyond `acquire` itself.
+        match self.acquire(entity, me).await {
+            Ok(epoch) => Ok(epoch),
+            Err(ClaimError::AlreadyClaimed) => {
+                // `acquire` lost the CAS: read the row it lost to. This read
+                // is deliberately **unlocked** (no `FOR SHARE`) — safe
+                // because it never authorizes a write itself; the
+                // authoritative gate over any actual write stays the
+                // per-write `FOR SHARE` fence inside that write's own
+                // transaction (`sm_persistence_fenced::assert_fenced`). This
+                // method only decides which `ClaimEpoch` value the caller
+                // should cache to bind into that later fence.
+                let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+                let mut rows = conn
+                    .query(
+                        "SELECT node_id, node_epoch, claim_epoch FROM clustering_claims WHERE entity = ?",
+                        crate::db_params![entity_key(entity)],
+                    )
+                    .await
+                    .map_err(db_err)?;
+                match rows.next().await.map_err(db_err)? {
+                    Some(row) => {
+                        let node_id: String = row.get(0).map_err(db_err)?;
+                        let node_epoch: String = row.get(1).map_err(db_err)?;
+                        let claim_epoch: i64 = row.get(2).map_err(db_err)?;
+                        if node_id == me.node_id && node_epoch == me.node_epoch {
+                            // Self-reacquire: this exact node/epoch already
+                            // holds the claim (either the losing side of a
+                            // concurrent first-write race against itself, or
+                            // a later slice's `<enable/>`-time acquire under
+                            // this same identity) — idempotent, not a
+                            // conflict.
+                            Ok(ClaimEpoch(claim_epoch))
+                        } else {
+                            Err(ClaimError::AlreadyClaimed)
+                        }
+                    }
+                    // The row vanished between the failed INSERT and this
+                    // read (e.g. released concurrently) — cannot confirm
+                    // self-ownership, so treat it the same as a foreign
+                    // owner: the caller retries with a fresh `acquire`.
+                    None => Err(ClaimError::AlreadyClaimed),
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     async fn steal_stale(
         &self,
         entity: &Entity,
@@ -1266,6 +1321,137 @@ mod tests {
             .await
             .expect_err("second acquire loses the race");
         assert!(matches!(err, ClaimError::AlreadyClaimed));
+    }
+
+    /// FIX 1: `ensure_claimed` on a not-yet-claimed entity is a plain fresh
+    /// acquire.
+    #[tokio::test]
+    async fn ensure_claimed_acquires_fresh_when_unclaimed() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        let entity = sm_entity("ensure-claimed-fresh");
+        let epoch = store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("ensure_claimed acquires fresh");
+        assert_eq!(epoch, ClaimEpoch(0));
+    }
+
+    /// FIX 1: a second `ensure_claimed` call under the exact same
+    /// `NodeIdentity` that already holds the claim (e.g. two concurrent
+    /// first-writes for the same not-yet-claimed stream_id) must observe the
+    /// existing epoch rather than `AlreadyClaimed` — this is the whole point
+    /// of the fix, closing the spurious-conflict failure mode the original
+    /// bare-`acquire` design hit.
+    #[tokio::test]
+    async fn ensure_claimed_is_idempotent_for_the_same_node_and_epoch() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        let entity = sm_entity("ensure-claimed-idempotent");
+        let first = store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("first ensure_claimed acquires");
+        let second = store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("second ensure_claimed under the same identity self-reacquires");
+        assert_eq!(first, second);
+        assert_eq!(second, ClaimEpoch(0));
+    }
+
+    /// FIX 1: `ensure_claimed` under a genuinely different node/epoch than
+    /// the current owner must still reject exactly like `acquire` does — the
+    /// self-reacquire path is scoped to the *exact same* identity, never a
+    /// blanket idempotent success.
+    #[tokio::test]
+    async fn ensure_claimed_rejects_a_foreign_owner() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = sm_entity("ensure-claimed-foreign");
+        store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("owner's ensure_claimed acquires");
+
+        let foreign = node_identity();
+        let err = store
+            .ensure_claimed(&entity, &foreign)
+            .await
+            .expect_err("a different node/epoch must not self-reacquire");
+        assert!(matches!(err, ClaimError::AlreadyClaimed));
+    }
+
+    /// FIX 1: two concurrent first-writes racing `ensure_claimed` for the
+    /// same fresh entity, under the same `NodeIdentity` (the fenced SM
+    /// persistence's own use case — one process, one identity, two
+    /// concurrent tasks writing the same not-yet-claimed stream_id), must
+    /// both succeed, and exactly one `clustering_claims` row must exist for
+    /// the entity afterward.
+    #[tokio::test]
+    async fn ensure_claimed_concurrent_first_writes_both_succeed_exactly_one_row() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
+            return;
+        };
+        let db = Database::from_config(
+            "clustering-claims-test-concurrent",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+        let store = PostgresClaimStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure schema");
+        let conn = db.guard().await.expect("guard");
+        conn.execute("DELETE FROM clustering_claims", ())
+            .await
+            .expect("clean claims");
+        conn.execute("DELETE FROM clustering_nodes", ())
+            .await
+            .expect("clean nodes");
+
+        let me = node_identity();
+        let entity = sm_entity("ensure-claimed-concurrent");
+        let store = std::sync::Arc::new(store);
+
+        let (store_a, entity_a, me_a) = (store.clone(), entity.clone(), me.clone());
+        let (store_b, entity_b, me_b) = (store.clone(), entity.clone(), me.clone());
+        let task_a = tokio::spawn(async move { store_a.ensure_claimed(&entity_a, &me_a).await });
+        let task_b = tokio::spawn(async move { store_b.ensure_claimed(&entity_b, &me_b).await });
+        let (result_a, result_b) = tokio::join!(task_a, task_b);
+        let epoch_a = result_a
+            .expect("task a join")
+            .expect("task a ensure_claimed");
+        let epoch_b = result_b
+            .expect("task b join")
+            .expect("task b ensure_claimed");
+        assert_eq!(epoch_a, epoch_b);
+
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM clustering_claims WHERE entity = ?",
+                crate::db_params![entity_key(&entity)],
+            )
+            .await
+            .expect("count query");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("row present")
+            .get(0)
+            .expect("count column");
+        assert_eq!(count, 1, "exactly one claims row must exist for the entity");
     }
 
     #[tokio::test]

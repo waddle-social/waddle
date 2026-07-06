@@ -159,6 +159,20 @@ pub struct Database {
     control_plane_backend: Option<DatabaseBackend>,
     name: String,
     driver: DatabaseDriver,
+    /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
+    /// FIX 4): lets a caller compare "does this other resolved URL point
+    /// at the same database as this handle" — e.g.
+    /// `sm_persistence::open_for_cluster_mode`'s co-location check, which
+    /// must refuse to start a Postgres-fenced `SmPersistenceStorage`
+    /// against a database URL different from the clustering global
+    /// database's own. Deliberately **not** exposed via `Debug` (this
+    /// struct has none, on purpose — see the control-plane-pool test
+    /// below) and [`Database::database_url`] is the only accessor, so a
+    /// caller must go out of its way to read it, rather than have it leak
+    /// into an incidental log/format call. Callers that log or embed this
+    /// value in an error message MUST redact credentials first (DSNs
+    /// commonly carry a password in their userinfo component).
+    database_url: String,
 }
 
 impl Database {
@@ -226,6 +240,7 @@ impl Database {
             control_plane_backend,
             name: name.to_string(),
             driver: config.driver,
+            database_url: config.database_url.clone(),
         })
     }
 
@@ -277,6 +292,14 @@ impl Database {
         self.driver
     }
 
+    /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
+    /// FIX 4). See the field's own doc comment for the redaction caveat —
+    /// this MAY carry credentials in its userinfo component; callers that
+    /// log or embed it in a user-facing error MUST redact first.
+    pub fn database_url(&self) -> &str {
+        &self.database_url
+    }
+
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
         let conn = self.guard().await?;
@@ -294,6 +317,67 @@ impl Database {
     pub async fn execute(&self, sql: &str) -> Result<u64, DatabaseError> {
         let conn = self.guard().await?;
         conn.execute(sql, ()).await
+    }
+}
+
+/// Strip a DSN's userinfo (`user[:password]@`) component, if any, for safe
+/// inclusion in a log line or user-facing error message (ADR-0017 Phase 3
+/// Slice 4 FIX 4). `postgres://user:pass@host/db` becomes
+/// `postgres://***@host/db`; a URL with no userinfo, or one that fails to
+/// parse as `scheme://...`, is returned unchanged.
+///
+/// A small string-scan rather than pulling in a URL-parsing crate: the only
+/// shape this needs to recognize is the `scheme://[userinfo@]rest` prefix
+/// every DSN this codebase handles (`postgres://`, `postgresql://`,
+/// `sqlite://`) already uses.
+///
+/// `#[cfg(feature = "clustering")]`: this repo's dead-code hard rule prefers
+/// narrowing visibility over suppressing an unused-code warning — the sole
+/// call site is `sm_persistence::open_for_cluster_mode`'s FIX 4 co-location
+/// check, itself only reachable in a `clustering`-feature build.
+#[cfg(feature = "clustering")]
+pub(crate) fn redact_database_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let (scheme, rest) = url.split_at(scheme_end + 3);
+    let Some(at_pos) = rest.find('@') else {
+        return url.to_string();
+    };
+    // Only redact if everything before the `@` is plausibly userinfo (no
+    // `/` in it) — a bare `@` appearing later in a path/query segment must
+    // not be mistaken for credentials.
+    let userinfo_candidate = &rest[..at_pos];
+    if userinfo_candidate.contains('/') {
+        return url.to_string();
+    }
+    format!("{scheme}***@{}", &rest[at_pos + 1..])
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod redact_database_url_tests {
+    use super::*;
+
+    #[test]
+    fn redact_database_url_strips_credentials() {
+        assert_eq!(
+            redact_database_url("postgres://user:hunter2@localhost:5432/waddle"),
+            "postgres://***@localhost:5432/waddle"
+        );
+        assert_eq!(
+            redact_database_url("postgres://user@localhost/waddle"),
+            "postgres://***@localhost/waddle"
+        );
+    }
+
+    #[test]
+    fn redact_database_url_is_a_no_op_without_userinfo() {
+        assert_eq!(
+            redact_database_url("postgres://localhost:5432/waddle"),
+            "postgres://localhost:5432/waddle"
+        );
+        assert_eq!(redact_database_url("sqlite::memory:"), "sqlite::memory:");
+        assert_eq!(redact_database_url("not-a-url-at-all"), "not-a-url-at-all");
     }
 }
 
