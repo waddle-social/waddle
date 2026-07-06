@@ -131,8 +131,15 @@ fn enforce_bounds(xml: &str) -> Result<(), RemoteCodecError> {
                 check_attribute_cap(&start)?;
             }
             Ok(quick_xml::events::Event::Empty(start)) => {
-                // Self-closing elements don't change depth but still carry
-                // attributes.
+                // A self-closing element opens no lasting scope but still
+                // occupies one nesting level of its own — count it against
+                // the cap so the parsed tree's depth invariant is exact
+                // (a leaf under MAX open elements must not slip through).
+                if depth + 1 > MAX_REMOTE_XML_DEPTH {
+                    return Err(RemoteCodecError::TooDeep {
+                        max: MAX_REMOTE_XML_DEPTH,
+                    });
+                }
                 check_attribute_cap(&start)?;
             }
             Ok(quick_xml::events::Event::End(_)) => {
@@ -283,6 +290,33 @@ mod tests {
         }
         let err = decode_element(&xml).expect_err("depth cap enforced");
         assert!(matches!(err, RemoteCodecError::TooDeep { .. }));
+    }
+
+    #[test]
+    fn self_closing_leaf_counts_against_the_depth_cap() {
+        // A self-closing element under MAX open elements is one level deeper
+        // than the cap and must be rejected; the same leaf one level higher
+        // must pass. (Open/close pairs at exactly MAX are the control.)
+        let build = |open_depth: usize, with_leaf: bool| {
+            let mut xml = String::from("<a xmlns='jabber:client'>");
+            for _ in 1..open_depth {
+                xml.push_str("<a>");
+            }
+            if with_leaf {
+                xml.push_str("<leaf/>");
+            }
+            for _ in 0..open_depth {
+                xml.push_str("</a>");
+            }
+            xml
+        };
+        let err = decode_element(&build(MAX_REMOTE_XML_DEPTH, true))
+            .expect_err("leaf under MAX opens exceeds the cap");
+        assert!(matches!(err, RemoteCodecError::TooDeep { .. }));
+        decode_element(&build(MAX_REMOTE_XML_DEPTH - 1, true))
+            .expect("leaf at exactly MAX depth is allowed");
+        decode_element(&build(MAX_REMOTE_XML_DEPTH, false))
+            .expect("MAX open/close pairs without the leaf are allowed");
     }
 
     #[test]
