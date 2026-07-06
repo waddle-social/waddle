@@ -238,7 +238,12 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
                 Err(error) => {
                     tracing::warn!(%name, %error, "clustering relay registration failed; retrying");
                     actor_ref.kill();
-                    tokio::time::sleep(RESPAWN_BACKOFF).await;
+                    // Cancellation-aware backoff: graceful shutdown must not
+                    // wait out the retry delay.
+                    tokio::select! {
+                        _ = stop_token.cancelled() => return,
+                        _ = tokio::time::sleep(RESPAWN_BACKOFF) => {}
+                    }
                     continue;
                 }
             }
@@ -267,9 +272,13 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
                     _ = actor_ref.wait_for_shutdown() => {
                         // Unexpected stop/panic: kameo has already
                         // unregistered the name. Respawn and re-register
-                        // under the SAME name after a short backoff.
+                        // under the SAME name after a short backoff (which a
+                        // graceful shutdown must not wait out).
                         respawns += 1;
-                        tokio::time::sleep(RESPAWN_BACKOFF).await;
+                        tokio::select! {
+                            _ = stop_token.cancelled() => return,
+                            _ = tokio::time::sleep(RESPAWN_BACKOFF) => {}
+                        }
                         break;
                     }
                     _ = reregister.tick() => {

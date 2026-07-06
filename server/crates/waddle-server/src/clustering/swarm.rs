@@ -117,7 +117,49 @@ pub async fn spawn(
     // kademlia relay registration.
     let node_id = NodeId::generate();
 
-    let keypair = node_keypair(config, db, &node_id, &stop_token).await?;
+    let (keypair, pending_lease) = node_keypair(config, db, &node_id).await?;
+
+    // Everything fallible after the slot lease runs in `bring_up`; only once
+    // it all succeeds does the slot's heartbeat start. A failure releases the
+    // slot immediately instead of leaving it held until lease-TTL expiry —
+    // repeated crash-restarts (each with a fresh node_id) would otherwise
+    // chew through the pool one slot per attempt and starve replacements
+    // with NoFreeSlot.
+    match bring_up(config, db, node_id, keypair, listen_addrs, &stop_token).await {
+        Ok(handle) => {
+            if let Some(pending) = pending_lease {
+                tokio::spawn(run_heartbeat(
+                    pending.lease,
+                    pending.node,
+                    pending.slot,
+                    config.lease.heartbeat_interval,
+                    config.lease.lease_ttl,
+                    stop_token.clone(),
+                ));
+            }
+            Ok(handle)
+        }
+        Err(error) => {
+            if let Some(pending) = pending_lease {
+                pending.release_best_effort("swarm bring-up failed").await;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The fallible remainder of swarm bring-up after the keypair-slot lease:
+/// allowlist load, transport/behaviour build, global `ActorSwarm` install,
+/// listeners, event loop, supervised relay, and the node-id file. Split out
+/// of [`spawn`] so a failure anywhere in it releases the leased slot.
+async fn bring_up(
+    config: &ClusteringConfig,
+    db: &Database,
+    node_id: NodeId,
+    keypair: Keypair,
+    listen_addrs: Vec<Multiaddr>,
+    stop_token: &CancellationToken,
+) -> Result<SwarmHandle, SwarmError> {
     let local_peer_id = keypair.public().to_peer_id();
 
     // Peer authorization (ADR element 3): load the enrolled peer set before
@@ -214,7 +256,7 @@ pub async fn spawn(
              relay or stall its mailbox — test harnesses only, never production"
         );
     }
-    relay::spawn_supervised(node_id.clone(), config.fault_injection, stop_token);
+    relay::spawn_supervised(node_id.clone(), config.fault_injection, stop_token.clone());
 
     let handle = SwarmHandle {
         local_peer_id,
@@ -245,15 +287,40 @@ struct AllowlistRefresh {
     interval: Duration,
 }
 
-/// Resolve this node's libp2p keypair: lease a pool slot (and start its
-/// heartbeat) when a keypair pool is configured, else generate an ephemeral
-/// identity.
+/// A leased keypair slot whose heartbeat has not started yet: held across
+/// the rest of swarm bring-up so a failure there releases the slot
+/// immediately instead of leaving it blocked until lease-TTL expiry.
+struct PendingLease {
+    lease: PostgresKeypairSlotLease,
+    node: LeaseIdentity,
+    slot: LeasedSlot,
+}
+
+impl PendingLease {
+    /// Best-effort release: without it a failed bring-up holds the slot
+    /// hostage until TTL expiry while this node crash-loops onto fresh
+    /// slots, transiently shrinking the pool for every other node.
+    async fn release_best_effort(self, context: &'static str) {
+        if let Err(error) = self.lease.release(&self.node, self.slot).await {
+            tracing::warn!(
+                %error,
+                slot = self.slot.slot_index,
+                context,
+                "failed to release keypair slot"
+            );
+        }
+    }
+}
+
+/// Resolve this node's libp2p keypair: lease a pool slot when a keypair pool
+/// is configured (returned as a [`PendingLease`] — the caller starts its
+/// heartbeat only after the rest of bring-up succeeds, or releases it), else
+/// generate an ephemeral identity.
 async fn node_keypair(
     config: &ClusteringConfig,
     db: &Database,
     node_id: &NodeId,
-    stop_token: &CancellationToken,
-) -> Result<Keypair, SwarmError> {
+) -> Result<(Keypair, Option<PendingLease>), SwarmError> {
     if config.keypair_pool.is_empty() {
         tracing::warn!(
             "clustering: no keypair pool configured — using an ephemeral per-process identity. \
@@ -262,7 +329,7 @@ async fn node_keypair(
              configure WADDLE_CLUSTERING_KEYPAIR_POOL and enroll every node's PeerId for any \
              multi-node deployment"
         );
-        return Ok(identity::ephemeral_keypair());
+        return Ok((identity::ephemeral_keypair(), None));
     }
 
     let lease = PostgresKeypairSlotLease::new(db.clone());
@@ -277,39 +344,23 @@ async fn node_keypair(
         .await?;
     // `acquire` only ever returns an in-range slot, so this index is valid.
     let entry = &config.keypair_pool[slot.slot_index as usize];
+    let pending = PendingLease { lease, node, slot };
     let keypair = match identity::keypair_from_pool_entry(entry) {
         Ok(keypair) => keypair,
         Err(error) => {
-            // Best-effort release: without it a malformed pool entry holds
-            // the slot hostage until lease-TTL expiry while this node
-            // crash-loops onto fresh slots, transiently shrinking the pool
-            // for every other node.
-            if let Err(release_error) = lease.release(&node, slot).await {
-                tracing::warn!(
-                    %release_error,
-                    slot = slot.slot_index,
-                    "failed to release keypair slot after decode failure"
-                );
-            }
+            pending
+                .release_best_effort("keypair pool entry decode failed")
+                .await;
             return Err(error.into());
         }
     };
     tracing::info!(
-        slot = slot.slot_index,
+        slot = pending.slot.slot_index,
         pool_size,
         "clustering: leased keypair-pool slot for node identity"
     );
 
-    tokio::spawn(run_heartbeat(
-        lease,
-        node,
-        slot,
-        config.lease.heartbeat_interval,
-        config.lease.lease_ttl,
-        stop_token.clone(),
-    ));
-
-    Ok(keypair)
+    Ok((keypair, Some(pending)))
 }
 
 /// Renew the keypair-slot lease on a timer until shutdown; release the slot on
