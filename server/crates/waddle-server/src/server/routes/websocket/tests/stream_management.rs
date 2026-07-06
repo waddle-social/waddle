@@ -1786,11 +1786,8 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
     while bob_rx.try_recv().is_ok() {}
     while alice_sibling_rx.try_recv().is_ok() {}
 
-    handlers::presence::broadcast_unavailable_for_expired_detached_session(
-        state.as_ref(),
-        &alice_jid,
-    )
-    .await;
+    handlers::presence::broadcast_unavailable_for_terminated_session(state.as_ref(), &alice_jid)
+        .await;
 
     let outbound = tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv())
         .await

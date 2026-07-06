@@ -240,10 +240,15 @@ async fn send_presence_stanza_to_jid(
     }
 }
 
-pub async fn broadcast_unavailable_for_expired_detached_session(
-    state: &WebSocketState,
-    from: &FullJid,
-) {
+/// RFC 6121 §4.5.2: broadcast a server-generated
+/// `<presence type='unavailable'/>` from `from` to the user's presence
+/// subscribers (and to the user's own sibling resources) when a
+/// presence-available session ends without the client retracting its
+/// presence itself. Used by both terminal session paths: SM-detached
+/// session expiry/invalidation and the unclean disconnect of a non-SM
+/// session (issue #1105). Callers gate on the session having actually
+/// been presence-available.
+pub async fn broadcast_unavailable_for_terminated_session(state: &WebSocketState, from: &FullJid) {
     let Some(storage) = roster_storage(state).await else {
         return;
     };

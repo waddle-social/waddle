@@ -566,3 +566,85 @@ async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_se
     let _ = bob.close().await;
     let _ = alice.close().await;
 }
+
+#[tokio::test]
+async fn websocket_unclean_disconnect_broadcasts_unavailable_to_subscribers() {
+    // RFC 6121 §4.5.2: when a session ends ungracefully (connection drop,
+    // no </stream> close, no self-sent unavailable), the SERVER must
+    // generate <presence type='unavailable'/> from that full JID to the
+    // user's presence subscribers. A resource that never sent initial
+    // available presence must NOT trigger such a broadcast.
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    let alice_full = alice.full_jid.clone().expect("alice full jid");
+
+    // A second alice resource that binds but NEVER sends available presence.
+    let silent_resource = format!("alice-silent-{}", uuid::Uuid::new_v4());
+    let alice_silent = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &silent_resource,
+    )
+    .await
+    .expect("silent alice connection");
+    let alice_silent_full = alice_silent
+        .full_jid
+        .clone()
+        .expect("silent alice full jid");
+
+    // Abrupt drop: no <close/>, no </stream>, no unavailable presence —
+    // the TCP/WebSocket stream is simply torn down.
+    drop(alice_silent);
+    assert_no_frame_matching(
+        &mut bob,
+        Duration::from_millis(700),
+        |frame| {
+            frame.contains("type='unavailable'")
+                && frame.contains(&format!("from='{alice_silent_full}'"))
+        },
+        "a session that never sent available presence must not produce a server-generated unavailable broadcast",
+    )
+    .await;
+
+    // Abrupt drop of the presence-available resource: subscribers MUST
+    // receive a server-generated unavailable from that full JID.
+    drop(alice);
+    let unavailable = bob
+        .recv_matching(|frame| {
+            frame.contains("type='unavailable'") && frame.contains(&format!("from='{alice_full}'"))
+        })
+        .await
+        .expect("bob receives server-generated unavailable after alice's unclean disconnect");
+    assert!(
+        unavailable.contains("to='bob@localhost"),
+        "server-generated unavailable must be addressed to the subscriber: {unavailable}"
+    );
+
+    let _ = bob.close().await;
+}

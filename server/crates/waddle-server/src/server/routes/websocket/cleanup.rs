@@ -459,15 +459,21 @@ pub(super) async fn cleanup_connection_shutdown(
         }
     }
 
-    let removed_owner = conn.registry_owner.as_ref().and_then(|owner| {
+    let removed = conn.registry_owner.as_ref().and_then(|owner| {
         state
             .deps
             .protocol
             .connection_registry
             .unregister_if_owner(&jid, owner)
-            .map(|_| std::sync::Arc::clone(owner))
+            .map(|entry| (entry, std::sync::Arc::clone(owner)))
     });
-    if let Some(owner) = removed_owner {
+    if let Some((removed_entry, owner)) = removed {
+        // Capture presence availability from the entry we just owned and
+        // removed — NOT from a fresh registry lookup, which after the
+        // unregister could only observe a replacement connection's state.
+        // The flag is only true if this session actually sent initial
+        // available presence (RFC 6121 §4.2.2) and did not retract it.
+        let was_presence_available = removed_entry.is_presence_available();
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
         // the dominant disconnect teardown path. Owner-gated (the same token
         // that owned the DashMap entry) so a superseding newcomer that
@@ -484,6 +490,17 @@ pub(super) async fn cleanup_connection_shutdown(
         // circuits the disco#info round-trip.
         state.deps.protocol.caps_resolver.drop_resource(&jid);
         info!(jid = %jid, "WebSocket connection unregistered");
+        // RFC 6121 §4.5.2: an ungraceful session end (connection drop with
+        // no self-sent unavailable) requires the SERVER to broadcast
+        // <presence type='unavailable'/> from this full JID to the user's
+        // presence subscribers. Gated on the session having actually sent
+        // available presence — a bound-but-silent resource advertised
+        // nothing, so there is nothing to retract. The owner-gated
+        // unregister above already guarantees we are not superseded by a
+        // replacement connection for this full JID.
+        if was_presence_available {
+            handlers::presence::broadcast_unavailable_for_terminated_session(state, &jid).await;
+        }
         cleanup_muc_presence(state, &jid).await;
     } else {
         debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
@@ -605,11 +622,8 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .drop_resource(&detached.jid);
     }
     if detached.presence_available && !replacement_is_current_owner {
-        handlers::presence::broadcast_unavailable_for_expired_detached_session(
-            state,
-            &detached.jid,
-        )
-        .await;
+        handlers::presence::broadcast_unavailable_for_terminated_session(state, &detached.jid)
+            .await;
     }
     cleanup_muc_presence(state, &detached.jid).await;
 }

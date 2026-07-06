@@ -329,7 +329,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 }
 
                 if session.presence_available {
-                    routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
+                    routes::websocket::handlers::presence::broadcast_unavailable_for_terminated_session(
                         &state,
                         &session.jid,
                     )
