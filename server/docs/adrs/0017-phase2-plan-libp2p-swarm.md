@@ -125,9 +125,10 @@ behaviour is unchanged and asserted by the unchanged e2e suite.
   keypair pool and selects that keypair; a heartbeat janitor renews; drain
   releases. `rows_affected==0` on renewal ⇒ fencing loss ⇒ refuse to serve.
   Duplicate-PeerId rejection at the swarm behaviour layer (reject a second live
-  session for an already-connected PeerId) as defence in depth. Runs on a
-  **dedicated small control-plane pool/handle**, never the shared statement
-  pool. Postgres-gated CAS tests (acquire, renew, expire-steal, at-most-one
+  session for an already-connected PeerId) as defence in depth. Runs on the
+  shared global pool in Phase 2; the **dedicated small control-plane
+  pool/handle** is a Phase 3 deliverable (see the implementation notes).
+  Postgres-gated CAS tests (acquire, renew, expire-steal, at-most-one
   leaseholder per slot).
 
 - **Slice 3 — peer allowlist enforcement + live-connection revocation.**

@@ -457,8 +457,11 @@ impl RelayHandle {
     }
 
     /// Harness: ask the relay to crash (fault injection). The ask may fail —
-    /// the actor can die before the reply leaves — so the result only says
-    /// whether the *request* went out; callers assert recovery separately.
+    /// the actor can die before the reply leaves — so only the failure
+    /// classes plausible for a mid-ask death are tolerated; anything else
+    /// (codec mismatch, full mailbox, handler error) means the crash request
+    /// never plausibly reached the relay and is propagated so callers don't
+    /// pass vacuously. Callers assert recovery separately.
     pub async fn crash(&mut self) -> Result<(), RelayAskError> {
         let remote_ref = self.resolve().await?;
         match remote_ref
@@ -467,8 +470,17 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
         {
-            // A dead-before-reply error is the expected outcome of a crash.
-            Ok(_) | Err(_) => Ok(()),
+            Ok(_) => Ok(()),
+            // Dead-before-reply presents as a stale ref, a reply that never
+            // arrives, or a torn connection — all expected outcomes here.
+            Err(error) => match classify(&error) {
+                RelaySendFailure::StaleRef
+                | RelaySendFailure::ReplyTimeout
+                | RelaySendFailure::Transport => Ok(()),
+                RelaySendFailure::MailboxFull
+                | RelaySendFailure::Handler
+                | RelaySendFailure::Codec => Err(send_error(error)),
+            },
         }
     }
 
