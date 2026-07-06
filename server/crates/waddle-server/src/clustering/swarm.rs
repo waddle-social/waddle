@@ -132,6 +132,16 @@ pub async fn spawn(
             "clustering peer allowlist is empty: all peer connections will be rejected until \
              peers are enrolled (deny-all)"
         );
+    } else if !enrolled.contains(&local_peer_id) {
+        // Enrollment is symmetric and cluster-wide: a node absent from the
+        // shared table is rejected by every peer, which otherwise presents
+        // only as silent dial failures on the other nodes. Not fatal —
+        // enrollment can land moments after boot and the refresh picks it up.
+        tracing::warn!(
+            %local_peer_id,
+            "clustering: this node's PeerId is not in the peer allowlist — every enrolled \
+             peer will reject its connections until it is enrolled"
+        );
     }
 
     let messaging_config = remote::messaging::Config::default()
