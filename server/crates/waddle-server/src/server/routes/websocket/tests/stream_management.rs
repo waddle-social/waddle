@@ -629,6 +629,282 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
     assert_eq!(ack2_el.attr("h"), Some("1"));
 }
 
+/// Enable SM on a fresh ready connection and return the negotiated
+/// stream id. Shared setup for the live `<a h='N'/>` validation tests
+/// (issue #1099).
+async fn enable_sm_for_live_ack_tests(
+    state: &super::super::state::WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+) -> String {
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state,
+        conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    assert_eq!(enabled.name(), "enabled");
+    enabled.attr("id").expect("stream id").to_string()
+}
+
+/// Seed a pending_delivery row claimed by `stream_id` whose flush
+/// stanza was recorded at `outbound_sequence`, mirroring the Q7b
+/// SM-ack lifecycle rows that `<a h='N'/>` range-deletes.
+async fn seed_claimed_pending_row(
+    state: &super::super::state::WebSocketState,
+    recipient: &BareJid,
+    stream_id: &str,
+    outbound_sequence: u32,
+) {
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new({
+                let mut m =
+                    xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+                m.id = Some(xmpp_parsers::message::Id("pd-1".to_string()));
+                m
+            })),
+            flushed_in_session: Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                stream_id.to_string(),
+            )),
+            outbound_sequence: Some(outbound_sequence),
+        })
+        .await
+        .expect("seed claimed pending_delivery row");
+}
+
+#[tokio::test]
+async fn sm_live_ack_with_impossible_handled_count_closes_stream_without_purging() {
+    // Issue #1099 / XEP-0198 §4: "If the value of 'h' is greater than
+    // the number of stanzas sent by the server... it is RECOMMENDED
+    // to close the stream with an undefined-condition stream error"
+    // carrying <handled-count-too-high/>. The live `<a h='N'/>` path
+    // previously acknowledged unconditionally, silently destroying
+    // the replay queue and the claimed pending_delivery rows.
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    // Two outbound stanzas recorded → send-count is 2.
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    // Client claims it handled 5 stanzas; we only sent 2.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='5'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        2,
+        "bogus live ack must yield stream error + close: {responses:?}"
+    );
+    let stream_error = Element::from_str(&responses[0]).expect("stream error xml");
+    assert_eq!(stream_error.name(), "error");
+    assert_eq!(stream_error.ns(), waddle_xmpp::ns::STREAM);
+    assert!(
+        responses[0].contains("undefined-condition")
+            && responses[0].contains("handled-count-too-high")
+            && (responses[0].contains("h='5'") || responses[0].contains("h=\"5\""))
+            && (responses[0].contains("send-count='2'")
+                || responses[0].contains("send-count=\"2\"")),
+        "expected handled-count-too-high stream error: {responses:?}"
+    );
+    let close = Element::from_str(&responses[1]).expect("close frame xml");
+    assert_eq!(close.name(), "close");
+    assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
+    assert!(
+        conn.phase.is_closing(),
+        "connection must be Closing after handled-count-too-high"
+    );
+
+    // Nothing was purged: both stanzas remain replayable and the
+    // claimed pending_delivery row survives.
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        2,
+        "bogus ack must not purge the replay queue"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert_eq!(rows.len(), 1, "bogus ack must not delete pending rows");
+}
+
+#[tokio::test]
+async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(responses.is_empty(), "valid ack yields no response frames");
+    assert!(!conn.phase.is_closing(), "valid ack must not close");
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        1,
+        "acked prefix must be purged, unacked tail retained"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert!(
+        rows.is_empty(),
+        "acked pending_delivery rows must be range-deleted"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
+    // Boundary: h == send-count is a full ack, not a violation
+    // (XEP-0198 §4 only forbids h GREATER than the sent count).
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='2'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(responses.is_empty(), "h == send-count is a valid full ack");
+    assert!(!conn.phase.is_closing());
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        0,
+        "full ack empties the replay queue"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_is_wrap_aware_past_u32_max() {
+    // XEP-0198 §4: counters wrap at 2^32 ("in the unlikely case that
+    // the number of stanzas handled ... exceeds 2^32"). "Greater than"
+    // must therefore be judged mod 2^32: with outbound_count wrapped
+    // to 2, a client ack of h = 4294967295 (u32::MAX, i.e. 3 stanzas
+    // behind the wrap) is VALID, not "too high".
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    // Restore counters as a wrapped session would carry them: the
+    // server has sent 2^32 + 2 stanzas, the client acked u32::MAX - 1.
+    let detached = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: stream_id.clone(),
+        user_id: "alice@example.com".to_string(),
+        jid: jid.clone(),
+        inbound_count: 0,
+        outbound_count: 2,
+        last_acked: u32::MAX - 1,
+        replay_gap_through: None,
+        unacked_stanzas: vec![
+            waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: u32::MAX,
+                stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            },
+            waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 1,
+                stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            },
+            waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 2,
+                stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            },
+        ],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+    };
+    conn.sm_state.restore_from_session(&detached);
+
+    // h = u32::MAX acks the pre-wrap stanza. A naive `h > outbound`
+    // comparison would misread this as handled-count-too-high.
+    let responses = handle_xmpp_frame(
+        &format!("<a xmlns='urn:xmpp:sm:3' h='{}'/>", u32::MAX),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "wrapped ack behind the counter is valid: {responses:?}"
+    );
+    assert!(!conn.phase.is_closing(), "wrapped valid ack must not close");
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(u32::MAX).len(),
+        2,
+        "pre-wrap stanza purged; post-wrap stanzas retained"
+    );
+}
+
 #[tokio::test]
 async fn sm_resume_restores_session_and_replays_unacked() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};

@@ -98,10 +98,7 @@ pub(super) async fn handle_sm_stanza(
     match sm {
         SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase),
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
-        SmStanza::Ack(ack) => {
-            apply_sm_ack(state, ctx.sm_state, ack.h).await;
-            vec![]
-        }
+        SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
@@ -134,11 +131,36 @@ pub(super) async fn handle_sm_stanza(
 /// Shared by the `<a/>` frame handler and the mid-batch drain in
 /// [`super::batch_write`] (issue #1089) so both paths honour the same
 /// ack lifecycle.
+///
+/// Issue #1099 / XEP-0198 §4: `h` is validated wrap-aware (mod 2^32)
+/// against the live `outbound_count` BEFORE anything is acknowledged.
+/// A bogus-high `h` previously purged the whole replay queue and
+/// range-deleted the session's claimed `pending_delivery` rows,
+/// silently destroying undelivered messages. On violation nothing is
+/// purged; the returned frames are the `<handled-count-too-high/>`
+/// undefined-condition stream error plus the RFC 7395 close frame
+/// (mirroring the resume path), and the connection phase is set to
+/// Closing so the loop terminates the stream.
 pub(super) async fn apply_sm_ack(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
+    phase: &mut ConnectionPhase,
     h: u32,
-) {
+) -> Vec<String> {
+    if sm_state.ack_exceeds_outbound(h) {
+        let send_count = sm_state.outbound_count;
+        info!(
+            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            client_h = h,
+            send_count,
+            "SM ack rejected: handled count too high"
+        );
+        *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+        return vec![
+            build_handled_count_too_high_stream_error(h, send_count),
+            websocket_stream_close_xml(),
+        ];
+    }
     sm_state.acknowledge(h);
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
@@ -169,6 +191,7 @@ pub(super) async fn apply_sm_ack(
             }
         }
     }
+    vec![]
 }
 
 fn handle_sm_enable(

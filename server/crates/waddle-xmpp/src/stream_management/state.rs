@@ -226,6 +226,16 @@ impl StreamManagementState {
         }
     }
 
+    /// Whether a client `<a h='N'/>` claims more stanzas handled than
+    /// this stream has sent (XEP-0198 §4 handled-count-too-high).
+    ///
+    /// Judged mod 2^32: counters wrap, so "greater than" uses the same
+    /// wrap-aware ordering as the unacked queue — an ack a few stanzas
+    /// behind a freshly-wrapped `outbound_count` is valid.
+    pub fn ack_exceeds_outbound(&self, h: u32) -> bool {
+        sequence_gt(h, self.outbound_count)
+    }
+
     /// Get the current inbound count for sending in an <a/> response.
     pub fn get_inbound_count(&self) -> u32 {
         self.inbound_count
