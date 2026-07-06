@@ -108,8 +108,8 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
         // Relay the resource's own stored extension payloads (XEP-0115 caps,
         // XEP-0319 idle, anything else) verbatim so a subscription-approval
         // push carries the contact's real advertisements (issue #1101).
-        if let Some(state) = &presence_state {
-            presence.payloads.extend(state.payloads.iter().cloned());
+        if let Some(stored) = &presence_state {
+            presence.payloads.extend(stored.payloads.iter().cloned());
         }
         let stanza = Stanza::Presence(presence);
         send_stanza_to_available_user_resources_and_detached_available(
@@ -146,8 +146,8 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
         );
         // Relay the resource's own stored extension payloads (XEP-0115 caps,
         // XEP-0319 idle, anything else) verbatim (issue #1101).
-        if let Some(state) = &presence_state {
-            presence.payloads.extend(state.payloads.iter().cloned());
+        if let Some(stored) = &presence_state {
+            presence.payloads.extend(stored.payloads.iter().cloned());
         }
         presence.to = Some(to.clone());
         send_presence_stanza_to_jid(state, to, Stanza::Presence(presence), "current presence")
