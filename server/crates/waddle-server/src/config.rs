@@ -124,6 +124,488 @@ impl SpiceDbConfig {
     }
 }
 
+/// ADR-0017 Phase 2 clustering (owned libp2p swarm) configuration.
+///
+/// Parsed from `WADDLE_CLUSTERING_*`. With `enabled` false (the default) the
+/// swarm subsystem never starts and server behaviour is byte-for-byte
+/// identical to the single-replica path. Clustering additionally requires the
+/// `clustering` build feature and the Postgres control plane; see
+/// [`crate::clustering`]. This struct carries no libp2p types (multiaddrs are
+/// strings, parsed inside the feature-gated swarm module) so it compiles into
+/// every build.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClusteringConfig {
+    pub enabled: bool,
+    /// libp2p listen multiaddrs for the swarm transport. Default: one
+    /// ephemeral TCP address (`/ip4/0.0.0.0/tcp/0`).
+    pub listen_addrs: Vec<String>,
+    /// Peer discovery seeds (`WADDLE_CLUSTERING_BOOTSTRAP_PEERS`, comma-
+    /// separated `host:port`; bracket IPv6 literals as `[::1]:7900`). In
+    /// production this is a single entry — the
+    /// Kubernetes headless Service name, which resolves to every ready pod;
+    /// the multi-process harness lists one loopback entry per node. Empty =
+    /// cold start with no bootstrap peers (dialing retries continuously; an
+    /// empty peer set is tolerated, avoiding cold-start deadlock).
+    pub bootstrap_peers: Vec<ClusteringBootstrapConfig>,
+    /// kameo `messaging::Config` limits and the ADR element-5 timeout
+    /// hierarchy.
+    pub messaging: ClusteringMessagingConfig,
+    /// Pre-enrolled per-pod keypair pool: base64-encoded 32-byte ed25519 secret
+    /// keys (`WADDLE_CLUSTERING_KEYPAIR_POOL`, comma-separated). At startup a
+    /// pod leases exactly one pool slot via a Postgres CAS and uses that
+    /// keypair as its libp2p identity (ADR element 3). Empty (the default)
+    /// falls back to an ephemeral per-process keypair — fine for the discovery
+    /// spike and tests, but no stable/revocable identity.
+    pub keypair_pool: Vec<String>,
+    /// Keypair-slot lease timing (heartbeat interval + lease TTL).
+    pub lease: ClusteringLeaseConfig,
+    /// How often the swarm re-reads the peer allowlist and revokes live
+    /// connections whose PeerId is no longer enrolled
+    /// (`WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS`). This interval is the
+    /// containment bound for a revoked peer (ADR element 3).
+    pub allowlist_refresh_interval: Duration,
+    /// How often the swarm re-resolves the headless-DNS bootstrap name and
+    /// dials seed peers, picking up pod churn
+    /// (`WADDLE_CLUSTERING_DIAL_INTERVAL_MS`).
+    pub dial_interval: Duration,
+    /// Enable the relay's fault-injection message set (crash/sleep) for the
+    /// multi-process cluster harness (`WADDLE_CLUSTERING_FAULT_INJECTION`).
+    /// Never enable in production: it lets any enrolled peer stop this node's
+    /// relay or hold its mailbox.
+    pub fault_injection: bool,
+    /// Write `"<node_id> <peer_id>\n"` to this path once the swarm is up
+    /// (`WADDLE_CLUSTERING_NODE_ID_FILE`) so the harness can resolve this
+    /// node's relay name — mirrors the `WADDLE_HTTP_PORT_FILE` convention.
+    pub node_id_file: Option<std::path::PathBuf>,
+}
+
+/// Manual `Debug`: `keypair_pool` holds base64-encoded ed25519 secret-key
+/// seeds, and `ClusteringConfig` is embedded in `ServerConfig`, so a derived
+/// impl would print raw private key material into any `{:?}` sink (panic
+/// handlers, error logs, `--nocapture` test output). The pool is redacted to
+/// a count; every other field formats as the derive would.
+impl std::fmt::Debug for ClusteringConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClusteringConfig")
+            .field("enabled", &self.enabled)
+            .field("listen_addrs", &self.listen_addrs)
+            .field("bootstrap_peers", &self.bootstrap_peers)
+            .field("messaging", &self.messaging)
+            .field(
+                "keypair_pool",
+                &format_args!("[{} keys redacted]", self.keypair_pool.len()),
+            )
+            .field("lease", &self.lease)
+            .field(
+                "allowlist_refresh_interval",
+                &self.allowlist_refresh_interval,
+            )
+            .field("dial_interval", &self.dial_interval)
+            .field("fault_injection", &self.fault_injection)
+            .field("node_id_file", &self.node_id_file)
+            .finish()
+    }
+}
+
+/// Timing for the keypair-slot lease heartbeat and expiry (ADR element 4
+/// shape). `lease_ttl` must exceed `heartbeat_interval` with margin so a
+/// briefly-delayed renewal does not lose the slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringLeaseConfig {
+    pub heartbeat_interval: Duration,
+    pub lease_ttl: Duration,
+}
+
+impl Default for ClusteringLeaseConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: Duration::from_secs(10),
+            lease_ttl: Duration::from_secs(30),
+        }
+    }
+}
+
+/// One peer-discovery seed: a DNS name or IP literal (A/AAAA-resolved to one
+/// or more peer IPs — the headless Service resolves to every ready pod) plus
+/// the TCP port those peers listen on for the swarm transport. IPv6 literals
+/// are stored unbracketed (`::1`); the resolver re-brackets them for the
+/// `host:port` lookup form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringBootstrapConfig {
+    pub dns_name: String,
+    pub port: u16,
+}
+
+/// kameo `messaging::Config` limits plus the ADR element-5 timeout hierarchy.
+///
+/// Invariants enforced at parse time: `reply_timeout <= request_timeout`,
+/// `mailbox_timeout <= request_timeout`, and — because the mailbox and reply
+/// phases run sequentially on the receiver — `mailbox_timeout + reply_timeout
+/// <= request_timeout`. `request_timeout` is the sender-side
+/// libp2p transport cap (`with_request_timeout`, applied at swarm build) and
+/// is the binding bound; any `reply_timeout` above it is dead configuration.
+/// `mailbox_timeout`/`reply_timeout` are per-ask parameters, applied by every
+/// relay ask (`clustering::relay::RelayHandle`); Phase 4's delivery asks
+/// inherit the same wiring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringMessagingConfig {
+    pub request_timeout: Duration,
+    pub reply_timeout: Duration,
+    pub mailbox_timeout: Duration,
+    /// Cap on concurrent asks per peer connection (kameo default 100).
+    pub max_concurrent_streams: usize,
+    /// Max serialized request envelope bytes (kameo default 1 MiB).
+    pub max_request_bytes: u64,
+    /// Max serialized response envelope bytes (kameo default 10 MiB).
+    pub max_response_bytes: u64,
+}
+
+impl Default for ClusteringMessagingConfig {
+    fn default() -> Self {
+        Self {
+            // Sized above the worst-case fenced-write / resume-handshake budget
+            // (the 10s kameo default is too low per ADR element 5).
+            request_timeout: Duration::from_secs(30),
+            reply_timeout: Duration::from_secs(20),
+            mailbox_timeout: Duration::from_secs(5),
+            max_concurrent_streams: 256,
+            max_request_bytes: 1024 * 1024,
+            max_response_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for ClusteringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addrs: vec!["/ip4/0.0.0.0/tcp/0".to_string()],
+            bootstrap_peers: Vec::new(),
+            messaging: ClusteringMessagingConfig::default(),
+            keypair_pool: Vec::new(),
+            lease: ClusteringLeaseConfig::default(),
+            allowlist_refresh_interval: Duration::from_secs(30),
+            dial_interval: Duration::from_secs(15),
+            fault_injection: false,
+            node_id_file: None,
+        }
+    }
+}
+
+impl ClusteringConfig {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let defaults = Self::default();
+        let enabled = parse_bool_var(&vars, "WADDLE_CLUSTERING_ENABLED", false)?;
+
+        let listen_addrs = match vars
+            .get("WADDLE_CLUSTERING_LISTEN_ADDRS")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            None => defaults.listen_addrs,
+            Some(raw) => {
+                let addrs: Vec<String> = raw
+                    .split(',')
+                    .map(|entry| entry.trim().to_string())
+                    .filter(|entry| !entry.is_empty())
+                    .collect();
+                if addrs.is_empty() {
+                    return Err(
+                        "WADDLE_CLUSTERING_LISTEN_ADDRS must contain at least one multiaddr"
+                            .to_string(),
+                    );
+                }
+                addrs
+            }
+        };
+
+        let bootstrap_peers = match vars
+            .get("WADDLE_CLUSTERING_BOOTSTRAP_PEERS")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            None => Vec::new(),
+            Some(raw) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    // IPv6 literals must be bracketed (`[::1]:7900`): the
+                    // resolver takes `host:port` strings, and an unbracketed
+                    // IPv6 host is ambiguous with the port separator — it
+                    // would parse "successfully" here and then never resolve,
+                    // retrying forever. Fail fast instead. Brackets are
+                    // stripped for storage; the resolver re-adds them.
+                    let (dns_name, port) = if let Some(rest) = entry.strip_prefix('[') {
+                        let (host, port) = rest.split_once("]:").ok_or_else(|| {
+                            format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' must be \
+                                 [ipv6]:port"
+                            )
+                        })?;
+                        if host.parse::<std::net::Ipv6Addr>().is_err() {
+                            return Err(format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' has an \
+                                 invalid bracketed IPv6 literal"
+                            ));
+                        }
+                        (host, port)
+                    } else {
+                        let (host, port) = entry.rsplit_once(':').ok_or_else(|| {
+                            format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' must be \
+                                 host:port"
+                            )
+                        })?;
+                        if host.contains(':') {
+                            return Err(format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}': IPv6 \
+                                 literals must be bracketed, e.g. [::1]:7900 — the \
+                                 unbracketed form never resolves"
+                            ));
+                        }
+                        (host, port)
+                    };
+                    let port = port
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|value| *value != 0)
+                        .ok_or_else(|| {
+                            format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' has an \
+                                 invalid TCP port (1-65535)"
+                            )
+                        })?;
+                    if dns_name.is_empty() {
+                        return Err(format!(
+                            "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' has an empty host"
+                        ));
+                    }
+                    Ok(ClusteringBootstrapConfig {
+                        dns_name: dns_name.to_string(),
+                        port,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        };
+
+        let messaging_defaults = ClusteringMessagingConfig::default();
+        let request_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS",
+            millis_u64(messaging_defaults.request_timeout),
+        )?);
+        let reply_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REPLY_TIMEOUT_MS",
+            millis_u64(messaging_defaults.reply_timeout),
+        )?);
+        let mailbox_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS",
+            millis_u64(messaging_defaults.mailbox_timeout),
+        )?);
+        let max_concurrent_streams = parse_usize_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAX_CONCURRENT_STREAMS",
+            messaging_defaults.max_concurrent_streams,
+        )?;
+        let max_request_bytes = parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAX_REQUEST_BYTES",
+            messaging_defaults.max_request_bytes,
+        )?;
+        let max_response_bytes = parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_MAX_RESPONSE_BYTES",
+            messaging_defaults.max_response_bytes,
+        )?;
+
+        // ADR element-5 timeout hierarchy. `request_timeout` is the sender-side
+        // transport cap; a `reply_timeout` above it is dead configuration (the
+        // sender always observes `OutboundFailure(Timeout)` at the cap), and
+        // the receiver-side `mailbox_timeout` must also fit under the cap.
+        // All three must be non-zero: a zero anywhere times out every ask
+        // instantly, and an all-zero triple would otherwise satisfy every
+        // ordering check below.
+        if request_timeout.is_zero() || reply_timeout.is_zero() || mailbox_timeout.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS, WADDLE_CLUSTERING_REPLY_TIMEOUT_MS, \
+                 and WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS must all be greater than 0"
+                    .to_string(),
+            );
+        }
+        if reply_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_REPLY_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({}): a reply timeout above the \
+                 transport request timeout is dead configuration",
+                reply_timeout.as_millis(),
+                request_timeout.as_millis()
+            ));
+        }
+        if mailbox_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({})",
+                mailbox_timeout.as_millis(),
+                request_timeout.as_millis()
+            ));
+        }
+        // The mailbox and reply phases of an ask are sequential on the
+        // receiver, so their combined worst case must also fit under the
+        // sender-side transport cap — otherwise the tail of the reply budget
+        // is dead configuration the transport timeout always preempts.
+        if mailbox_timeout + reply_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS ({}) + \
+                 WADDLE_CLUSTERING_REPLY_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({}): the phases are \
+                 sequential, so any combined budget above the transport cap \
+                 can never be observed",
+                mailbox_timeout.as_millis(),
+                reply_timeout.as_millis(),
+                request_timeout.as_millis()
+            ));
+        }
+        if max_concurrent_streams == 0 {
+            return Err("WADDLE_CLUSTERING_MAX_CONCURRENT_STREAMS must be at least 1".to_string());
+        }
+        if max_request_bytes == 0 || max_response_bytes == 0 {
+            return Err(
+                "WADDLE_CLUSTERING_MAX_REQUEST_BYTES and WADDLE_CLUSTERING_MAX_RESPONSE_BYTES \
+                 must both be non-zero"
+                    .to_string(),
+            );
+        }
+
+        let keypair_pool = match vars
+            .get("WADDLE_CLUSTERING_KEYPAIR_POOL")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            None => Vec::new(),
+            Some(raw) => {
+                let entries: Vec<String> = raw
+                    .split(',')
+                    .map(|entry| entry.trim().to_string())
+                    .filter(|entry| !entry.is_empty())
+                    .collect();
+                // Two slots holding the same keypair would let two live nodes
+                // share a PeerId — exactly what the slot lease exists to
+                // prevent. The entries are secrets, so the error names slot
+                // positions, never values.
+                let mut seen = std::collections::HashMap::new();
+                for (index, entry) in entries.iter().enumerate() {
+                    if let Some(first) = seen.insert(entry.as_str(), index) {
+                        return Err(format!(
+                            "WADDLE_CLUSTERING_KEYPAIR_POOL entries at positions {first} and \
+                             {index} are identical: duplicate keypairs would let two live \
+                             nodes share a PeerId"
+                        ));
+                    }
+                }
+                entries
+            }
+        };
+
+        let lease_defaults = ClusteringLeaseConfig::default();
+        let heartbeat_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS",
+            millis_u64(lease_defaults.heartbeat_interval),
+        )?);
+        let lease_ttl = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_LEASE_TTL_MS",
+            millis_u64(lease_defaults.lease_ttl),
+        )?);
+        if heartbeat_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS must be greater than 0".to_string(),
+            );
+        }
+        // TTL must survive at least one missed renewal plus margin, else a
+        // single delayed heartbeat forfeits the slot.
+        if lease_ttl < heartbeat_interval * 2 {
+            return Err(format!(
+                "WADDLE_CLUSTERING_LEASE_TTL_MS ({}) must be at least 2x \
+                 WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS ({})",
+                lease_ttl.as_millis(),
+                heartbeat_interval.as_millis()
+            ));
+        }
+
+        let allowlist_refresh_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS",
+            millis_u64(Self::default().allowlist_refresh_interval),
+        )?);
+        if allowlist_refresh_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS must be greater than 0".to_string(),
+            );
+        }
+        let dial_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_DIAL_INTERVAL_MS",
+            millis_u64(Self::default().dial_interval),
+        )?);
+        if dial_interval.is_zero() {
+            return Err("WADDLE_CLUSTERING_DIAL_INTERVAL_MS must be greater than 0".to_string());
+        }
+        let fault_injection = parse_bool_var(&vars, "WADDLE_CLUSTERING_FAULT_INJECTION", false)?;
+        let node_id_file = vars
+            .get("WADDLE_CLUSTERING_NODE_ID_FILE")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+
+        Ok(Self {
+            enabled,
+            listen_addrs,
+            bootstrap_peers,
+            messaging: ClusteringMessagingConfig {
+                request_timeout,
+                reply_timeout,
+                mailbox_timeout,
+                max_concurrent_streams,
+                max_request_bytes,
+                max_response_bytes,
+            },
+            keypair_pool,
+            lease: ClusteringLeaseConfig {
+                heartbeat_interval,
+                lease_ttl,
+            },
+            allowlist_refresh_interval,
+            dial_interval,
+            fault_injection,
+            node_id_file,
+        })
+    }
+}
+
+/// Milliseconds of a `Duration` as `u64`, saturating (used only to derive
+/// env-var defaults from the compiled-in `Duration` defaults).
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub mode: ServerMode,
@@ -146,6 +628,9 @@ pub struct ServerConfig {
     /// every stamping site reads the same key. Required at startup;
     /// see [`parse_occupant_id_secret`] for the validation rules.
     pub occupant_id_secret: OccupantIdSecret,
+    /// ADR-0017 Phase 2 clustering (owned libp2p swarm) configuration. With
+    /// `enabled` false (the default) the swarm subsystem never starts.
+    pub clustering: ClusteringConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,6 +1022,7 @@ impl Default for ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
+            clustering: ClusteringConfig::default(),
         }
     }
 }
@@ -564,6 +1050,8 @@ impl ServerConfig {
         let occupant_id_secret =
             parse_occupant_id_secret(std::env::var("WADDLE_OCCUPANT_ID_SECRET").ok().as_deref())?;
 
+        let clustering = ClusteringConfig::from_env()?;
+
         Ok(Self {
             mode,
             base_url,
@@ -574,6 +1062,7 @@ impl ServerConfig {
             ws_keepalive,
             spicedb,
             occupant_id_secret,
+            clustering,
         })
     }
 
@@ -607,6 +1096,7 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
+            clustering: ClusteringConfig::default(),
         }
     }
 
@@ -622,6 +1112,7 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
+            clustering: ClusteringConfig::default(),
         }
     }
 }
@@ -629,6 +1120,291 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clustering_defaults_are_disabled() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.listen_addrs, vec!["/ip4/0.0.0.0/tcp/0".to_string()]);
+        assert!(config.bootstrap_peers.is_empty());
+        assert_eq!(config.messaging, ClusteringMessagingConfig::default());
+        // Byte-for-byte-identical guarantee: the whole struct equals Default.
+        assert_eq!(config, ClusteringConfig::default());
+    }
+
+    #[test]
+    fn clustering_parses_enabled_and_listen_addrs() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_ENABLED", "true"),
+            (
+                "WADDLE_CLUSTERING_LISTEN_ADDRS",
+                "/ip4/0.0.0.0/tcp/7900, /ip4/0.0.0.0/udp/7900/quic-v1",
+            ),
+        ])
+        .unwrap();
+        assert!(config.enabled);
+        assert_eq!(
+            config.listen_addrs,
+            vec![
+                "/ip4/0.0.0.0/tcp/7900".to_string(),
+                "/ip4/0.0.0.0/udp/7900/quic-v1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn clustering_parses_bootstrap_peer_list() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_ENABLED", "1"),
+            (
+                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS",
+                "waddle-server-swarm:7900, localhost:7901",
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.bootstrap_peers,
+            vec![
+                ClusteringBootstrapConfig {
+                    dns_name: "waddle-server-swarm".to_string(),
+                    port: 7900,
+                },
+                ClusteringBootstrapConfig {
+                    dns_name: "localhost".to_string(),
+                    port: 7901,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn clustering_rejects_malformed_bootstrap_entries() {
+        for bad in [
+            "no-port",
+            "host:0",
+            ":7900",
+            "host:notaport",
+            // Unbracketed IPv6: rsplit would "parse" it and then it never
+            // resolves — must fail fast at config time.
+            "::1:7900",
+            "fe80::1:7900",
+            // Bracketed but broken.
+            "[::1]",
+            "[::1]:0",
+            "[not-ipv6]:7900",
+        ] {
+            let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", bad)])
+                .unwrap_err();
+            assert!(
+                err.contains("WADDLE_CLUSTERING_BOOTSTRAP_PEERS"),
+                "entry '{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn clustering_parses_bracketed_ipv6_bootstrap_entries() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_BOOTSTRAP_PEERS",
+            "[::1]:7900, [fe80::1]:7901",
+        )])
+        .unwrap();
+        assert_eq!(
+            config.bootstrap_peers,
+            vec![
+                ClusteringBootstrapConfig {
+                    dns_name: "::1".to_string(),
+                    port: 7900,
+                },
+                ClusteringBootstrapConfig {
+                    dns_name: "fe80::1".to_string(),
+                    port: 7901,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn clustering_rejects_reply_timeout_above_request_timeout() {
+        // reply_timeout > request_timeout is dead configuration per ADR
+        // element 5 (the sender caps out at the transport request_timeout).
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "10000"),
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "20000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("must be <="));
+    }
+
+    #[test]
+    fn clustering_rejects_mailbox_timeout_above_request_timeout() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "10000"),
+            // Keep reply under the request cap so the mailbox check is the one
+            // that trips (otherwise the reply-timeout invariant fires first).
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "5000"),
+            ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "20000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_timeouts() {
+        // An all-zero triple satisfies every ordering check (0 <= 0), so the
+        // non-zero guard must catch it — and each individually-zero value.
+        for vars in [
+            vec![
+                ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "0"),
+                ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "0"),
+                ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "0"),
+            ],
+            vec![("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "0")],
+            vec![("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "0")],
+        ] {
+            let err = ClusteringConfig::from_vars(vars.clone()).unwrap_err();
+            assert!(
+                err.contains("must all be greater than 0"),
+                "{vars:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn clustering_rejects_combined_mailbox_plus_reply_above_request_timeout() {
+        // Each timeout individually fits under the transport cap, but the
+        // mailbox and reply phases are sequential, so their sum exceeding the
+        // cap makes the reply budget's tail unreachable.
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "10000"),
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "8000"),
+            ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "8000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
+        assert!(err.contains("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS"));
+        assert!(err.contains("sequential"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_concurrent_streams() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_MAX_CONCURRENT_STREAMS", "0")])
+            .unwrap_err();
+        assert!(err.contains("MAX_CONCURRENT_STREAMS"));
+    }
+
+    #[test]
+    fn clustering_rejects_non_boolean_enabled() {
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ENABLED", "maybe")]).unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ENABLED"));
+    }
+
+    #[test]
+    fn clustering_parses_keypair_pool_and_lease_timing() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_KEYPAIR_POOL", " keyA , keyB ,keyC"),
+            ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "5000"),
+            ("WADDLE_CLUSTERING_LEASE_TTL_MS", "20000"),
+        ])
+        .unwrap();
+        assert_eq!(config.keypair_pool, vec!["keyA", "keyB", "keyC"]);
+        assert_eq!(config.lease.heartbeat_interval.as_millis(), 5000);
+        assert_eq!(config.lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_debug_redacts_keypair_pool_secrets() {
+        let config = ClusteringConfig {
+            keypair_pool: vec![
+                "c2VjcmV0LXNlZWQtQQ==".to_string(),
+                "c2VjcmV0LXNlZWQtQg==".to_string(),
+            ],
+            ..ClusteringConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("c2VjcmV0"),
+            "Debug output leaked keypair seed material: {rendered}"
+        );
+        assert!(rendered.contains("[2 keys redacted]"), "{rendered}");
+    }
+
+    #[test]
+    fn clustering_rejects_duplicate_keypair_pool_entries() {
+        let err = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_KEYPAIR_POOL",
+            "c2VjcmV0QQ==, c2VjcmV0Qg==, c2VjcmV0QQ==",
+        )])
+        .unwrap_err();
+        assert!(err.contains("positions 0 and 2"), "{err}");
+        // The entries are secrets — the diagnostic must not echo them.
+        assert!(
+            !err.contains("c2VjcmV0"),
+            "error leaked pool material: {err}"
+        );
+    }
+
+    #[test]
+    fn clustering_defaults_have_empty_pool_and_valid_lease() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert!(config.keypair_pool.is_empty());
+        assert_eq!(config.lease, ClusteringLeaseConfig::default());
+    }
+
+    #[test]
+    fn clustering_rejects_lease_ttl_below_two_heartbeats() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "10000"),
+            ("WADDLE_CLUSTERING_LEASE_TTL_MS", "15000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_LEASE_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_parses_allowlist_refresh_and_rejects_zero() {
+        let config =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "5000")])
+                .unwrap();
+        assert_eq!(config.allowlist_refresh_interval.as_millis(), 5000);
+
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS"));
+    }
+
+    #[test]
+    fn clustering_parses_harness_knobs() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "2000"),
+            ("WADDLE_CLUSTERING_FAULT_INJECTION", "true"),
+            ("WADDLE_CLUSTERING_NODE_ID_FILE", "/tmp/node-id"),
+        ])
+        .unwrap();
+        assert_eq!(config.dial_interval.as_millis(), 2000);
+        assert!(config.fault_injection);
+        assert_eq!(
+            config.node_id_file,
+            Some(std::path::PathBuf::from("/tmp/node-id"))
+        );
+
+        let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(defaults.dial_interval.as_secs(), 15);
+        assert!(!defaults.fault_injection);
+        assert!(defaults.node_id_file.is_none());
+
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "0")]).unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_DIAL_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_heartbeat_interval() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS"));
+    }
 
     #[test]
     fn ws_keepalive_defaults_are_45s_2_misses() {

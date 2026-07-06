@@ -25,6 +25,20 @@ sqlx = { workspace = true }
 # Actor Framework
 kameo = { workspace = true }
 
+# ADR-0017 Phase 2: owned libp2p swarm subsystem (behind the `clustering`
+# feature). Version-pinned to match kameo 0.20's libp2p (0.56) so the whole
+# dependency graph unifies on one libp2p and `kameo::remote::Behaviour`
+# composes into our owned `NetworkBehaviour`. Optional — a default build links
+# no libp2p at all.
+libp2p = { version = "0.56", default-features = false, features = [
+    "tokio",
+    "tcp",
+    "quic",
+    "noise",
+    "yamux",
+    "macros",
+], optional = true }
+
 # XMPP Server
 waddle-xmpp = { path = "../waddle-xmpp" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
@@ -133,6 +147,15 @@ tempfile = "3.27"
 # builds of `waddle-server` do not pull in the test-only helpers.
 waddle-xmpp = { path = "../waddle-xmpp", features = ["test-utils"] }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
+
+[features]
+# ADR-0017 Phase 2: the owned libp2p swarm subsystem (node discovery only).
+# OFF by default so the standard production build links zero libp2p and is
+# byte-for-byte identical to the single-replica path. Enabling it turns on
+# kameo's `remote` feature (which pulls libp2p) and compiles the
+# `crate::clustering` swarm/codec/relay modules. A clustering-built binary is
+# still inert unless the runtime `clustering.enabled` config is also set.
+clustering = ["kameo/remote", "dep:libp2p"]
 
 [[bin]]
 name = "waddle-server"
