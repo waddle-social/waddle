@@ -16,11 +16,13 @@ import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 
 type PrivateState = {
+  xmpp: unknown;
   pendingDuringResume: unknown[] | null;
   resumeBarrier: { xmpp: unknown; promise: Promise<void> } | null;
   currentRoom: string | null;
   joinedMucReady: Set<string>;
   handleMessage: (message: unknown) => void;
+  openResumeBarrier: (xmpp: unknown, promise: Promise<void>) => void;
   completeResumeBarrier: (xmpp: unknown) => void;
 };
 
@@ -196,6 +198,78 @@ describe("resume-time reaction/displayed-marker buffering (#1165)", () => {
     state.completeResumeBarrier(null);
 
     expect(order).toEqual(["reaction:a", "displayed:b", "reaction:c"]);
+  });
+
+  // F2: the barrier's `.finally` fires after the connection died
+  // mid-catch-up (`this.xmpp` moved on). The buffered stanzas were
+  // SM-acked — the server will never replay them — so a failed barrier
+  // must carry them into the NEXT barrier instead of discarding them.
+  test("a reaction buffered during a failed barrier drains exactly once when the next barrier completes", () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    state.currentRoom = ROOM_JID;
+    state.joinedMucReady.add(ROOM_JID);
+    const reactions: string[] = [];
+    client.setReactionHandler((event) => reactions.push(event.messageId));
+
+    // Barrier A opens on handle A; a reaction arrives mid-catch-up.
+    const handleA = {};
+    state.xmpp = handleA;
+    state.openResumeBarrier(handleA, Promise.resolve());
+    state.handleMessage(roomReactionWasmMessage("room-9"));
+    expect(state.pendingDuringResume).toHaveLength(1);
+
+    // The connection dies mid-catch-up (handleDisconnected nulls
+    // this.xmpp), then barrier A's `.finally` fires: no dispatch, but
+    // no loss either.
+    state.xmpp = null;
+    state.completeResumeBarrier(handleA);
+    expect(reactions).toHaveLength(0);
+
+    // The next session's barrier completes: the carried reaction
+    // drains exactly once.
+    const handleB = {};
+    state.xmpp = handleB;
+    state.openResumeBarrier(handleB, Promise.resolve());
+    state.completeResumeBarrier(handleB);
+    expect(reactions).toEqual(["room-9"]);
+
+    // A third barrier must not re-dispatch it.
+    state.openResumeBarrier(handleB, Promise.resolve());
+    state.completeResumeBarrier(handleB);
+    expect(reactions).toEqual(["room-9"]);
+  });
+
+  test("carried entries keep drain ordering: bodies before targeted follow-ups across barriers", () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    state.currentRoom = ROOM_JID;
+    state.joinedMucReady.add(ROOM_JID);
+    const order: string[] = [];
+    client.setMessageHandler((message) => order.push(`body:${message.body}`));
+    client.setReactionHandler((event) => order.push(`reaction:${event.messageId}`));
+    client.setDisplayedHandler((event) => order.push(`displayed:${event.messageId}`));
+
+    // Barrier A buffers a reaction and a marker, then fails.
+    const handleA = {};
+    state.xmpp = handleA;
+    state.openResumeBarrier(handleA, Promise.resolve());
+    state.handleMessage(roomReactionWasmMessage("room-7"));
+    state.handleMessage(roomDisplayedWasmMessage("room-7"));
+    state.xmpp = null;
+    state.completeResumeBarrier(handleA);
+    expect(order).toHaveLength(0);
+
+    // Barrier B buffers the follow-ups' target body, then completes:
+    // the body drains before the carried follow-ups, which keep their
+    // relative arrival order.
+    const handleB = {};
+    state.xmpp = handleB;
+    state.openResumeBarrier(handleB, Promise.resolve());
+    state.handleMessage(roomWasmMessage("room-7", "hello", "2026-05-20T10:00:00.000Z"));
+    state.completeResumeBarrier(handleB);
+
+    expect(order).toEqual(["body:hello", "reaction:room-7", "displayed:room-7"]);
   });
 
   test("live (non-barrier) reactions and displayed markers still dispatch immediately", () => {

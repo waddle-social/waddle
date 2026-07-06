@@ -363,6 +363,57 @@ describe("internal connect() must not leak the fresh-budget reset (F1)", () => {
   });
 });
 
+describe("background connect() must not preempt an armed backoff timer (F5)", () => {
+  test("connect() while a retry timer is armed fast-rejects without cancelling the timer or launching an attempt", async () => {
+    const { client, state, scheduled, fireDisconnected } = createHarness();
+    let attempts = 0;
+    state.connectTimeoutMs = 50;
+    state.doConnect = async () => { attempts += 1; };
+
+    // Outage begins: the loop arms its first backoff timer.
+    fireDisconnected();
+    expect(scheduled).toHaveLength(1);
+    const scheduler = state.reconnect as unknown as { timer: unknown; attempt: number };
+    expect(scheduler.timer).not.toBeNull();
+
+    // A background trigger (typing chat-state via requireConnectedXmpp,
+    // presence, room switch, MAM pager) calls connect(): it must leave
+    // the schedule intact and start nothing.
+    await expect(client.connect()).rejects.toThrow("XMPP session is not ready");
+    expect(attempts).toBe(0);
+    expect(scheduler.timer).not.toBeNull();
+    expect(scheduler.attempt).toBe(1);
+    expect(scheduled).toHaveLength(1);
+    state.reconnect.clearTimer();
+  });
+
+  test("repeated background connects during a short outage never burn the budget into terminal error", async () => {
+    const { client, state, stub, statuses, scheduled, fireDisconnected } = createHarness();
+    // Every launched attempt fails fast: the socket opens, then drops —
+    // re-entering handleDisconnected → schedule() → attempt++.
+    state.doConnect = async () => {
+      state.xmpp = stub;
+      state.connected = true;
+      state.handleDisconnected(stub, new Error("still down"));
+    };
+
+    // Outage begins: attempt 1 armed.
+    fireDisconnected();
+    expect(scheduled).toHaveLength(1);
+
+    // Ten user interactions while the backoff timer is armed (<1 min of
+    // typing) must not exhaust the 10-attempt budget.
+    for (let i = 0; i < 10; i += 1) {
+      await client.connect().catch(() => undefined);
+    }
+
+    expect(scheduled).toHaveLength(1);
+    expect(statuses.some((snapshot) => snapshot.state === "error")).toBe(false);
+    expect(statuses.at(-1)?.state).toBe("reconnecting");
+    state.reconnect.clearTimer();
+  });
+});
+
 describe("disconnect() cancels the pending connect attempt (F3)", () => {
   test("a stale connect timer cannot tear down a subsequent connect", async () => {
     const client = new BrowserXmppClient(session());

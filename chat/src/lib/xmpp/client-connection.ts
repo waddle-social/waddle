@@ -208,6 +208,17 @@ export class ReconnectScheduler {
     }
   }
 
+  /**
+   * True while a backoff retry timer is armed — the loop owns the next
+   * attempt. Background `connect()` calls must not preempt it: every
+   * fast-failing immediate attempt re-enters `schedule()` and burns an
+   * attempt from the budget, so ten user interactions during a short
+   * outage would exhaust it into a false terminal error.
+   */
+  hasPendingRetry(): boolean {
+    return this.timer !== null;
+  }
+
   resetAttempts(): void {
     this.attempt = 0;
   }

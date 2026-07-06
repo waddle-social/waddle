@@ -407,8 +407,14 @@ export function buildChannelTimelineFromMamResults(params: {
     const target = timeline.find((message) => message.reactionTargetId === update.targetId);
     if (!target) continue;
     // C5: XEP-0444 recency — an archived reaction older than one
-    // already applied for the same sender must not clobber it.
-    if (isStaleReactionUpdate(target, update.nick, update.occurredAt)) continue;
+    // already applied for the same sender must not clobber it. Keyed by
+    // senderId (the replacement key), NOT nick — nicks are not stable.
+    if (isStaleReactionUpdate(target, {
+      senderKey: update.senderId,
+      nick: update.nick,
+      emojis: update.emojis,
+      ...(update.occurredAt ? { occurredAt: update.occurredAt } : {}),
+    })) continue;
     const state = channelReactionState(target, update);
     if (state) {
       target.reactionSenders = state.reactionSenders;
@@ -418,7 +424,7 @@ export function buildChannelTimelineFromMamResults(params: {
       delete target.reactions;
     }
     if (update.occurredAt) {
-      target.reactionTimes = { ...(target.reactionTimes ?? {}), [update.nick]: update.occurredAt };
+      target.reactionTimes = { ...(target.reactionTimes ?? {}), [update.senderId]: update.occurredAt };
     }
   }
 

@@ -250,8 +250,14 @@ export function buildDmTimelineFromMamResults(params: {
     const target = findMessageById(timeline, update.targetId);
     if (!target) continue;
     // C5: XEP-0444 recency — an archived reaction older than one
-    // already applied for the same sender must not clobber it.
-    if (isStaleReactionUpdate(target, update.nick, update.occurredAt)) continue;
+    // already applied for the same sender must not clobber it. The DM
+    // sender key is the nick (senderId === nick on the DM path).
+    if (isStaleReactionUpdate(target, {
+      senderKey: update.nick,
+      nick: update.nick,
+      emojis: update.emojis,
+      ...(update.occurredAt ? { occurredAt: update.occurredAt } : {}),
+    })) continue;
     const reactions = replacedNickReactions(target.reactions, update.nick, update.emojis);
     if (reactions) target.reactions = reactions;
     else delete target.reactions;

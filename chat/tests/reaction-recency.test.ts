@@ -27,6 +27,7 @@ const ROOM_JID = "room@muc.example.com";
 const BOB = `${ROOM_JID}/bob`;
 
 const OLDER = "2026-07-05T10:00:00.000Z";
+const MIDDLE = "2026-07-05T10:02:00.000Z";
 const NEWER = "2026-07-05T10:05:00.000Z";
 
 function channelHarness(seed: TimelineMessage[]) {
@@ -165,6 +166,96 @@ describe("XEP-0444 live undelayed reactions advance the recency stamp (DM)", () 
     h.liveMerge.applyReaction("m1", "bob", ["🎉"], NEWER);
     expect(h.messages.value).toBe(before);
     expect(h.messages.value[0]?.reactions).toEqual({ "🎉": ["bob"] });
+  });
+});
+
+// F3: the server truncates XEP-0203 delay stamps to whole seconds, so a
+// 👍→❤️ toggle within one second replays as two stanzas with IDENTICAL
+// stamps. XEP-0444 rejects only if a strictly NEWER reaction was already
+// accepted — on a tie, in-order delivery makes the later-processed
+// update the newer one, so a different set must apply. Only an exact
+// re-delivery (same set) stays an idempotent no-op.
+describe("XEP-0444 equal-stamp tie applies a different set (F3)", () => {
+  test("channel: a same-second toggle replayed with an identical stamp applies the final set", () => {
+    const h = channelHarness([channelTarget()]);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍"], BOB, NEWER);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["❤️"], BOB, NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "❤️": ["bob"] });
+  });
+
+  test("channel: an exact re-delivery on the tie stays an idempotent no-op", () => {
+    const h = channelHarness([channelTarget()]);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍", "🎉"], BOB, NEWER);
+    const before = h.messages.value;
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉", "👍"], BOB, NEWER);
+    expect(h.messages.value).toBe(before);
+    expect(h.messages.value[0]?.reactions).toEqual({ "👍": ["bob"], "🎉": ["bob"] });
+  });
+
+  test("dm: a same-second toggle replayed with an identical stamp applies the final set", () => {
+    const h = dmHarness([dmTarget()]);
+    h.liveMerge.applyReaction("m1", "bob", ["👍"], NEWER);
+    h.liveMerge.applyReaction("m1", "bob", ["❤️"], NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "❤️": ["bob"] });
+  });
+});
+
+// F4: live undelayed reactions must never stamp the LOCAL clock into a
+// recency map that is compared against SERVER delay stamps — a client
+// clock ahead by Δ would drop any genuinely newer reaction replayed
+// within Δ. The wire stamps here are in the past relative to the test
+// machine's clock, so the machine's clock IS "ahead" by construction.
+describe("live undelayed stamps never mix clock domains (F4)", () => {
+  test("channel: a replayed reaction newer than the last wire stamp applies despite a skewed-ahead local clock", () => {
+    const h = channelHarness([channelTarget()]);
+    // Wire-stamped 👍 at T0.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍"], BOB, OLDER);
+    // Live undelayed toggle — recorded in the local domain.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉"], BOB);
+    // The sender's genuinely newer reaction arrives via SM replay with
+    // a server stamp far below the local clock. It must apply.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["❤️"], BOB, NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "❤️": ["bob"] });
+  });
+
+  test("channel: replays at or before the wire stamp the live reaction superseded stay stale", () => {
+    const h = channelHarness([channelTarget()]);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍"], BOB, NEWER);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉"], BOB);
+    // Re-delivery of the superseded stanza and an even older one.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍"], BOB, NEWER);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["😅"], BOB, OLDER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "🎉": ["bob"] });
+  });
+
+  test("dm: a replayed reaction newer than the last wire stamp applies despite a skewed-ahead local clock", () => {
+    const h = dmHarness([dmTarget()]);
+    h.liveMerge.applyReaction("m1", "bob", ["👍"], OLDER);
+    h.liveMerge.applyReaction("m1", "bob", ["🎉"]);
+    h.liveMerge.applyReaction("m1", "bob", ["❤️"], NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "❤️": ["bob"] });
+  });
+});
+
+// F5: MUC recency must be keyed by the same senderId used for reaction
+// replacement (real bare JID when known) — nicks are NOT stable. A nick
+// rename must not let a re-delivered pre-rename stanza bypass the gate.
+describe("MUC recency is keyed by senderId, not nick (F5)", () => {
+  const REAL = "bob@example.com";
+
+  test("a nick rename does not let a re-delivered pre-rename reaction clobber the newer set", () => {
+    const h = channelHarness([channelTarget()]);
+    // bob reacts pre-rename, then renames to bobby and reacts again
+    // (same real JID).
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍"], REAL, OLDER);
+    h.liveMerge.applyReaction("stanza-1", "bobby", ["🎉"], REAL, NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "🎉": ["bobby"] });
+    // MAM catch-up delivers a pre-rename toggle this client missed live,
+    // under the OLD nick. Under nick-keyed recency it passes the gate
+    // (nick bob's stamp is OLDER) and clobbers the newer post-rename
+    // set; senderId-keyed recency (stamp NEWER) rejects it.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["😀"], REAL, MIDDLE);
+    expect(h.messages.value[0]?.reactions).toEqual({ "🎉": ["bobby"] });
   });
 });
 

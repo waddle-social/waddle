@@ -441,6 +441,13 @@ export class BrowserXmppClient {
   // entry) cannot observe one set without the other.
   private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
   private pendingDuringResume: InboundWasmMessage[] | null = null;
+  // F2: buffer entries stranded by a barrier that failed mid-catch-up
+  // (the connection died, so `completeResumeBarrier` could not drain
+  // them). Those stanzas were SM-acked — the server will never replay
+  // them, and a MAM refetch surfaces reactions/markers as ignored
+  // message rows — so they are carried into the NEXT barrier's buffer
+  // (arrival order preserved) and drained when it completes.
+  private carriedPendingDuringResume: InboundWasmMessage[] = [];
   // #1164: set when a stream error announced a terminal condition
   // (see `TERMINAL_STREAM_CONDITION_DETAILS`). The wire error and the
   // disconnect arrive as two separate WASM callbacks; this carries
@@ -839,6 +846,18 @@ export class BrowserXmppClient {
     if (this.inTerminalErrorState || this.reconnect.isExhausted()) {
       throw new Error("XMPP session is not ready");
     }
+    // F5: a backoff retry is already armed — leave the schedule intact.
+    // Cancelling it for an immediate attempt lets every background
+    // trigger burn an attempt on a fast failure (re-entering
+    // `handleDisconnected` → `schedule()`), so <1 min of typing during
+    // an outage could exhaust the whole budget into a false terminal
+    // error. Fast-reject like any unavailable session; only the
+    // scheduler itself (`connectFromScheduler`) and user-explicit
+    // recovery (`connectWithFreshBudget`) may clear the timer and
+    // launch.
+    if (this.reconnect.hasPendingRetry()) {
+      throw new Error("XMPP session is not ready");
+    }
     return this.connectInternal();
   }
 
@@ -962,6 +981,10 @@ export class BrowserXmppClient {
     this.inTerminalErrorState = false;
     this.terminalDisconnectDetail = null;
     this.clearResumeState();
+    // A user-explicit teardown drops the carried resume buffer too — a
+    // later session on this instance must not replay another session's
+    // stanzas.
+    this.carriedPendingDuringResume = [];
     const xmpp = this.xmpp;
     const joinedRooms = [...this.joinedMucs.keys()];
     this.stopSelfPing();
@@ -2136,19 +2159,17 @@ export class BrowserXmppClient {
         : { type: "resumed" },
     );
     if (catchupEntries.length === 0) {
+      // No barrier this session: entries carried from a failed barrier
+      // still owe their dispatch (same flush-then-drain order).
+      const carried = this.carriedPendingDuringResume.splice(0);
       this.flushAfterSessionReady(xmpp);
+      if (carried.length > 0) this.drainResumeBuffer(carried);
       this.fulfillOnceConnected();
       return;
     }
-    // Build the barrier promise and the buffer *atomically* — set
-    // both fields together before any `await` so a re-entrant
-    // `handleSessionReady` (synchronous WASM callback) can never
-    // observe `pendingDuringResume` set without `resumeBarrier`
-    // also set.
     const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries, lifecycle.type);
     const barrierPromise = catchupPromise.finally(() => this.completeResumeBarrier(xmpp));
-    this.pendingDuringResume = [];
-    this.resumeBarrier = { xmpp, promise: barrierPromise };
+    this.openResumeBarrier(xmpp, barrierPromise);
     await barrierPromise;
     if (this.xmpp !== xmpp) return;
     this.fulfillOnceConnected();
@@ -2168,15 +2189,40 @@ export class BrowserXmppClient {
    * own state but don't fire queue flush / buffer drain for the
    * stale handle.
    */
+  /**
+   * Open the resume barrier: build the buffer and the barrier *atomically*
+   * — both fields set together with no `await` in between, so a re-entrant
+   * `handleSessionReady` (synchronous WASM callback) can never observe
+   * `pendingDuringResume` set without `resumeBarrier` also set. Seeds the
+   * buffer with entries carried over from a barrier that failed
+   * mid-catch-up (F2) so they drain with this barrier, ahead of newer
+   * arrivals.
+   */
+  private openResumeBarrier(xmpp: XmppClientInstance, promise: Promise<void>) {
+    this.pendingDuringResume = this.carriedPendingDuringResume.splice(0);
+    this.resumeBarrier = { xmpp, promise };
+  }
+
   private completeResumeBarrier(xmpp: XmppClientInstance) {
     const buffered = this.pendingDuringResume ?? [];
     // Only clear the barrier if it is still ours — a newer handle
     // may have replaced it after a full reconnect.
-    if (this.resumeBarrier?.xmpp === xmpp) {
+    const ownBarrier = this.resumeBarrier?.xmpp === xmpp;
+    if (ownBarrier) {
       this.resumeBarrier = null;
       this.pendingDuringResume = null;
     }
-    if (this.xmpp !== xmpp) return;
+    if (this.xmpp !== xmpp) {
+      // F2: our barrier failed (the connection died mid-catch-up). The
+      // buffered stanzas were SM-acked and will never be replayed —
+      // carry them into the next barrier instead of discarding them.
+      // (When the barrier was NOT ours, `buffered` is the newer
+      // barrier's live buffer — leave it alone.)
+      if (ownBarrier && buffered.length > 0) {
+        this.carriedPendingDuringResume.push(...buffered);
+      }
+      return;
+    }
     // Flush the locally-queued outbound *before* draining the live
     // buffer. Queued messages carry the user's send wall-clock from
     // before the pause; live arrivals from during the pause carry
@@ -2185,6 +2231,10 @@ export class BrowserXmppClient {
     // echoes alongside (or before) the inbound arrivals they belong
     // next to, instead of mis-ordering the tail (Bug 4).
     this.flushAfterSessionReady(xmpp);
+    this.drainResumeBuffer(buffered);
+  }
+
+  private drainResumeBuffer(buffered: InboundWasmMessage[]) {
     // Drain bodies first, then targeted follow-ups (displayed markers
     // + reactions), each kind in arrival order (#1165). A follow-up
     // whose target arrived during the same catch-up window — via MAM
