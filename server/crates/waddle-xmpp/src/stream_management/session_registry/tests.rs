@@ -11,6 +11,10 @@ fn make_test_jid() -> FullJid {
     "user@example.com/resource".parse().unwrap()
 }
 
+fn bare(s: &str) -> jid::BareJid {
+    s.parse().expect("valid bare jid")
+}
+
 fn message_stanza_xml_with_id(id: String) -> String {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message.id = Some(xmpp_parsers::message::Id(id));
@@ -155,7 +159,7 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("target", "user@example.com")
+        .scrub_unacked_for_tombstone("target", &bare("user@example.com"))
         .await
         .unwrap();
     assert_eq!(removed, 1, "exactly one matching message should be removed");
@@ -282,7 +286,7 @@ async fn xep_0198_scrub_for_tombstone_matches_groupchat_stanza_id() {
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("canonical-archive-id", "room@conf.example.com")
+        .scrub_unacked_for_tombstone("canonical-archive-id", &bare("room@conf.example.com"))
         .await
         .unwrap();
     assert_eq!(
@@ -320,7 +324,7 @@ async fn xep_0198_scrub_for_tombstone_does_not_cross_conversations() {
     // remove the carol→user message even though it shares the
     // wire id, because alice is neither its `from` nor `to`.
     let removed = registry
-        .scrub_unacked_for_tombstone("msg-1", "alice@example.com")
+        .scrub_unacked_for_tombstone("msg-1", &bare("alice@example.com"))
         .await
         .unwrap();
     assert_eq!(
@@ -360,7 +364,7 @@ async fn xep_0198_scrub_for_tombstone_ignores_non_xep0359_stanza_id_namespace() 
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("target", "user@example.com")
+        .scrub_unacked_for_tombstone("target", &bare("user@example.com"))
         .await
         .unwrap();
     assert_eq!(
@@ -384,7 +388,7 @@ async fn xep_0198_scrub_for_tombstone_handles_no_match() {
             .await
             .unwrap();
     let removed = registry
-        .scrub_unacked_for_tombstone("not-here", "user@example.com")
+        .scrub_unacked_for_tombstone("not-here", &bare("user@example.com"))
         .await
         .unwrap();
     assert_eq!(removed, 0);
@@ -1104,7 +1108,7 @@ async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
     registry.store_session(session).await.unwrap();
 
     let removed = registry
-        .scrub_unacked_for_tombstone("retracted-id", "user@example.com")
+        .scrub_unacked_for_tombstone("retracted-id", &bare("user@example.com"))
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -1526,7 +1530,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
 
     // Retraction arrives during the window.
     let removed = registry
-        .scrub_unacked_for_tombstone("retract-me", "user@example.com")
+        .scrub_unacked_for_tombstone("retract-me", &bare("user@example.com"))
         .await
         .unwrap();
     assert_eq!(
@@ -1687,7 +1691,7 @@ async fn scrub_records_recent_tombstone_for_promotion_time_recheck() {
     let registry = InMemorySmSessionRegistry::new();
     let before = chrono::Utc::now();
     registry
-        .scrub_unacked_for_tombstone("retract-me", "user@example.com")
+        .scrub_unacked_for_tombstone("retract-me", &bare("user@example.com"))
         .await
         .unwrap();
     let after = chrono::Utc::now();
@@ -1697,7 +1701,7 @@ async fn scrub_records_recent_tombstone_for_promotion_time_recheck() {
         records.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
         vec![TombstoneKey {
             target_id: "retract-me".to_string(),
-            archive_jid: "user@example.com".to_string(),
+            archive_jid: bare("user@example.com"),
         }],
         "the scrub must record its tombstone identity for promotion-time re-check"
     );
@@ -1717,10 +1721,10 @@ async fn recent_tombstones_evicts_entries_past_ttl() {
     let registry = InMemorySmSessionRegistry::new();
     let stale = Instant::now() - (tombstones::RECENT_TOMBSTONE_TTL + Duration::from_secs(1));
     registry
-        .record_recent_tombstone_at("old-target", "user@example.com", stale)
+        .record_recent_tombstone_at("old-target", &bare("user@example.com"), stale)
         .unwrap();
     registry
-        .record_recent_tombstone_at("fresh-target", "user@example.com", Instant::now())
+        .record_recent_tombstone_at("fresh-target", &bare("user@example.com"), Instant::now())
         .unwrap();
 
     let records = registry.recent_tombstones().unwrap();
@@ -1728,7 +1732,7 @@ async fn recent_tombstones_evicts_entries_past_ttl() {
         records.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
         vec![TombstoneKey {
             target_id: "fresh-target".to_string(),
-            archive_jid: "user@example.com".to_string(),
+            archive_jid: bare("user@example.com"),
         }],
         "entries older than the TTL must be evicted; fresh ones retained"
     );
@@ -1739,7 +1743,7 @@ async fn recent_tombstones_bounds_entry_count() {
     let registry = InMemorySmSessionRegistry::new();
     for i in 0..(tombstones::MAX_RECENT_TOMBSTONES + 5) {
         registry
-            .record_recent_tombstone_at(&format!("target-{i}"), "user@example.com", Instant::now())
+            .record_recent_tombstone_at(&format!("target-{i}"), &bare("user@example.com"), Instant::now())
             .unwrap();
     }
     let records = registry.recent_tombstones().unwrap();

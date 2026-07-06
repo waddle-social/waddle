@@ -217,7 +217,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     async fn scrub_unacked_for_tombstone(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &jid::BareJid,
     ) -> Result<usize, SmRegistryError> {
         // Phase 0 (round-2 review R2): record the tombstone identity
         // BEFORE any scrub phase runs so a promotion already holding a

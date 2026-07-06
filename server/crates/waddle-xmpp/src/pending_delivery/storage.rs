@@ -244,7 +244,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
     async fn scrub_for_tombstone(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &BareJid,
     ) -> Result<u64, PendingStorageError>;
 
     /// Periodically GC backend-internal bookkeeping that grows with
@@ -261,14 +261,18 @@ pub trait PendingDeliveryStorage: Send + Sync {
 /// implementations that hold typed [`PendingRow`]s (the in-memory
 /// backend here; SQL backends match on their column representation
 /// with the same semantics).
-pub fn pending_row_matches_tombstone(row: &PendingRow, target_id: &str, archive_jid: &str) -> bool {
+pub fn pending_row_matches_tombstone(
+    row: &PendingRow,
+    target_id: &str,
+    archive_jid: &BareJid,
+) -> bool {
     match &row.payload {
         super::PendingPayload::Transient(message) => {
             let element: xmpp_parsers::minidom::Element = (**message).clone().into();
             crate::tombstone::message_element_matches_tombstone(&element, target_id, archive_jid)
         }
         super::PendingPayload::Archived(stanza_id) => {
-            stanza_id.id.as_str() == target_id && stanza_id.by.to_bare().to_string() == archive_jid
+            stanza_id.id.as_str() == target_id && &stanza_id.by.to_bare() == archive_jid
         }
     }
 }
@@ -694,7 +698,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
     async fn scrub_for_tombstone(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &BareJid,
     ) -> Result<u64, PendingStorageError> {
         let mut guard = self
             .inner

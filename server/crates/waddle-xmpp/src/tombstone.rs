@@ -19,7 +19,7 @@
 pub fn matching_tombstone_sequences(
     entries: &[(u32, String)],
     target_id: &str,
-    archive_jid: &str,
+    archive_jid: &jid::BareJid,
 ) -> Vec<u32> {
     entries
         .iter()
@@ -46,7 +46,7 @@ pub fn matching_tombstone_sequences(
 pub fn message_element_matches_tombstone(
     el: &minidom::Element,
     target_id: &str,
-    archive_jid: &str,
+    archive_jid: &jid::BareJid,
 ) -> bool {
     if el.name() != "message" {
         return false;
@@ -73,9 +73,52 @@ pub fn message_element_matches_tombstone(
         .any(|c| c.is("stanza-id", "urn:xmpp:sid:0") && c.attr("id") == Some(target_id))
 }
 
-fn jid_bare_equals(jid_str: &str, archive_jid: &str) -> bool {
+fn jid_bare_equals(jid_str: &str, archive_jid: &jid::BareJid) -> bool {
     match jid_str.parse::<jid::Jid>() {
-        Ok(jid) => jid.to_bare().to_string() == archive_jid,
+        Ok(jid) => &jid.to_bare() == archive_jid,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message_with_scope(to: &str, wire_id: &str) -> minidom::Element {
+        format!("<message xmlns='jabber:client' to='{to}' id='{wire_id}'/>")
+            .parse()
+            .expect("valid message element")
+    }
+
+    #[test]
+    fn matches_are_scoped_by_normalized_bare_jid_not_raw_string() {
+        // The archive scope is a typed BareJid, so IDNA/nodeprep
+        // normalization applies on both sides: a stanza addressed to a
+        // mixed-case JID matches an archive JID that normalizes to the
+        // same value. A raw-string comparison would have missed this
+        // and silently skipped the scrub, leaking the retracted
+        // message.
+        let archive: jid::BareJid = "room@conference.example.com"
+            .parse()
+            .expect("valid bare jid");
+        let el = message_with_scope("Room@Conference.EXAMPLE.com", "retract-me");
+        assert!(message_element_matches_tombstone(
+            &el,
+            "retract-me",
+            &archive
+        ));
+    }
+
+    #[test]
+    fn does_not_match_a_different_conversation() {
+        let archive: jid::BareJid = "room@conference.example.com"
+            .parse()
+            .expect("valid bare jid");
+        let el = message_with_scope("other@conference.example.com", "retract-me");
+        assert!(!message_element_matches_tombstone(
+            &el,
+            "retract-me",
+            &archive
+        ));
     }
 }

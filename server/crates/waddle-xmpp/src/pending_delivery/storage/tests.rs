@@ -371,7 +371,7 @@ async fn scrub_for_tombstone_removes_matching_transient_row_only() {
         .unwrap();
 
     let removed = store
-        .scrub_for_tombstone("retract-me", "alice@example.com")
+        .scrub_for_tombstone("retract-me", &bare("alice@example.com"))
         .await
         .unwrap();
     assert_eq!(removed, 1, "exactly the in-scope matching row is removed");
@@ -412,7 +412,7 @@ async fn scrub_for_tombstone_removes_matching_archived_pointer_row() {
         .unwrap();
 
     let removed = store
-        .scrub_for_tombstone("archive-1", "alice@example.com")
+        .scrub_for_tombstone("archive-1", &bare("alice@example.com"))
         .await
         .unwrap();
     assert_eq!(removed, 1);

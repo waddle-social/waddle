@@ -585,7 +585,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     async fn scrub_for_tombstone(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &jid::BareJid,
     ) -> Result<u64, PendingStorageError> {
         // Archived pointers: exact (stanza-id, archive-by) match —
         // pure SQL. The MAM row was tombstoned, so the pointer must

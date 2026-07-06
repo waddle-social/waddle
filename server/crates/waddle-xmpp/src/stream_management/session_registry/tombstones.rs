@@ -36,7 +36,7 @@ pub const MAX_RECENT_TOMBSTONES: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TombstoneKey {
     pub target_id: String,
-    pub archive_jid: String,
+    pub archive_jid: jid::BareJid,
 }
 
 /// A recorded tombstone as seen by the promotion-time re-check: its
@@ -70,7 +70,7 @@ impl InMemorySmSessionRegistry {
     pub(super) fn record_recent_tombstone(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &jid::BareJid,
     ) -> Result<(), SmRegistryError> {
         self.record_recent_tombstone_at(target_id, archive_jid, Instant::now())
     }
@@ -80,7 +80,7 @@ impl InMemorySmSessionRegistry {
     pub(super) fn record_recent_tombstone_at(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &jid::BareJid,
         recorded_at: Instant,
     ) -> Result<(), SmRegistryError> {
         let mut recent = self
@@ -95,7 +95,7 @@ impl InMemorySmSessionRegistry {
         recent.push(RecentTombstone {
             key: TombstoneKey {
                 target_id: target_id.to_string(),
-                archive_jid: archive_jid.to_string(),
+                archive_jid: archive_jid.clone(),
             },
             recorded_at,
             recorded_at_utc: Utc::now(),

@@ -93,7 +93,7 @@ pub trait SmSessionRegistry: Send + Sync {
     async fn scrub_unacked_for_tombstone(
         &self,
         _target_id: &str,
-        _archive_jid: &str,
+        _archive_jid: &jid::BareJid,
     ) -> Result<usize, SmRegistryError> {
         Ok(0)
     }

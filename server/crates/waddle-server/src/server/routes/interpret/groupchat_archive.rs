@@ -216,7 +216,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 sm_session_registry,
                 pending_storage,
                 target_message_id,
-                &room.to_string(),
+                room,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -233,7 +233,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 sm_session_registry,
                 pending_storage,
                 target_message_id,
-                &room.to_string(),
+                room,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -252,7 +252,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         sm_session_registry,
         pending_storage,
         target_message_id,
-        &room.to_string(),
+        room,
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
@@ -281,7 +281,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
         &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
     >,
     target_id: &str,
-    archive_jid: &str,
+    archive_jid: &jid::BareJid,
     site: &'static str,
 ) {
     if let Some(sm) = sm_session_registry {
@@ -290,7 +290,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
             Ok(removed) if removed > 0 => {
                 debug!(
                     target = target_id,
-                    archive = archive_jid,
+                    archive = %archive_jid,
                     removed,
                     "{site}: scrubbed unacked SM queue entries for tombstoned message"
                 );
@@ -299,7 +299,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
             Err(error) => {
                 warn!(
                     target = target_id,
-                    archive = archive_jid,
+                    archive = %archive_jid,
                     %error,
                     "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
                 );
@@ -311,7 +311,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
             Ok(removed) if removed > 0 => {
                 debug!(
                     target = target_id,
-                    archive = archive_jid,
+                    archive = %archive_jid,
                     removed,
                     "{site}: scrubbed pending_delivery rows for tombstoned message"
                 );
@@ -320,7 +320,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
             Err(error) => {
                 warn!(
                     target = target_id,
-                    archive = archive_jid,
+                    archive = %archive_jid,
                     %error,
                     "{site}: pending_delivery scrub_for_tombstone failed; retracted \
                      content may still deliver at the recipient's next login"

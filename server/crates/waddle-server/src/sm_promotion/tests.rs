@@ -161,7 +161,7 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
     async fn scrub_for_tombstone(
         &self,
         _target_id: &str,
-        _archive_jid: &str,
+        _archive_jid: &jid::BareJid,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         Ok(0)
     }
@@ -1352,7 +1352,7 @@ async fn promotion_scrubs_stanzas_matching_recent_tombstone() {
         &[waddle_xmpp::stream_management::RecentTombstoneRecord {
             key: waddle_xmpp::stream_management::TombstoneKey {
                 target_id: "retract-me".to_string(),
-                archive_jid: "alice@example.com".to_string(),
+                archive_jid: bare("alice@example.com"),
             },
             recorded_at_utc: Utc::now(),
         }],
@@ -1405,7 +1405,7 @@ async fn tombstone_does_not_scrub_stanza_received_after_its_recording() {
         &[waddle_xmpp::stream_management::RecentTombstoneRecord {
             key: waddle_xmpp::stream_management::TombstoneKey {
                 target_id: "retract-me".to_string(),
-                archive_jid: "alice@example.com".to_string(),
+                archive_jid: bare("alice@example.com"),
             },
             recorded_at_utc: Utc::now() - chrono::Duration::hours(1),
         }],
@@ -1459,7 +1459,7 @@ async fn tombstone_scrubs_stanza_whose_receipt_reads_slightly_after_recording() 
         &[waddle_xmpp::stream_management::RecentTombstoneRecord {
             key: waddle_xmpp::stream_management::TombstoneKey {
                 target_id: "retract-me".to_string(),
-                archive_jid: "alice@example.com".to_string(),
+                archive_jid: bare("alice@example.com"),
             },
             recorded_at_utc: Utc::now() - chrono::Duration::seconds(30),
         }],
@@ -1516,7 +1516,7 @@ async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_conten
 
     // Step 2: retraction scrub lands mid-promotion.
     sm_registry
-        .scrub_unacked_for_tombstone("retract-me", "alice@example.com")
+        .scrub_unacked_for_tombstone("retract-me", &bare("alice@example.com"))
         .await
         .unwrap();
 
@@ -1557,7 +1557,7 @@ struct MidBatchRetractingBlocking {
     calls: std::sync::atomic::AtomicU32,
     retract_on_call: u32,
     target_id: &'static str,
-    archive_jid: &'static str,
+    archive_jid: BareJid,
 }
 
 #[async_trait::async_trait]
@@ -1571,7 +1571,7 @@ impl waddle_xmpp::xep::xep0191::BlockingStorage for MidBatchRetractingBlocking {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         if call == self.retract_on_call {
             self.sm_registry
-                .scrub_unacked_for_tombstone(self.target_id, self.archive_jid)
+                .scrub_unacked_for_tombstone(self.target_id, &self.archive_jid)
                 .await
                 .expect("mid-batch scrub must succeed");
         }
@@ -1616,7 +1616,7 @@ async fn mid_batch_retraction_still_scrubs_later_sessions_in_displaced_promotion
         calls: std::sync::atomic::AtomicU32::new(0),
         retract_on_call: 2,
         target_id: "retract-me",
-        archive_jid: "carol@example.com",
+        archive_jid: bare("carol@example.com"),
     };
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -1778,7 +1778,7 @@ impl PendingDeliveryStorage for FlakyPending {
     async fn scrub_for_tombstone(
         &self,
         target_id: &str,
-        archive_jid: &str,
+        archive_jid: &jid::BareJid,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner.scrub_for_tombstone(target_id, archive_jid).await
     }

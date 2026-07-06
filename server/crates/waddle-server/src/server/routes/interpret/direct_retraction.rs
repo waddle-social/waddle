@@ -72,7 +72,7 @@ pub(super) async fn apply_retraction_tombstone(
                 sm_session_registry,
                 pending_storage,
                 target_wire_id,
-                &archive.to_string(),
+                archive,
                 "ApplyRetractionTombstone",
             )
             .await;
@@ -89,7 +89,7 @@ pub(super) async fn apply_retraction_tombstone(
                 sm_session_registry,
                 pending_storage,
                 target_wire_id,
-                &archive.to_string(),
+                archive,
                 "ApplyRetractionTombstone",
             )
             .await;
@@ -106,7 +106,7 @@ pub(super) async fn apply_retraction_tombstone(
         sm_session_registry,
         pending_storage,
         target_wire_id,
-        &archive.to_string(),
+        archive,
         "ApplyRetractionTombstone",
     )
     .await;

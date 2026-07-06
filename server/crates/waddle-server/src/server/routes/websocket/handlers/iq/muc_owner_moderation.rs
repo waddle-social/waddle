@@ -476,12 +476,11 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     // on PR #305).
                     use waddle_xmpp::stream_management::SmSessionRegistry as _;
                     let target_id = request.target_id.as_str();
-                    let room_jid_str = room_jid.to_string();
                     match state
                         .deps
                         .protocol
                         .sm_session_registry
-                        .scrub_unacked_for_tombstone(target_id, &room_jid_str)
+                        .scrub_unacked_for_tombstone(target_id, &room_jid)
                         .await
                     {
                         Ok(removed) if removed > 0 => debug!(
@@ -506,7 +505,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         .deps
                         .protocol
                         .pending_delivery_storage
-                        .scrub_for_tombstone(target_id, &room_jid_str)
+                        .scrub_for_tombstone(target_id, &room_jid)
                         .await
                     {
                         Ok(removed) if removed > 0 => debug!(
