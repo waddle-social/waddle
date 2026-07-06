@@ -222,7 +222,28 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
             }
             let actor_ref: ActorRef<RelayActor> =
                 RelayActor::spawn(RelayActor::new(node_id.clone(), fault_injection));
-            match actor_ref.register(name.clone()).await {
+            // Race registration against cancellation instead of plain
+            // `.await`: kameo's swarm-command reply future panics
+            // (`.expect(..)` on a dropped oneshot sender) if the event loop
+            // observes this SAME stop token, drops `Swarm<WaddleBehaviour>`,
+            // and the pending register command's reply is abandoned as a
+            // result. `biased` is load-bearing: the event loop drops the
+            // swarm only AFTER observing this token, so polling the
+            // cancellation arm first guarantees `register` is never polled
+            // against an already-closed swarm command channel (an unbiased
+            // select could poll `register` first, whose very first poll
+            // sends the command and panics on the dropped reply).
+            // Cancellation landing mid-register simply drops the in-flight
+            // future (no panic on drop, only on a completed poll).
+            let register_result = tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    actor_ref.kill();
+                    return;
+                }
+                result = actor_ref.register(name.clone()) => result,
+            };
+            match register_result {
                 Ok(()) => {
                     if respawns > 0 {
                         metrics::record_relay_respawn();
@@ -284,9 +305,28 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
                     _ = reregister.tick() => {
                         // Same-name refresh so a registration that predated
                         // our first peer connection becomes discoverable
-                        // (see REREGISTER_INTERVAL).
-                        if let Err(error) = actor_ref.register(name.clone()).await {
-                            tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                        // (see REREGISTER_INTERVAL). Guarded against the same
+                        // cancellation race as the post-(re)spawn
+                        // registration above: the `biased` inner `select!`
+                        // polls the cancellation arm first, so `register` is
+                        // never polled once cancellation is visible — and the
+                        // event loop drops the swarm only after observing the
+                        // same token, so a closed swarm command channel can
+                        // never panic here (`is_cancelled()` merely
+                        // short-circuits the common case). Falling through to
+                        // the outer loop after a lost race is sufficient: the
+                        // next iteration's `stop_token.cancelled()` arm fires
+                        // immediately.
+                        if !stop_token.is_cancelled() {
+                            tokio::select! {
+                                biased;
+                                _ = stop_token.cancelled() => {}
+                                result = actor_ref.register(name.clone()) => {
+                                    if let Err(error) = result {
+                                        tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -306,6 +346,18 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
 /// [`ClusteringMessagingConfig`](crate::config::ClusteringMessagingConfig)
 /// defaults; callers with a runtime config apply it via
 /// [`Self::with_ask_timeouts`].
+///
+/// `resolve`/`ping`/`crash`/`sleep`/`echo_stanza` all await kameo swarm-
+/// command replies and share the same theoretical panic-on-drop hazard as
+/// `spawn_supervised`'s `register` calls (see there) if awaited concurrently
+/// with the local swarm being torn down. Unlike `spawn_supervised`, this
+/// handle owns no cancellation token to race against: today every caller
+/// (the swarm bring-up smoke test, and the Phase 4 cross-node callers this
+/// type is built for) either runs before local shutdown starts or targets a
+/// different node's swarm entirely, so there is no concrete call site racing
+/// this process's own teardown. Threading a token through here becomes
+/// necessary the moment a caller awaits these methods from a task that also
+/// watches this node's clustering stop token.
 pub struct RelayHandle {
     node_id: NodeId,
     cached: Option<RemoteActorRef<RelayActor>>,
