@@ -320,8 +320,14 @@ export function useDirectMessageConversations(
     const existing = ensureConversation(bare);
     const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
     const isActiveConversation = activePeerJid.value === bare;
+    // Archive-decoded arrivals are MAM catch-up re-emissions: the message
+    // may already have been counted live before a reconnect, and
+    // genuinely-missed messages are accounted by the server inbox
+    // (hydrateFromInbox runs on every session-ready). Only live arrivals
+    // increment locally.
     const shouldIncrementUnread = !isSelfMessage
       && !isActiveConversation
+      && msg.createdAtSource !== "archive"
       && !wasUnreadAccountedByInbox(bare, msg);
 
     conversations.value = sortByRecent(conversations.value.map((c) => (

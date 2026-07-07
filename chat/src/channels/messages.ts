@@ -197,6 +197,7 @@ export function useChannelMessages(
             ...(msg.stanzaId ? { stanzaId: msg.stanzaId } : {}),
             ...(msg.mentions ? { mentions: msg.mentions } : {}),
             ...(msg.broadcastMention ? { broadcastMention: msg.broadcastMention } : {}),
+            ...(msg.createdAtSource === "archive" ? { fromArchive: true } : {}),
           });
           return;
         }
@@ -218,6 +219,10 @@ export function useChannelMessages(
         // it depends on cross-room session state and the tab-visibility
         // signal, both of which are out of scope for live-merge.
         if (classified.kind !== "live") return;
+        // Archive decodes (MAM catch-up re-emissions for the focused room)
+        // merge into the timeline above but never notify — see
+        // `recordRoomActivity` for the rationale.
+        if (msg.createdAtSource === "archive") return;
         if (msg.nick !== session.value?.username && isTabHidden()) {
           const isMentioned =
             !!msg.broadcastMention ||
@@ -669,6 +674,11 @@ export function useChannelMessages(
   function recordRoomActivity(event: RoomActivityEvent) {
     const roomJid = barePeerJid(event.roomJid);
     activeChannels.value = new Set([...activeChannels.value, roomJid]);
+    // MAM catch-up re-emissions may duplicate messages already seen (and
+    // counted) live before a reconnect — they never notify or bump
+    // mention badges; the server inbox hydrate accounts genuinely-missed
+    // messages authoritatively.
+    if (event.fromArchive) return;
     if (event.nick !== session.value?.username && isTabHidden()) {
       enqueueNotificationActivity(event);
     }

@@ -501,4 +501,9 @@ export interface RoomActivityEvent {
   mentions?: string[];
   /** XEP-0513 */
   broadcastMention?: "everyone" | "here";
+  /** True when the event is a MAM catch-up re-emission (XEP-0313 archive
+   * decode) rather than a live arrival. Notification/unread accounting
+   * must skip these — the message may already have been seen and counted
+   * live, and the server inbox is the authority for offline unread. */
+  fromArchive?: boolean;
 }

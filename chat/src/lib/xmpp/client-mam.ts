@@ -53,6 +53,7 @@ export function roomActivityEventFromMessage(message: LiveRoomMessage): RoomActi
   if (message.stanzaId) activity.stanzaId = message.stanzaId;
   if (message.mentions) activity.mentions = message.mentions;
   if (message.broadcastMention) activity.broadcastMention = message.broadcastMention;
+  if (message.createdAtSource === "archive") activity.fromArchive = true;
   return activity;
 }
 

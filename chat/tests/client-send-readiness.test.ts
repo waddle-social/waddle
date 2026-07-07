@@ -2843,6 +2843,10 @@ describe("room activity adapter", () => {
         nick: "bob",
         body: "missed hello alice",
         mentions: ["alice@example.com"],
+        // Catch-up re-emissions are flagged so unread/mention/notification
+        // accounting stays idempotent (the server inbox accounts
+        // genuinely-missed messages authoritatively).
+        fromArchive: true,
       },
     ]);
   });
