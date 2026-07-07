@@ -3297,7 +3297,9 @@ async fn resolver_write_does_not_replace_explicit_ban_and_join_stays_forbidden()
     assert!(
         matches!(
             outcome,
-            Err(SendError::HandlerError(RoomActorError::JoinForbidden { .. }))
+            Err(SendError::HandlerError(
+                RoomActorError::JoinForbidden { .. }
+            ))
         ),
         "banned user joining with a resolver-derived Member affiliation \
          must still be refused, got {outcome:?}"

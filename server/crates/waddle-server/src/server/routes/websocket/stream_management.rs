@@ -308,7 +308,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
 
     let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
-    if resume.h > detached.outbound_count {
+    if detached.handled_count_exceeds_outbound(resume.h) {
         if let Err(error) = state
             .deps
             .protocol

@@ -134,6 +134,15 @@ impl DetachedSession {
             .collect()
     }
 
+    /// Whether a resume `h` claims more stanzas handled than this
+    /// stream ever sent (XEP-0198 §4 handled-count-too-high). Judged
+    /// mod 2^32, matching the live ack path's
+    /// `StreamManagementState::ack_exceeds_outbound` — an `h` a few
+    /// stanzas behind a freshly wrapped `outbound_count` is valid.
+    pub fn handled_count_exceeds_outbound(&self, client_h: u32) -> bool {
+        sequence_gt(client_h, self.outbound_count)
+    }
+
     /// Whether this detached session can satisfy XEP-0198 replay for `client_h`.
     pub fn can_resume_from(&self, client_h: u32) -> bool {
         self.replay_gap_through

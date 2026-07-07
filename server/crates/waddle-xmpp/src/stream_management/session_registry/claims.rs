@@ -382,7 +382,7 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         if let Some(client_h) = client_h {
-            if !session.is_expired() && client_h > session.outbound_count {
+            if !session.is_expired() && session.handled_count_exceeds_outbound(client_h) {
                 let restored = {
                     let mut claimed = self
                         .claimed_sessions

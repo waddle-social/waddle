@@ -2953,3 +2953,84 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
         "occupant slot survives the detach"
     );
 }
+
+/// XEP-0198 §4 counters are mod 2^32: a resume whose `h` sits just
+/// behind a freshly wrapped `outbound_count` is VALID, not
+/// handled-count-too-high (gpt-5.5 review follow-up to #1099 — the
+/// live ack path was made wrap-aware, resume must agree).
+#[tokio::test]
+async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-wrapped".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            // The server's send counter wrapped past 2^32: it now
+            // reads 2, while the client last handled u32::MAX.
+            outbound_count: 2,
+            last_acked: u32::MAX - 1,
+            replay_gap_through: None,
+            unacked_stanzas: vec![
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: u32::MAX,
+                    stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 2,
+                    stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    // h = u32::MAX acks the pre-wrap stanza; a naive `h > outbound`
+    // comparison misreads this as handled-count-too-high.
+    let resume_frame = resume_frame_xml("stream-wrapped", u32::MAX);
+    let responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    let resumed = responses
+        .iter()
+        .any(|frame| frame.contains("<resumed") && frame.contains("stream-wrapped"));
+    assert!(
+        resumed,
+        "wrapped-counter resume must succeed, got frames: {responses:?}"
+    );
+    assert!(
+        responses.iter().any(|frame| frame.contains("post-wrap-1"))
+            && responses.iter().any(|frame| frame.contains("post-wrap-2")),
+        "post-wrap unacked stanzas must be replayed: {responses:?}"
+    );
+    assert!(
+        !responses.iter().any(|frame| frame.contains("pre-wrap")),
+        "the acked pre-wrap stanza must not be replayed: {responses:?}"
+    );
+}
