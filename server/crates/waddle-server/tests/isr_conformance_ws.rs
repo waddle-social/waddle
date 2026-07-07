@@ -16,10 +16,21 @@
 use waddle_ws_test_support as ws_common;
 
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+const CLIENT_NS: &str = "jabber:client";
 const ISR_NS: &str = "urn:xmpp:isr:0";
+
+/// Serialize a `minidom::Element` to a wire frame (typed-XML hard rule:
+/// tests build stanzas via the builder and serialize, never hand-write
+/// XML string literals).
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML element");
+    String::from_utf8(buf).expect("minidom serializes UTF-8")
+}
 
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
@@ -59,10 +70,18 @@ async fn server_disco_info_does_not_advertise_isr() {
 async fn legacy_isr_token_request_iq_is_not_implemented() {
     let (_server, mut client) = setup().await;
 
+    let token_request = element_to_xml(
+        Element::builder("iq", CLIENT_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "isr-legacy-token",
+            )
+            .append(Element::builder("token-request", ISR_NS).build())
+            .build(),
+    );
     client
-        .send(
-            r#"<iq xmlns="jabber:client" type="get" id="isr-legacy-token"><token-request xmlns="urn:xmpp:isr:0"/></iq>"#,
-        )
+        .send(&token_request)
         .await
         .expect("send legacy ISR token request");
     let response = client
