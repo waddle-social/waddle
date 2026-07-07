@@ -3785,18 +3785,14 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             .is_none(),
         "routed MUC PM must not preserve caller-supplied occupant-id: {xml}"
     );
-    let spoofed_ids = [
-        "spoofed-room-stanza",
-        "spoofed-room-fulljid-stanza",
-        "spoofed-malformed-stanza",
-    ];
+    // Strongest invariant: the server strips ALL client-supplied stanza-ids
+    // (bare-JID, full-JID, and unparseable `by` were all injected above), so
+    // no <stanza-id/> may remain regardless of its attributes.
     assert!(
-        !routed.children().any(|child| {
-            child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
-                && child.attr("id").is_some_and(|id| spoofed_ids.contains(&id))
-        }),
-        "routed MUC PM must strip every caller-supplied room-scoped/malformed stanza-id \
-         (bare-JID, full-JID, and unparseable `by`): {xml}"
+        !routed
+            .children()
+            .any(|child| child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)),
+        "routed MUC PM must strip every caller-supplied stanza-id: {xml}"
     );
 }
 
