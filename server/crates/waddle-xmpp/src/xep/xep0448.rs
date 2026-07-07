@@ -233,7 +233,17 @@ pub fn set_encrypted_file(
     msg: &mut Message,
     enc: &EncryptedFile,
 ) -> Result<(), EncryptedFileError> {
+    // Build the envelope first so a NoSources error can't leave the message
+    // partially mutated, and confirm the target <file-sharing/> exists BEFORE
+    // touching any payloads — the error path must leave `msg` untouched
+    // (transactional).
     let encrypted = build_encrypted_element(enc)?;
+    if !msg.payloads.iter().any(|p| p.is("file-sharing", NS_SFS)) {
+        return Err(EncryptedFileError::MissingChild("file-sharing"));
+    }
+
+    // Drop any stale top-level <encrypted/> envelopes (legacy non-conformant
+    // placement). This never removes the <file-sharing/> payload.
     msg.payloads
         .retain(|payload| !is_encrypted_file_element(payload));
 
@@ -244,17 +254,21 @@ pub fn set_encrypted_file(
     {
         if let Some(sources) = file_sharing.get_child_mut("sources", NS_SFS) {
             while sources.remove_child("url-data", NS_URL_DATA).is_some() {}
-            sources.remove_child("encrypted", NS_ESFS);
+            // Remove ALL existing nested envelopes so a fresh one can't be
+            // shadowed by a stale duplicate on later extraction.
+            while sources.remove_child("encrypted", NS_ESFS).is_some() {}
             sources.append_child(encrypted);
         } else {
             let mut sources = Element::builder("sources", NS_SFS).build();
             sources.append_child(encrypted);
             file_sharing.append_child(sources);
         }
-        return Ok(());
+        Ok(())
+    } else {
+        // Unreachable: presence is verified above and the retain above never
+        // removes <file-sharing/>.
+        Err(EncryptedFileError::MissingChild("file-sharing"))
     }
-
-    Err(EncryptedFileError::MissingChild("file-sharing"))
 }
 
 /// Extract the first `<encrypted/>` element from a XEP-0447 source list.
@@ -389,5 +403,68 @@ mod tests {
         for c in [Cipher::Aes128GcmNoPadding, Cipher::Aes256GcmNoPadding] {
             assert_eq!(Cipher::from_uri(c.as_uri()), Some(c));
         }
+    }
+
+    // A message with no <file-sharing/> must be left UNMUTATED on the error
+    // path — set_encrypted_file is transactional (#1150 review).
+    #[test]
+    fn set_encrypted_file_missing_file_sharing_is_transactional() {
+        use jid::BareJid;
+        let mut msg = Message::new(Some(jid::Jid::from(
+            "bob@example.com".parse::<BareJid>().unwrap(),
+        )));
+        // Pre-existing top-level (legacy-placed) encrypted envelope.
+        let stale = build_encrypted_element(&sample()).unwrap();
+        msg.payloads.push(stale.clone());
+        let before = msg.payloads.clone();
+
+        let err = set_encrypted_file(&mut msg, &sample());
+        assert!(matches!(
+            err,
+            Err(EncryptedFileError::MissingChild("file-sharing"))
+        ));
+        assert_eq!(
+            msg.payloads, before,
+            "error path must not mutate the message (stale top-level encrypted preserved)"
+        );
+    }
+
+    // A pre-existing message carrying multiple nested <encrypted/> envelopes
+    // must end up with exactly one — the freshly set one (#1150 review).
+    #[test]
+    fn set_encrypted_file_removes_all_stale_nested_encrypted() {
+        use jid::BareJid;
+        let mut msg = message_with_file_sharing(jid::Jid::from(
+            "bob@example.com".parse::<BareJid>().unwrap(),
+        ));
+        // Seed two stale nested encrypted envelopes.
+        if let Some(sources) = msg
+            .payloads
+            .iter_mut()
+            .find(|p| p.is("file-sharing", NS_SFS))
+            .and_then(|fs| fs.get_child_mut("sources", NS_SFS))
+        {
+            sources.append_child(build_encrypted_element(&sample()).unwrap());
+            sources.append_child(build_encrypted_element(&sample()).unwrap());
+        }
+
+        set_encrypted_file(&mut msg, &sample()).unwrap();
+
+        let sources = msg
+            .payloads
+            .iter()
+            .find(|p| p.is("file-sharing", NS_SFS))
+            .and_then(|fs| fs.get_child("sources", NS_SFS))
+            .expect("file-sharing sources present");
+        let encrypted_children = sources
+            .children()
+            .filter(|c| c.is("encrypted", NS_ESFS))
+            .count();
+        assert_eq!(
+            encrypted_children, 1,
+            "exactly one nested encrypted envelope must remain"
+        );
+        // And it still round-trips to the value we set.
+        assert_eq!(extract_encrypted_file(&msg).unwrap().unwrap(), sample());
     }
 }
