@@ -514,21 +514,49 @@ pub(super) async fn cleanup_connection_shutdown(
         // circuits the disco#info round-trip.
         state.deps.protocol.caps_resolver.drop_resource(&jid);
         info!(jid = %jid, "WebSocket connection unregistered");
-        // RFC 6121 §4.5.2: an ungraceful session end (connection drop with
-        // no self-sent unavailable) requires the SERVER to broadcast
-        // <presence type='unavailable'/> from this full JID to the user's
-        // presence subscribers. Gated on the session having actually sent
-        // available presence — a bound-but-silent resource advertised
-        // nothing, so there is nothing to retract. The owner-gated
-        // unregister above already guarantees we are not superseded by a
-        // replacement connection for this full JID.
-        if was_presence_available {
-            handlers::presence::broadcast_unavailable_for_terminated_session(state, &jid).await;
-        }
+        broadcast_unavailable_if_no_replacement(state, &jid, was_presence_available).await;
         cleanup_muc_presence(state, &jid).await;
     } else {
         debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
     }
+}
+
+/// RFC 6121 §4.5.2: an ungraceful session end (connection drop with no
+/// self-sent unavailable) requires the SERVER to broadcast `<presence
+/// type='unavailable'/>` from this full JID to the user's presence
+/// subscribers (#1105).
+///
+/// Gated twice. `was_presence_available` comes from the entry the caller
+/// just owned and removed — a bound-but-silent resource advertised
+/// nothing, so there is nothing to retract. And a fresh registry lookup
+/// must find NO live replacement for this full JID: the owner-gated
+/// unregister only protects the map slot, not ordering against a
+/// replacement's presence — broadcasting after the newcomer's available
+/// would leave subscribers on a stale unavailable for a JID that is
+/// online (round-2 concurrency review). The replacement broadcasts its
+/// own presence, so suppressing here is always safe.
+pub(super) async fn broadcast_unavailable_if_no_replacement(
+    state: &WebSocketState,
+    jid: &FullJid,
+    was_presence_available: bool,
+) {
+    if !was_presence_available {
+        return;
+    }
+    if state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(jid)
+        .is_some()
+    {
+        debug!(
+            jid = %jid,
+            "Suppressed terminated-session unavailable: replacement connection is live"
+        );
+        return;
+    }
+    handlers::presence::broadcast_unavailable_for_terminated_session(state, jid).await;
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {

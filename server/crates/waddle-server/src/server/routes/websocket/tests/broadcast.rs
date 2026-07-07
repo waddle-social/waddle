@@ -93,3 +93,72 @@ async fn try_send_to_does_not_unregister_replacement_entry() {
         "replacement entry must still be registered after a try_send_to that races with eviction"
     );
 }
+
+/// Round-2 concurrency review on #1105: after the owner-gated
+/// unregister, a replacement connection for the same full JID may
+/// already have registered (and broadcast its own available). The
+/// terminated-session unavailable must be suppressed when a live
+/// replacement exists, or subscribers end on a stale unavailable for a
+/// JID that is online.
+#[tokio::test]
+async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live() {
+    let state = create_test_websocket_state().await;
+    let dropped: FullJid = "alice@example.com/web".parse().expect("jid");
+    let sibling: FullJid = "alice@example.com/other".parse().expect("jid");
+
+    // A live available sibling resource observes the (bare-JID) leg of
+    // the terminated-session broadcast.
+    let (sib_tx, mut sib_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(sibling.clone(), sib_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&sibling, true, 0);
+
+    // No replacement: the broadcast goes out and the sibling sees the
+    // unavailable from the dropped resource.
+    super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
+        .await;
+    let received = tokio::time::timeout(std::time::Duration::from_millis(500), sib_rx.recv())
+        .await
+        .expect("sibling must receive the unavailable broadcast")
+        .expect("channel open");
+    let frame = stanza_to_xml(&received.stanza);
+    assert!(
+        frame.contains("unavailable") && frame.contains("alice@example.com/web"),
+        "expected unavailable from the dropped resource, got {frame}"
+    );
+
+    // Replacement registered for the SAME full JID: the broadcast must
+    // be suppressed entirely.
+    let (repl_tx, _repl_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(dropped.clone(), repl_tx);
+    super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
+        .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), sib_rx.recv())
+            .await
+            .is_err(),
+        "no unavailable may be broadcast while a replacement connection is live"
+    );
+
+    // And a session that never sent available broadcasts nothing.
+    state.deps.protocol.connection_registry.unregister(&dropped);
+    super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, false)
+        .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), sib_rx.recv())
+            .await
+            .is_err(),
+        "a never-available session must not broadcast unavailable"
+    );
+}
