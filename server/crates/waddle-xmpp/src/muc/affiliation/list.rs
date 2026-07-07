@@ -138,6 +138,19 @@ impl AffiliationList {
         affiliation: Affiliation,
         provenance: AffiliationProvenance,
     ) -> Option<AffiliationChange> {
+        // A resolver-derived write must never replace an explicit
+        // grant, whatever the values: bans (Outcast) and admin-set
+        // tiers are memory-only and would otherwise be silently
+        // overwritten on the next join (issue #1110 follow-up — a
+        // resolver Member write must not lift an explicit ban).
+        if provenance == AffiliationProvenance::ResolverDerived
+            && self
+                .affiliations
+                .get(&jid)
+                .is_some_and(|stored| stored.provenance == AffiliationProvenance::ExplicitGrant)
+        {
+            return None;
+        }
         let old = self.get(&jid);
         if old != affiliation {
             if affiliation == Affiliation::None {

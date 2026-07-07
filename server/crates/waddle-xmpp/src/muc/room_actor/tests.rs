@@ -3266,3 +3266,62 @@ async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
         "the ban in the batch surfaces its removed session"
     );
 }
+
+/// A resolver-derived affiliation must never replace an explicit grant
+/// (#1110 follow-up): an explicit Outcast (ban) survives a resolver
+/// write saying the user is a Member, and the banned user's join is
+/// still refused. XEP-0045 §7.2.8: outcasts are denied entry.
+#[tokio::test]
+async fn resolver_write_does_not_replace_explicit_ban_and_join_stays_forbidden() {
+    let actor = spawn_room_actor().await;
+    let banned: BareJid = "mallory@example.com".parse().expect("bare jid");
+    actor
+        .ask(ChangeAffiliation {
+            jid: banned.clone(),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban mallory");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: "mallory@example.com/res".parse().expect("full jid"),
+            nick: "mallory".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(RoomActorError::JoinForbidden { .. }))
+        ),
+        "banned user joining with a resolver-derived Member affiliation \
+         must still be refused, got {outcome:?}"
+    );
+}
+
+/// A resolver write with a different value must not downgrade an
+/// explicit grant (#1110): an admin-granted Admin stays Admin when the
+/// resolver reports Member, and it keeps blocking dormancy.
+#[tokio::test]
+async fn resolver_write_does_not_downgrade_explicit_grant() {
+    let mut room = test_room();
+    let alice: BareJid = "alice@example.com".parse().expect("bare jid");
+    room.set_affiliation(alice.clone(), Affiliation::Admin);
+
+    room.update_affiliation_from_resolver(alice.clone(), Affiliation::Member);
+
+    assert_eq!(
+        room.get_affiliation(&alice),
+        Affiliation::Admin,
+        "resolver-derived Member must not downgrade the explicit Admin grant"
+    );
+    assert!(
+        !room.is_dormant(),
+        "the surviving explicit grant must keep blocking dormancy"
+    );
+}
