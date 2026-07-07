@@ -31,7 +31,6 @@ use waddle_xmpp::xep::xep_waddle_pin::MAX_TARGET_STANZA_ID_LEN;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(super) async fn apply_pin_change_event(
-    registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     room: BareJid,
     request: PinChangeRequest,
@@ -49,21 +48,15 @@ pub(super) async fn apply_pin_change_event(
     }
     match request {
         PinChangeRequest::Pin { .. } => {
-            apply_pin(registry, deps, room, request, recursion_depth).await;
+            apply_pin(deps, room, request, recursion_depth).await;
         }
         PinChangeRequest::Unpin { .. } => {
-            apply_unpin(registry, deps, room, request, recursion_depth).await;
+            apply_unpin(deps, room, request, recursion_depth).await;
         }
     }
 }
 
-async fn apply_pin(
-    registry: &ConnectionRegistry,
-    deps: &Deps<'_>,
-    room: BareJid,
-    request: PinChangeRequest,
-    recursion_depth: u8,
-) {
+async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, recursion_depth: u8) {
     let PinChangeRequest::Pin {
         target_stanza_id,
         pinner_jid,
@@ -154,7 +147,6 @@ async fn apply_pin(
         None,
     );
     super::room_system_message::broadcast_room_system_message_event(
-        registry,
         deps,
         room,
         Box::new(system_message),
@@ -164,7 +156,6 @@ async fn apply_pin(
 }
 
 async fn apply_unpin(
-    registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     room: BareJid,
     request: PinChangeRequest,
@@ -207,7 +198,6 @@ async fn apply_unpin(
         reason.as_deref(),
     );
     super::room_system_message::broadcast_room_system_message_event(
-        registry,
         deps,
         room,
         Box::new(system_message),
@@ -327,7 +317,6 @@ async fn resolve_preview_from_mam(
 /// regular interpreter path mutates the actor and broadcasts the
 /// unpin system message — single code path, no special-case logic.
 pub(super) async fn cascade_retraction_to_pin_list(
-    registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     room: BareJid,
     target_message_id: String,
@@ -359,7 +348,6 @@ pub(super) async fn cascade_retraction_to_pin_list(
     };
 
     apply_pin_change_event(
-        registry,
         deps,
         room,
         PinChangeRequest::Unpin {

@@ -190,7 +190,12 @@ impl kameo::message::Message<GetResources> for UserActor {
     }
 }
 
-/// Get available resources with their priorities.
+/// Get available resources with their priorities (presence-available only,
+/// with priority) — distinct from [`GetResources`] (all connected) and
+/// `SelectRoutableResources` (RFC-6121 routable ranking). ADR-0017 Phase 3
+/// Slice 9 retired its former production caller (the DashMap-liveness
+/// selection filter); it is retained as a supported `UserActor` query of the
+/// availability accounting, exercised by the actor's own tests.
 pub struct GetAvailableResources;
 
 impl kameo::message::Message<GetAvailableResources> for UserActor {

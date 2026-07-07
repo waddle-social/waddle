@@ -1,24 +1,29 @@
 use jid::{BareJid, FullJid};
+use kameo::actor::ActorRef;
 use waddle_xmpp::protocol::dm_routing::{DmRouting, LiveDecision, OnlineResources};
-use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::registry::{ConnectionRegistry, UserRegistryActor};
 
-/// Build an [`OnlineResources`] snapshot for `recipient_bare` from
-/// the connection registry.
+/// Build an [`OnlineResources`] snapshot for `recipient_bare` from the
+/// actor-authoritative registry (ADR-0017 Phase 3 Slice 9), cross-checked
+/// against the DashMap `ConnectionEntry` for presence availability/priority
+/// (that atomic-backed entry is shared between both trees, so it is not part
+/// of the DashMap *selection* surface this slice retires).
 ///
-/// Filters to resources that are both connected AND have sent
-/// available presence. RFC 6121 §8.5.2.1.1 says only "available
-/// resources that have specified a non-negative priority" are
-/// candidates for bare-JID delivery; classify_dm_intake's online-
-/// check should match. Without the `presence_available` filter
-/// (Qodo review on PR #346), a connected-but-unavailable resource
-/// would be mis-classified as a live recipient and the unacked
-/// stanza would silently fail to route.
-pub(super) fn build_online_resources(
+/// Filters to resources that are both connected AND have sent available
+/// presence. RFC 6121 §8.5.2.1.1 says only "available resources that have
+/// specified a non-negative priority" are candidates for bare-JID delivery;
+/// classify_dm_intake's online-check should match. Without the
+/// `presence_available` filter (Qodo review on PR #346), a
+/// connected-but-unavailable resource would be mis-classified as a live
+/// recipient and the unacked stanza would silently fail to route.
+pub(super) async fn build_online_resources(
     registry: &ConnectionRegistry,
+    user_registry: &ActorRef<UserRegistryActor>,
     recipient_bare: &BareJid,
 ) -> OnlineResources {
-    let pairs: Vec<(FullJid, i8)> = registry
-        .get_resources_for_user(recipient_bare)
+    let resources =
+        waddle_xmpp::registry::get_resources_for_user(user_registry, recipient_bare).await;
+    let pairs: Vec<(FullJid, i8)> = resources
         .into_iter()
         .filter_map(|full| {
             let entry = registry.get_entry(&full)?;
@@ -45,10 +50,11 @@ pub(super) fn build_online_resources(
 /// resources, matching `interpret.rs`'s live-route fanout (Copilot
 /// review on PR #346: earlier code took only the first via `next()`
 /// which lost deliveries on multi-resource users).
-pub(super) fn collect_live_targets(
+pub(super) async fn collect_live_targets(
     routing: &DmRouting,
     message: &xmpp_parsers::message::Message,
     registry: &ConnectionRegistry,
+    user_registry: &ActorRef<UserRegistryActor>,
 ) -> Vec<FullJid> {
     let bare_target = match message.to.as_ref() {
         Some(jid) => jid.to_bare(),
@@ -69,11 +75,16 @@ pub(super) fn collect_live_targets(
                 // classifier ran (or before promotion fired).
                 // Fall back to bare-JID fanout per RFC 6121 §8.5.3
                 // ("treat as if addressed to bare JID").
-                registry.select_routable_resources_for_user(&bare_target)
+                waddle_xmpp::registry::select_routable_resources_for_user(
+                    user_registry,
+                    &bare_target,
+                )
+                .await
             }
         }
         LiveDecision::DeliverToBareWithFanout => {
-            registry.select_routable_resources_for_user(&bare_target)
+            waddle_xmpp::registry::select_routable_resources_for_user(user_registry, &bare_target)
+                .await
         }
     }
 }

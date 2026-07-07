@@ -322,6 +322,7 @@ pub(super) async fn cleanup_connection_shutdown(
                             crate::sm_promotion::DisplacedPromotionDeps {
                                 sm_registry: &state.deps.protocol.sm_session_registry,
                                 connection_registry: &state.deps.protocol.connection_registry,
+                                user_registry: &state.deps.protocol.user_registry,
                                 pending_storage: &state.deps.protocol.pending_delivery_storage,
                                 blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
                                 server_domain: state.deps.auth_state.xmpp_domain.as_str(),
@@ -369,6 +370,7 @@ pub(super) async fn cleanup_connection_shutdown(
                                             .deps
                                             .protocol
                                             .connection_registry,
+                                        user_registry: &state.deps.protocol.user_registry,
                                         pending_storage: &state
                                             .deps
                                             .protocol

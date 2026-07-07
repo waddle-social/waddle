@@ -1186,11 +1186,12 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
     let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob_jid.clone(), bob_tx);
+    // ADR-0017 Phase 3 Slice 9: the subscription-ack path enumerates the
+    // requester's (bob's) resources through the actor-authoritative registry,
+    // so bob must be dual-registered exactly as production bind does. Alice is
+    // reached via the available/roster-interested paths (unchanged), so a bare
+    // DashMap register still suffices for her.
+    super::register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
     state
         .deps
         .protocol
@@ -1487,11 +1488,10 @@ async fn presence_probe_returns_detached_available_resource_presence() {
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob_jid.clone(), bob_tx);
+    // ADR-0017 Phase 3 Slice 9: the probe path enumerates the requester's
+    // (bob's) resources through the actor-authoritative registry, so bob must
+    // be dual-registered exactly as production bind does.
+    super::register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
@@ -1573,11 +1573,10 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
     let alice_phone: FullJid = "alice@example.com/phone".parse().expect("alice phone");
     let alice_tablet: FullJid = "alice@example.com/tablet".parse().expect("alice tablet");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob_jid.clone(), bob_tx);
+    // ADR-0017 Phase 3 Slice 9: the probe path enumerates the requester's
+    // (bob's) resources through the actor-authoritative registry, so bob must
+    // be dual-registered exactly as production bind does.
+    super::register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
@@ -1679,11 +1678,12 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
     let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (mallory_tx, mut mallory_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(mallory_jid.clone(), mallory_tx);
+    // ADR-0017 Phase 3 Slice 9: the (unsubscribed) probe path enumerates the
+    // requester's (mallory's) resources through the actor-authoritative
+    // registry to deliver the `unsubscribed` signal, so mallory must be
+    // dual-registered exactly as production bind does. The privacy guarantee
+    // (no detached presence leaked to an unauthorized prober) is unchanged.
+    super::register_test_connection(state.as_ref(), &mallory_jid, mallory_tx).await;
     state
         .deps
         .protocol

@@ -226,6 +226,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 let summary = crate::sm_promotion::promote_session_unacked(
                     &session,
                     &state.deps.protocol.connection_registry,
+                    &state.deps.protocol.user_registry,
                     &state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     state.deps.auth_state.xmpp_domain.as_str(),
@@ -1462,6 +1463,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 let summary = crate::sm_promotion::promote_session_unacked(
                     &session,
                     &websocket_state.deps.protocol.connection_registry,
+                    &websocket_state.deps.protocol.user_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     websocket_state.deps.auth_state.xmpp_domain.as_str(),

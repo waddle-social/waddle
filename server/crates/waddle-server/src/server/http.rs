@@ -566,6 +566,7 @@ async fn create_websocket_state(
         &websocket_command_registry,
         Arc::clone(&state),
         Arc::clone(&connection_registry),
+        user_registry.clone(),
         Arc::clone(&sm_session_registry),
         sfu_service.clone(),
     )

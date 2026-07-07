@@ -202,11 +202,11 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
                 // so events still reach them via the per-resource SM
                 // stash even when the user has no live socket at publish
                 // time.
-                let mut all = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .get_resources_for_user(bare);
+                let mut all = waddle_xmpp::registry::get_resources_for_user(
+                    &state.deps.protocol.user_registry,
+                    bare,
+                )
+                .await;
                 match state
                     .deps
                     .protocol
@@ -475,11 +475,11 @@ pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'
         let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
             Ok(full) => vec![full.clone()],
             Err(bare) => {
-                let mut all = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .get_resources_for_user(bare);
+                let mut all = waddle_xmpp::registry::get_resources_for_user(
+                    &state.deps.protocol.user_registry,
+                    bare,
+                )
+                .await;
                 match state
                     .deps
                     .protocol

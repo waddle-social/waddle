@@ -2,20 +2,31 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use jid::BareJid;
+use kameo::actor::ActorRef;
 use tracing::warn;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
-use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
+use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
 use waddle_xmpp::Stanza;
 
 use super::PromotedOutcome;
+
+/// Bundled delivery handles for pending-storage promotion (ADR-0017 Phase 3
+/// Slice 9): the DashMap send surface plus the actor-authoritative registry
+/// used for bare-JID resource enumeration. Grouped into one type so
+/// `insert_pending` doesn't cross clippy's `too_many_arguments` threshold.
+#[derive(Clone, Copy)]
+pub(super) struct DeliveryHandles<'a> {
+    pub registry: &'a ConnectionRegistry,
+    pub user_registry: &'a ActorRef<UserRegistryActor>,
+}
 
 pub(super) async fn promote_as_transient(
     message: xmpp_parsers::message::Message,
     recipient_bare: BareJid,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
-    registry: &ConnectionRegistry,
+    delivery: DeliveryHandles<'_>,
     origin_stream_id: &str,
 ) -> PromotedOutcome {
     let payload = PendingPayload::Transient(Box::new(message.clone()));
@@ -25,7 +36,7 @@ pub(super) async fn promote_as_transient(
         pending_storage,
         original_receipt_fallback,
         &message,
-        registry,
+        delivery,
         origin_stream_id,
     )
     .await
@@ -50,7 +61,7 @@ pub(super) async fn insert_pending(
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     original_receipt_at: DateTime<Utc>,
     original_message: &xmpp_parsers::message::Message,
-    registry: &ConnectionRegistry,
+    delivery: DeliveryHandles<'_>,
     origin_stream_id: &str,
 ) -> PromotedOutcome {
     let row = PendingRow {
@@ -70,7 +81,7 @@ pub(super) async fn insert_pending(
             // intake-time quota overflow so the wire shape is
             // identical.
             waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
-            send_quota_bounce(original_message, &recipient, registry).await;
+            send_quota_bounce(original_message, &recipient, delivery).await;
             PromotedOutcome::Bounced
         }
         Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity }) => {
@@ -106,7 +117,7 @@ pub(super) async fn insert_pending(
 async fn send_quota_bounce(
     original_message: &xmpp_parsers::message::Message,
     recipient: &BareJid,
-    registry: &ConnectionRegistry,
+    delivery: DeliveryHandles<'_>,
 ) {
     let error = xmpp_parsers::stanza_error::StanzaError::new(
         xmpp_parsers::stanza_error::ErrorType::Cancel,
@@ -127,14 +138,19 @@ async fn send_quota_bounce(
     let mut delivered = false;
     match sender_jid.clone().try_into_full() {
         Ok(full) => {
-            if matches!(registry.send_to(&full, stanza).await, SendResult::Sent) {
+            if matches!(
+                delivery.registry.send_to(&full, stanza).await,
+                SendResult::Sent
+            ) {
                 delivered = true;
             }
         }
         Err(bare) => {
-            for full in registry.get_resources_for_user(&bare) {
+            let resources =
+                waddle_xmpp::registry::get_resources_for_user(delivery.user_registry, &bare).await;
+            for full in resources {
                 if matches!(
-                    registry.send_to(&full, stanza.clone()).await,
+                    delivery.registry.send_to(&full, stanza.clone()).await,
                     SendResult::Sent
                 ) {
                     delivered = true;

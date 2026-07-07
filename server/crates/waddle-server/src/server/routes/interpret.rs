@@ -199,7 +199,7 @@ use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
 use routing::{
     deliver_direct_to_full, deliver_peer_to_full, run_fanout_recipient_pass,
-    run_headless_recipient_pass, FanoutPassResult,
+    run_headless_recipient_pass, DeliveryDisposition, FanoutPassResult,
 };
 
 pub use deps::{Deps, InterpretOutcome, TimerCommand};
@@ -213,14 +213,7 @@ pub(crate) async fn broadcast_room_system_message(
     room: BareJid,
     message: Box<Message>,
 ) -> Option<String> {
-    room_system_message::broadcast_room_system_message_event(
-        deps.connection_registry,
-        deps,
-        room,
-        message,
-        0,
-    )
-    .await
+    room_system_message::broadcast_room_system_message_event(deps, room, message, 0).await
 }
 
 /// Execute the side effects described by `events`.
@@ -414,7 +407,7 @@ async fn interpret_with_depth(
             // content into logs.
             // -------------------------------------------------------
             OutboundEvent::RouteToConnection { jid, stanza } => {
-                route_to_connection(registry, deps, jid, stanza, recursion_depth).await;
+                route_to_connection(deps, jid, stanza, recursion_depth).await;
             }
             OutboundEvent::DispatchToRoom { room, message } => {
                 // #229 PR18 — MUC cutover. Replaces the legacy
@@ -555,7 +548,7 @@ async fn interpret_with_depth(
                 }
             }
             OutboundEvent::ApplyPinChange { room, request } => {
-                apply_pin_change_event(registry, deps, room, request, recursion_depth).await;
+                apply_pin_change_event(deps, room, request, recursion_depth).await;
             }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,
@@ -595,7 +588,6 @@ async fn interpret_with_depth(
                 // synthetic unpin system message so live clients see the
                 // tab update without a separate poll.
                 room_pin::cascade_retraction_to_pin_list(
-                    registry,
                     deps,
                     room,
                     target_message_id,

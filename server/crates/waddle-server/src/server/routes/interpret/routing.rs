@@ -333,6 +333,26 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
     }
 }
 
+/// Disposition of a single-resource actor delivery attempt (ADR-0017 Phase 3
+/// Slice 9). The bare-JID headless-persistence gate in
+/// [`super::route_to_connection::route_to_connection`] needs to know
+/// whether ANY target in a delivery set actually landed somewhere durable
+/// (`DeliveredLive` or `QueuedDetached`) — self-healing via `DroppedClosed`
+/// eviction means a target selected as "live" can still turn out `Dropped`
+/// by the time delivery runs, and if every target does, the message must
+/// not be silently lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeliveryDisposition {
+    /// Delivered onto a live resource's channel.
+    DeliveredLive,
+    /// Routed to the detached XEP-0198 replay buffer.
+    QueuedDetached,
+    /// Dropped: full channel, closed/not-connected with no detached
+    /// session to fall back to, or a terminal ask failure classified
+    /// `MaybeEnqueued` (never routed to detached, to avoid double-delivery).
+    Dropped,
+}
+
 /// Deliver one stanza to one resource through the authoritative `UserActor`
 /// (ADR-0017 Phase 1 Slice 2), with **no DashMap fallback**.
 ///
@@ -342,7 +362,10 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 /// send, so one wedged/zombie recipient can no longer stall global dispatch,
 /// issue #699; `try_deliver` already bumps the Prometheus dropped-full
 /// counter); `NotConnected`/`DroppedClosed` routes to the detached XEP-0198
-/// replay buffer.
+/// replay buffer — this is the self-healing eviction path ADR-0017 Phase 3
+/// Slice 9 relies on in place of the retired DashMap-liveness intersection
+/// filter: a stale actor entry is caught and evicted the moment delivery
+/// touches it, exactly like the DashMap path already did.
 ///
 /// A terminal ask failure is classified by [`classify_send_error`]:
 /// provably-never-enqueued failures (`ActorNotRunning`, `MailboxFull`,
@@ -357,7 +380,7 @@ async fn deliver_one_via_actor(
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
-) {
+) -> DeliveryDisposition {
     // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
     // for a bare-JID DM this is the SECOND `GetUser` for the same bare JID —
     // `select_bare_jid_live_targets` already resolved the `UserActor` during
@@ -379,13 +402,11 @@ async fn deliver_one_via_actor(
         // No live actor for this bare JID — no delivery was attempted, so the
         // detached replay buffer is a safe (non-duplicating) fallback.
         Ok(None) => {
-            deliver_to_detached(sm_session_registry, target, stanza).await;
-            return;
+            return deliver_to_detached(sm_session_registry, target, stanza).await;
         }
         Err(error) => {
             warn!(jid = %target, %error, "actor delivery: GetUser failed; routing to detached");
-            deliver_to_detached(sm_session_registry, target, stanza).await;
-            return;
+            return deliver_to_detached(sm_session_registry, target, stanza).await;
         }
     };
 
@@ -418,13 +439,15 @@ async fn deliver_one_via_actor(
     match outcome {
         Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
             debug!(jid = %target, "actor delivery: queued for recipient");
+            DeliveryDisposition::DeliveredLive
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
             debug!(jid = %target, "actor delivery: recipient channel full; dropped");
+            DeliveryDisposition::Dropped
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
         | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => {
-            deliver_to_detached(sm_session_registry, target, stanza).await;
+            deliver_to_detached(sm_session_registry, target, stanza).await
         }
         // Provably never enqueued — no delivery was attempted, so the detached
         // replay buffer is a lossless, non-duplicating fallback.
@@ -434,7 +457,7 @@ async fn deliver_one_via_actor(
                 %error,
                 "actor delivery: TrySend ask failed before enqueue; routing to detached"
             );
-            deliver_to_detached(sm_session_registry, target, stanza).await;
+            deliver_to_detached(sm_session_registry, target, stanza).await
         }
         // May have been enqueued — kameo does not cancel the enqueued handler,
         // so a post-timeout run plus a detached replay would double-deliver.
@@ -449,6 +472,7 @@ async fn deliver_one_via_actor(
                 "actor delivery: TrySend ask failed terminally (possibly enqueued); \
                  dropping to avoid double-delivery"
             );
+            DeliveryDisposition::Dropped
         }
     }
 }
@@ -466,7 +490,7 @@ pub(super) async fn deliver_peer_to_full(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
-) {
+) -> DeliveryDisposition {
     match user_registry {
         Some(user_registry) => {
             deliver_one_via_actor(
@@ -494,7 +518,7 @@ pub(super) async fn deliver_direct_to_full(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
-) {
+) -> DeliveryDisposition {
     match user_registry {
         Some(user_registry) => {
             deliver_one_via_actor(
@@ -531,10 +555,10 @@ pub(super) async fn deliver_to_detached(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
-) {
+) -> DeliveryDisposition {
     let Some(sm) = sm_session_registry else {
         debug!(jid = %target, "RouteToConnection: target offline, dropping");
-        return;
+        return DeliveryDisposition::Dropped;
     };
     match sm
         .record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
@@ -545,12 +569,14 @@ pub(super) async fn deliver_to_detached(
                 jid = %target,
                 "RouteToConnection: recipient detached, queued for XEP-0198 replay"
             );
+            DeliveryDisposition::QueuedDetached
         }
         Ok(false) => {
             debug!(
                 jid = %target,
                 "RouteToConnection: target offline and no detached session, dropping"
             );
+            DeliveryDisposition::Dropped
         }
         Err(error) => {
             warn!(
@@ -558,6 +584,7 @@ pub(super) async fn deliver_to_detached(
                 %error,
                 "RouteToConnection: failed to record stanza for detached resource"
             );
+            DeliveryDisposition::Dropped
         }
     }
 }

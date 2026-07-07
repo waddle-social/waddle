@@ -1,11 +1,19 @@
 use super::*;
 use chrono::Utc;
+use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
+use waddle_xmpp::registry::UserRegistryActor;
 use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
+}
+
+/// A fresh, empty actor-authoritative registry for
+/// `sm_promotion::promote_session_unacked` (ADR-0017 Phase 3 Slice 9).
+fn test_user_registry() -> ActorRef<UserRegistryActor> {
+    UserRegistryActor::spawn(UserRegistryActor::new())
 }
 
 fn full(s: &str) -> FullJid {
@@ -1554,9 +1562,11 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
     storage.delete_row(&row_id).await.unwrap();
 
     // Step 5: SM-expiry promotion re-creates the pending row.
+    let user_registry = test_user_registry();
     let summary = crate::sm_promotion::promote_session_unacked(
         &detached,
         &registry,
+        &user_registry,
         &storage,
         &waddle_xmpp::protocol::session_state::Blocklist::empty(),
         "example.com",

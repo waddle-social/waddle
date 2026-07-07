@@ -25,6 +25,7 @@
 //! let router = StanzaRouter::new(
 //!     RouterConfig::new("waddle.social".to_string()),
 //!     connection_registry,
+//!     user_registry,
 //! );
 //!
 //! // Route IQ stanzas locally.
@@ -34,11 +35,12 @@
 use std::sync::Arc;
 
 use jid::{FullJid, Jid};
+use kameo::actor::ActorRef;
 use tracing::{debug, info, instrument};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::presence::Presence;
 
-use crate::registry::{ConnectionRegistry, SendResult};
+use crate::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
 use crate::Stanza;
 use crate::XmppError;
 
@@ -118,6 +120,10 @@ pub struct StanzaRouter {
     config: RouterConfig,
     /// Connection registry for local users
     connection_registry: Arc<ConnectionRegistry>,
+    /// Actor-authoritative per-user registry (ADR-0017 Phase 3 Slice 9):
+    /// bare-JID resource enumeration sources from here, not the DashMap
+    /// `connection_registry` above.
+    user_registry: ActorRef<UserRegistryActor>,
 }
 
 impl StanzaRouter {
@@ -127,7 +133,13 @@ impl StanzaRouter {
     ///
     /// * `config` - Router configuration including local domain
     /// * `connection_registry` - Registry of local connections for message delivery
-    pub fn new(config: RouterConfig, connection_registry: Arc<ConnectionRegistry>) -> Self {
+    /// * `user_registry` - Actor-authoritative per-user registry for bare-JID
+    ///   resource selection (ADR-0017 Phase 3 Slice 9)
+    pub fn new(
+        config: RouterConfig,
+        connection_registry: Arc<ConnectionRegistry>,
+        user_registry: ActorRef<UserRegistryActor>,
+    ) -> Self {
         info!(
             local_domain = %config.local_domain,
             muc_domain = %config.muc_domain,
@@ -137,6 +149,7 @@ impl StanzaRouter {
         Self {
             config,
             connection_registry,
+            user_registry,
         }
     }
 
@@ -257,8 +270,10 @@ impl StanzaRouter {
                 }
             }
             Err(bare_jid) => {
-                // Send to all resources
-                let resources = self.connection_registry.get_resources_for_user(&bare_jid);
+                // Send to all resources (ADR-0017 Phase 3 Slice 9: sourced
+                // from the actor-authoritative registry, not the DashMap).
+                let resources =
+                    crate::registry::get_resources_for_user(&self.user_registry, &bare_jid).await;
                 let mut delivered = 0;
                 let mut offline = 0;
 
@@ -346,7 +361,9 @@ impl StanzaRouter {
             },
             Err(bare_jid) => {
                 // For bare JID, send to first available resource
-                let resources = self.connection_registry.get_resources_for_user(&bare_jid);
+                // (ADR-0017 Phase 3 Slice 9: actor-authoritative registry).
+                let resources =
+                    crate::registry::get_resources_for_user(&self.user_registry, &bare_jid).await;
 
                 if let Some(resource_jid) = resources.first() {
                     match self.connection_registry.send_to(resource_jid, stanza).await {

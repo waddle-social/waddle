@@ -249,11 +249,9 @@ pub(super) async fn handle_group_dm_mediated_invite(
         &inbound_invite,
         access,
     )];
-    let resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_resources_for_user(&invitee);
+    let resources =
+        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &invitee)
+            .await;
     if resources.is_empty() {
         if let Err(error) = queue_offline_group_dm_invite(state, &invitee, &invite).await {
             warn!(

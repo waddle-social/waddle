@@ -781,6 +781,7 @@ async fn handle_inbox_mark_read_iq(
     if let Some(entry) = updated {
         crate::server::routes::interpret::push_inbox_update(
             state.deps.protocol.connection_registry.as_ref(),
+            Some(&state.deps.protocol.user_registry),
             &user_jid,
             &entry,
         )

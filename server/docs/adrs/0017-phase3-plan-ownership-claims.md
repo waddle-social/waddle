@@ -1612,11 +1612,17 @@ groupchat_archive.rs`, `sm_promotion/pending.rs`, `sm_promotion/live.rs` ×2 —
 `LiveDecision::DeliverToFull`/`DeliverToBareWithFanout` arms) onto the actor's
 `SelectRoutableResources`, and retires the transitional Slice-1 DashMap-liveness
 intersection filter (`select_bare_jid_live_targets`'s `filter_deliverable`), switching
-to self-healing via `TrySendPeer` → `DroppedClosed` eviction exactly as the Phase 1
-completion note's "later slice" describes. The headless-persistence gate (`
+to self-healing via `TrySendPeer` → `DroppedClosed` eviction — the retirement the Phase
+1 completion note deferred to "a later slice", though (deviations 87-92 below, in
+particular deviation 90) via a substitute mechanism the note didn't name, not either of
+its own two named preconditions. The headless-persistence gate (`
 run_headless_recipient_pass` on an all-`DroppedClosed` bare-JID delivery) ships
 alongside the filter retirement, per that note's own dependency ("only needed once the
-liveness filter is retired").
+liveness filter is retired"). **Note (routing.rs scope):** the `routing.rs` ×2 sites
+migrate `waddle_xmpp::routing::StanzaRouter`, which — code research confirms — has no
+production construction site; it is pre-existing/test-only. Migrating it is correct
+per this slice's stated scope, but it does not reduce live production DashMap traffic
+and should not be counted toward this slice's risk-reduction total.
 
 **Files**: `waddle-xmpp/src/registry/connection_registry.rs` (or wherever
 `select_routable_resources_for_user`/`get_resources_for_user` are defined — deletion),
@@ -1637,6 +1643,82 @@ delivered). Existing e2e suites (`dm_delivery_mam.cue`, `muc_groupchat_fanout.cu
 -scoped SM consumers, some of which are among the 14 callers, e.g. `sm_promotion/
 pending.rs` and `live.rs`, should already be claim-aware before their DashMap-selection
 call sites are touched, to avoid re-touching the same lines twice).
+
+**LANDED (implementation note, deviations 87-92).** The two DashMap methods were replaced by
+crate-level async free functions — `waddle_xmpp::registry::select_routable_resources_for_user`
+and `get_resources_for_user` in the new `waddle-xmpp/src/registry/selection.rs`
+(each: `GetUser` on the `UserRegistryActor`, then `SelectRoutableResources` /
+`GetResources` on the resolved `UserActor`; degrade to empty on any actor
+error) — rather than open-coding the `GetUser`+ask pair at every site. The two
+inherent `ConnectionRegistry` methods and their four DashMap unit tests were
+deleted from `connection_registry/resources.rs` + `connection_registry/tests.rs`.
+Migration map (17 sites): `routing.rs` ×2 (`StanzaRouter` gained a
+`user_registry: ActorRef<UserRegistryActor>` field; its constructor and 9 unit
+tests updated); `admin/channels.rs` (`run_group_dm_leave` +
+`handle_group_dm_leave` + `register` threaded a `user_registry` handle, wired
+at `http.rs` and 3 `tests/iq.rs` call sites); `presence/subscription/directed.rs`;
+`presence/subscription/delivery.rs`; `presence/probe.rs` ×3;
+`message/group_dm_invite.rs`; `pubsub_fanout.rs` ×2; `interpret/offline_delivery.rs`
+(guards on `deps.user_registry`); `interpret/groupchat_archive.rs::push_inbox_update`
+(gained `user_registry: Option<&ActorRef<…>>`, threaded through
+`GroupchatInboxProjectionInputs`, `groupchat_inbox.rs`, `displayed_marker.rs`,
+`iq/archive_inbox_upload.rs`); `sm_promotion/live.rs` (`build_online_resources`,
+`collect_live_targets`) + `pending.rs` (a `DeliveryHandles<'a>` bundle to stay
+under clippy's arg cap) — threaded through `sm_promotion.rs`
+(`promote_session_unacked` signature, `DisplacedPromotionDeps`,
+`PromotionContext`) and its two production callers in `session_janitors.rs` and
+three `DisplacedPromotionDeps` construction sites (`cleanup.rs` ×2,
+`stream_management/registration.rs`). Slice 5 had already made the
+`sm_promotion` sites' *fenced write* claim-aware; this slice removed their
+DashMap *selection* reads only, per the "avoid re-touching the same lines"
+dependency. **Count reconciliation:** the "Settled scope" paragraph above
+cites the scoping map's ~14 confirmed direct former-DashMap call sites; the 17-site
+migration map here is that same set plus the downstream threading/wiring sites the
+migration required to satisfy those call sites' new `user_registry` parameter —
+`http.rs`, `tests/iq.rs` ×3, `groupchat_inbox.rs`, `displayed_marker.rs`, and
+`archive_inbox_upload.rs` — which are not themselves former-DashMap call sites.
+
+The Slice-1 liveness filter (`select_bare_jid_live_targets`'s DashMap-liveness
+intersection + `filter_deliverable` helper) was deleted; `route_to_connection`'s
+bare-JID arm now selects from the actor alone (`SelectRoutableResources`, then
+`GetResources`). Self-healing wiring: `deliver_peer_to_full` /
+`deliver_direct_to_full` / `deliver_to_detached` / `deliver_one_via_actor` now
+return a typed `DeliveryDisposition` (`DeliveredLive` / `QueuedDetached` /
+`Dropped`); the bare-JID arm tracks whether *anything* landed across the live +
+detached delivery set and, when nothing did, runs `run_headless_recipient_pass`
+(local-domain only) — the headless-persistence gate that ships alongside the
+filter retirement. The empty-actor reaper is unchanged and still holds.
+
+**Deviation (accepted behaviour change, council-visible; deviation 90).** The retired filter
+guaranteed selection was *byte-for-byte* identical to legacy even inside the
+lagging-unregister window. Without it, a stale extra holding a **unique top
+priority** whose channel has already closed is still ranked top by the actor
+and selected alone (the max-priority collapse no longer runs after a DashMap
+intersection), so on that first delivery the live *lower*-priority resources are
+not live-delivered — the message is persisted (the shared fan-out recipient
+pass archives it regardless of the live-send outcome; for the non-fan-out paths
+the new headless gate persists it) and the DroppedClosed send evicts the ghost,
+so the very next bare-JID delivery converges on the true live top-priority
+resource. This is the filter→self-healing trade the Phase 1 completion note
+deferred to "a later slice" — though, as deviation 90 details, delivered via a
+substitute mechanism (the headless-persistence gate) rather than either of the
+note's own two named preconditions (the note's actual language describes the
+risk the filter mitigates as "a stale-extra message-loss window", not the "no
+message loss" framing this text previously and inaccurately quoted). No message
+is lost under the substitute mechanism either: it is only briefly routed to
+offline storage instead of a live lower-priority resource in the narrow
+stale-ghost window. The two Slice-1 exact-parity guard tests
+(`route_to_connection_bare_jid_filters_stale_actor_extra_absent_from_dashmap`,
+`…_stale_top_priority_extra_does_not_promote_lower`) were rewritten to assert
+this new self-healing behaviour
+(`…_sole_stale_extra_self_heals_via_dropped_closed` — this is the fifth test
+above — and `…_stale_top_priority_extra_self_heals_to_live_lower`, which also
+proves convergence on the next delivery). The four presence-probe/subscription
+tests that broke were fixed at the test-setup level only: they registered the
+*requester* on the DashMap alone, so after the probe/subscription path's
+migration to the actor the requester's resources were invisible; switching them
+to the production-parity `register_test_connection` (dual-register) restores the
+requester in the actor tree — no privacy/routing assertion was weakened.
 
 ---
 
@@ -3525,3 +3607,73 @@ duplicated here.
     `session_janitors.rs`'s existing orphan-reaper sweep calls it once per
     tick, bounded by its own timeout, alongside the claim-steal sweep it
     already runs.
+87. **LANDED — the DashMap-selection→actor migration, 17 sites.** The two
+    inherent `ConnectionRegistry` selection methods
+    (`select_routable_resources_for_user`, `get_resources_for_user`) are
+    deleted; every call site now goes through the new crate-level async free
+    functions in `waddle-xmpp/src/registry/selection.rs`, which ask the
+    resolved `UserActor` for `SelectRoutableResources`/`GetResources` instead
+    of reading the DashMap. See the Slice 9 "LANDED" migration map for the
+    full 17-site breakdown (`routing.rs` ×2, `admin/channels.rs`,
+    `presence/subscription/directed.rs`, `presence/subscription/delivery.rs`,
+    `presence/probe.rs` ×3, `message/group_dm_invite.rs`, `pubsub_fanout.rs`
+    ×2, `interpret/offline_delivery.rs`, `interpret/groupchat_archive.rs`,
+    `sm_promotion/live.rs`, `sm_promotion/pending.rs`, plus the downstream
+    threading sites in deviation 92 below).
+88. **The Slice-1 DashMap-liveness intersection filter
+    (`select_bare_jid_live_targets`'s `filter_deliverable`) is retired**,
+    with the headless-persistence gate (`run_headless_recipient_pass` on an
+    all-`DroppedClosed` bare-JID delivery) substituted alongside it, per the
+    Phase 1 completion note's own stated dependency ("only needed once the
+    liveness filter is retired"). See deviation 90 below for the accepted
+    behaviour change this retirement introduces and the precondition
+    correction.
+89. **`DeliveryDisposition` (`DeliveredLive`/`QueuedDetached`/`Dropped`)
+    typed disposition tracking** replaces the prior boolean
+    delivered/not-delivered filter. `deliver_peer_to_full`,
+    `deliver_direct_to_full`, `deliver_to_detached`, and
+    `deliver_one_via_actor` all now return this typed disposition, which the
+    bare-JID arm uses to decide whether anything landed across the live +
+    detached delivery set and, when nothing did, to trigger the deviation 88
+    headless-persistence gate.
+90. **ACCEPTED BEHAVIOUR DEVIATION (council-adjudicated) — a stale
+    top-priority ghost resource can now cause a brief misroute to
+    offline/detached storage.** With the deviation 88 filter retired, a
+    stale extra holding a unique top priority whose channel has already
+    closed is still ranked top by the actor (the max-priority collapse no
+    longer runs after a DashMap intersection), so on that first delivery the
+    live *lower*-priority resources are not live-delivered. This self-heals
+    via `DroppedClosed` eviction on the very next bare-JID delivery, which
+    then converges on the true live top-priority resource. There is **no
+    message loss**: the message is persisted (the shared fan-out recipient
+    pass archives regardless of live-send outcome; for non-fan-out paths the
+    deviation 88 headless gate persists it). This corrects the plan's
+    earlier framing (see deviation 88 and the corrected quotation in the
+    Slice 9 body text above): **neither** of the Phase 1 completion note's two
+    named preconditions for retiring the filter — teardown flipping the
+    shared ownership atomic, or the empty-actor reaper eagerly reaping stale
+    extras — was actually implemented. The headless-persistence gate is a
+    third, substitute mechanism the note never named; this slice does not
+    "complete" the note's deferred work as originally described, it replaces
+    it with a different mechanism that produces a weaker (but still
+    loss-free) guarantee. **Scope correction (coordinator ruling):** this
+    self-healing-via-`DroppedClosed` behaviour applies to the
+    `route_to_connection.rs` delivery path only. `sm_promotion::promote_one`
+    still delivers via `ConnectionRegistry::send_to` and does **not**
+    self-evict ghosts on that path — but it is bounded by its own existing
+    pending-storage (Archived/Transient) fallback, so this deviation
+    introduces no new loss there either. Earlier doc phrasing implying the
+    self-healing behaviour applies uniformly to the promotion path is
+    corrected by this entry.
+91. **`DeliveryHandles<'a>` / `DisplacedPromotionDeps` parameter bundles**,
+    added to `sm_promotion/pending.rs` and `sm_promotion.rs` respectively to
+    stay under clippy's `too_many_arguments` cap once the migrated
+    DashMap-selection callers were threaded through.
+92. **`push_inbox_update`'s new `Option<&ActorRef<UserRegistryActor>>`
+    parameter**, threaded through `GroupchatInboxProjectionInputs`,
+    `groupchat_inbox.rs`, `displayed_marker.rs`, and
+    `iq/archive_inbox_upload.rs` — the downstream wiring sites that, together
+    with `http.rs` and the 3 `tests/iq.rs` call sites for `admin/
+    channels.rs`, account for the gap between the ~14 directly-confirmed
+    former-DashMap call sites and the 17-site migration count in deviation
+    87.

@@ -54,11 +54,9 @@ pub(super) async fn handle_presence_probe(
         } else {
             build_unavailable_presence(&to, &from)
         });
-        for resource in state
-            .deps
-            .protocol
-            .connection_registry
-            .get_resources_for_user(&from)
+        for resource in
+            waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &from)
+                .await
         {
             let _ = state
                 .deps
@@ -69,11 +67,9 @@ pub(super) async fn handle_presence_probe(
         }
         return;
     }
-    let requester_resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_resources_for_user(&from);
+    let requester_resources =
+        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &from)
+            .await;
     for (resource, show, status, priority) in detached_available {
         let presence = Stanza::Presence(build_available_presence(
             &resource,
@@ -130,11 +126,8 @@ async fn send_unsubscribed_probe_response(state: &WebSocketState, from: &BareJid
         None,
         &[],
     ));
-    for resource in state
-        .deps
-        .protocol
-        .connection_registry
-        .get_resources_for_user(to)
+    for resource in
+        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, to).await
     {
         let _ = state
             .deps

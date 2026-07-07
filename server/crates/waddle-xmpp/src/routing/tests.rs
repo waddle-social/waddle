@@ -1,9 +1,18 @@
 use super::*;
+use kameo::actor::Spawn;
 use minidom::Element;
 use tokio::sync::mpsc;
 
 fn create_test_config() -> RouterConfig {
     RouterConfig::new("waddle.social".to_string())
+}
+
+/// A fresh, empty actor-authoritative registry for `StanzaRouter` tests
+/// (ADR-0017 Phase 3 Slice 9). None of these tests populate it — the
+/// `StanzaRouter` bare-JID resource-enumeration path is exercised by
+/// `crate::registry::selection`'s own tests.
+fn spawn_user_registry() -> ActorRef<UserRegistryActor> {
+    UserRegistryActor::spawn(UserRegistryActor::new())
 }
 
 fn create_test_jid(jid_str: &str) -> Jid {
@@ -25,11 +34,12 @@ fn test_router_config() {
     assert_eq!(config.muc_domain, "chat.example.com");
 }
 
-#[test]
-fn test_get_destination_local() {
+#[tokio::test]
+async fn test_get_destination_local() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("user@waddle.social");
     assert_eq!(router.get_destination(&jid), RoutingDestination::Local);
@@ -38,11 +48,12 @@ fn test_get_destination_local() {
     assert_eq!(router.get_destination(&jid), RoutingDestination::Local);
 }
 
-#[test]
-fn test_get_destination_muc() {
+#[tokio::test]
+async fn test_get_destination_muc() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("room@muc.waddle.social");
     assert_eq!(router.get_destination(&jid), RoutingDestination::LocalMuc);
@@ -51,11 +62,12 @@ fn test_get_destination_muc() {
     assert_eq!(router.get_destination(&jid), RoutingDestination::LocalMuc);
 }
 
-#[test]
-fn test_get_destination_spaces() {
+#[tokio::test]
+async fn test_get_destination_spaces() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("spaces.waddle.social");
     assert_eq!(
@@ -64,11 +76,12 @@ fn test_get_destination_spaces() {
     );
 }
 
-#[test]
-fn test_get_destination_remote() {
+#[tokio::test]
+async fn test_get_destination_remote() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("user@example.com");
     assert_eq!(
@@ -87,11 +100,12 @@ fn test_get_destination_remote() {
     );
 }
 
-#[test]
-fn test_is_local_jid() {
+#[tokio::test]
+async fn test_is_local_jid() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     assert!(router.is_local_jid(&create_test_jid("user@waddle.social")));
     assert!(router.is_local_jid(&create_test_jid("room@muc.waddle.social")));
@@ -99,33 +113,36 @@ fn test_is_local_jid() {
     assert!(!router.is_local_jid(&create_test_jid("user@example.com")));
 }
 
-#[test]
-fn test_is_muc_jid() {
+#[tokio::test]
+async fn test_is_muc_jid() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     assert!(!router.is_muc_jid(&create_test_jid("user@waddle.social")));
     assert!(router.is_muc_jid(&create_test_jid("room@muc.waddle.social")));
     assert!(!router.is_muc_jid(&create_test_jid("user@example.com")));
 }
 
-#[test]
-fn test_is_remote_jid() {
+#[tokio::test]
+async fn test_is_remote_jid() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     assert!(!router.is_remote_jid(&create_test_jid("user@waddle.social")));
     assert!(!router.is_remote_jid(&create_test_jid("room@muc.waddle.social")));
     assert!(router.is_remote_jid(&create_test_jid("user@example.com")));
 }
 
-#[test]
-fn test_federation_disabled_by_default() {
+#[tokio::test]
+async fn test_federation_disabled_by_default() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
-    let router = StanzaRouter::new(config, registry);
+    let user_registry = spawn_user_registry();
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     assert!(!router.is_remote_routing_enabled());
 }
@@ -134,10 +151,21 @@ fn test_federation_disabled_by_default() {
 async fn test_route_iq_local_muc_bare_non_jingle_routes_to_connected_resource() {
     let config = create_test_config();
     let registry = Arc::new(ConnectionRegistry::new());
+    let user_registry = spawn_user_registry();
     let (tx, mut rx) = mpsc::channel(16);
     let full_room_jid: FullJid = "room@muc.waddle.social/nick".parse().unwrap();
-    registry.register(full_room_jid, tx);
-    let router = StanzaRouter::new(config, registry);
+    registry.register(full_room_jid.clone(), tx.clone());
+    // Bare-JID resource enumeration now sources from the actor tree
+    // (ADR-0017 Phase 3 Slice 9), so the fixture must dual-register here too
+    // — production dual-registration keeps both in sync on the live path.
+    user_registry
+        .ask(crate::registry::RegisterUserResource {
+            jid: full_room_jid,
+            entry: crate::registry::ConnectionEntry::new(tx),
+        })
+        .await
+        .expect("register on actor tree");
+    let router = StanzaRouter::new(config, registry, user_registry);
 
     let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
     let iq = parse_iq(

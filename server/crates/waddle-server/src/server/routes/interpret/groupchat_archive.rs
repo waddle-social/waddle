@@ -417,6 +417,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
 pub(super) struct GroupchatInboxProjectionInputs<'a> {
     pub inbox_storage: &'a Arc<dyn InboxStorage>,
     pub connection_registry: &'a waddle_xmpp::registry::ConnectionRegistry,
+    pub user_registry: Option<&'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     pub owner: &'a BareJid,
     pub room: &'a BareJid,
     pub message: &'a Message,
@@ -437,6 +438,7 @@ pub(super) async fn project_groupchat_inbox(
     let GroupchatInboxProjectionInputs {
         inbox_storage,
         connection_registry,
+        user_registry,
         owner,
         room,
         message,
@@ -458,7 +460,7 @@ pub(super) async fn project_groupchat_inbox(
     {
         Ok(updated) if is_recipient => {
             outcome.channel_committed = true;
-            push_inbox_update(connection_registry, owner, &updated).await;
+            push_inbox_update(connection_registry, user_registry, owner, &updated).await;
         }
         Ok(_) => {
             outcome.channel_committed = true;
@@ -501,7 +503,7 @@ pub(super) async fn project_groupchat_inbox(
     {
         Ok(updated) if is_recipient => {
             outcome.thread_committed = true;
-            push_inbox_update(connection_registry, owner, &updated).await;
+            push_inbox_update(connection_registry, user_registry, owner, &updated).await;
         }
         Ok(_) => {
             outcome.thread_committed = true;
@@ -536,10 +538,16 @@ pub(super) struct GroupchatInboxProjectionOutcome {
 /// §"Mark as read" cross-device sync).
 pub(crate) async fn push_inbox_update(
     connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     user: &BareJid,
     entry: &InboxEntry,
 ) {
-    let resources = connection_registry.get_resources_for_user(user);
+    let resources = match user_registry {
+        Some(user_registry) => {
+            waddle_xmpp::registry::get_resources_for_user(user_registry, user).await
+        }
+        None => Vec::new(),
+    };
     for resource_jid in resources {
         let msg = build_inbox_push(Jid::from(resource_jid.clone()), entry);
         let _ = connection_registry

@@ -17,7 +17,6 @@ use super::*;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
 pub(super) async fn broadcast_room_system_message_event(
-    registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     room: BareJid,
     mut message: Box<Message>,
@@ -140,7 +139,6 @@ pub(super) async fn broadcast_room_system_message_event(
         let mut copy = (*message).clone();
         copy.to = Some(Jid::from(occupant.full_jid.clone()));
         route_to_connection(
-            registry,
             deps,
             Jid::from(occupant.full_jid.clone()),
             Box::new(Stanza::Message(copy)),

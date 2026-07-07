@@ -17,6 +17,7 @@
 //! ```
 
 mod connection_registry;
+mod selection;
 pub mod user_actor;
 pub mod user_registry;
 
@@ -24,9 +25,11 @@ pub use connection_registry::{
     BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, SendResult,
 };
+pub use selection::{get_resources_for_user, select_routable_resources_for_user};
 pub use user_actor::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
 };
+pub use user_actor::GetResources;
 pub use user_registry::{
     GetOrCreateUser, GetUser, ListUsers, ReapUserIfEmpty, RegisterUserResource, RemoveUser,
     UnregisterUserResource, UserCount, UserRegistryActor, UserRegistryError,
