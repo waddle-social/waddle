@@ -29,9 +29,9 @@ Bundles marked `[one PR]` touch the same files and should land together.
 ## Tier 2 — XEP/RFC conformance violations + top reliability (parallel lanes)
 
 ### Lane A — MUC conformance (server)
-1. #1111 — RoomFull join → `service-unavailable` presence error (XEP-0045 §7.2.9); currently empty reply. S.
-2. #1172 — MUC MUST gaps: status 201 on create, config broadcast 104/170/171, PM routing, `<decline/>`, affiliation-list authz (§9 admin-only). M–L.
-3. #1169 — ISR: implement XEP-0397 wire shape or drop `urn:xmpp:isr:0` advert; replace `format!`-XML + substring parsing. M.
+1. ✅ **#1111 — RoomFull join → `service-unavailable` presence error (XEP-0045 §7.2.9); was an empty reply. DONE (PR #1212, merged).**
+2. #1172 — MUC MUST gaps: status 201 on create, config broadcast 104/170/171, PM routing, `<decline/>`, affiliation-list authz (§9 admin-only); plus admin/owner overflow-join to a full room (§7.2.9 MAY, deferred from #1111). M–L.
+3. ✅ **#1169 — ISR: dropped `urn:xmpp:isr:0` advert + bespoke `format!`-XML token scheme (removal was the conformant choice; nothing depended on it). DONE (PR #1211, merged).**
 4. #1150 — fix all 7 wire deviations (0452, 0500, 0502, 0446, 0433, 0488, 0448). L.
 
 ### Lane B — SFU / calls reliability `[one PR bundle]`
