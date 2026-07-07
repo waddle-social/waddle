@@ -21,7 +21,8 @@ pub mod user_actor;
 pub mod user_registry;
 
 pub use connection_registry::{
-    BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, OutboundStanza, SendResult,
+    BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
+    ForceDetachRequest, OutboundStanza, SendResult,
 };
 pub use user_actor::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,

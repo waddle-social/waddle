@@ -13,8 +13,8 @@ use super::{
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
     transport_xml::{
-        build_handled_count_too_high_stream_error, build_system_shutdown_stream_error,
-        websocket_stream_close_xml,
+        build_conflict_stream_error, build_handled_count_too_high_stream_error,
+        build_system_shutdown_stream_error, websocket_stream_close_xml,
     },
 };
 use axum::response::IntoResponse;
@@ -65,6 +65,30 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 /// that follows the break is what actually preserves the session.
 const SHUTDOWN_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The two channel halves handed over to the `ConnectionRegistry` at
+/// registration time (`register_bound_connection_after_frame`, then
+/// ADR-0017 Phase 3 Slice 6's force-detach receiver take-over). Bundled so
+/// `handle_inbound_text` stays under the clippy too-many-arguments
+/// threshold, mirroring `SmCtx`'s identical rationale one file over.
+struct RegistrationChannels<'a> {
+    pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
+    force_detach_rx: &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+}
+
+/// Poll `rx` if present, otherwise never resolve (ADR-0017 Phase 3 Slice 6).
+/// Lets the connection loop's `select!` carry an `Option<mpsc::Receiver<_>>`
+/// arm — `None` before this connection is registered (the force-detach
+/// receiver is only handed over post-registration, see
+/// `handle_inbound_text`) — without an `if`-guard/`.unwrap()` pairing: the
+/// arm simply never fires while `rx` is `None`, exactly like a genuinely
+/// empty, never-closing channel would.
+async fn recv_optional<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Handle an XMPP WebSocket connection
 async fn handle_xmpp_websocket(
     socket: WebSocket,
@@ -90,6 +114,24 @@ async fn handle_xmpp_websocket(
     // returns `None` — that's how we detect replacement and exit cleanly.
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundStanza>(OUTBOUND_CHANNEL_SIZE);
     let mut pending_tx: Option<mpsc::Sender<OutboundStanza>> = Some(outbound_tx);
+
+    // ADR-0017 Phase 3 Slice 6: the cross-node resume live-steal handshake's
+    // force-detach receiver. `None` until this connection registers — the
+    // registry mints a fresh channel pair per `ConnectionEntry`
+    // (`ConnectionEntry::new`), and `handle_inbound_text` takes the receiver
+    // half via `entry.take_force_detach_rx()` immediately after
+    // registration succeeds, mirroring `pending_tx`'s own hand-off pattern.
+    let mut force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>> =
+        None;
+    // Set when this connection is asked (identity-matched) to force-detach
+    // for a cross-node resume. The ack is deliberately sent only AFTER
+    // `cleanup_connection_shutdown` below has run this connection's normal
+    // XEP-0198 detach-for-resume persistence — the asking node's
+    // `steal_for_resume` must never proceed until the detach-flush this
+    // node performs has actually landed.
+    let mut pending_force_detach_ack: Option<
+        tokio::sync::oneshot::Sender<waddle_xmpp::registry::ForceDetachOutcome>,
+    > = None;
 
     // Track connection state
     let mut conn = WsConnState::new();
@@ -139,7 +181,10 @@ async fn handle_xmpp_websocket(
                     &domain,
                     &state,
                     &mut conn,
-                    &mut pending_tx,
+                    RegistrationChannels {
+                        pending_tx: &mut pending_tx,
+                        force_detach_rx: &mut force_detach_rx,
+                    },
                     &mut ws_sender,
                     &mut ws_receiver,
                 )
@@ -158,7 +203,10 @@ async fn handle_xmpp_websocket(
                             &domain,
                             &state,
                             &mut conn,
-                            &mut pending_tx,
+                            RegistrationChannels {
+                                pending_tx: &mut pending_tx,
+                                force_detach_rx: &mut force_detach_rx,
+                            },
                             &mut ws_sender,
                             &mut ws_receiver,
                         )
@@ -231,6 +279,61 @@ async fn handle_xmpp_websocket(
                         info!("Outbound channel closed; session superseded by replacement");
                         superseded = true;
                         break;
+                    }
+                }
+            }
+
+            // ADR-0017 Phase 3 Slice 6: a cross-node XEP-0198 resume
+            // live-steal handshake ask for this connection's own stream id.
+            // The identity check gates the destructive close itself (defense
+            // in depth against a wrong-identity `previd` forcing a disconnect
+            // before rejection) — a mismatch answers inline and this
+            // connection keeps serving normally; a match sends `<conflict/>`
+            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
+            // the SAME detach-for-resume cleanup a graceful/keepalive close
+            // uses (never transitions `phase` to `Closing`).
+            request = recv_optional(&mut force_detach_rx) => {
+                match request {
+                    Some(request) => {
+                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
+                        if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
+                            warn!(
+                                requester = %request.requester_bare_jid,
+                                bound = ?bound_bare,
+                                "Cross-node resume force-detach rejected: identity mismatch"
+                            );
+                            let _ = request
+                                .ack
+                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+                        } else {
+                            info!(
+                                jid = ?conn.phase.bound_jid(),
+                                "Cross-node resume: force-detaching this session (<conflict/> close)"
+                            );
+                            if conn.stream_open_sent {
+                                let _ = send_ws_text_frames(
+                                    &mut ws_sender,
+                                    [build_conflict_stream_error(), websocket_stream_close_xml()],
+                                    "Failed to send conflict stream error",
+                                )
+                                .await;
+                            }
+                            let _ = close_ws_connection(
+                                &mut ws_sender,
+                                "Failed to send WebSocket close frame after conflict",
+                            )
+                            .await;
+                            // Deferred: acked only after this connection's own
+                            // detach-for-resume cleanup below actually runs.
+                            pending_force_detach_ack = Some(request.ack);
+                            break;
+                        }
+                    }
+                    None => {
+                        // The registry entry was removed (e.g. superseded)
+                        // without this channel ever being used — disable
+                        // this arm for the remainder of the loop.
+                        force_detach_rx = None;
                     }
                 }
             }
@@ -380,7 +483,29 @@ async fn handle_xmpp_websocket(
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
-    cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
+    let shutdown_outcome =
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
+
+    // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
+    // detach-for-resume persistence has actually run above — tell the
+    // cross-node resume asker it is safe to proceed with `steal_for_resume`.
+    // Council-adjudicated FIX 4: ack only what actually happened — map the
+    // typed `shutdown_outcome` onto the wire outcome rather than always
+    // claiming `Detached`, so the asker never proceeds with
+    // `steal_for_resume` against a snapshot that was never persisted (a
+    // storage-error fallback, an ownership-race promotion, or any other
+    // non-detach cleanup path).
+    if let Some(ack) = pending_force_detach_ack.take() {
+        let outcome = match shutdown_outcome {
+            cleanup::ConnectionShutdownOutcome::Detached => {
+                waddle_xmpp::registry::ForceDetachOutcome::Detached
+            }
+            cleanup::ConnectionShutdownOutcome::NotPersisted => {
+                waddle_xmpp::registry::ForceDetachOutcome::NotPersisted
+            }
+        };
+        let _ = ack.send(outcome);
+    }
 
     info!("XMPP WebSocket connection closed");
 }
@@ -397,10 +522,14 @@ async fn handle_inbound_text(
     domain: &str,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
-    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
+    channels: RegistrationChannels<'_>,
     ws_sender: &mut SplitSink<WebSocket, Message>,
     ws_receiver: &mut SplitStream<WebSocket>,
 ) -> bool {
+    let RegistrationChannels {
+        pending_tx,
+        force_detach_rx,
+    } = channels;
     debug!(len = text.len(), "Received XMPP WebSocket message");
     // Any inbound frame is liveness evidence for the
     // RFC 7395 §3.8 keepalive policy (issue #1090).
@@ -440,43 +569,58 @@ async fn handle_inbound_text(
             .await;
             return false;
         }
-        RegistrationAfterFrame::Registered(sm_finalization) => match sm_finalization {
-            SmRegistrationFinalization::KeepExistingResponses => {}
-            SmRegistrationFinalization::ReplaceWithResumed {
-                resumed,
-                replay_after_h,
-            } => {
-                responses = vec![resumed.to_xml()];
-                // Issue #1178: like the pre-registration resume path,
-                // replayed stanzas carry a XEP-0203 <delay/> with their
-                // original receipt time.
-                let server_domain = state.deps.auth_state.xmpp_domain.as_str();
-                responses.extend(
-                    conn.sm_state
-                        .get_stanzas_to_resend(replay_after_h)
-                        .into_iter()
-                        .map(|entry| {
-                            waddle_xmpp::stream_management::stamp_replay_delay(
-                                &entry.stanza_xml,
-                                server_domain,
-                                entry.original_receipt_at,
-                            )
-                        }),
-                );
+        RegistrationAfterFrame::Registered(sm_finalization) => {
+            // ADR-0017 Phase 3 Slice 6: wire this connection's own
+            // force-detach receiver into the main loop's select! now that
+            // registration published the `ConnectionEntry` this channel
+            // pair lives on. `take_force_detach_rx` returns `Some` exactly
+            // once per entry, so a racing/duplicate registration attempt
+            // for the same entry observes `None` here, same as intended.
+            if let Some(jid) = conn.phase.bound_jid() {
+                if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
+                    if let Some(rx) = entry.take_force_detach_rx() {
+                        *force_detach_rx = Some(rx);
+                    }
+                }
             }
-            SmRegistrationFinalization::ReplaceWithFailed(failed) => {
-                responses = vec![failed.to_xml()];
+            match sm_finalization {
+                SmRegistrationFinalization::KeepExistingResponses => {}
+                SmRegistrationFinalization::ReplaceWithResumed {
+                    resumed,
+                    replay_after_h,
+                } => {
+                    responses = vec![resumed.to_xml()];
+                    // Issue #1178: like the pre-registration resume path,
+                    // replayed stanzas carry a XEP-0203 <delay/> with their
+                    // original receipt time.
+                    let server_domain = state.deps.auth_state.xmpp_domain.as_str();
+                    responses.extend(
+                        conn.sm_state
+                            .get_stanzas_to_resend(replay_after_h)
+                            .into_iter()
+                            .map(|entry| {
+                                waddle_xmpp::stream_management::stamp_replay_delay(
+                                    &entry.stanza_xml,
+                                    server_domain,
+                                    entry.original_receipt_at,
+                                )
+                            }),
+                    );
+                }
+                SmRegistrationFinalization::ReplaceWithFailed(failed) => {
+                    responses = vec![failed.to_xml()];
+                }
+                SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
+                    acknowledged,
+                    send_count,
+                } => {
+                    responses = vec![
+                        build_handled_count_too_high_stream_error(acknowledged, send_count),
+                        websocket_stream_close_xml(),
+                    ];
+                }
             }
-            SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
-                acknowledged,
-                send_count,
-            } => {
-                responses = vec![
-                    build_handled_count_too_high_stream_error(acknowledged, send_count),
-                    websocket_stream_close_xml(),
-                ];
-            }
-        },
+        }
     }
 
     ensure_websocket_stream_close_for_closing_phase(conn, &mut responses);

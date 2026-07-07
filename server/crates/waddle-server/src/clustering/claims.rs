@@ -617,6 +617,58 @@ impl ClaimStore for PostgresClaimStore {
         }
     }
 
+    async fn current_claim(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, ClaimError> {
+        // ADR-0017 Phase 3 Slice 6 addition: read-only, deliberately
+        // unlocked — same shape and same "never itself an authority" caveat
+        // as `ensure_claimed`'s own conflict-path read above. The cross-node
+        // XEP-0198 resume path uses this to decide which resume branch
+        // applies and to learn the observed epoch to bind into a later
+        // `steal_for_resume` call.
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // `owner_lease_fresh` (council-adjudicated fix, Slice 6): the exact
+        // same `NOT EXISTS` owner-stale predicate `steal_stale`'s
+        // `OwnerStale` arm uses, read here read-only/unlocked alongside the
+        // claim row itself — never a raw heartbeat comparison, only the
+        // committed `expired` flag (see that predicate's own doc comment).
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    c.node_id,
+                    c.node_epoch,
+                    c.claim_epoch,
+                    EXISTS (
+                        SELECT 1 FROM clustering_nodes n
+                        WHERE n.node_id = c.node_id
+                          AND NOT n.expired
+                          AND n.node_epoch = c.node_epoch
+                    ) AS owner_lease_fresh
+                FROM clustering_claims c
+                WHERE c.entity = ?
+                "#,
+                crate::db_params![entity_key(entity)],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => {
+                let node_id: String = row.get(0).map_err(db_err)?;
+                let node_epoch: String = row.get(1).map_err(db_err)?;
+                let claim_epoch: i64 = row.get(2).map_err(db_err)?;
+                let owner_lease_fresh: bool = row.get(3).map_err(db_err)?;
+                Ok(Some(waddle_xmpp::ownership::ClaimSnapshot {
+                    owner: NodeIdentity::new(node_id, node_epoch),
+                    claim_epoch: ClaimEpoch(claim_epoch),
+                    owner_lease_fresh,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn fence(
         &self,
         entity: &Entity,

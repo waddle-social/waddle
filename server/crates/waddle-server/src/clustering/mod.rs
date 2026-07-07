@@ -54,6 +54,17 @@ mod metrics;
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+/// The `RemoteResumeAsker` implementation over `RelayHandle` (ADR-0017
+/// Phase 3 Slice 6) — the resuming node's side of the cross-node XEP-0198
+/// resume live-steal handshake. Public so `server/http.rs` can construct it.
+#[cfg(feature = "clustering")]
+pub mod resume_asker;
+/// The `RelayActor`-side bridge to the live `ConnectionRegistry` (ADR-0017
+/// Phase 3 Slice 6). Public for the same reason as [`local_claims`]: the
+/// harness wires/drives it directly in the cross-node live-steal handshake
+/// scenario.
+#[cfg(feature = "clustering")]
+pub mod resume_bridge;
 /// Self-fencing, isolation detection, and re-registration hysteresis
 /// (ADR-0017 Phase 3 Slice 2). Public for the same reason as
 /// [`claims`]/[`lease`]: the harness drives the node-lease loop directly.
@@ -253,6 +264,32 @@ pub struct ClusteringHandles {
     /// `WebSocketState`, which does not otherwise carry `ServerConfig`).
     #[cfg(feature = "clustering")]
     pub lease_ttl: Option<std::time::Duration>,
+    /// ADR-0017 Phase 3 Slice 6: the cross-node resume live-handshake's
+    /// bridge to this node's own `ConnectionRegistry` — the SAME `Arc` the
+    /// swarm's `RelayActor` answers `RelayResumeSteal` asks through, not a
+    /// second, independent bridge. Wired by
+    /// `server/http.rs::create_sm_session_registry` once the connection
+    /// registry exists (construction-order chicken-and-egg, mirroring
+    /// `local_claims`). Feature-gated for the same reason as `local_claims`.
+    #[cfg(feature = "clustering")]
+    pub resume_bridge: Option<Arc<resume_bridge::ResumeStealBridge>>,
+    /// This node's clustering-scope cancellation token (the same child
+    /// token every clustering task races against — see
+    /// `clustering_scope_token`'s doc comment). Exposed so a caller outside
+    /// `clustering` (the cross-node resume asker,
+    /// `server/http.rs::create_sm_session_registry`) can construct a
+    /// `relay::RelayHandle` with the correct cancellation scope (ADR-0017
+    /// Phase 3 Slice 6's `RelayHandle` cancellation-safety paydown).
+    #[cfg(feature = "clustering")]
+    pub stop_token: Option<CancellationToken>,
+    /// The resolved `ClusteringResumeHandshakeConfig::timeout` (ADR-0017
+    /// Phase 3 Slice 6) — the cross-node resume path's held-response retry
+    /// budget. Carried here (rather than threading `ServerConfig` itself)
+    /// mirroring `lease_ttl`'s identical rationale: the SM session registry
+    /// and its resume path run off `WebSocketState`, which does not
+    /// otherwise carry `ClusteringConfig`.
+    #[cfg(feature = "clustering")]
+    pub resume_handshake_timeout: Option<std::time::Duration>,
 }
 
 impl ClusteringHandles {
@@ -270,6 +307,23 @@ impl ClusteringHandles {
         match (&self.claim_store, &self.node_identity) {
             (Some(store), Some(identity)) => Some((Arc::clone(store), identity.clone())),
             _ => None,
+        }
+    }
+
+    /// The resolved resume-handshake timeout (ADR-0017 Phase 3 Slice 6),
+    /// `None` under the exact same conditions `claim_pair` is `None`
+    /// (clustering disabled, non-Postgres, or a build without the
+    /// `clustering` feature). Unconditionally compiled, like `claim_pair`,
+    /// so `stream_management.rs` (outside the `clustering` feature gate)
+    /// can read it without conditional compilation.
+    pub fn resume_handshake_timeout(&self) -> Option<std::time::Duration> {
+        #[cfg(feature = "clustering")]
+        {
+            self.resume_handshake_timeout
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            None
         }
     }
 }
@@ -313,10 +367,23 @@ pub async fn start_if_enabled(
         // node-lease/self-fence loop) is driven off this child, never the
         // raw process-wide `stop_token` — see `clustering_scope_token`.
         let clustering_stop = clustering_scope_token(stop_token);
+        // ADR-0017 Phase 3 Slice 6: constructed empty (the `ConnectionRegistry`
+        // doesn't exist yet at this point in startup) and wired to it later by
+        // `server/http.rs::create_sm_session_registry` — the same
+        // construction-order chicken-and-egg fix `local_claims` already
+        // applies. The swarm's `RelayActor` answers `RelayResumeSteal` asks
+        // through this exact `Arc`.
+        let resume_bridge = resume_bridge::ResumeStealBridge::new();
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
-        let handle = swarm::spawn(config, db, clustering_stop.clone()).await?;
+        let handle = swarm::spawn(
+            config,
+            db,
+            clustering_stop.clone(),
+            Arc::clone(&resume_bridge),
+        )
+        .await?;
         tracing::info!(
             local_peer_id = %handle.local_peer_id,
             node_id = %handle.node_id,
@@ -371,6 +438,9 @@ pub async fn start_if_enabled(
             local_claims: Some(Arc::clone(&local_claims)),
             node_lease: Some(node_lease_handle),
             lease_ttl: Some(config.node_lease.lease_ttl),
+            resume_bridge: Some(resume_bridge),
+            stop_token: Some(clustering_stop.clone()),
+            resume_handshake_timeout: Some(config.resume_handshake.timeout),
         };
 
         tokio::spawn(self_fence::run_node_lease(

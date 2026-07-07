@@ -347,6 +347,16 @@ async fn create_websocket_state(
 ) -> Result<Arc<WebSocketState>> {
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
+    // ADR-0017 Phase 3 Slice 6: complete the cross-node resume bridge
+    // `clustering::start_if_enabled` handed the swarm's `RelayActor` empty
+    // (the connection registry didn't exist yet at that point in startup) —
+    // the same construction-order chicken-and-egg fix `local_claims` below
+    // already applies. A no-op when clustering is disabled or this binary
+    // lacks the `clustering` feature (`resume_bridge` is `None`).
+    #[cfg(feature = "clustering")]
+    if let Some(resume_bridge) = &state.clustering_claims.resume_bridge {
+        resume_bridge.wire(Arc::clone(&connection_registry));
+    }
 
     // ADR-0017 Phase 1: spawn the actor-backed per-user registry. It is
     // populated alongside `connection_registry` on the live register/
@@ -875,6 +885,21 @@ async fn create_sm_session_registry(
     // `clustering` feature) leaves today's single-node default untouched.
     if let Some((claim_store, node_identity)) = clustering.claim_pair() {
         sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
+    }
+    // ADR-0017 Phase 3 Slice 6: wire the cross-node resume live-handshake
+    // asker (over `RelayHandle`) alongside the claim store above — both are
+    // `None`/absent under the exact same conditions (clustering disabled,
+    // non-Postgres, or a build without the `clustering` feature), so the
+    // cross-node resume fallback never has anything to ask in those cases
+    // and single-node behavior stays byte-identical.
+    #[cfg(feature = "clustering")]
+    if let Some(stop_token) = &clustering.stop_token {
+        let asker = crate::clustering::resume_asker::SwarmRemoteResumeAsker::new(
+            stop_token.clone(),
+            server_config.clustering.messaging.mailbox_timeout,
+            server_config.clustering.messaging.reply_timeout,
+        );
+        sm_session_registry = sm_session_registry.with_remote_resume_asker(Arc::new(asker));
     }
     if let Err(error) = sm_session_registry.restore_from_persistence().await {
         warn!(

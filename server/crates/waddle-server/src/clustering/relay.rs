@@ -21,14 +21,27 @@
 
 use super::codec::RemoteStanza;
 use super::metrics;
+use super::resume_bridge::ResumeStealBridge;
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
 use kameo::message::{Context, Message};
 use kameo::{Actor, RemoteActor, Reply};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Bound on this node's own wait for a local force-detach to complete when
+/// answering a [`RelayResumeSteal`] ask (ADR-0017 Phase 3 Slice 6).
+/// Independent of the *asking* node's own resume-handshake retry budget
+/// (`ClusteringResumeHandshakeConfig::timeout`) — this is purely a
+/// defensive bound so a wedged local connection cannot leak this handler's
+/// task indefinitely; a timeout here answers `NotLiveLocally` via
+/// [`super::resume_bridge::ResumeStealBridge::request_forced_detach`]'s own
+/// bounded wait, which the asker retries exactly like any other transient
+/// race.
+const LOCAL_FORCE_DETACH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The kademlia registration name for a node's relay actor — the node's ONLY
 /// kademlia name (O(1) registrations per node, never per entity).
@@ -73,13 +86,21 @@ pub struct RelayActor {
     node_id: NodeId,
     /// When false (production), the fault-injection messages are inert acks.
     fault_injection: bool,
+    /// ADR-0017 Phase 3 Slice 6: this node's bridge to its own live
+    /// `ConnectionRegistry`, answering [`RelayResumeSteal`] asks.
+    resume_bridge: Arc<ResumeStealBridge>,
 }
 
 impl RelayActor {
-    pub fn new(node_id: NodeId, fault_injection: bool) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        fault_injection: bool,
+        resume_bridge: Arc<ResumeStealBridge>,
+    ) -> Self {
         Self {
             node_id,
             fault_injection,
+            resume_bridge,
         }
     }
 }
@@ -137,6 +158,87 @@ impl Message<RelayEchoStanza> for RelayActor {
             node_id: self.node_id.clone(),
             stanza: msg.stanza,
         }
+    }
+}
+
+/// Cross-node XEP-0198 resume live-steal handshake ask (ADR-0017 Phase 3
+/// Slice 6, element 8's "live, owned elsewhere" branch). Sent by the
+/// resuming node to the node currently claiming `stream_id`, asking it to
+/// force-detach (identity-checked defense in depth) so a persisted snapshot
+/// becomes readable and the resuming node can proceed with
+/// `steal_for_resume`. This is Slice 6's entire addition to the relay
+/// message set — every other message on this actor predates it (Phase 2,
+/// discovery-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayResumeSteal {
+    pub stream_id: waddle_xmpp::pending_delivery::SmSessionId,
+    pub requester_bare_jid: jid::BareJid,
+}
+
+/// Reply to [`RelayResumeSteal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayResumeStealReply {
+    /// Identity matched: this node's own live connection (if any) for
+    /// `stream_id` force-detached, sent `<conflict/>`, and closed — a
+    /// persisted snapshot should now be readable.
+    Detached,
+    /// This node's own defense-in-depth identity check rejected the
+    /// requester — the asker must not proceed to `steal_for_resume`.
+    IdentityMismatch,
+    /// This node has no live local connection for `stream_id` right now (a
+    /// race with a concurrent detach/expiry, or the connection did not
+    /// answer within this node's own bounded wait) — the asker should
+    /// re-check persistence and retry.
+    NotLiveLocally,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.resume_steal.v1")]
+impl Message<RelayResumeSteal> for RelayActor {
+    // Council-adjudicated FIX 2: `DelegatedReply`, not a bare
+    // `RelayResumeStealReply`. `resume_bridge.request_forced_detach` awaits
+    // the local connection's own force-detach ack, up to
+    // `LOCAL_FORCE_DETACH_ACK_TIMEOUT` (10s) — kameo actors process their
+    // mailbox strictly sequentially, so awaiting that inline here would
+    // head-of-line-block every OTHER message this node's relay answers
+    // (`RelayPing`, `RelayEchoStanza`, concurrent `RelayResumeSteal` asks
+    // for unrelated sessions, ...) for up to 10 seconds per ask. kameo 0.20
+    // ships exactly the mechanism this needs:
+    // `Context::spawn` (`ctx.spawn(future)`) delegates the reply to a
+    // detached `tokio::spawn`ed task and returns immediately, freeing the
+    // mailbox for the next message while the force-detach wait proceeds
+    // concurrently. This is the intended, documented kameo 0.20 pattern
+    // (see `kameo::message::Context::{reply_sender, spawn}`'s doc comments
+    // and examples) — no second actor/registration is needed, so the
+    // O(1)-kademlia-registrations-per-node claim (this module's own doc
+    // comment) is unaffected.
+    type Reply = kameo::reply::DelegatedReply<RelayResumeStealReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayResumeSteal,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let resume_bridge = Arc::clone(&self.resume_bridge);
+        ctx.spawn(async move {
+            match resume_bridge
+                .request_forced_detach(
+                    &msg.stream_id,
+                    &msg.requester_bare_jid,
+                    LOCAL_FORCE_DETACH_ACK_TIMEOUT,
+                )
+                .await
+            {
+                super::resume_bridge::LocalForcedDetachOutcome::Detached => {
+                    RelayResumeStealReply::Detached
+                }
+                super::resume_bridge::LocalForcedDetachOutcome::IdentityMismatch => {
+                    RelayResumeStealReply::IdentityMismatch
+                }
+                super::resume_bridge::LocalForcedDetachOutcome::NotLiveLocally => {
+                    RelayResumeStealReply::NotLiveLocally
+                }
+            }
+        })
     }
 }
 
@@ -212,7 +314,12 @@ impl Message<RelaySleep> for RelayActor {
 /// **re-register under the same name** on every respawn (kameo auto-registers
 /// removal on actor stop, so re-registration is mandatory, not optional).
 /// Stops cleanly when `stop_token` fires.
-pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: CancellationToken) {
+pub fn spawn_supervised(
+    node_id: NodeId,
+    fault_injection: bool,
+    stop_token: CancellationToken,
+    resume_bridge: Arc<ResumeStealBridge>,
+) {
     tokio::spawn(async move {
         let name = relay_name(&node_id);
         let mut respawns: u64 = 0;
@@ -220,8 +327,11 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
             if stop_token.is_cancelled() {
                 break;
             }
-            let actor_ref: ActorRef<RelayActor> =
-                RelayActor::spawn(RelayActor::new(node_id.clone(), fault_injection));
+            let actor_ref: ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
+                node_id.clone(),
+                fault_injection,
+                Arc::clone(&resume_bridge),
+            ));
             // Race registration against cancellation instead of plain
             // `.await`: kameo's swarm-command reply future panics
             // (`.expect(..)` on a dropped oneshot sender) if the event loop
@@ -347,22 +457,32 @@ pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: Canc
 /// defaults; callers with a runtime config apply it via
 /// [`Self::with_ask_timeouts`].
 ///
-/// `resolve`/`ping`/`crash`/`sleep`/`echo_stanza` all await kameo swarm-
-/// command replies and share the same theoretical panic-on-drop hazard as
-/// `spawn_supervised`'s `register` calls (see there) if awaited concurrently
-/// with the local swarm being torn down. Unlike `spawn_supervised`, this
-/// handle owns no cancellation token to race against: today every caller
-/// (the swarm bring-up smoke test, and the Phase 4 cross-node callers this
-/// type is built for) either runs before local shutdown starts or targets a
-/// different node's swarm entirely, so there is no concrete call site racing
-/// this process's own teardown. Threading a token through here becomes
-/// necessary the moment a caller awaits these methods from a task that also
-/// watches this node's clustering stop token.
+/// `resolve`/`ping`/`crash`/`sleep`/`echo_stanza`/`resume_steal` all await
+/// kameo swarm-command replies and share the same theoretical panic-on-drop
+/// hazard as `spawn_supervised`'s `register` calls (see there) if awaited
+/// concurrently with the local swarm being torn down.
+///
+/// **Cancellation-safety paydown (ADR-0017 Phase 3 Slice 6, coordinator
+/// ruling — paid down in this slice rather than carried into Phase 4)**:
+/// `RelayHandle` now owns a `stop_token: CancellationToken` (the same
+/// clustering-scope token `spawn_supervised` already receives), and every
+/// public ask method races its whole body (resolve + send + await-reply)
+/// against that token in a `biased` `select!`, exactly mirroring
+/// `spawn_supervised`'s pattern: cancellation is polled first, so an ask
+/// already in flight during local clustering shutdown returns
+/// [`RelayAskError::Cancelled`] instead of ever polling a future against an
+/// already-torn-down swarm. This slice is `RelayHandle`'s first production
+/// (non-harness) caller — the cross-node XEP-0198 resume live-steal
+/// handshake ([`RelayHandle::resume_steal`]) — which is exactly the
+/// "a caller awaits these methods from a task that also watches this node's
+/// clustering stop token" case the previous doc comment named as the
+/// trigger for paying this down.
 pub struct RelayHandle {
     node_id: NodeId,
     cached: Option<RemoteActorRef<RelayActor>>,
     mailbox_timeout: Duration,
     reply_timeout: Duration,
+    stop_token: CancellationToken,
 }
 
 /// Failures asking a remote relay.
@@ -379,6 +499,10 @@ pub enum RelayAskError {
         failure: RelaySendFailure,
         message: String,
     },
+    /// This handle's clustering-scope stop token fired before the ask
+    /// completed (ADR-0017 Phase 3 Slice 6 cancellation-safety paydown).
+    #[error("relay ask cancelled: clustering shutdown in progress")]
+    Cancelled,
 }
 
 /// Typed classification of a failed relay ask. kameo's [`RemoteSendError`]
@@ -439,13 +563,14 @@ where
 }
 
 impl RelayHandle {
-    pub fn new(node_id: NodeId) -> Self {
+    pub fn new(node_id: NodeId, stop_token: CancellationToken) -> Self {
         let defaults = crate::config::ClusteringMessagingConfig::default();
         Self {
             node_id,
             cached: None,
             mailbox_timeout: defaults.mailbox_timeout,
             reply_timeout: defaults.reply_timeout,
+            stop_token,
         }
     }
 
@@ -493,7 +618,19 @@ impl RelayHandle {
     /// Ping the relay, refreshing a stale cached ref once: transport-layer
     /// errors that mean "this ActorId is gone" invalidate the cache and
     /// re-resolve via kademlia, then retry the ask exactly once.
+    ///
+    /// Races the whole ask against this handle's `stop_token`, biased
+    /// (cancellation checked first) — see the type-level doc comment.
     pub async fn ping(&mut self) -> Result<RelayPong, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.ping_inner() => result,
+        }
+    }
+
+    async fn ping_inner(&mut self) -> Result<RelayPong, RelayAskError> {
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&RelayPing)
@@ -527,7 +664,19 @@ impl RelayHandle {
     /// (codec mismatch, full mailbox, handler error) means the crash request
     /// never plausibly reached the relay and is propagated so callers don't
     /// pass vacuously. Callers assert recovery separately.
+    ///
+    /// Races the whole ask against this handle's `stop_token`, biased — see
+    /// the type-level doc comment.
     pub async fn crash(&mut self) -> Result<(), RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.crash_inner() => result,
+        }
+    }
+
+    async fn crash_inner(&mut self) -> Result<(), RelayAskError> {
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&RelayCrash)
@@ -552,7 +701,19 @@ impl RelayHandle {
     /// Harness: ask the relay to sleep for `millis` inside its handler,
     /// WITHOUT the stale-ref retry (the point is to observe the sender-side
     /// transport timeout, not to recover from it).
+    ///
+    /// Races the whole ask against this handle's `stop_token`, biased — see
+    /// the type-level doc comment.
     pub async fn sleep(&mut self, millis: u64) -> Result<RelayFaultAck, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.sleep_inner(millis) => result,
+        }
+    }
+
+    async fn sleep_inner(&mut self, millis: u64) -> Result<RelayFaultAck, RelayAskError> {
         let remote_ref = self.resolve().await?;
         remote_ref
             .ask(&RelaySleep { millis })
@@ -564,11 +725,79 @@ impl RelayHandle {
 
     /// Round-trip a stanza through the relay (codec proof), with the same
     /// stale-ref refresh-and-retry-once behaviour as [`Self::ping`].
+    ///
+    /// Races the whole ask against this handle's `stop_token`, biased — see
+    /// the type-level doc comment.
     pub async fn echo_stanza(
         &mut self,
         stanza: RemoteStanza,
     ) -> Result<RelayEchoReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.echo_stanza_inner(stanza) => result,
+        }
+    }
+
+    async fn echo_stanza_inner(
+        &mut self,
+        stanza: RemoteStanza,
+    ) -> Result<RelayEchoReply, RelayAskError> {
         let message = RelayEchoStanza { stanza };
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_stale_ref_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    /// Ask this relay's node to force-detach its live SM session
+    /// `stream_id` on behalf of `requester_bare_jid` (ADR-0017 Phase 3
+    /// Slice 6's cross-node XEP-0198 resume live-steal handshake — this
+    /// slice's entire addition to the relay message set, and
+    /// `RelayHandle`'s first production, non-harness caller). Same
+    /// stale-ref refresh-and-retry-once behaviour as [`Self::ping`].
+    ///
+    /// Races the whole ask against this handle's `stop_token`, biased — see
+    /// the type-level doc comment.
+    pub async fn resume_steal(
+        &mut self,
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId,
+        requester_bare_jid: jid::BareJid,
+    ) -> Result<RelayResumeStealReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.resume_steal_inner(stream_id, requester_bare_jid) => result,
+        }
+    }
+
+    async fn resume_steal_inner(
+        &mut self,
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId,
+        requester_bare_jid: jid::BareJid,
+    ) -> Result<RelayResumeStealReply, RelayAskError> {
+        let message = RelayResumeSteal {
+            stream_id,
+            requester_bare_jid,
+        };
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&message)
@@ -648,5 +877,102 @@ mod tests {
         ] {
             assert_eq!(classify::<Infallible>(&error), expected, "{error:?}");
         }
+    }
+
+    /// Council-adjudicated FIX 2: a slow force-detach wait must not
+    /// head-of-line-block this node's relay mailbox. Registers one live
+    /// connection whose force-detach ack is deliberately delayed (standing
+    /// in for a wedged/slow connection task), asks the relay to
+    /// `RelayResumeSteal` it, and — WITHOUT awaiting that ask first —
+    /// concurrently asks the SAME relay actor `RelayPing`. Before the
+    /// `Context::spawn` delegated-reply fix, kameo's strictly-sequential
+    /// per-actor mailbox meant the ping could not even be dequeued until
+    /// the resume-steal handler's own inline await finished; the fix under
+    /// test frees the mailbox immediately, so the ping must resolve long
+    /// before the slow ack does.
+    #[tokio::test]
+    async fn slow_force_detach_does_not_delay_a_concurrent_relay_ping() {
+        use kameo::actor::Spawn;
+        use waddle_xmpp::pending_delivery::SmSessionId;
+        use waddle_xmpp::registry::{ConnectionRegistry, ForceDetachOutcome};
+
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid full jid");
+        let requester: jid::BareJid = "alice@example.com".parse().expect("valid bare jid");
+        let stream_id = SmSessionId::new("stream-slow-detach");
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
+        registry.register(jid.clone(), outbound_tx);
+        registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
+
+        // Simulate a slow/wedged connection: receive the force-detach
+        // request but wait well past when the concurrent ping below must
+        // already have resolved before acking.
+        const ACK_DELAY: Duration = Duration::from_secs(3);
+        let entry = registry.get_entry(&jid).expect("entry was just registered");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("receiver is available exactly once");
+        tokio::spawn(async move {
+            if let Some(request) = force_detach_rx.recv().await {
+                tokio::time::sleep(ACK_DELAY).await;
+                let _ = request.ack.send(ForceDetachOutcome::Detached);
+            }
+        });
+
+        let resume_bridge = ResumeStealBridge::new();
+        resume_bridge.wire(Arc::clone(&registry));
+        let actor_ref: kameo::actor::ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
+            NodeId::new("node-under-test".to_string()),
+            false,
+            resume_bridge,
+        ));
+
+        // Dispatch the resume-steal ask on its own task so it is genuinely
+        // in flight — actually sent into the actor's mailbox and its
+        // handler actually invoked — concurrently with the ping ask below,
+        // rather than merely constructed-but-unpolled.
+        let resume_steal_handle = tokio::spawn({
+            let actor_ref = actor_ref.clone();
+            async move {
+                actor_ref
+                    .ask(RelayResumeSteal {
+                        stream_id,
+                        requester_bare_jid: requester,
+                    })
+                    .await
+            }
+        });
+        // Give the spawned ask a moment to actually reach the actor and
+        // start executing: before the fix under test, the handler would
+        // still be blocked inline on the (3s) force-detach ack at this
+        // point; after the fix, `ctx.spawn` has already returned and the
+        // mailbox is free again, well within this margin.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let ping_started = std::time::Instant::now();
+        let ping_result =
+            tokio::time::timeout(Duration::from_millis(500), actor_ref.ask(RelayPing)).await;
+        let ping_elapsed = ping_started.elapsed();
+
+        assert!(
+            ping_result.is_ok(),
+            "RelayPing must resolve well within 500ms even while a slow \
+             RelayResumeSteal ack is still pending"
+        );
+        assert!(
+            ping_elapsed < ACK_DELAY,
+            "ping took {ping_elapsed:?}, which is not plausibly faster than the \
+             {ACK_DELAY:?} force-detach ack delay — the mailbox was likely blocked"
+        );
+
+        // Let the still-pending resume-steal ask complete so the test
+        // doesn't leak the background task; confirms the eventual reply is
+        // still correct once the slow ack lands.
+        let resume_steal_reply = resume_steal_handle
+            .await
+            .expect("resume-steal task did not panic")
+            .expect("resume-steal ask succeeds");
+        assert_eq!(resume_steal_reply, RelayResumeStealReply::Detached);
     }
 }

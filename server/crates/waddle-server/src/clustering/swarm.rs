@@ -108,6 +108,7 @@ pub async fn spawn(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: CancellationToken,
+    resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
 ) -> Result<SwarmHandle, SwarmError> {
     // Parse and validate the listen multiaddrs first, before building any
     // transport or touching the process-global `ActorSwarm` — fail fast on bad
@@ -139,7 +140,17 @@ pub async fn spawn(
     // repeated crash-restarts (each with a fresh node_id) would otherwise
     // chew through the pool one slot per attempt and starve replacements
     // with NoFreeSlot.
-    match bring_up(config, db, node_id, keypair, listen_addrs, &stop_token).await {
+    match bring_up(
+        config,
+        db,
+        node_id,
+        keypair,
+        listen_addrs,
+        &stop_token,
+        resume_bridge,
+    )
+    .await
+    {
         Ok(handle) => {
             if let Some(pending) = pending_lease {
                 tokio::spawn(run_heartbeat(
@@ -174,6 +185,7 @@ async fn bring_up(
     keypair: Keypair,
     listen_addrs: Vec<Multiaddr>,
     stop_token: &CancellationToken,
+    resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
 ) -> Result<SwarmHandle, SwarmError> {
     let local_peer_id = keypair.public().to_peer_id();
 
@@ -273,7 +285,12 @@ async fn bring_up(
              relay or stall its mailbox — test harnesses only, never production"
         );
     }
-    relay::spawn_supervised(node_id.clone(), config.fault_injection, stop_token.clone());
+    relay::spawn_supervised(
+        node_id.clone(),
+        config.fault_injection,
+        stop_token.clone(),
+        resume_bridge,
+    );
 
     let handle = SwarmHandle {
         local_peer_id,
@@ -923,9 +940,14 @@ mod tests {
         .expect("open test postgres");
         let stop = CancellationToken::new();
 
-        let handle = spawn(&config, &db, stop.clone())
-            .await
-            .expect("swarm brings up cleanly");
+        let handle = spawn(
+            &config,
+            &db,
+            stop.clone(),
+            crate::clustering::resume_bridge::ResumeStealBridge::new(),
+        )
+        .await
+        .expect("swarm brings up cleanly");
         assert!(!handle.local_peer_id.to_string().is_empty());
 
         // Relay round-trip through the remote registry + ask path (kameo
@@ -934,7 +956,7 @@ mod tests {
         // handler without a second process; the true cross-node round-trip is
         // a Slice 6 harness case). Registration is async — retry until the
         // relay is discoverable so a slow CI runner cannot flake the test.
-        let mut relay_handle = relay::RelayHandle::new(handle.node_id.clone());
+        let mut relay_handle = relay::RelayHandle::new(handle.node_id.clone(), stop.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let pong = loop {
             match relay_handle.ping().await {
@@ -988,9 +1010,14 @@ mod tests {
         // Listen-addr validation fails before any DB access, so a SQLite
         // scratch handle is fine here.
         let db = scratch_db().await;
-        let err = spawn(&config, &db, CancellationToken::new())
-            .await
-            .expect_err("invalid addr rejected");
+        let err = spawn(
+            &config,
+            &db,
+            CancellationToken::new(),
+            crate::clustering::resume_bridge::ResumeStealBridge::new(),
+        )
+        .await
+        .expect_err("invalid addr rejected");
         assert!(matches!(err, SwarmError::ListenAddrInvalid { .. }));
     }
 

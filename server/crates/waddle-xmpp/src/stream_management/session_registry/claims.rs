@@ -319,6 +319,45 @@ impl InMemorySmSessionRegistry {
         Ok(())
     }
 
+    /// Ensure this node holds `stream_id`'s `ClaimStore` claim at
+    /// `<enable/>` time (ADR-0017 Phase 3 Slice 6, element 8: "claims row
+    /// created at `<enable/>` time"). `ensure_claimed`, not a bare
+    /// `acquire` (deviation 26/Slice 5's own forward note): a fresh
+    /// `<enable/>` for a stream id this node has never seen still gets a
+    /// plain fresh claim (there is no existing row to self-reacquire
+    /// against), but `ensure_claimed`'s self-idempotence is exactly what
+    /// keeps this call from spuriously conflicting with the detach-time
+    /// `acquire_claim_store_entry_for_detach` call for the *same*
+    /// stream-id on this same node later in this session's lifetime — the
+    /// two call sites coexist with no explicit hand-off protocol between
+    /// them precisely because both go through the same idempotent-for-self
+    /// primitive.
+    ///
+    /// Best-effort by design, exactly like
+    /// [`Self::acquire_claim_store_entry_for_detach`]: `stream_id` is a
+    /// freshly minted UUID (element 8), so a genuine collision with
+    /// another node's claim is not expected in practice, and a failure
+    /// here must not fail the `<enable/>` handshake itself — the session
+    /// simply proceeds without a durable claim record until the detach
+    /// -time call retries. Logged at `warn` so a persistently failing
+    /// `ClaimStore` backend stays visible. Called with no stream-shard
+    /// lock held: `stream_id` is freshly minted and cannot yet appear in
+    /// `sessions`/`claimed_sessions`, so there is nothing else to
+    /// coordinate with under that lock.
+    pub async fn ensure_session_claim(&self, stream_id: &str) {
+        let entity = sm_session_entity(stream_id);
+        let identity = self.node_identity.current();
+        if let Err(error) = self.claim_store.ensure_claimed(&entity, &identity).await {
+            tracing::warn!(
+                stream_id = %stream_id,
+                %error,
+                "handle_sm_enable: ClaimStore ensure_claimed failed for a freshly enabled \
+                 session; proceeding without a durable claim record until the detach-time \
+                 retry (best-effort, see this method's doc comment)"
+            );
+        }
+    }
+
     /// Atomically claim a resumable session for a single resume attempt.
     ///
     /// Claimed sessions stay writable by detached fanout so stanzas routed

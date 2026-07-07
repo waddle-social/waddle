@@ -65,6 +65,26 @@ impl std::fmt::Display for PendingRowId {
     }
 }
 
+/// Wire length bound on [`SmSessionId`] (council-adjudicated FIX 7).
+/// Production stream ids are server-generated UUIDs (36 bytes); 128 bytes
+/// is a generous cap well above that, rejected only at
+/// [`serde::Deserialize`] — the relay message carrying this type
+/// (`waddle-server::clustering::relay::RelayResumeSteal`) is NOT a stanza,
+/// so it never passes through the bounded XML stanza codec
+/// (`waddle-server::clustering::codec`, `MAX_REMOTE_XML_BYTES` et al.) —
+/// without a field-level bound of its own, a malicious (or buggy)
+/// allowlisted peer could ship a multi-MB id, and every non-stanza relay
+/// message needs its own such bound rather than relying on the stanza
+/// codec's.
+pub const SM_SESSION_ID_MAX_LEN: usize = 128;
+
+/// [`SmSessionId`] exceeded [`SM_SESSION_ID_MAX_LEN`] at deserialization.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("SmSessionId of {len} bytes exceeds the {SM_SESSION_ID_MAX_LEN}-byte wire bound")]
+pub struct SmSessionIdTooLong {
+    pub len: usize,
+}
+
 /// Opaque XEP-0198 stream-id, identifying a single SM session.
 ///
 /// Two SM sessions for the same user have different `SmSessionId`s.
@@ -72,7 +92,21 @@ impl std::fmt::Display for PendingRowId {
 /// [`crate::stream_management::session_registry::DetachedSession`] —
 /// kept as a newtype here so a session id cannot be silently swapped
 /// for another opaque string at the storage boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 6): carried as a typed
+/// field on the cross-node resume-handshake relay message
+/// (`waddle-server::clustering::relay::RelayResumeSteal`) — `#[serde(transparent)]`
+/// so the wire representation is the bare string, matching every other
+/// stream-id-shaped value on the wire, while every in-process consumer still
+/// only ever sees the typed newtype. `Deserialize` is hand-written (below),
+/// not derived, so it can enforce [`SM_SESSION_ID_MAX_LEN`] — see
+/// [`SM_SESSION_ID_MAX_LEN`]'s own doc comment for why. [`Self::new`] itself
+/// stays unvalidated: every production caller mints server-generated UUIDs
+/// (far under the cap), and validating there too would force every one of
+/// those internal call sites to handle a `Result` for a case that cannot
+/// occur in practice — the wire boundary is where an untrusted length
+/// actually arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct SmSessionId(String);
 
 impl SmSessionId {
@@ -90,6 +124,21 @@ impl SmSessionId {
 impl std::fmt::Display for SmSessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SmSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() > SM_SESSION_ID_MAX_LEN {
+            return Err(serde::de::Error::custom(SmSessionIdTooLong {
+                len: value.len(),
+            }));
+        }
+        Ok(Self(value))
     }
 }
 
@@ -217,5 +266,37 @@ mod tests {
         let sid = SmSessionId::new("stream-abc-123");
         assert_eq!(sid.as_str(), "stream-abc-123");
         assert_eq!(sid.to_string(), "stream-abc-123");
+    }
+
+    /// Council-adjudicated FIX 7: the wire-deserialize bound.
+    #[test]
+    fn sm_session_id_deserialize_accepts_the_boundary_length() {
+        let value = "a".repeat(SM_SESSION_ID_MAX_LEN);
+        let json = serde_json::to_string(&value).expect("serialize the raw string");
+        let sid: SmSessionId =
+            serde_json::from_str(&json).expect("exactly at the cap must deserialize");
+        assert_eq!(sid.as_str().len(), SM_SESSION_ID_MAX_LEN);
+    }
+
+    #[test]
+    fn sm_session_id_deserialize_rejects_one_byte_over_the_cap() {
+        let value = "a".repeat(SM_SESSION_ID_MAX_LEN + 1);
+        let json = serde_json::to_string(&value).expect("serialize the raw string");
+        let error = serde_json::from_str::<SmSessionId>(&json)
+            .expect_err("one byte over the cap must be rejected");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
+    fn sm_session_id_deserialize_rejects_a_malicious_multi_kb_id() {
+        // Stands in for "a malicious allowlisted peer ships a multi-MB id" —
+        // a few KB is already far past any real server-generated UUID and
+        // well past the cap.
+        let value = "x".repeat(64 * 1024);
+        let json = serde_json::to_string(&value).expect("serialize the raw string");
+        assert!(serde_json::from_str::<SmSessionId>(&json).is_err());
     }
 }

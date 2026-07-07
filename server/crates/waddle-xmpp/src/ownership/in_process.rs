@@ -115,21 +115,40 @@ impl ClaimStore for InProcessClaimStore {
     async fn steal_stale(
         &self,
         entity: &Entity,
-        _observed: ClaimEpoch,
+        observed: ClaimEpoch,
         _staleness: StalePredicate,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
-        // Single node: there is no other node to steal from, so this
-        // trivially succeeds by bumping the epoch (mirroring what a fresh
-        // acquire-after-steal would observe on the real CAS).
+        // Real epoch-fenced CAS, mirroring `PostgresClaimStore::steal_stale`'s
+        // `WHERE entity=$e AND claim_epoch=$observed` gate exactly (ADR-0017
+        // Phase 3 Slice 6 fix: the previous unconditional-overwrite shape
+        // ignored `observed` entirely, so it could never lose a race — which
+        // made this store useless for exercising the two-node claim-steal
+        // races Slice 6's dedicated tests simulate in-process, sharing one
+        // `InProcessClaimStore` between two distinct `NodeIdentity` values.
+        // There is no single-node owner-staleness concept to check
+        // separately (no `clustering_nodes`-equivalent liveness table here),
+        // so `_staleness` is accepted but not consulted — same simplification
+        // the "trivial single node" module doc already makes for every other
+        // method.
         let mut claims = self.lock()?;
-        let entry = claims.entry(entity.clone()).or_insert(ClaimRecord {
-            owner: me.clone(),
-            epoch: ClaimEpoch(0),
-        });
-        entry.epoch.0 += 1;
-        entry.owner = me.clone();
-        Ok(entry.epoch)
+        match claims.get(entity) {
+            Some(record) if record.epoch == observed => {
+                let new_epoch = ClaimEpoch(record.epoch.0 + 1);
+                claims.insert(
+                    entity.clone(),
+                    ClaimRecord {
+                        owner: me.clone(),
+                        epoch: new_epoch,
+                    },
+                );
+                Ok(new_epoch)
+            }
+            // Stale observed epoch, or no claim exists at all to steal —
+            // both are `Conflict`, exactly like the Postgres CAS affecting
+            // zero rows.
+            _ => Err(ClaimError::Conflict),
+        }
     }
 
     async fn steal_for_resume(
@@ -139,10 +158,27 @@ impl ClaimStore for InProcessClaimStore {
         _witness: ResumeIdentityProof,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
-        // Same trivial single-node semantics as `steal_stale`; the witness
-        // only gates *callers*, not this store's internal bookkeeping.
+        // Same real epoch-fenced CAS as `steal_stale` — the witness only
+        // gates *callers* (only `verify_resume_identity` can mint one), not
+        // this store's internal bookkeeping, exactly matching
+        // `PostgresClaimStore::steal_for_resume`'s own "no staleness
+        // predicate at all" shape.
         self.steal_stale(entity, observed, StalePredicate::OwnerStale, me)
             .await
+    }
+
+    async fn current_claim(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<super::ClaimSnapshot>, ClaimError> {
+        let claims = self.lock()?;
+        Ok(claims.get(entity).map(|record| super::ClaimSnapshot {
+            owner: record.owner.clone(),
+            claim_epoch: record.epoch,
+            // No node-liveness table in this single-node store (see this
+            // type's module doc) — always fresh.
+            owner_lease_fresh: true,
+        }))
     }
 
     async fn fence(
@@ -364,6 +400,83 @@ mod tests {
             .fence(&e, &me(), epoch0)
             .await
             .expect("fence after release"));
+    }
+
+    #[tokio::test]
+    async fn steal_stale_with_a_stale_observed_epoch_loses_the_race() {
+        // ADR-0017 Phase 3 Slice 6 fix: this store must actually lose a CAS
+        // race, not unconditionally overwrite — otherwise it cannot stand in
+        // for a two-node claim-steal simulation in a dedicated test.
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        store.acquire(&e, &me()).await.expect("acquire");
+        let err = store
+            .steal_stale(&e, ClaimEpoch(41), StalePredicate::OwnerStale, &me())
+            .await
+            .expect_err("wrong observed epoch loses");
+        assert!(matches!(err, ClaimError::Conflict));
+    }
+
+    #[tokio::test]
+    async fn steal_stale_against_a_nonexistent_claim_conflicts() {
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        let err = store
+            .steal_stale(&e, ClaimEpoch(0), StalePredicate::OwnerStale, &me())
+            .await
+            .expect_err("nothing to steal");
+        assert!(matches!(err, ClaimError::Conflict));
+    }
+
+    #[tokio::test]
+    async fn steal_for_resume_between_two_node_identities_sharing_one_store() {
+        // The in-process "two-registry simulation" idiom Slice 6's dedicated
+        // tests use: two distinct `NodeIdentity` values racing
+        // `steal_for_resume` against one shared store, standing in for two
+        // nodes sharing one Postgres `clustering_claims` table.
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        let owner = NodeIdentity::new("node-a", "epoch-a");
+        let epoch0 = store.acquire(&e, &owner).await.expect("acquire");
+
+        let stealer = NodeIdentity::new("node-b", "epoch-b");
+        let jid: jid::BareJid = "alice@example.com".parse().expect("valid jid");
+        let proof = crate::ownership::verify_resume_identity(&jid, &jid).expect("identity match");
+        let epoch1 = store
+            .steal_for_resume(&e, epoch0, proof, &stealer)
+            .await
+            .expect("consent CAS steals from a live-but-consenting owner");
+        assert_eq!(epoch1, ClaimEpoch(1));
+
+        let snapshot = store
+            .current_claim(&e)
+            .await
+            .expect("current_claim")
+            .expect("claim exists");
+        assert_eq!(snapshot.owner, stealer);
+        assert_eq!(snapshot.claim_epoch, ClaimEpoch(1));
+
+        // The original owner retrying against its now-stale observed epoch
+        // loses cleanly.
+        let jid2: jid::BareJid = "alice@example.com".parse().expect("valid jid");
+        let proof2 =
+            crate::ownership::verify_resume_identity(&jid2, &jid2).expect("identity match");
+        let err = store
+            .steal_for_resume(&e, epoch0, proof2, &owner)
+            .await
+            .expect_err("stale epoch loses");
+        assert!(matches!(err, ClaimError::Conflict));
+    }
+
+    #[tokio::test]
+    async fn current_claim_is_none_for_an_unclaimed_entity() {
+        let store = InProcessClaimStore::new();
+        let e = entity("stream-1");
+        assert!(store
+            .current_claim(&e)
+            .await
+            .expect("current_claim")
+            .is_none());
     }
 
     #[tokio::test]

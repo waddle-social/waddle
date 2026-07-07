@@ -1217,14 +1217,43 @@ with the locally-SASL-authenticated bare JID and the loaded snapshot's bound bar
 and pass the resulting `Option` through to `steal_for_resume` (mismatch ⇒ `None` ⇒
 `<failed/>` `not-authorized`, claim untouched, exactly as element 8 requires).
 
-**Files**: `server/routes/websocket/stream_management.rs` (three resume branches; calls
+**Files** (corrected — the as-landed shape replaces three of this list's originally
+-named files with one new, concrete-typed one; see the explanation immediately below):
+`server/routes/websocket/stream_management.rs` (three resume branches; calls
 `ownership::resume::verify_resume_identity` per above), `server/crates/waddle-xmpp/src/
-ownership/resume.rs` (completed here: `verify_resume_identity`), `server/crates/
-waddle-xmpp/src/stream_management/session_registry/tombstone.rs` +
-`trait_impl.rs` + `traits.rs` (claim-aware resume outcomes, same identity-check call),
-`server/crates/waddle-server/src/clustering/relay.rs` (the live-steal handshake rides
+ownership/resume.rs` (completed here: `verify_resume_identity`), new
+`server/crates/waddle-xmpp/src/stream_management/session_registry/cross_node_resume.rs`
+(claim-aware cross-node resume dispatch: the three branches, the one-shot-CAS
+discipline, the `RemoteResumeAsker` trait, and the identity-check call), `server/
+crates/waddle-server/src/clustering/relay.rs` (the live-steal handshake rides
 `RelayHandle` — the **first production (non-harness) caller**; this slice also pays
 down `RelayHandle`'s cancellation-safety debt, below, rather than carrying it).
+
+**Why `cross_node_resume.rs` replaces `tombstone.rs`/`trait_impl.rs`/`traits.rs` in this
+list**: the originally-drafted Files list named those three existing
+`session_registry/` files as the home for "claim-aware resume outcomes, same
+identity-check call," anticipating that cross-node dispatch would be woven into the
+existing trait-object/tombstone machinery those files already own. As implemented, the
+entire cross-node dispatch — the three-branch logic, the one-shot-CAS discipline
+(deviation 38), and the `RemoteResumeAsker` injection trait — is instead concrete,
+inherent-`impl`-block code on `InMemorySmSessionRegistry` in its own new file,
+`cross_node_resume.rs`, called directly from `stream_management.rs::handle_sm_resume`
+only after the existing `claim_session`/`SmSessionRegistry`-trait path returns
+`Ok(None)`. `tombstone.rs`/`trait_impl.rs`/`traits.rs` are untouched by this slice: there
+was no concrete need to route cross-node dispatch through the trait-object layer those
+files own, since the only production caller is the concrete `InMemorySmSessionRegistry`
+type itself.
+
+**Trust-model precision (council-adjudicated, deviation 54)**: the identity binding
+`verify_resume_identity` performs — and every claim-aware resume outcome built on top
+of it — protects against malicious/buggy **clients** and honest-node mistakes only. It
+does not, and structurally cannot, protect against a **compromised allowlisted node**:
+a remote node answering (or issuing) a `RelayResumeSteal` ask could forge
+`requester_bare_jid` on the wire, and nothing in this identity check would detect it.
+This is consistent with, not a gap introduced by, the ADR's enrolled-node-fully-trusted
+cluster membership model — every other cross-node ask this phase adds makes the
+identical trust assumption — but is worth stating plainly here so a future reader does
+not mistake this identity check for a defense against a compromised peer.
 
 **Janitor-vs-resume ordering invariant (major fix 11)**: the orphan reaper (Slice 5)
 may `steal_stale` a dead node's detached `sm_session` claim for GC/expiry/promotion at
@@ -2283,3 +2312,412 @@ concern).
     already release their `ClaimStore` claim as part of deviation 29's fix, so Slice
     10's batching has a correct, already-tested single-entity release to batch — but no
     drain-specific sequencing/batching/observability is added here.
+37. **`ClaimStore` gains `current_claim` (as-landed, Slice 6)**: a new, read-only,
+    deliberately unlocked method — `async fn current_claim(&self, entity: &Entity) ->
+    Result<Option<ClaimSnapshot>, ClaimError>` returning a new `ClaimSnapshot { owner:
+    NodeIdentity, claim_epoch: ClaimEpoch }` — implemented identically to
+    `ensure_claimed`'s own conflict-path read (same unlocked-SELECT shape, same "never
+    itself an authority" caveat) on both `PostgresClaimStore` and `InProcessClaimStore`.
+    Not named in the Slice 1 trait sketch: the cross-node resume path needs to (a)
+    distinguish "no claim"/"self-owned" (today's local path, unchanged) from "owned by
+    another node" (the new branch dispatch), and (b) learn the observed epoch to bind
+    into a subsequent `steal_for_resume` call — no existing method exposes this without
+    a mutating side effect.
+38. **One-shot CAS discipline in `attempt_cross_node_resume` (as-landed, Slice 6,
+    correcting an implementation-time design flaw caught by this slice's own dedicated
+    tests)**: the new `InMemorySmSessionRegistry::attempt_cross_node_resume` (new file
+    `waddle-xmpp/src/stream_management/session_registry/cross_node_resume.rs`) captures
+    the claim epoch it observes exactly once, before its first ask, and every
+    `steal_for_resume` call it issues binds that same original epoch — never a freshly
+    re-read one, even across held-response retries. An earlier draft re-read
+    `current_claim` on every retry, which — proven by this slice's own
+    `pure_two_node_detached_steal_race_exactly_one_winner` and
+    `reaper_wins_mid_resume_interleaving_resume_fails_cleanly` tests failing under that
+    draft — let a resume attempt that lost a CAS re-observe the new (foreign) owner as
+    its next "observed epoch" and legitimately re-steal the claim a second time later,
+    contradicting the plan's own "the other observes a stale epoch and fails cleanly"
+    (minor fix 22) and "fails cleanly ... rather than resuming a snapshot the reaper is
+    concurrently touching" (major fix 11) language, both of which describe a single,
+    terminal CAS attempt per resume call, not a retried one. Also fixed in the same
+    pass: `InProcessClaimStore::steal_stale`/`steal_for_resume` previously ignored
+    `observed` entirely (an unconditional overwrite, correct only in the sense that a
+    true single node never contends with itself) — this could never lose a race, so it
+    could not stand in for a two-node claim-steal simulation. Both methods now
+    epoch-check exactly like the Postgres CAS, confirmed by new dedicated unit tests
+    (`steal_stale_with_a_stale_observed_epoch_loses_the_race` et al.).
+39. **`ClusteringResumeHandshakeConfig`/`WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS`
+    (as-landed, Slice 6)**: implements the plan's `min(remaining lease TTL,
+    resume-handshake timeout)` held-response cap (element 8) as a flat, configured
+    timeout validated at parse time to be `<= WADDLE_CLUSTERING_NODE_LEASE_TTL_MS` —
+    rather than computing the `min(...)` per request against a live per-owner
+    remaining-TTL read, which no existing `NodeLeaseStore` query serves. This makes the
+    configured timeout an upper bound that can never exceed a *fresh* lease's remaining
+    TTL; the only imprecision accepted is holding a response slightly longer than the
+    *shrinking* remaining TTL of an owner whose lease is already partway expired —
+    harmless, since the janitor-vs-resume ordering invariant (deviation 38) already
+    guarantees a concurrent orphan-reaper steal is observed as a clean CAS loss, never a
+    corrupted read. Threaded onto `ClusteringHandles` as
+    `resume_handshake_timeout: Option<Duration>` (plus a `resume_handshake_timeout()`
+    accessor, unconditionally compiled like `claim_pair`) so
+    `stream_management.rs`'s route handler — outside the `clustering` feature gate —
+    can read it without conditional compilation.
+40. **Live-handshake force-detach: a new secondary per-connection control channel, not a
+    repurposed `OutboundStanza`/`DeliveryKind` (as-landed, Slice 6)**: `ConnectionEntry`
+    gains a small, dedicated `mpsc::Sender/Receiver<ForceDetachRequest>` pair (capacity
+    8, not 1 — see that field's own doc comment for why a second concurrent ask must
+    never block a `send` the connection's own select loop will never come back to read,
+    which would otherwise wedge the single-threaded `RelayActor` mailbox handling it),
+    plus a new best-effort reverse index on `ConnectionRegistry`
+    (`sm_stream_owner`/`set_sm_stream_id`) from SM stream id to the `FullJid` currently
+    publishing it. Chosen over extending `OutboundStanza`/`DeliveryKind` (which would
+    have required a dummy `Stanza` value and touched the already-carefully-ordered main
+    connection select loop's stanza-delivery pipeline) specifically to keep this
+    addition isolated and auditable in the most race-sensitive file in the codebase.
+    `RelayActor` gains a `resume_bridge: Arc<ResumeStealBridge>` field (new
+    `waddle-server::clustering::resume_bridge` module) answering the new
+    `RelayResumeSteal` ask by looking up the reverse index, re-verifying the hit against
+    the entry's own authoritative `sm_stream_id()` (the index is best-effort, never
+    proactively swept), and — on a match — sending a `ForceDetachRequest` through the
+    connection's own channel and awaiting its ack (bounded by
+    `LOOKUP_FORCE_DETACH_ACK_TIMEOUT`, independent of the asking node's own
+    resume-handshake budget). `ResumeStealBridge` and the `RemoteResumeAsker` adapter
+    over `RelayHandle` (`clustering::resume_asker::SwarmRemoteResumeAsker`) follow the
+    same construction-order "wired after the fact" pattern `local_claims` already
+    established (constructed empty at swarm-spawn time, before the `ConnectionRegistry`
+    exists; completed by `server/http.rs::create_websocket_state`/
+    `create_sm_session_registry`).
+41. **`RelayHandle` cancellation-safety paydown lands exactly as the coordinator ruling
+    specified (as-landed, Slice 6)**: `RelayHandle::new` gains a `stop_token:
+    CancellationToken` constructor parameter; every public ask method
+    (`ping`/`crash`/`sleep`/`echo_stanza`, plus the new `resume_steal`) is now a thin
+    wrapper racing its own `_inner` implementation against `stop_token.cancelled()` in a
+    `biased` `select!`, returning the new `RelayAskError::Cancelled` variant on a lost
+    race — mirroring `spawn_supervised`'s identical pattern. `ClusteringHandles` gains a
+    `stop_token: Option<CancellationToken>` field (the same clustering-scope child token
+    `spawn_supervised` already receives) so `server/http.rs` can construct
+    `SwarmRemoteResumeAsker` with the correct scope. All seven pre-existing
+    `RelayHandle::new` call sites (one production-adjacent smoke test in `swarm.rs`, six
+    in `clustering_cluster_e2e.rs`) updated to pass a token; this slice's
+    `RelayResumeSteal` ask is `RelayHandle`'s first genuine production (non-harness)
+    caller, exactly the trigger the pre-Slice-6 doc comment named as "necessary the
+    moment a caller awaits these methods from a task that also watches this node's
+    clustering stop token."
+42. **`<enable/>`-time claim creation lands as `SmSessionRegistry::ensure_session_claim`
+    (as-landed, Slice 6)**, a thin wrapper around `ClaimStore::ensure_claimed` called
+    from `handle_sm_enable` immediately after minting the stream id, best-effort and
+    logged exactly like the existing detach-time
+    `acquire_claim_store_entry_for_detach` (never fails the `<enable/>` handshake
+    itself). No stream-shard lock is taken for this call (unlike every other
+    `ClaimStore` call site under `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`): a freshly
+    minted UUID stream id cannot yet appear in `sessions`/`claimed_sessions`, so there is
+    nothing else to coordinate with under that lock at this point in the session's
+    lifecycle.
+
+### Council-adjudicated corrigenda to the Slice 6 implementation (second review pass)
+
+A second adversarial review of the as-landed Slice 6 code (deviations 37–42 above)
+found nine further issues, all fixed in the same pass; each is recorded below in the
+same "as-landed" style, numbered onward from 43.
+
+43. **`attempt_cross_node_resume`'s held-response retry loop bounds every internal
+    await by the shrinking budget, not just the overall deadline check (high-severity
+    fix, `cross_node_resume.rs`)**: the previous implementation checked
+    `Instant::now() >= deadline` only between iterations, so a single slow step inside
+    one iteration — most importantly `RemoteResumeAsker::ask_remote_detach`, whose
+    underlying `RelayHandle` ask carries its own `mailbox_timeout`/`reply_timeout` plus
+    a stale-ref refresh-and-retry-once (up to roughly double those timeouts) — could
+    make one iteration alone run well past `handshake_budget`, defeating the bound the
+    whole held-response window exists to guarantee. Every await in the loop
+    (`load_persisted_snapshot`, the terminal `steal_for_resume` + `hydrate_reclaimed` +
+    `claim_session` sequence, and `ask_remote_detach` itself) is now wrapped in
+    `tokio::time::timeout` against the budget remaining at the moment that specific
+    await begins, recomputed fresh each time. A timeout on `ask_remote_detach` is
+    treated identically to `RemoteResumeAskOutcome::Unreachable` (falls through to the
+    existing backoff-and-retry). A timeout on the terminal CAS sequence is deliberately
+    **not** retried and **not** guessed at (it does not resolve to `NotFound` or
+    `OwnerUnreachable`): the outcome is genuinely ambiguous (the CAS may have committed
+    server-side with the reply lost to the budget), so it surfaces as
+    `SmRegistryError::Internal` — consistent with the one-shot-CAS discipline (deviation
+    38) that a lost/ambiguous CAS is never retried. Proven by a new paused-clock unit
+    test (`cross_node_resume.rs`'s own `tests` module,
+    `fix1_slow_asker_never_holds_past_the_handshake_budget`) using a `SlowAsker` double
+    with an hour-long delay against a two-second budget.
+44. **FIX 8(b)'s recipient-claim-move retry test covers the Phase-3-reachable half
+    only, per this plan's own Non-goals**: "pending_delivery rows move with the claim"
+    is trivially true in the dedicated test suite's two-registry simulation (both
+    simulated nodes already share one Postgres `pending_delivery` table, exactly like
+    every other cross-node simulation in this suite — there is no second, node-local
+    copy to move). The genuinely new, Phase-3-reachable thing this council round's test
+    (`recipient_claim_move_retry_dedups_pending_delivery_delete`,
+    `xep0198_cross_node_resume.rs`) proves is that the SM-ack-keyed delete path
+    (`PendingDeliveryStorage::delete_acked_through`) is idempotent under retry after a
+    cross-node steal has moved the SM claim: a retried ack for the same `h` (the
+    client's `<a h='N'/>` re-arriving, or the recovering session's own at-least-once
+    redelivery) dedups to a clean zero-rows-removed no-op rather than erroring or
+    double-processing. Reconstructing the flush itself via genuine cross-node stanza
+    ROUTING (a live message arriving at node A, offline-queued, then delivered after a
+    resume moves the recipient to node B) requires the routed cross-node stanza
+    delivery this phase's own Non-goals assign to Phase 4 — that remainder is deferred,
+    not silently dropped.
+45. **FIX 8(c)'s "deferred-h/handoff coupling across the steal" scenario is inherited,
+    unchanged single-node machinery — no new cross-node-specific code exists to test,
+    so none was invented**: investigation traced the phase plan's "`<r/>` answered
+    immediately with `h` excluding unresolved handoffs" text to the pre-existing
+    `claimed_sessions`-writable-during-handoff contract
+    (`session_registry/tests.rs::test_claimed_session_remains_writable_for_handoff_fanout`:
+    `record_stanza_for_detached_resource` merges fanout into a session's unacked queue
+    while it sits in `claimed_sessions`, between `claim_session` and `complete_claim`).
+    `attempt_cross_node_resume`'s branch 1 reaches this exact same `claimed_sessions`
+    state via the exact same `hydrate_reclaimed` → `claim_session` pair the local-only
+    resume path already uses — the resulting entry is indistinguishable from a purely
+    local claim, and no cross-node-specific `h`/handoff-coupling logic was ever added or
+    needed. Per this plan's own instruction not to silently test nothing, a new test
+    (`handoff_fanout_survives_a_cross_node_steal_unchanged`,
+    `xep0198_cross_node_resume.rs`) empirically proves the existing mechanism carries
+    over unchanged through an actual cross-node steal, rather than resting on code
+    inspection alone.
+46. **`RelayResumeSteal`'s handler delegates its reply via kameo 0.20's
+    `Context::spawn`, rather than awaiting the local force-detach inline (high-severity
+    fix, `relay.rs`)**: kameo processes one actor's mailbox strictly sequentially, so
+    the previous `Message<RelayResumeSteal>::handle`'s inline
+    `resume_bridge.request_forced_detach(..).await` — bounded by
+    `LOCAL_FORCE_DETACH_ACK_TIMEOUT` (10s) — head-of-line-blocked every OTHER message
+    this node's relay answers (`RelayPing`, `RelayEchoStanza`, any concurrent
+    `RelayResumeSteal` for an unrelated session) for up to that same 10 seconds per ask.
+    `Message<RelayResumeSteal>::Reply` is now `kameo::reply::DelegatedReply<RelayResumeStealReply>`,
+    and `handle` calls `ctx.spawn(async move { .. })` to run the force-detach wait on a
+    detached `tokio::spawn`ed task, returning control to the actor's own message loop
+    immediately. This is kameo 0.20's own documented delegation mechanism (see
+    `kameo::message::Context::{reply_sender, spawn}`'s doc comments/examples) and
+    requires **no second actor and no second kademlia registration** — the
+    O(1)-registrations-per-node claim this module's own doc comment makes is unaffected.
+    Proven by a new local-actor test (`relay.rs`'s own `tests` module,
+    `slow_force_detach_does_not_delay_a_concurrent_relay_ping`) that registers a
+    connection whose force-detach ack is deliberately delayed, fires a `RelayResumeSteal`
+    ask on a background task, and asserts a concurrent `RelayPing` on the same actor
+    resolves in well under a second regardless; confirmed as a genuine regression guard
+    by re-running it against the pre-fix inline-await code, where it fails (times out).
+47. **`attempt_cross_node_resume` is now raced against this node's graceful-shutdown
+    token at its call site (medium-severity fix, `stream_management.rs::handle_sm_resume`);
+    corrected below in deviation 55 — this entry's original "no committed steal can be
+    lost" framing was false as shipped.** The connection's own `tokio::select!` loop
+    (`connection.rs`) cannot observe its `shutdown_token.cancelled()` arm while a selected
+    arm's body — including a nested `handle_sm_resume` call — is still executing an
+    `.await` chain, so a held cross-node resume attempt (deviation 43's now-bounded, but
+    still potentially multi-second, budget) delayed this connection's own graceful
+    -shutdown handling by up to that same budget. `handle_sm_resume` originally raced the
+    whole `attempt_cross_node_resume` call against `state.deps.shutdown.stop_token().cancelled()`
+    in a `biased` `tokio::select!` (a new local `CrossNodeAttemptOutcome::ShutdownAbandoned`
+    variant marks the losing case), reasoning that on cancellation `tokio::select!` drops
+    the losing future rather than polling it to completion, so no `steal_for_resume` the
+    call issued could have committed after that point.
+    **That reasoning only covers the CAS call itself — it does not cover the sequence
+    after it.** `tokio::select!` can just as easily drop the future *between*
+    `steal_for_resume` committing in Postgres and the subsequent `hydrate_reclaimed`/
+    `claim_session` completing, leaving a self-owned, un-hydrated claim under a FRESH
+    lease that the orphan reaper's `OwnerStale` predicate can never fire against (the
+    "owner" is this very node, alive and heartbeating) — wedging resume for that session
+    until this node's own lease naturally lapses or it self-fences. Deviation 55 below is
+    the as-built correction: only the read-only pre-CAS phase is ever raced; the CAS →
+    hydrate → claim sequence, once entered, always runs to completion. The original
+    Postgres-gated regression test
+    (`tests/stream_management.rs::fix3_shutdown_race::shutdown_mid_resume_abandons_the_attempt_without_waiting_out_the_budget`,
+    using a `HangingAsker` that never resolves and a deliberately generous 30-second
+    budget) still passes unmodified under the corrected design, because a `HangingAsker`
+    never lets the attempt reach the CAS at all — it stays entirely in the now-still-raced
+    pre-CAS phase, exactly proving deviation 55's cancellation boundary is drawn in the
+    right place.
+48. **The cross-node resume force-detach ack is now a typed outcome reflecting whether
+    a snapshot was actually persisted, not an unconditional `Detached` (medium-severity
+    fix, `cleanup.rs`/`connection.rs`/`outbound.rs`/`resume_bridge.rs`)**: previously,
+    `connection.rs` sent `ForceDetachOutcome::Detached` to the asking node after
+    `cleanup_connection_shutdown` ran, regardless of what that call actually did —
+    including its several early-return paths (no cleanup-eligible JID, no registry
+    ownership, non-owned entry, an ownership-race that promoted the queue instead of
+    storing it) and its `store_session` storage-error fallback, none of which leave a
+    persisted, resumable snapshot behind. `cleanup_connection_shutdown` now returns a
+    new `pub(super) enum ConnectionShutdownOutcome { Detached, NotPersisted }`
+    (`#[must_use]`), and `ForceDetachOutcome` gains a matching `NotPersisted` variant;
+    `connection.rs` maps the two 1:1 before acking. `ResumeStealBridge::request_forced_detach`
+    (`resume_bridge.rs`) maps `NotPersisted` the same as `NotLiveLocally` (re-check
+    persistence and retry) — the asker never proceeds with `steal_for_resume` against a
+    snapshot that was never actually written.
+49. **`ResumeStealBridge::request_forced_detach`'s channel send is now `try_send`, not
+    a blocking `send().await` (medium-severity fix, `resume_bridge.rs`/`outbound.rs`)**:
+    a full or already-closed force-detach channel now answers `NotLiveLocally`
+    immediately rather than awaiting capacity that may never free up, keeping this
+    call's own budget meaningful (a blocking send had no bound of its own). This is
+    belt-and-suspenders alongside, not a replacement for, deviation 46's mailbox fix —
+    `ConnectionEntry`'s own doc comment on `force_detach_tx`/`FORCE_DETACH_CHANNEL_CAPACITY`
+    is corrected to describe the capacity as belt-and-suspenders rather than the
+    load-bearing wedge-avoidance mechanism the original design intended.
+50. **The owner-unreachable held-response window now distinguishes its two terminal
+    conditions instead of collapsing them onto one (medium-severity conformance fix,
+    `ownership/mod.rs`/`in_process.rs`/`clustering/claims.rs`/`cross_node_resume.rs`)**:
+    `ClaimSnapshot` gains a new `owner_lease_fresh: bool` field — for
+    `PostgresClaimStore::current_claim`, an unlocked, advisory read of the exact same
+    `NOT EXISTS`-over-`clustering_nodes` owner-stale predicate `steal_stale`'s
+    `OwnerStale` arm already uses (committed `expired` flag only, never a raw heartbeat
+    comparison); `InProcessClaimStore` always reports `true` (no node-liveness table in
+    the single-node case, matching that store's existing simplifications elsewhere).
+    `attempt_cross_node_resume` gains `classify_window_expiry`, called at every point the
+    held-response window expires: `current_claim` is re-checked once (never retried
+    further) and the claim being altogether gone, OR present but `owner_lease_fresh ==
+    false`, now answers `<failed/>` `item-not-found` (the session is known gone) — only a
+    present claim with a still-fresh owner lease answers `<failed/>` `resource-constraint`
+    (genuinely unreachable, not gone) as before. Proven by a new in-process unit test
+    (`cross_node_resume.rs`'s `tests` module,
+    `fix6_window_expiry_with_claim_gone_reports_not_found`) and two Postgres-gated tests
+    (`xep0198_cross_node_resume.rs`: the pre-existing
+    `owner_unreachable_past_the_handshake_window_fails_with_owner_unreachable` now
+    explicitly registers the owner's `clustering_nodes` liveness row so it still
+    exercises the "genuinely fresh, just unreachable" case rather than accidentally
+    falling into the new lease-expired case for lack of any liveness row at all; the new
+    `owner_lease_expired_past_the_handshake_window_fails_with_not_found` commits that
+    same row `expired = true` directly and asserts the new `NotFound` outcome).
+51. **`SmSessionId` enforces a 128-byte wire bound at deserialization (medium-severity
+    conformance fix, `pending_delivery/mod.rs`)**: `RelayResumeSteal` (the relay message
+    carrying this type across the wire) is not a stanza, so it never passes through the
+    bounded XML stanza codec (`clustering::codec`'s `MAX_REMOTE_XML_BYTES` et al.) —
+    every non-stanza relay message needs its own field-level bound rather than relying
+    on the stanza codec's, and this one had none, letting a malicious (or buggy)
+    allowlisted peer ship an arbitrarily large id. `SmSessionId`'s `Deserialize` impl is
+    now hand-written (no longer derived) and rejects any value over
+    `SM_SESSION_ID_MAX_LEN` (128 bytes — production stream ids are 36-byte
+    server-generated UUIDs) with a new typed `SmSessionIdTooLong` error.
+    [`Self::new`] itself stays unvalidated: every production caller mints
+    server-generated UUIDs, and the wire boundary — not every internal call site — is
+    where an untrusted length actually arrives. Non-stanza relay messages in general
+    carry their own field-level bounds rather than inheriting the stanza codec's; this
+    is the first (and, as of this phase, only) such field.
+52. **Testing-methodology tradeoff, recorded rather than left implicit: the "pure
+    two-node detached-steal race" test drives the bare `ClaimStore::steal_for_resume`
+    CAS directly, not two concurrent `attempt_cross_node_resume` calls**
+    (`xep0198_cross_node_resume.rs::pure_two_node_detached_steal_race_exactly_one_winner`,
+    already landed prior to this council round, documented here per this round's own
+    "record every real tradeoff, don't leave it only in a code comment" instruction):
+    the full `attempt_cross_node_resume` orchestration has several sequential `.await`
+    points before its own CAS (the `current_claim` read, the persistence read), so two
+    independently-scheduled top-level calls are not guaranteed by `tokio::join!` alone
+    to observe the SAME pre-race epoch — a real two-node race requires the SAME
+    `observed_epoch` bound into both CAS attempts to be a meaningful proof of "both nodes
+    race against the same detached claim." The test instead captures `observed_epoch`
+    once and races the bare CAS with it directly, then separately verifies the winner's
+    full hydrate/`claim_session` pipeline using the same public API. The genuinely
+    two-concurrent-top-level-call scenario (a client retransmit/second-connection race
+    against the SAME resuming node) is covered by this council round's own addition,
+    deviation 44's sibling test
+    `resume_retransmit_race_against_the_same_new_node_dedups_without_double_hydration`.
+53. **Harness clarification: `WADDLE_XMPP_SM_DATABASE_URL` must be set to the SAME
+    shared Postgres URL as `WADDLE_DATABASE_URL` in the cross-node live-steal handshake
+    harness (`clustering_cluster_e2e.rs::spawn_cluster_server`), documented here because
+    the plan text never previously named this requirement explicitly**: `TestServer`'s
+    own default SM-persistence URL is `sqlite::memory:`, a non-Postgres URL that
+    `open_for_cluster_mode`'s `postgres://`/`postgresql://` filter silently treats as
+    "not set," falling back to the portable, per-process, NON-shared SM store — which
+    would defeat `cross_node_resume_live_steal_handshake` entirely (both harness nodes
+    must read/write the SAME persisted `sm_sessions`/`sm_unacked` rows for a cross-node
+    steal to be observable at all). The harness as-landed already sets
+    `WADDLE_XMPP_SM_DATABASE_URL` to the shared `postgres_url` for exactly this reason;
+    this deviation records that requirement in the plan text itself rather than leaving
+    it discoverable only via the harness's own inline comment.
+54. **Trust-model precision (council-adjudicated): the cross-node resume identity
+    binding protects against malicious/buggy CLIENTS and honest-node mistakes only — it
+    does not, and cannot, protect against a compromised allowlisted NODE.** A sentence
+    to this effect is added both here and to `resume_bridge.rs`'s own module doc
+    comment. `verify_resume_identity`'s bare-JID match (element 8) proves that the
+    SASL-authenticated identity presented on THIS connection matches the snapshot's
+    bound JID — a real defense against a client attempting to resume, or force a
+    force-detach of, a session that is not its own, and against an honest node's own
+    bug accidentally mismatching JIDs. It says nothing about whether the `requester_bare_jid`
+    a REMOTE node places on the wire in a `RelayResumeSteal` ask is the JID that remote
+    node's own client actually authenticated as — a compromised allowlisted node could
+    forge that field arbitrarily and this mechanism would not detect it. This is fully
+    consistent with, not a gap introduced by, this ADR's enrolled-node-fully-trusted
+    cluster membership model (allowlisted nodes are trusted peers by construction,
+    exactly as every other cross-node ask in this phase — `RelayPing`, `RelayEchoStanza`
+    — already assumes); it is called out explicitly here so a future reader does not
+    mistake the identity-check mechanism for a defense it was never designed to provide.
+55. **`attempt_cross_node_resume` is split at its write boundary, and a post-win repair
+    path plus a matching unclaimed-but-persisted resume branch are added (high-severity
+    fix, correcting deviation 47 — `cross_node_resume.rs`, `stream_management.rs::handle_sm_resume`)**:
+    a second adversarial convergence pass (after the deviation 37–46 round) found that
+    deviation 47's shutdown race was unsound past the CAS itself, and traced a second,
+    related hazard with no cancellation involved at all.
+    - **The defect**: `handle_sm_resume` raced the ENTIRE `attempt_cross_node_resume` call
+      — including the terminal `steal_for_resume` → `hydrate_reclaimed` → `claim_session`
+      sequence — against the shutdown token. `tokio::select!` can drop that future between
+      `steal_for_resume` committing in Postgres and `hydrate_reclaimed`/`claim_session`
+      completing, leaving a self-owned, un-hydrated claim that wedges resume for that
+      session until this node's lease goes stale and the orphan reaper reclaims it
+      (deviation 33's sweep interval plus deviation 26's fencing headroom — tens of
+      seconds in practice).
+    - **The sibling** (same class, found while tracing the defect): FIX 1's per-step
+      timeout (deviation 43) wraps the terminal CAS+hydrate+claim sequence — a timeout
+      firing AFTER the CAS commits but during hydration drops the future identically, with
+      no shutdown involved at all. Worse, ANY ordinary `hydrate_reclaimed`/`claim_session`
+      failure after the CAS has won (a storage read error, a lost self-reacquire, any of
+      `hydrate_reclaimed`'s several best-effort skip-and-continue paths) leaves the claim
+      held by this live node under a FRESH lease — and `steal_stale`'s `OwnerStale`
+      predicate can never fire against a live, heartbeating owner, so the orphan reaper
+      that rescues the cancellation case never rescues this one. Combined with
+      `current_claim` short-circuiting every subsequent client retry straight to `NotFound`
+      (the pre-fix `attempt_cross_node_resume` had no branch for "claim absent, but a
+      persisted snapshot exists anyway"), this was a genuinely **permanent** wedge — worse
+      than the cancellation case, which at least self-heals via the reaper.
+    - **The fix, three parts**:
+      - **Cancellation boundary**: `attempt_cross_node_resume` is split into
+        `prepare_cross_node_resume` (read-only: the initial claim snapshot read, the
+        identity check, and the branch-2/3 ask/hold/backoff loop — returns a new
+        `CrossNodeResumeStage`, either a terminal outcome or a `StealTicket`) and
+        `finish_cross_node_steal` (the write: the CAS or, for the new branch below, a
+        plain `ensure_claimed`, followed by `hydrate_reclaimed` and `claim_session`).
+        `handle_sm_resume` races only `prepare_cross_node_resume` against the shutdown
+        token; `finish_cross_node_steal` is always awaited to completion once reached,
+        never wrapped in a timeout that could drop it. Every internal step inside
+        `finish_cross_node_steal` still carries its own fixed, independent bound
+        (`FINISH_STEAL_TIMEOUT`/`FINISH_HYDRATE_TIMEOUT`/`FINISH_CLAIM_TIMEOUT` —
+        deliberately NOT derived from the caller's `handshake_budget`, so an exhausted
+        budget at the moment of winning the CAS no longer aborts the sequence); a bound
+        expiring routes to the repair below rather than surfacing as a bare dropped
+        future.
+      - **Post-win repair**: once the CAS (or the new direct-acquire) has won, any
+        subsequent `hydrate_reclaimed`/`claim_session` failure — error OR an internal
+        bound expiring — is repaired by `repair_failed_local_claim`: an epoch-gated
+        `ClaimStore::release` of the claim just won, retried up to
+        `REPAIR_RELEASE_MAX_ATTEMPTS` times with a short delay between attempts. The
+        release is the PRIMARY recovery path, not a belt-and-suspenders fallback — a live
+        node's own fresh lease means the orphan reaper's staleness predicate will never
+        fire for it, so there is no other mechanism that would ever reclaim this entity if
+        every release attempt fails; that terminal case is a loud `error!` log plus a
+        typed `Err` naming both the original failure and the exhausted repair, so an
+        operator sees the full picture in one message. On successful repair the call
+        returns `Ok(NotFound)` (not an error), since the claim is once again
+        unclaimed-but-persisted — exactly the state the next fix makes recoverable.
+      - **The unclaimed-but-persisted branch**: `prepare_cross_node_resume` no longer
+        treats "no `ClaimStore` claim on this entity" as automatically terminal. If a
+        persisted snapshot exists anyway (this repair path's own release, or the Slice 5
+        fail-open-detach gap noted in deviation 34), it verifies identity against the
+        snapshot and hands back a `StealTicket` in `DirectAcquire` mode — no CAS, no
+        witness, just a self-reacquire-idempotent `ensure_claimed` — then hydrates and
+        self-claims exactly like the steal path, sharing the same post-win repair. Without
+        this branch, a successfully-repaired claim would still dead-end every subsequent
+        client retry at `NotFound` forever, since nothing else ever creates a fresh claim
+        for an already-persisted, already-unclaimed entity.
+    - **Tests** (all in `cross_node_resume.rs`'s existing in-process suite, `#[tokio::test(start_paused
+      = true)]`, no Postgres needed — a paused clock makes every scenario exact and
+      instant): `fix_a_budget_expiry_mid_finish_does_not_drop_the_sequence` proves the
+      terminal sequence completes (`Claimed`) even when a persistence-read delay pushes
+      virtual time 100x past the nominal `handshake_budget` mid-hydrate, closing exactly
+      the gap deviation 47's own regression test could not exercise (a `HangingAsker`
+      never reaches the CAS at all). `fix_b_post_win_hydrate_failure_repairs_and_fix_c_retry_succeeds`
+      forces `hydrate_reclaimed`'s ordinary "already present" skip path immediately after
+      a real CAS win, asserts the repair releases the claim (checked directly against the
+      shared `ClaimStore`) and returns a clean `NotFound` rather than an error, then
+      re-attempts the resume and asserts the retry actually recovers the persisted session
+      (`Claimed`) via the new unclaimed-but-persisted branch — not merely "not wedged,"
+      but genuinely successful. The existing FIX 3 shutdown-race test
+      (`tests/stream_management.rs::fix3_shutdown_race`) and every other pre-existing test
+      in this suite (`fix1`, `fix6`, and the full Postgres-gated `xep0198_cross_node_resume.rs`
+      suite) pass unmodified against the split API, since `attempt_cross_node_resume`
+      itself is kept as a thin `prepare` + `finish` wrapper for exactly this reason.

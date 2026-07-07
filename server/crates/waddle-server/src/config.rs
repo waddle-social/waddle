@@ -202,6 +202,15 @@ pub struct ClusteringConfig {
     /// surface land together, mirroring `node_lease`/`self_fence`'s own
     /// Slice 2 precedent.
     pub steal_intent: ClusteringStealIntentConfig,
+    /// ADR-0017 Phase 3 Slice 6: bound on the cross-node XEP-0198 resume
+    /// live-handshake's held-response retry window (element 8's
+    /// owner-unreachable branch — "hold the `<resume/>` response ... retry
+    /// the handshake with backoff, capped at `min(remaining lease TTL,
+    /// resume-handshake timeout)`"). See
+    /// [`ClusteringResumeHandshakeConfig`]'s own doc for the `min(...)`
+    /// simplification this config validates at parse time rather than
+    /// computing per-request.
+    pub resume_handshake: ClusteringResumeHandshakeConfig,
     /// This pod's `pod-template-hash` label, read once at startup from the
     /// Kubernetes downward API (`WADDLE_CLUSTERING_POD_TEMPLATE_HASH`) and
     /// stamped onto this node's `clustering_nodes` row (Q5/element 4/Slice
@@ -242,6 +251,7 @@ impl std::fmt::Debug for ClusteringConfig {
             .field("node_lease", &self.node_lease)
             .field("self_fence", &self.self_fence)
             .field("steal_intent", &self.steal_intent)
+            .field("resume_handshake", &self.resume_handshake)
             .field("pod_template_hash", &self.pod_template_hash)
             .finish()
     }
@@ -333,6 +343,40 @@ impl Default for ClusteringStealIntentConfig {
     }
 }
 
+/// ADR-0017 Phase 3 Slice 6: the cross-node XEP-0198 resume live-handshake's
+/// held-response retry budget (element 8's owner-unreachable branch).
+///
+/// The ADR text caps the held-response retry window at
+/// `min(remaining lease TTL, resume-handshake timeout)` — this deployment's
+/// configured `timeout` here, and the *remaining* time before the owning
+/// node's `clustering_nodes` lease naturally expires. This config
+/// deliberately does not compute that `min(...)` per request (which would
+/// need a live per-owner remaining-TTL read with no existing query to
+/// serve it): instead, parse-time validation requires `timeout <=
+/// node_lease.lease_ttl`, which makes the flat configured `timeout` an
+/// upper bound that is never longer than a **fresh** lease's remaining TTL
+/// — the only imprecision this simplification accepts is holding the
+/// response slightly longer than the *shrinking* remaining TTL of an
+/// owner whose lease is already partway expired, which is harmless: the
+/// janitor-vs-resume ordering invariant (this module's own doc comment)
+/// already guarantees a concurrent orphan-reaper steal is observed as a
+/// clean CAS loss, never a corrupted read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringResumeHandshakeConfig {
+    pub timeout: Duration,
+}
+
+impl Default for ClusteringResumeHandshakeConfig {
+    fn default() -> Self {
+        Self {
+            // Comfortably inside a default 30s node-lease TTL, leaving
+            // headroom for the reaper to win a genuinely dead owner's
+            // claim before this window would have expired anyway.
+            timeout: Duration::from_secs(20),
+        }
+    }
+}
+
 /// One peer-discovery seed: a DNS name or IP literal (A/AAAA-resolved to one
 /// or more peer IPs — the headless Service resolves to every ready pod) plus
 /// the TCP port those peers listen on for the swarm transport. IPv6 literals
@@ -399,6 +443,7 @@ impl Default for ClusteringConfig {
             node_lease: ClusteringNodeLeaseConfig::default(),
             self_fence: ClusteringSelfFenceConfig::default(),
             steal_intent: ClusteringStealIntentConfig::default(),
+            resume_handshake: ClusteringResumeHandshakeConfig::default(),
             pod_template_hash: None,
         }
     }
@@ -785,6 +830,29 @@ impl ClusteringConfig {
             ));
         }
 
+        let resume_handshake_defaults = ClusteringResumeHandshakeConfig::default();
+        let resume_handshake_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS",
+            millis_u64(resume_handshake_defaults.timeout),
+        )?);
+        if resume_handshake_timeout.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS must be greater than 0".to_string(),
+            );
+        }
+        if resume_handshake_timeout > node_lease_ttl {
+            return Err(format!(
+                "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}): the held-response window is capped \
+                 at min(remaining lease TTL, resume-handshake timeout) per ADR-0017 element 8, \
+                 which this config makes an upper bound by construction rather than computing \
+                 a live per-owner remaining-TTL read (see this config's own doc comment)",
+                resume_handshake_timeout.as_millis(),
+                node_lease_ttl.as_millis()
+            ));
+        }
+
         Ok(Self {
             enabled,
             listen_addrs,
@@ -816,6 +884,9 @@ impl ClusteringConfig {
                 reregister_backoff_max,
             },
             steal_intent: ClusteringStealIntentConfig { intent_ttl },
+            resume_handshake: ClusteringResumeHandshakeConfig {
+                timeout: resume_handshake_timeout,
+            },
             pod_template_hash,
         })
     }
@@ -1759,6 +1830,43 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_defaults_have_a_valid_resume_handshake_config() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(
+            config.resume_handshake,
+            ClusteringResumeHandshakeConfig::default()
+        );
+    }
+
+    #[test]
+    fn clustering_parses_resume_handshake_timeout() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS",
+            "15000",
+        )])
+        .unwrap();
+        assert_eq!(config.resume_handshake.timeout.as_millis(), 15000);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_resume_handshake_timeout() {
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "0")])
+                .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_resume_handshake_timeout_above_node_lease_ttl() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "30000"),
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "45000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS"));
     }
 
     #[test]

@@ -103,6 +103,14 @@ pub struct InMemorySmSessionRegistry {
     /// bookkeeping — the `ClaimStore` implementation itself is the
     /// authority on what epoch is actually current.
     pub(super) claim_epochs: RwLock<HashMap<String, ClaimEpoch>>,
+    /// ADR-0017 Phase 3 Slice 6: the cross-node "ask the live owner to
+    /// detach" bridge for the XEP-0198 resume path's live-handshake branch.
+    /// `None` for single-node/non-clustering deployments (the cross-node
+    /// resume fallback then never has anything to ask — see
+    /// `cross_node_resume::attempt_cross_node_resume`'s doc comment).
+    /// Production wiring injects a `waddle-server`-side adapter over
+    /// `RelayHandle` via [`Self::with_remote_resume_asker`].
+    pub(super) remote_resume: Option<Arc<dyn super::cross_node_resume::RemoteResumeAsker>>,
 }
 
 impl Default for InMemorySmSessionRegistry {
@@ -143,6 +151,7 @@ impl InMemorySmSessionRegistry {
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_epochs: RwLock::new(HashMap::new()),
+            remote_resume: None,
         }
     }
 
@@ -158,6 +167,7 @@ impl InMemorySmSessionRegistry {
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_epochs: RwLock::new(HashMap::new()),
+            remote_resume: None,
         }
     }
 
@@ -189,6 +199,23 @@ impl InMemorySmSessionRegistry {
     ) -> Self {
         self.claim_store = claim_store;
         self.node_identity = me;
+        self
+    }
+
+    /// Inject the cross-node "ask the live owner to detach" bridge
+    /// (ADR-0017 Phase 3 Slice 6). Must be called once at construction time
+    /// before the registry is wrapped in `Arc`, exactly like
+    /// [`Self::with_claim_store`]. Production wiring
+    /// (`server/http.rs::create_sm_session_registry`) sets this alongside
+    /// the claim store whenever clustering is enabled; single-node builds
+    /// leave it `None`, so `cross_node_resume::attempt_cross_node_resume`'s
+    /// live-handshake branch never has anything to ask (byte-identical
+    /// single-node behavior).
+    pub fn with_remote_resume_asker(
+        mut self,
+        asker: Arc<dyn super::cross_node_resume::RemoteResumeAsker>,
+    ) -> Self {
+        self.remote_resume = Some(asker);
         self
     }
 

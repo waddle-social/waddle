@@ -176,17 +176,39 @@ pub(crate) async fn maybe_evict_empty_room(
     }
 }
 
+/// Whether [`cleanup_connection_shutdown`] actually persisted a detached,
+/// resumable XEP-0198 snapshot (council-adjudicated FIX 4: "ack only what
+/// actually happened"). The cross-node resume force-detach ack
+/// (`connection.rs`) maps [`Self::Detached`] onto
+/// [`waddle_xmpp::registry::ForceDetachOutcome::Detached`] — the only
+/// outcome that authorizes the remote asker's `steal_for_resume` — and
+/// every other exit path (superseded, no cleanup-eligible JID, not
+/// resumable, no registry ownership, non-owned entry, `store_session`
+/// failure, ownership-moved-during-detach) onto
+/// [`waddle_xmpp::registry::ForceDetachOutcome::NotPersisted`], which the
+/// bridge/asker treat identically to "not live locally" (re-check
+/// persistence, retry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "the cross-node resume force-detach ack must reflect whether a snapshot was actually persisted"]
+pub(super) enum ConnectionShutdownOutcome {
+    /// A detach-for-resume snapshot was persisted (`store_session`
+    /// succeeded).
+    Detached,
+    /// No detach-for-resume snapshot was persisted by this call.
+    NotPersisted,
+}
+
 pub(super) async fn cleanup_connection_shutdown(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     conn: &mut WsConnState,
     superseded: bool,
-) {
+) -> ConnectionShutdownOutcome {
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
     if superseded {
-        return;
+        return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
     // the SM here — the drain loops below need the SM in `Ready`
@@ -197,7 +219,7 @@ pub(super) async fn cleanup_connection_shutdown(
     // the main loop.
 
     let Some(jid) = conn.phase.cleanup_jid().cloned() else {
-        return;
+        return ConnectionShutdownOutcome::NotPersisted;
     };
 
     let should_detach_for_resume =
@@ -220,7 +242,7 @@ pub(super) async fn cleanup_connection_shutdown(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
-            return;
+            return ConnectionShutdownOutcome::NotPersisted;
         };
         let presence_state = state
             .deps
@@ -234,7 +256,7 @@ pub(super) async fn cleanup_connection_shutdown(
             .entry_if_owner(&jid, owner)
         else {
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
-            return;
+            return ConnectionShutdownOutcome::NotPersisted;
         };
 
         let carbons_enabled = conn.carbons_enabled;
@@ -371,7 +393,7 @@ pub(super) async fn cleanup_connection_shutdown(
                                 );
                             }
                         }
-                        return;
+                        return ConnectionShutdownOutcome::NotPersisted;
                     }
                     // ADR-0017 Phase 1: prune the actor-tree entry at detach
                     // (Greptile review on PR #1177). We just removed the DashMap
@@ -421,6 +443,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         stream_id = %stream_id,
                         "SM session detached; awaiting resume"
                     );
+                    return ConnectionShutdownOutcome::Detached;
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
@@ -453,9 +476,9 @@ pub(super) async fn cleanup_connection_shutdown(
                     // otherwise stale state lingers indefinitely.
                     state.deps.protocol.caps_resolver.drop_resource(&jid);
                     cleanup_muc_presence(state, &jid).await;
+                    return ConnectionShutdownOutcome::NotPersisted;
                 }
             }
-            return;
         }
     }
 
@@ -488,6 +511,9 @@ pub(super) async fn cleanup_connection_shutdown(
     } else {
         debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
     }
+    // Every path reaching here is a non-detach (full-cleanup or no-op)
+    // teardown — never a persisted resumable snapshot.
+    ConnectionShutdownOutcome::NotPersisted
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {

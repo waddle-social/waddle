@@ -208,6 +208,34 @@ pub(super) fn build_system_shutdown_stream_error() -> String {
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 
+/// Build the RFC 6120 §4.9.3.1 `<stream:error><conflict/>` frame sent to a
+/// live stream that has just lost cross-node XEP-0198 resume claim-steal
+/// arbitration (ADR-0017 Phase 3 Slice 6): "If the former stream is resumed
+/// and the server still has the stream for the previously-identified
+/// session open at this time, the server SHOULD send a 'conflict' stream
+/// error and close that stream" (XEP-0198 "Resumption"). Pairs with
+/// `websocket_stream_close_xml()`, identically to
+/// `build_system_shutdown_stream_error()`.
+pub(super) fn build_conflict_stream_error() -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut stream_error = BytesStart::new("stream:error");
+    stream_error.push_attribute(("xmlns:stream", waddle_xmpp::ns::STREAM));
+    writer
+        .write_event(Event::Start(stream_error))
+        .expect("serializing stream error should not fail");
+
+    let mut conflict = BytesStart::new("conflict");
+    conflict.push_attribute(("xmlns", waddle_xmpp::ns::STREAMS));
+    writer
+        .write_event(Event::Empty(conflict))
+        .expect("serializing conflict should not fail");
+
+    writer
+        .write_event(Event::End(BytesEnd::new("stream:error")))
+        .expect("serializing stream error end should not fail");
+    String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
+}
+
 pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
@@ -258,6 +286,18 @@ pub(super) fn sasl_failure_xml(condition: &str) -> String {
 #[cfg(test)]
 mod stream_error_tests {
     use super::*;
+
+    #[test]
+    fn conflict_stream_error_matches_rfc6120_wire_shape() {
+        assert_eq!(
+            build_conflict_stream_error(),
+            concat!(
+                "<stream:error xmlns:stream=\"http://etherx.jabber.org/streams\">",
+                "<conflict xmlns=\"urn:ietf:params:xml:ns:xmpp-streams\"/>",
+                "</stream:error>"
+            )
+        );
+    }
 
     #[test]
     fn system_shutdown_stream_error_matches_rfc6120_wire_shape() {

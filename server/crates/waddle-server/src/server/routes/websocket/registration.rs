@@ -91,14 +91,13 @@ pub(super) async fn register_bound_connection_after_frame(
     // hide a live resource from RFC 6121 §8.5.2.1.1 bare-JID selection. Setting
     // presence/stream-id first closes it; the actor shares this same
     // `Arc`-backed entry, so it still observes these atomics.
-    if let Some(entry) = state.deps.protocol.connection_registry.get_entry(&jid) {
-        entry.set_sm_stream_id(
-            conn.sm_state
-                .stream_id
-                .clone()
-                .map(waddle_xmpp::pending_delivery::SmSessionId::new),
-        );
-    }
+    state.deps.protocol.connection_registry.set_sm_stream_id(
+        &jid,
+        conn.sm_state
+            .stream_id
+            .clone()
+            .map(waddle_xmpp::pending_delivery::SmSessionId::new),
+    );
 
     if conn.presence_available {
         state

@@ -96,7 +96,7 @@ pub(super) async fn handle_sm_stanza(
     use waddle_xmpp::stream_management::SmAck;
 
     match sm {
-        SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase),
+        SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase).await,
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => {
             apply_sm_ack(state, ctx.sm_state, ack.h).await;
@@ -171,7 +171,7 @@ pub(super) async fn apply_sm_ack(
     }
 }
 
-fn handle_sm_enable(
+async fn handle_sm_enable(
     enable: SmEnable,
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
@@ -198,6 +198,24 @@ fn handle_sm_enable(
     };
     sm_state.enable(stream_id.clone(), enable.resume, Some(max));
 
+    // ADR-0017 Phase 3 Slice 6, element 8: ensure this node's `ClaimStore`
+    // claim on this SM session at `<enable/>` time — not only at detach
+    // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
+    // claim row for a still-live session, a cross-node resume attempt
+    // would have nothing to discover: it needs the `clustering_claims` row
+    // to exist to know this entity is "live, owned by this node" at all.
+    // `ensure_claimed`'s self-idempotence (see the method's own doc
+    // comment) is exactly what keeps this call from spuriously conflicting
+    // with the detach-time call for the same stream id later in this
+    // session's lifetime. No-op in practice for single-node deployments
+    // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .ensure_session_claim(&stream_id)
+        .await;
+
     // Publish the stream id onto the registry's ConnectionEntry so
     // the offline-flush path can claim `pending_delivery` rows under
     // a session id that's unique to this XEP-0198 session (not just
@@ -205,11 +223,12 @@ fn handle_sm_enable(
     // would otherwise share the same key, causing cross-session row
     // deletion). Locked Q7b SM-ack lifecycle (issue #209).
     if let Some(jid) = phase.bound_jid() {
-        if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
-            entry.set_sm_stream_id(Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+        state.deps.protocol.connection_registry.set_sm_stream_id(
+            jid,
+            Some(waddle_xmpp::pending_delivery::SmSessionId::new(
                 stream_id.clone(),
-            )));
-        }
+            )),
+        );
     }
 
     info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
@@ -220,8 +239,53 @@ fn handle_sm_enable(
     }
 }
 
+/// Outcome of racing [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::prepare_cross_node_resume`]
+/// — the cancellable, read-only half of a cross-node resume attempt — against
+/// this node's graceful-shutdown token (council-adjudicated FIX 3, corrected
+/// by FIX A/deviation 47's rewrite: only the read-only `prepare` half is ever
+/// raced; the write half,
+/// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::finish_cross_node_steal`],
+/// always runs to completion once reached — see `cross_node_resume.rs`'s
+/// module doc "Cancellation boundary" section for why racing the whole
+/// attempt was unsound). Kept local to this module — a `waddle-server`-only
+/// concern, not part of `waddle-xmpp`'s registry API.
+enum CrossNodeAttemptOutcome {
+    /// The attempt reached a terminal outcome (successfully or with an
+    /// error) before shutdown fired, OR `finish_cross_node_steal` ran (it
+    /// is never raced, so it always reaches this variant once started).
+    Completed(
+        Result<
+            waddle_xmpp::stream_management::CrossNodeResumeOutcome,
+            waddle_xmpp::stream_management::SmRegistryError,
+        >,
+    ),
+    /// This node's graceful-shutdown token fired before `prepare_cross_node_resume`
+    /// produced even a [`waddle_xmpp::stream_management::CrossNodeResumeStage::ReadyToSteal`]
+    /// ticket — abandoned cleanly, never retried, and (unlike the pre-FIX-A
+    /// design) provably no write was ever issued: `prepare_cross_node_resume`
+    /// performs none.
+    ShutdownAbandoned,
+}
+
+/// Outcome of racing only `prepare_cross_node_resume` (FIX A). Distinct from
+/// [`CrossNodeAttemptOutcome`] because a `ReadyToSteal` ticket is not itself
+/// a terminal state — it still needs `finish_cross_node_steal`, called
+/// un-raced, immediately after.
+enum PrepareRaceOutcome {
+    ShutdownAbandoned,
+    Terminal(
+        Result<
+            waddle_xmpp::stream_management::CrossNodeResumeOutcome,
+            waddle_xmpp::stream_management::SmRegistryError,
+        >,
+    ),
+    ReadyToSteal(waddle_xmpp::stream_management::StealTicket),
+}
+
 async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'_>) -> Vec<String> {
-    use waddle_xmpp::stream_management::{stamp_replay_delay, SmFailed, SmResumed};
+    use waddle_xmpp::stream_management::{
+        stamp_replay_delay, CrossNodeResumeOutcome, SmFailed, SmResumed,
+    };
 
     let SmCtx {
         phase,
@@ -253,9 +317,159 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         .await
     {
         Ok(Some(session)) => session,
+        // ADR-0017 Phase 3 Slice 6, element 8: this node has no local
+        // record of the session at all — before falling back to today's
+        // plain item-not-found, try the cross-node claim-steal resume path.
+        // Single-node/non-clustering behavior is byte-identical: with no
+        // cluster claim store wired (or no foreign claim on this entity),
+        // `attempt_cross_node_resume` itself returns `NotFound` and this
+        // collapses to exactly the pre-Slice-6 outcome. Only attempted when
+        // this connection already has a SASL-authenticated bare JID to
+        // check identity against — a resume attempt with no established
+        // identity has nothing for `verify_resume_identity` to compare, so
+        // it falls straight through to `item-not-found` exactly as before.
         Ok(None) => {
-            info!(stream_id = %resume.previd, "SM resume rejected: session not found or expired");
-            return vec![SmFailed::with_condition("item-not-found").to_xml()];
+            // Council-adjudicated FIX 3, corrected by FIX A (deviation 47's
+            // rewrite): race ONLY the cancellable, read-only
+            // `prepare_cross_node_resume` half (including its whole
+            // held-response retry loop) against this node's
+            // graceful-shutdown token, so a `<resume/>` held for up to the
+            // resume-handshake budget (FIX 1: now itself bounded) can never
+            // delay this connection's own graceful-shutdown handling — the
+            // outer connection loop's `shutdown_token.cancelled()` arm is
+            // otherwise starved for as long as this `.await` runs (see
+            // `connection.rs`'s select loop: once an arm's body starts
+            // executing, the loop cannot observe any other arm, including
+            // shutdown, until that body's own awaits resolve).
+            //
+            // The write half, `finish_cross_node_steal`, is deliberately
+            // called OUTSIDE this `tokio::select!` once `prepare_cross_node_resume`
+            // hands back a `ReadyToSteal` ticket — never raced, never
+            // wrapped in a timeout that could drop it mid-sequence. Racing
+            // the whole attempt (the original FIX 3 shape) could drop the
+            // future between `steal_for_resume` committing in Postgres and
+            // `hydrate_reclaimed`/`claim_session` completing, stranding a
+            // self-owned, un-hydrated claim under a fresh lease the orphan
+            // reaper can never steal back — see
+            // `waddle_xmpp::stream_management::session_registry`'s
+            // `cross_node_resume.rs` module doc, "Cancellation boundary".
+            let cross_node = if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
+                let handshake_budget = state
+                    .deps
+                    .app_state
+                    .clustering_claims
+                    .resume_handshake_timeout()
+                    // Unreachable in practice: a `None` budget only occurs
+                    // when clustering is disabled/not compiled in, in which
+                    // case `prepare_cross_node_resume` itself short-circuits
+                    // to `NotFound` before ever consulting this budget.
+                    .unwrap_or(std::time::Duration::ZERO);
+                let shutdown_token = state.deps.shutdown.stop_token();
+                let prepared = tokio::select! {
+                    biased;
+                    _ = shutdown_token.cancelled() => PrepareRaceOutcome::ShutdownAbandoned,
+                    result = state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .prepare_cross_node_resume(&resume.previd, bare_jid, handshake_budget) => {
+                        match result {
+                            Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::Terminal(outcome)) => {
+                                PrepareRaceOutcome::Terminal(Ok(outcome))
+                            }
+                            Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::ReadyToSteal(ticket)) => {
+                                PrepareRaceOutcome::ReadyToSteal(ticket)
+                            }
+                            Err(error) => PrepareRaceOutcome::Terminal(Err(error)),
+                        }
+                    }
+                };
+                Some(match prepared {
+                    PrepareRaceOutcome::ShutdownAbandoned => {
+                        CrossNodeAttemptOutcome::ShutdownAbandoned
+                    }
+                    PrepareRaceOutcome::Terminal(result) => {
+                        CrossNodeAttemptOutcome::Completed(result)
+                    }
+                    PrepareRaceOutcome::ReadyToSteal(ticket) => CrossNodeAttemptOutcome::Completed(
+                        state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .finish_cross_node_steal(ticket)
+                            .await,
+                    ),
+                })
+            } else {
+                None
+            };
+            match cross_node {
+                Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::Claimed(
+                    session,
+                )))) => *session,
+                Some(CrossNodeAttemptOutcome::Completed(Ok(
+                    CrossNodeResumeOutcome::NotAuthorized,
+                ))) => {
+                    warn!(
+                        stream_id = %resume.previd,
+                        "SM resume rejected: cross-node identity mismatch"
+                    );
+                    return vec![SmFailed::with_condition("not-authorized").to_xml()];
+                }
+                Some(CrossNodeAttemptOutcome::Completed(Ok(
+                    CrossNodeResumeOutcome::OwnerUnreachable,
+                ))) => {
+                    // Phase plan's XEP fact-check note: `resource-constraint`
+                    // is a valid generic RFC 6120 condition under XEP-0198's
+                    // "MUST be one of the stanza error conditions defined in
+                    // RFC 6120" rule, but is "our chosen condition" for this
+                    // case, not one XEP-0198 itself demonstrates.
+                    warn!(
+                        stream_id = %resume.previd,
+                        "SM resume rejected: cross-node owner unreachable within the \
+                         resume-handshake window"
+                    );
+                    return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+                }
+                Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
+                | None => {
+                    info!(
+                        stream_id = %resume.previd,
+                        "SM resume rejected: session not found or expired"
+                    );
+                    return vec![SmFailed::with_condition("item-not-found").to_xml()];
+                }
+                Some(CrossNodeAttemptOutcome::Completed(Err(error))) => {
+                    warn!(
+                        stream_id = %resume.previd,
+                        %error,
+                        "SM resume failed: cross-node registry error"
+                    );
+                    return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+                }
+                Some(CrossNodeAttemptOutcome::ShutdownAbandoned) => {
+                    // FIX 3: cancellation won the race before the attempt
+                    // completed — abandoned cleanly (no CAS after
+                    // cancellation: `tokio::select!` drops the losing future
+                    // rather than polling it to completion, so no
+                    // `steal_for_resume` this call issued can have committed
+                    // after this point). No response is sent for this
+                    // `<resume/>` at all: the connection's own select loop
+                    // observes the same, now-cancelled `shutdown_token` on
+                    // its very next iteration and sends the conformant
+                    // `<system-shutdown/>` stream error instead — a more
+                    // accurate signal to the client than a resume-specific
+                    // failure would be. A client that instead hard
+                    // -disconnects mid-hold is observed at the next loop
+                    // iteration (the WS read arm); the hold itself is
+                    // already bounded by FIX 1's budget regardless.
+                    info!(
+                        stream_id = %resume.previd,
+                        "SM resume abandoned: graceful shutdown in progress"
+                    );
+                    return vec![];
+                }
+            }
         }
         Err(e) => {
             warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");

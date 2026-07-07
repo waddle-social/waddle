@@ -122,6 +122,52 @@ impl OutboundStanza {
     }
 }
 
+/// A request to force-detach a live SM session for cross-node XEP-0198
+/// resume (ADR-0017 Phase 3 Slice 6, element 8's "live, owned elsewhere"
+/// branch). Delivered through [`ConnectionEntry::force_detach_tx`] into the
+/// owning connection's own select loop, so the destructive detach-flush +
+/// `<conflict/>` close runs on the connection's own task (never from an
+/// external task reaching into its state directly).
+#[derive(Debug)]
+pub struct ForceDetachRequest {
+    /// The bare JID the cross-node resume requester authenticated as.
+    /// Compared against this connection's own bound JID (defense in depth:
+    /// the caller — `ResumeStealBridge` — already checked this against the
+    /// registry's reverse index before sending, but the identity check must
+    /// gate the destructive close itself, not just an earlier lookup).
+    pub requester_bare_jid: jid::BareJid,
+    /// Answered exactly once, after the connection either force-detaches
+    /// (identity matched) or declines (identity mismatch).
+    pub ack: tokio::sync::oneshot::Sender<ForceDetachOutcome>,
+}
+
+/// Outcome of a [`ForceDetachRequest`], reported back to the asker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceDetachOutcome {
+    /// Identity matched, the connection sent `<conflict/>` and closed, AND
+    /// its subsequent XEP-0198 detach-for-resume cleanup actually persisted
+    /// a resumable snapshot (council-adjudicated fix: this is the ONLY
+    /// variant that authorizes the asker to proceed with
+    /// `steal_for_resume` — see [`Self::NotPersisted`] for every other
+    /// outcome of that same cleanup pass).
+    Detached,
+    /// The requester's bare JID did not match this connection's own bound
+    /// JID — the destructive close was refused.
+    IdentityMismatch,
+    /// Identity matched and the connection closed, but its detach-for
+    /// -resume cleanup did NOT end in a persisted, resumable snapshot
+    /// (council-adjudicated fix — a storage-write failure that fell back to
+    /// full cleanup, an ownership race that promoted the queue instead of
+    /// storing it, no registry ownership at all, or any other early-return
+    /// path in `cleanup_connection_shutdown`). Distinct from
+    /// [`Self::Detached`] so the asker never proceeds with
+    /// `steal_for_resume` against a snapshot that was never actually
+    /// written — the caller maps this the same as
+    /// `LocalForcedDetachOutcome::NotLiveLocally` (re-check persistence and
+    /// retry).
+    NotPersisted,
+}
+
 /// Connection state stored in the registry.
 ///
 /// Contains the outbound sender and shared state that can be queried
@@ -157,11 +203,47 @@ pub struct ConnectionEntry {
     /// previous `Option<String>` form violated the typed-payloads
     /// rule).
     pub sm_stream_id: Arc<std::sync::Mutex<Option<crate::pending_delivery::SmSessionId>>>,
+    /// Sender half of this connection's force-detach control channel
+    /// (ADR-0017 Phase 3 Slice 6). The receiver half is handed to the
+    /// connection's own task exactly once via [`Self::take_force_detach_rx`]
+    /// — a fresh `mpsc` pair is minted per `ConnectionEntry` in [`Self::new`],
+    /// isolated from the stanza-delivery `sender`/`OutboundStanza` pipeline
+    /// entirely. Capacity [`FORCE_DETACH_CHANNEL_CAPACITY`] (deliberately
+    /// greater than 1, not the "only one ever needed" capacity 1): the
+    /// connection's select loop `recv()`s and acts on at most one request
+    /// before breaking out, so a second, concurrent force-detach ask (the
+    /// two-simultaneous-live-resume race, ADR-0017 Phase 3 plan Slice 6)
+    /// should not usually find the channel already full.
+    ///
+    /// **Council-adjudicated fix (updating this comment to match reality,
+    /// not the original design intent)**: the capacity here is
+    /// belt-and-suspenders, not the load-bearing bound it once was.
+    /// `ResumeStealBridge::request_forced_detach` (the sole production
+    /// sender) uses `try_send`, not a blocking `send().await` — a full or
+    /// closed channel answers `NotLiveLocally` immediately rather than
+    /// waiting for capacity that may never free up. This is belt-and
+    /// -suspenders alongside (not a replacement for) the
+    /// `RelayResumeSteal` handler's own delegated-reply fix (`relay.rs`):
+    /// that fix means a wedged force-detach wait no longer blocks this
+    /// node's relay mailbox at all, so even a hypothetical blocking send
+    /// here would no longer wedge *other* relay traffic the way the
+    /// original design worried about — but a blocking send could still
+    /// hang the individual ask past its own caller-observed budget, which
+    /// `try_send` avoids categorically. Whichever request the
+    /// connection never gets around to reading is caught by that request's
+    /// own asker-side ack timeout instead (a bounded, not indefinite, wait).
+    force_detach_tx: mpsc::Sender<ForceDetachRequest>,
+    force_detach_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<ForceDetachRequest>>>>,
 }
+
+/// See [`ConnectionEntry::force_detach_tx`]'s doc comment for why this is
+/// not 1.
+const FORCE_DETACH_CHANNEL_CAPACITY: usize = 8;
 
 impl ConnectionEntry {
     /// Create a new connection entry with carbons disabled by default.
     pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             sender,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
@@ -171,7 +253,28 @@ impl ConnectionEntry {
             blocklist_interested: Arc::new(AtomicBool::new(false)),
             offline_flushed: Arc::new(AtomicBool::new(false)),
             sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
+            force_detach_tx,
+            force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
         }
+    }
+
+    /// Clone of this entry's force-detach sender, for a caller (the
+    /// cross-node resume bridge) that has looked up this entry by JID/
+    /// stream-id and wants to ask its owning connection task to force
+    /// -detach.
+    pub fn force_detach_sender(&self) -> mpsc::Sender<ForceDetachRequest> {
+        self.force_detach_tx.clone()
+    }
+
+    /// Take this connection's force-detach receiver, wiring it into the
+    /// owning connection's own select loop. Returns `Some` exactly once per
+    /// connection — every clone of this entry (e.g. via [`super::ConnectionRegistry::get_entry`])
+    /// shares the same underlying take-once slot, so only the connection
+    /// task that actually registered this entry (immediately after
+    /// registration — see `server::routes::websocket::registration`) ever
+    /// receives `Some`; any later/racing caller observes `None`.
+    pub fn take_force_detach_rx(&self) -> Option<mpsc::Receiver<ForceDetachRequest>> {
+        self.force_detach_rx.lock().ok().and_then(|mut g| g.take())
     }
 
     /// Get the carbons_enabled handle for this connection.

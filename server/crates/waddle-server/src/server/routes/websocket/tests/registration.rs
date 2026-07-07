@@ -512,8 +512,13 @@ async fn cleanup_connection_shutdown_mirrors_unregister_into_actor_tree() {
 
     // The default (non-SM, non-resumable) teardown takes the full-cleanup
     // branch, which must mirror the unregister.
-    super::super::cleanup::cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false)
-        .await;
+    let _ = super::super::cleanup::cleanup_connection_shutdown(
+        state.as_ref(),
+        &mut rx,
+        &mut conn,
+        false,
+    )
+    .await;
 
     // DashMap authoritative registry dropped the entry...
     assert!(

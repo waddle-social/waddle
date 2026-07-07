@@ -803,6 +803,9 @@ mod orphan_reaper_sweep_tests {
             local_claims: None,
             node_lease: Some(sweeper_node_lease),
             lease_ttl: Some(lease_ttl),
+            resume_bridge: None,
+            stop_token: None,
+            resume_handshake_timeout: None,
         };
 
         let state = create_test_websocket_state_with_clustering(

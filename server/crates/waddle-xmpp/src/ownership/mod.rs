@@ -113,6 +113,32 @@ impl std::fmt::Display for Entity {
     }
 }
 
+/// A read-only snapshot of an entity's current claim (ADR-0017 Phase 3
+/// Slice 6): who owns it and at which epoch. Returned by
+/// [`ClaimStore::current_claim`] — typed, never a bare tuple, per the
+/// typed-payloads hard rule.
+///
+/// `owner_lease_fresh` (council-adjudicated fix, Slice 6): whether `owner`'s
+/// own node-liveness row is currently fresh (not committed-`expired`, and its
+/// `node_epoch` still matches) — the exact same owner-stale predicate
+/// [`StalePredicate::OwnerStale`] realizes for `steal_stale`, read here
+/// advisory-only (no write attached, same "never itself an authority"
+/// caveat as the rest of this snapshot). This is what lets a cross-node
+/// resume attempt distinguish, once its held-response window closes,
+/// between "the owner is still alive, just unreachable over the swarm right
+/// now" (XEP-0198's `resource-constraint`) and "the owner's own lease has
+/// since expired" (XEP-0198's `item-not-found` — the session is known
+/// gone). [`InProcessClaimStore`] has no node-liveness table at all (module
+/// doc: "no `clustering_nodes`-equivalent liveness table here"), so it
+/// always reports `true` — the single-node case has no notion of a stale
+/// peer to distinguish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSnapshot {
+    pub owner: NodeIdentity,
+    pub claim_epoch: ClaimEpoch,
+    pub owner_lease_fresh: bool,
+}
+
 /// A claim's fencing generation. Every successful acquire/steal bumps this;
 /// a durable write's fencing check compares the epoch it was granted against
 /// the epoch currently on file, so a stale epoch can never authorize a
@@ -371,6 +397,19 @@ pub trait ClaimStore: Send + Sync {
         witness: ResumeIdentityProof,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError>;
+
+    /// Read-only lookup of `entity`'s current claim, if any (ADR-0017 Phase 3
+    /// Slice 6 addition — deviation, see the phase plan). Unlocked, exactly
+    /// like [`ensure_claimed`](Self::ensure_claimed)'s own conflict-path read:
+    /// it never authorizes a write by itself, it only tells a caller who to
+    /// ask/steal from. The cross-node XEP-0198 resume path uses this to
+    /// decide which of the three resume branches applies (claim absent or
+    /// self-owned → today's local path; owned by another node → the
+    /// detached-vs-live branch, itself decided by whether a persisted
+    /// snapshot already exists) and to learn the observed [`ClaimEpoch`] to
+    /// bind into a subsequent [`steal_for_resume`](Self::steal_for_resume)
+    /// call.
+    async fn current_claim(&self, entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError>;
 
     /// Advisory, own-transaction check: does `me` still hold `entity` under
     /// epoch `mine` right now? See the trait-level doc for why this is

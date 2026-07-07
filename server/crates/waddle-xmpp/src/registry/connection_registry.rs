@@ -23,7 +23,10 @@ mod sending;
 mod state;
 mod subscriptions;
 
-pub use outbound::{BroadcastOutcome, ConnectionEntry, DeliveryKind, OutboundStanza, SendResult};
+pub use outbound::{
+    BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOutcome, ForceDetachRequest,
+    OutboundStanza, SendResult,
+};
 pub use state::{LastActivityState, PresenceState};
 
 /// Registry for tracking active XMPP connections.
@@ -41,6 +44,15 @@ pub struct ConnectionRegistry {
     last_activity: DashMap<BareJid, LastActivityState>,
     /// Server start time used for XEP-0012 uptime responses.
     started_at: Instant,
+    /// Best-effort reverse index from XEP-0198 SM stream id to the full JID
+    /// currently publishing it (ADR-0017 Phase 3 Slice 6). "Best-effort":
+    /// entries are never proactively swept on every connection teardown
+    /// path, so a caller MUST re-verify the returned JID's own
+    /// `ConnectionEntry::sm_stream_id()` still matches before acting on
+    /// it — see [`Self::sm_stream_owner`]'s doc comment. Used by the
+    /// cross-node resume bridge to find which live connection (if any) to
+    /// ask to force-detach.
+    sm_stream_owners: DashMap<crate::pending_delivery::SmSessionId, FullJid>,
 }
 
 impl ConnectionRegistry {
@@ -53,7 +65,45 @@ impl ConnectionRegistry {
             presence_states: DashMap::new(),
             last_activity: DashMap::new(),
             started_at: Instant::now(),
+            sm_stream_owners: DashMap::new(),
         }
+    }
+
+    /// Publish (or clear) the XEP-0198 SM stream id a connection owns,
+    /// updating both the entry's own field and the registry-wide reverse
+    /// index (ADR-0017 Phase 3 Slice 6). Supersedes bare
+    /// `ConnectionEntry::set_sm_stream_id` at every call site so the two
+    /// never drift apart.
+    pub fn set_sm_stream_id(
+        &self,
+        jid: &FullJid,
+        stream_id: Option<crate::pending_delivery::SmSessionId>,
+    ) {
+        let Some(entry) = self.connections.get(jid) else {
+            return;
+        };
+        if let Some(previous) = entry.sm_stream_id() {
+            self.sm_stream_owners.remove(&previous);
+        }
+        entry.set_sm_stream_id(stream_id.clone());
+        if let Some(stream_id) = stream_id {
+            self.sm_stream_owners.insert(stream_id, jid.clone());
+        }
+    }
+
+    /// Look up which full JID currently publishes `stream_id`, if any
+    /// (ADR-0017 Phase 3 Slice 6). **Best-effort**: this index is not
+    /// proactively swept on every teardown path, so callers MUST re-verify
+    /// the returned entry's `ConnectionEntry::sm_stream_id()` still equals
+    /// `stream_id` before acting on it (a stale reverse-index hit is always
+    /// safely detectable this way, never silently acted upon).
+    pub fn sm_stream_owner(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Option<FullJid> {
+        self.sm_stream_owners
+            .get(stream_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// Number of bare JIDs holding queued subscription stanzas for

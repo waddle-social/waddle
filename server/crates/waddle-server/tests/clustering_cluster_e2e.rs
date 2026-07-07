@@ -48,7 +48,7 @@ use waddle_server::clustering::swarm;
 use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
-use waddle_ws_test_support::TestServer;
+use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
 
 const POOL_SIZE: usize = 4;
 
@@ -172,6 +172,17 @@ async fn spawn_cluster_server(
         let mut envs: Vec<(&str, &str)> = vec![
             ("WADDLE_DB_DRIVER", "postgres"),
             ("WADDLE_DATABASE_URL", &postgres_url),
+            // ADR-0017 Phase 3 Slice 4/6 co-location invariant: clustered SM
+            // persistence MUST live in the same Postgres database as the
+            // clustering claims tables, or `open_for_cluster_mode` fails
+            // startup with `ClusterColocationMismatch`. `TestServer`'s own
+            // default (`sqlite::memory:`) is a non-Postgres URL, which
+            // `open_for_cluster_mode`'s `postgres://`/`postgresql://` filter
+            // silently treats as "not set" — falling back to the portable,
+            // per-process, NON-shared SM store, defeating cross-node resume
+            // entirely (Slice 6's `cross_node_resume_live_steal_handshake`
+            // needs both nodes reading/writing the SAME persisted rows).
+            ("WADDLE_XMPP_SM_DATABASE_URL", &postgres_url),
             // NB: the fixed test account stays enabled (TestServer's default) —
             // disabling it flips the permission backend onto the SpiceDB path and
             // fails startup. Its seeding is delete-then-recreate, safe for the
@@ -198,6 +209,10 @@ async fn spawn_cluster_server(
             ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "2"),
             ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "200"),
             ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "1000"),
+            // ADR-0017 Phase 3 Slice 6: must be <= WADDLE_CLUSTERING_NODE_LEASE_TTL_MS
+            // (config validation enforces this — the held-response window is
+            // an upper bound on, never longer than, a fresh node-lease TTL).
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "1000"),
         ];
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
@@ -351,11 +366,19 @@ async fn cluster_exit_criteria_end_to_end() {
         },
         self_fence: waddle_server::config::ClusteringSelfFenceConfig::default(),
         steal_intent: waddle_server::config::ClusteringStealIntentConfig::default(),
+        resume_handshake: waddle_server::config::ClusteringResumeHandshakeConfig {
+            timeout: Duration::from_secs(2),
+        },
         pod_template_hash: None,
     };
-    let handle = swarm::spawn(&config, &db, stop.clone())
-        .await
-        .expect("test-process swarm joins the mesh");
+    let handle = swarm::spawn(
+        &config,
+        &db,
+        stop.clone(),
+        waddle_server::clustering::resume_bridge::ResumeStealBridge::new(),
+    )
+    .await
+    .expect("test-process swarm joins the mesh");
     assert!(!handle.node_id.as_str().is_empty());
 
     // --- Exit criterion: cross-node ask round-trip (real network, two other
@@ -363,14 +386,15 @@ async fn cluster_exit_criteria_end_to_end() {
     // bootstraps toward A).
     // Exercise the configured receiver-side ask timeouts (ADR element 5)
     // through the handle's wiring, not just config validation.
-    let mut relay_a = RelayHandle::new(NodeId::new(node_a.clone())).with_ask_timeouts(
-        config.messaging.mailbox_timeout,
-        config.messaging.reply_timeout,
-    );
+    let mut relay_a = RelayHandle::new(NodeId::new(node_a.clone()), stop.clone())
+        .with_ask_timeouts(
+            config.messaging.mailbox_timeout,
+            config.messaging.reply_timeout,
+        );
     ping_until(&mut relay_a, &node_a, Duration::from_secs(30))
         .await
         .expect("cross-node ping to A");
-    let mut relay_b = RelayHandle::new(NodeId::new(node_b.clone()));
+    let mut relay_b = RelayHandle::new(NodeId::new(node_b.clone()), stop.clone());
     ping_until(&mut relay_b, &node_b, Duration::from_secs(30))
         .await
         .expect("cross-node ping to B");
@@ -394,10 +418,11 @@ async fn cluster_exit_criteria_end_to_end() {
     let mut join_set = tokio::task::JoinSet::new();
     for index in 0..8u32 {
         let node = node_a.clone();
+        let stop = stop.clone();
         let size = if index % 2 == 0 { 100 * 1024 } else { 16 };
         let thread_id = format!("mix-{index}");
         join_set.spawn(async move {
-            let mut relay = RelayHandle::new(NodeId::new(node));
+            let mut relay = RelayHandle::new(NodeId::new(node), stop);
             let reply = relay
                 .echo_stanza(thread_message(&thread_id, size))
                 .await
@@ -459,7 +484,7 @@ async fn cluster_exit_criteria_end_to_end() {
     // never prove the transport cap; the per-ask builder lets the harness
     // construct it deliberately. Aimed at B so A's relay is idle for the
     // crash scenario next.
-    let mut relay_b_slow = RelayHandle::new(NodeId::new(node_b.clone()))
+    let mut relay_b_slow = RelayHandle::new(NodeId::new(node_b.clone()), stop.clone())
         .with_ask_timeouts(Duration::from_secs(10), Duration::from_secs(10));
     ping_until(&mut relay_b_slow, &node_b, Duration::from_secs(30))
         .await
@@ -546,7 +571,7 @@ async fn cluster_exit_criteria_end_to_end() {
     let (server_b2, node_b2, _peer_b2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
     assert_ne!(node_b2, node_b, "restarted node must mint a fresh node_id");
-    let mut relay_b2 = RelayHandle::new(NodeId::new(node_b2.clone()));
+    let mut relay_b2 = RelayHandle::new(NodeId::new(node_b2.clone()), stop.clone());
     ping_until(&mut relay_b2, &node_b2, Duration::from_secs(45))
         .await
         .expect("restarted node re-discovered via kademlia");
@@ -566,7 +591,7 @@ async fn cluster_exit_criteria_end_to_end() {
     let (server_a2, node_a2, _peer_a2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
     assert_ne!(node_a2, node_a, "restarted node must mint a fresh node_id");
-    let mut relay_a2 = RelayHandle::new(NodeId::new(node_a2.clone()));
+    let mut relay_a2 = RelayHandle::new(NodeId::new(node_a2.clone()), stop.clone());
     ping_until(&mut relay_a2, &node_a2, Duration::from_secs(45))
         .await
         .expect("A's replacement re-discovered via kademlia after the full rolling restart");
@@ -776,6 +801,124 @@ async fn lone_survivor_and_isolation_fencing() {
         drop(server_b);
         drop(server_d);
     }
+}
+
+/// ADR-0017 Phase 3 Slice 6: the cross-node XEP-0198 resume live-steal
+/// handshake, end to end, against two real `waddle-server` processes
+/// sharing one Postgres control plane (co-located clustering claims + SM
+/// persistence, per Slice 4's design). A client enables resumable stream
+/// management on node A and STAYS CONNECTED (a genuinely live session, no
+/// detach) while a second connection resumes the same `previd` against node
+/// B. Node B has no local record and no persisted snapshot to read, so it
+/// must ask node A over the real swarm relay (`RelayResumeSteal`) to
+/// force-detach — proving the whole handshake: the relay message
+/// round-trip, node A's own identity check gating the destructive close,
+/// the `<conflict/>` stream error actually reaching client A's live socket,
+/// and node B's subsequent claim-steal + hydrate succeeding against the
+/// now-persisted snapshot.
+#[tokio::test]
+async fn cross_node_resume_live_steal_handshake() {
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping cross_node_resume_live_steal_handshake: WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+
+    const DOMAIN: &str = "localhost";
+    const USERNAME: &str = "admin";
+    // The fixed test account is shared (same Postgres users table) but each
+    // `TestServer` reseeds it delete-then-recreate on its own startup with
+    // its own randomly generated password — whichever server started LAST
+    // (server_b) is the one whose password is actually live in the shared
+    // table by the time both are up.
+    let password = server_b.fixed_account_password().to_string();
+
+    // Client A connects to node A and enables resumable SM. It stays
+    // connected for the whole test — this IS the "live, owned elsewhere"
+    // branch (no detach, so no persisted snapshot exists until node A's
+    // force-detach lands).
+    let resource_a = format!("cross-node-resume-a-{}", uuid::Uuid::new_v4());
+    let mut client_a = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &resource_a,
+    )
+    .await
+    .expect("client A connects to node A");
+    client_a
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("enable stream management");
+    let enabled = client_a
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("stream management enabled");
+    let previd = extract_attr_after(&enabled, "<enabled", "id")
+        .unwrap_or_else(|| panic!("enabled missing id: {enabled}"));
+
+    // Client B connects to node B (a DIFFERENT process) and resumes the
+    // SAME previd while client A is still live on node A. This can only
+    // succeed via the cross-node live-steal handshake: node B has no local
+    // claim and nothing persisted to read until node A force-detaches.
+    let mut client_b = WsXmppClient::connect(&server_b.ws_url())
+        .await
+        .expect("client B connects to node B");
+    client_b
+        .authenticate(DOMAIN, USERNAME, &password)
+        .await
+        .expect("client B authenticates against node B");
+    client_b
+        .send(&format!(
+            r#"<resume xmlns="urn:xmpp:sm:3" previd="{previd}" h="0"/>"#
+        ))
+        .await
+        .expect("send cross-node resume");
+
+    // The handshake involves a real swarm round-trip (kademlia discovery +
+    // relay ask), so allow a generous deadline; poll rather than a single
+    // fixed-timeout recv so a slow CI runner cannot flake this.
+    let resumption = client_b
+        .recv_matching(|frame| frame.contains("<resumed") || frame.contains("<failed"))
+        .await
+        .expect("cross-node resume reply from node B");
+    assert!(
+        resumption.contains("<resumed"),
+        "cross-node live-steal handshake must resume onto node B, got: {resumption}"
+    );
+    assert!(
+        resumption.contains(&previd),
+        "resumed previd must match: {resumption}"
+    );
+
+    // Client A's live socket must have been force-detached: XEP-0198
+    // "Resumption"'s `<conflict/>` stream error, then the transport close.
+    let conflict_or_close = client_a
+        .recv_matching(|frame| frame.contains("conflict") || frame.contains("<close"))
+        .await
+        .expect("client A observes the force-detach close");
+    assert!(
+        conflict_or_close.contains("conflict") || conflict_or_close.contains("<close"),
+        "client A must see the <conflict/> stream error (or the framing close that follows): {conflict_or_close}"
+    );
+
+    drop(server_a);
+    drop(server_b);
 }
 
 /// DEFERRED (Phase 3): a single dead link between two of three nodes degrades
