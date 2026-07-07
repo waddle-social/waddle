@@ -650,12 +650,13 @@ async fn websocket_unclean_disconnect_broadcasts_unavailable_to_subscribers() {
 }
 
 #[tokio::test]
-async fn websocket_probe_returns_xep0319_idle_for_detached_resource() {
+async fn websocket_probe_returns_xep0319_idle_for_live_and_detached_resource() {
     // XEP-0319 §2.2 + RFC 6121 §4.3: a probe response reports the contact's
     // last broadcast presence, including the <idle xmlns='urn:xmpp:idle:1'
-    // since='…'/> stamp the client advertised. This must hold for a resource
-    // whose XEP-0198 session is DETACHED (awaiting resume): the stored
-    // presence payloads travel into the detached snapshot (issue #1103).
+    // since='…'/> stamp the client advertised. Issue #1103 acceptance covers
+    // "live AND detached": the stored payloads must answer a probe while the
+    // resource is still LIVE, and must survive into the detached snapshot
+    // once the XEP-0198 session is awaiting resume.
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
     let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
     let server = TestServer::start_with_extra_accounts(&[
@@ -711,6 +712,23 @@ async fn websocket_probe_returns_xep0319_idle_for_detached_resource() {
     assert!(
         live_broadcast.contains("urn:xmpp:idle:1"),
         "live broadcast relays the idle stamp verbatim (issue #1101): {live_broadcast}"
+    );
+
+    // Probe the LIVE resource's full JID before any disconnect: the
+    // stored last-broadcast presence must already carry the idle stamp
+    // (RFC 6121 §4.3.2, XEP-0319 §2.2 — issue #1103 "live" half).
+    bob.send(&probe_presence_xml(&alice_full))
+        .await
+        .expect("bob probes alice's live resource");
+    let live_probe = bob
+        .recv_matching(|frame| {
+            frame.contains(&format!("from='{alice_full}'")) && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("probe response for the live resource");
+    assert!(
+        live_probe.contains("urn:xmpp:idle:1") && live_probe.contains(IDLE_SINCE),
+        "probe response for a live resource must carry the stored XEP-0319 idle stamp: {live_probe}"
     );
 
     // Abrupt drop: the resumable session detaches, awaiting resume.

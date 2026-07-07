@@ -7,6 +7,33 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 
+/// Drain EVERY frame delivered within `duration` and fail if any one of
+/// them matches `predicate`. A single `recv_timeout` is not a negative
+/// assertion: a benign frame (roster push, presence echo) arriving first
+/// would mask a buggy frame right behind it. Mirrors the helper of the
+/// same name in `rfc6121_presence_ws.rs` (integration test binaries
+/// cannot share items without a support-crate move).
+async fn assert_no_frame_matching<F>(
+    client: &mut WsXmppClient,
+    duration: Duration,
+    predicate: F,
+    description: &str,
+) where
+    F: Fn(&str) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let Ok(frame) = client.recv_timeout(remaining).await else {
+            return;
+        };
+        assert!(!predicate(&frame), "{description}: {frame}");
+    }
+}
+
 async fn connect_alice_bob() -> (TestServer, WsXmppClient, WsXmppClient) {
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
     let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
@@ -1088,14 +1115,13 @@ async fn offline_subscribe_is_redelivered_on_new_sessions_until_answered() {
         .send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("alice third session available");
-    let after_denial = alice_third.recv_timeout(Duration::from_millis(250)).await;
-    assert!(
-        !after_denial
-            .as_deref()
-            .map(|frame| frame.contains("type='subscribe'"))
-            .unwrap_or(false),
-        "answered pending subscribe must not be redelivered: {after_denial:?}"
-    );
+    assert_no_frame_matching(
+        &mut alice_third,
+        Duration::from_millis(250),
+        |frame| frame.contains("type='subscribe'"),
+        "answered pending subscribe must not be redelivered",
+    )
+    .await;
 
     let _ = alice_third.close().await;
     let _ = bob.close().await;
@@ -1256,14 +1282,13 @@ async fn pending_subscribe_is_delivered_once_per_session_not_on_presence_flips()
         .send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("alice flips back to available");
-    let redelivered = alice.recv_timeout(Duration::from_millis(400)).await;
-    assert!(
-        !redelivered
-            .as_deref()
-            .map(|frame| frame.contains("type='subscribe'"))
-            .unwrap_or(false),
-        "presence flips within a session must not re-deliver the pending subscribe: {redelivered:?}"
-    );
+    assert_no_frame_matching(
+        &mut alice,
+        Duration::from_millis(400),
+        |frame| frame.contains("type='subscribe'"),
+        "presence flips within a session must not re-deliver the pending subscribe",
+    )
+    .await;
 
     // A NEW session for alice (fresh resource) gets the still-unanswered
     // request again on its first available presence.
