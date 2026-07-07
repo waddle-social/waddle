@@ -659,6 +659,85 @@ async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row
     assert!(snapshot.find_nick_by_real_jid(&sender_jid).is_none());
 }
 
+/// Review F3: on the members-only path a `Resolver(None)` verdict makes
+/// the handler return registration-required BEFORE any actor message,
+/// so a stale resolver-derived Member inside a LIVE room actor (written
+/// before the revocation) was never cleared — the revoked user stayed
+/// on the room's affiliation list (admin queries, XEP-0045 §7.x member
+/// lists) until eviction. The rejection must best-effort sync
+/// `Affiliation::None` into the existing actor.
+#[tokio::test]
+async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_actor() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "revoked@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "bob@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "revoked".to_string(),
+            name: "Revoked".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    let actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig {
+            members_only: true,
+            ..RoomConfig::default()
+        },
+        "space".to_string(),
+        "revoked".to_string(),
+    )
+    .await
+    .expect("room actor")
+    .actor_ref;
+
+    // Stale resolver-derived Member from before the revocation.
+    actor
+        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
+            jid: sender_jid.to_bare(),
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .expect("seed stale resolver-derived member");
+
+    // No permission tuples exist for bob: the resolver reports None.
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "bob",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(denied.len(), 1, "denied join: {denied:?}");
+    assert!(
+        denied[0].contains("registration-required"),
+        "revoked user's members-only join must be refused: {denied:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.get_affiliation(&sender_jid.to_bare()),
+        waddle_xmpp::Affiliation::None,
+        "the rejection must clear the stale resolver-derived Member from the live actor"
+    );
+}
+
 #[tokio::test]
 async fn standard_members_only_join_rejects_unaffiliated_user() {
     let state = create_test_websocket_state().await;

@@ -541,3 +541,32 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         self.room.config = desired_config;
     }
 }
+
+/// Best-effort resolver-affiliation sync for joins the presence handler
+/// rejects BEFORE any actor message (members-only registration-required
+/// and resolver Outcast → forbidden). Without it, a stale
+/// resolver-derived affiliation inside a live room actor (written
+/// before the revocation) lingers on the room's affiliation list —
+/// visible via admin queries and XEP-0045 §7.x member lists — until the
+/// room is evicted. Provenance-aware via
+/// `MucRoom::update_affiliation_from_resolver`: explicit grants (bans,
+/// creator Owner) are never touched, and `Affiliation::None` removes
+/// resolver-derived entries.
+pub struct SyncResolverAffiliation {
+    pub jid: BareJid,
+    pub affiliation: Affiliation,
+}
+
+impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
+    type Reply = Result<(), Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: SyncResolverAffiliation,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room
+            .update_affiliation_from_resolver(msg.jid, msg.affiliation);
+        Ok(())
+    }
+}

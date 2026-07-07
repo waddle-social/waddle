@@ -30,7 +30,7 @@ pub use admin_handlers::{
 pub use occupancy_handlers::{
     ClearMujiPresence, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
     LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData,
-    ReconcileChannelBackedRoom, UpsertInCallState, UpsertMujiPresence,
+    ReconcileChannelBackedRoom, SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,

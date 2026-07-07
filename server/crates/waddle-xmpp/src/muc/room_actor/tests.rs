@@ -3421,6 +3421,93 @@ async fn resolver_none_does_not_clear_explicit_ban() {
     );
 }
 
+/// Review F3: on the members-only path the handler rejects a revoked
+/// user's join BEFORE any actor message, so `JoinWithAffiliation`'s
+/// `Resolver(None)` write never reaches a live actor and the stale
+/// resolver-derived Member from before the revocation lingers on the
+/// room's affiliation list (admin queries, XEP-0045 §7.x member lists)
+/// until eviction. `SyncResolverAffiliation` lets the handler clear it
+/// best-effort as part of the rejection.
+#[tokio::test]
+async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice: FullJid = test_full_jid("alice");
+    let alice_bare = alice.to_bare();
+
+    // Seed a resolver-derived Member entry, then leave the room.
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("resolver-derived member joins the members-only room");
+    actor
+        .ask(Leave {
+            nick: "alice".to_string(),
+        })
+        .await
+        .expect("leave");
+
+    actor
+        .ask(SyncResolverAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("sync resolver affiliation");
+
+    let affiliation = actor
+        .ask(GetAffiliation { jid: alice_bare })
+        .await
+        .expect("affiliation query");
+    assert_eq!(
+        affiliation,
+        Affiliation::None,
+        "the stale resolver-derived Member entry must be cleared by the sync"
+    );
+}
+
+/// Companion: the sync is provenance-aware — a resolver-derived None
+/// write must never lift an explicit ban.
+#[tokio::test]
+async fn sync_resolver_affiliation_does_not_touch_explicit_grants() {
+    let actor = spawn_room_actor().await;
+    let banned: BareJid = "mallory@example.com".parse().expect("bare jid");
+    actor
+        .ask(ChangeAffiliation {
+            jid: banned.clone(),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban mallory");
+
+    actor
+        .ask(SyncResolverAffiliation {
+            jid: banned.clone(),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("sync resolver affiliation");
+
+    let affiliation = actor
+        .ask(GetAffiliation { jid: banned })
+        .await
+        .expect("affiliation query");
+    assert_eq!(
+        affiliation,
+        Affiliation::Outcast,
+        "the explicit ban must survive the resolver-derived sync"
+    );
+}
+
 /// A resolver write with a different value must not downgrade an
 /// explicit grant (#1110): an admin-granted Admin stays Admin when the
 /// resolver reports Member, and it keeps blocking dormancy.

@@ -40,6 +40,34 @@ pub async fn handle_muc_join(
     .await
 }
 
+/// Best-effort resolver-affiliation sync into an EXISTING live room
+/// actor when join admission rejects before any actor message (review
+/// F3). Never creates an actor — a rejection must not spawn rooms —
+/// and never blocks the rejection on failure: the sync is a staleness
+/// repair, the authoritative admission decision was already made by
+/// the resolver. The actor-side handler is provenance-aware
+/// (`update_affiliation_from_resolver`), so explicit grants survive.
+async fn sync_resolver_affiliation_on_rejection(
+    existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
+    room_jid: &BareJid,
+    jid: BareJid,
+    affiliation: Affiliation,
+) {
+    let Some(actor) = existing_room_actor else {
+        return;
+    };
+    if let Err(error) = actor
+        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation { jid, affiliation })
+        .await
+    {
+        warn!(
+            room = %room_jid,
+            error = ?error,
+            "Failed to sync resolver affiliation into live room actor on rejected join"
+        );
+    }
+}
+
 async fn handle_muc_join_unlocked(
     state: &WebSocketState,
     domain: String,
@@ -152,6 +180,24 @@ async fn handle_muc_join_unlocked(
             .await
             {
                 Ok(Some(Affiliation::Outcast)) => {
+                    // The resolver's Outcast comes from the permission
+                    // graph (resolver-derived), so mirror it into a live
+                    // actor the same way: a formerly-Member-now-Outcast
+                    // user's stale resolver-derived Member entry would
+                    // otherwise linger on the room's affiliation list
+                    // until eviction. Explicit bans are untouched by the
+                    // provenance-aware sync.
+                    sync_resolver_affiliation_on_rejection(
+                        existing_room_actor.as_ref(),
+                        room_jid,
+                        // Room affiliations are keyed by the joiner's
+                        // bare JID (`JoinWithAffiliation` uses
+                        // `sender_jid.to_bare()`), so the sync must use
+                        // the same key.
+                        sender_jid.to_bare(),
+                        Affiliation::Outcast,
+                    )
+                    .await;
                     return vec![build_muc_presence_error_xml(
                         room_jid,
                         &nick,
@@ -167,6 +213,20 @@ async fn handle_muc_join_unlocked(
                 Ok(Some(affiliation)) => Some(affiliation),
                 Ok(None) => {
                     if admission_members_only {
+                        // The registration-required rejection returns
+                        // BEFORE `JoinWithAffiliation`, so its
+                        // `Resolver(None)` write never reaches a live
+                        // actor — clear any stale resolver-derived
+                        // affiliation from before the revocation here.
+                        sync_resolver_affiliation_on_rejection(
+                            existing_room_actor.as_ref(),
+                            room_jid,
+                            // Same key as `JoinWithAffiliation`:
+                            // `sender_jid.to_bare()`.
+                            sender_jid.to_bare(),
+                            Affiliation::None,
+                        )
+                        .await;
                         return vec![build_muc_presence_error_xml(
                             room_jid,
                             &nick,
