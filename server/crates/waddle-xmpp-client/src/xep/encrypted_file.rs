@@ -19,9 +19,10 @@
 //! </encrypted>
 //! ```
 //!
-//! Waddle's chat sends `<encrypted/>` as a top-level child of `<message/>`,
-//! a sibling of the matching `<file-sharing/>` element (which carries the
-//! plaintext metadata such as filename, size, media-type and dimensions).
+//! Waddle's chat sends `<encrypted/>` inside the XEP-0447
+//! `<file-sharing><sources/>` list, alongside URL sources. The matching
+//! `<file-sharing/>` element carries the plaintext metadata such as filename,
+//! size, media-type and dimensions.
 
 use minidom::Element;
 

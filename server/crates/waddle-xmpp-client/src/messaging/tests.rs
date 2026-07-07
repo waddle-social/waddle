@@ -1534,11 +1534,13 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
         .expect("file-sharing child present");
     assert_eq!(file_sharing.attr("disposition"), Some("inline"));
 
-    // The XEP-0448 envelope is a sibling carrying cipher + key + iv +
-    // hashes + sources pointing at the ciphertext blob.
-    let encrypted = stanza
+    let sources = file_sharing
+        .get_child("sources", NS_SFS)
+        .expect("file-sharing sources");
+    // The XEP-0448 envelope is nested in the XEP-0447 source list.
+    let encrypted = sources
         .get_child("encrypted", NS_ESFS)
-        .expect("encrypted sibling present");
+        .expect("encrypted source present");
     assert_eq!(
         encrypted.attr("cipher"),
         Some("urn:xmpp:ciphers:aes-256-gcm-nopadding:0")
@@ -1551,13 +1553,17 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
         encrypted.get_child("iv", NS_ESFS).map(|e| e.text()),
         Some("aXY=".to_string())
     );
-    let sources = encrypted
+    let encrypted_sources = encrypted
         .get_child("sources", NS_SFS)
         .expect("encrypted sources");
-    let url_data = sources
+    let url_data = encrypted_sources
         .get_child("url-data", NS_URL_DATA)
         .expect("url-data inside encrypted sources");
     assert_eq!(url_data.attr("target"), Some(url));
+    assert!(
+        stanza.get_child("encrypted", NS_ESFS).is_none(),
+        "encrypted must not be a direct message child"
+    );
 }
 
 #[test]
@@ -1574,17 +1580,17 @@ fn parse_message_collects_encrypted_metadata_into_shared_file() {
              </file>\
              <sources xmlns='urn:xmpp:sfs:0'>\
                <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
+               <encrypted xmlns='urn:xmpp:esfs:0' \
+                          cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
+                 <key>a2V5</key>\
+                 <iv>aXY=</iv>\
+                 <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>aGFzaA==</hash>\
+                 <sources xmlns='urn:xmpp:sfs:0'>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
+                 </sources>\
+               </encrypted>\
              </sources>\
            </file-sharing>\
-           <encrypted xmlns='urn:xmpp:esfs:0' \
-                      cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
-             <key>a2V5</key>\
-             <iv>aXY=</iv>\
-             <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>aGFzaA==</hash>\
-             <sources xmlns='urn:xmpp:sfs:0'>\
-               <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
-             </sources>\
-           </encrypted>\
          </message>"
     );
     let el: Element = xml.parse().expect("valid xml");
@@ -1632,10 +1638,9 @@ fn parse_message_leaves_encrypted_none_for_plaintext_share() {
 }
 
 #[test]
-fn parse_message_attaches_encrypted_metadata_to_sims_share() {
-    // SIMS-style (XEP-0385) shares are collected after `<file-sharing/>`
-    // entries, so the XEP-0448 sibling matching must run last to cover
-    // them too. Regression guard for the original PR review feedback.
+fn parse_message_ignores_top_level_encrypted_for_sims_share() {
+    // XEP-0448 is scoped to XEP-0447 file-sharing sources. A top-level
+    // encrypted sibling must not annotate legacy SIMS shares.
     let url = "https://files.example.com/sims-blob.enc";
     let xml = format!(
         "<message xmlns='jabber:client' type='chat' from='bob@example.com' id='m1'>\
@@ -1662,22 +1667,19 @@ fn parse_message_attaches_encrypted_metadata_to_sims_share() {
     let MessagingEvent::Message(parsed) = parse(&el).expect("parses to event") else {
         panic!("expected message event");
     };
-    let with_url = parsed
-        .shared_files
-        .iter()
-        .find(|f| f.url == url)
-        .expect("sims-derived shared file present");
     assert!(
-        with_url.encrypted.is_some(),
-        "sims-derived shared file gained xep-0448 metadata"
+        parsed
+            .shared_files
+            .iter()
+            .all(|file| file.url != url && file.encrypted.is_none()),
+        "top-level encrypted payload must not synthesize or annotate a SIMS share"
     );
 }
 
 #[test]
-fn parse_message_synthesises_share_for_orphan_encrypted_sibling() {
-    // A peer that only emits `<encrypted/>` (skipping the redundant
-    // `<file-sharing/>`) should still surface as a shared file so the
-    // chat UI can render it.
+fn parse_message_ignores_orphan_encrypted_sibling() {
+    // XEP-0448 encrypted metadata is only valid inside
+    // `<file-sharing><sources/>`.
     let url = "https://files.example.com/orphan.enc";
     let xml = format!(
         "<message xmlns='jabber:client' type='chat' from='bob@example.com' id='m1'>\
@@ -1696,9 +1698,7 @@ fn parse_message_synthesises_share_for_orphan_encrypted_sibling() {
     let MessagingEvent::Message(parsed) = parse(&el).expect("parses to event") else {
         panic!("expected message event");
     };
-    assert_eq!(parsed.shared_files.len(), 1);
-    assert_eq!(parsed.shared_files[0].url, url);
-    assert!(parsed.shared_files[0].encrypted.is_some());
+    assert!(parsed.shared_files.is_empty());
 }
 
 #[test]

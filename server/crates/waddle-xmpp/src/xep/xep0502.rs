@@ -1,42 +1,22 @@
 //! XEP-0502: MUC Activity Indicator
 //!
-//! Lightweight activity tracking for MUC rooms. Clients can subscribe
-//! to activity indicators without joining rooms, enabling sidebar badges
-//! showing which rooms have new messages.
-//!
-//! ## XML Format
-//!
-//! Subscribe to activity for a room:
-//! ```xml
-//! <iq type='set' to='muc.example.com' id='act-1'>
-//!   <activity xmlns='urn:xmpp:muc-activity:0'>
-//!     <subscribe jid='room@muc.example.com'/>
-//!   </activity>
-//! </iq>
-//! ```
-//!
-//! Activity notification from server:
-//! ```xml
-//! <message from='muc.example.com' to='user@example.com'>
-//!   <activity xmlns='urn:xmpp:muc-activity:0'>
-//!     <active jid='room@muc.example.com' last-activity='2024-06-01T12:00:00Z'/>
-//!   </activity>
-//! </message>
-//! ```
-//!
-//! ## Use Cases
-//!
-//! - Show activity dots on rooms in the sidebar
-//! - Track new messages in rooms the user hasn't joined
-//! - Lightweight alternative to full room presence
+//! XEP-0502 exposes room activity through a disco#info data-form field. It
+//! does not define a subscribe/notify stanza protocol.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
 
-/// Namespace for XEP-0502 MUC Activity Indicator.
-pub const NS_MUC_ACTIVITY: &str = "urn:xmpp:muc-activity:0";
+use super::xep0004::{DataForm, Field, FormType, ToElement, NS_DATA_FORMS};
 
-/// Activity state for a room.
+/// Namespace for XEP-0502 MUC Activity Indicator.
+pub const NS_MUC_ACTIVITY: &str = "urn:xmpp:muc-activity";
+
+/// MUC roominfo field containing the room's messages/hour value.
+pub const FIELD_MESSAGE_ACTIVITY: &str = "{urn:xmpp:muc-activity}message-activity";
+
+const FORM_TYPE_MUC_ROOMINFO: &str = "http://jabber.org/protocol/muc#roominfo";
+
+/// Activity state for a room. This is a local model, not a XEP-0502 stanza.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomActivity {
     /// The room JID.
@@ -77,7 +57,7 @@ impl RoomActivity {
     }
 }
 
-/// Tracks activity across multiple rooms.
+/// Tracks activity across multiple rooms locally.
 #[derive(Debug, Default)]
 pub struct ActivityTracker {
     rooms: std::collections::HashMap<String, RoomActivity>,
@@ -137,73 +117,49 @@ impl ActivityTracker {
     }
 }
 
-// ── Detection ────────────────────────────────────────────────────────
-
-/// Check if an element is an `<activity/>` element.
-pub fn is_activity_element(elem: &Element) -> bool {
-    elem.ns() == NS_MUC_ACTIVITY && elem.name() == "activity"
+fn message_activity_value(messages_per_hour: f64) -> String {
+    if messages_per_hour.is_finite() && messages_per_hour >= 0.0 {
+        messages_per_hour.to_string()
+    } else {
+        "0".to_owned()
+    }
 }
 
-// ── Extraction ───────────────────────────────────────────────────────
-
-/// Parse activity notifications from an `<activity/>` element.
-pub fn parse_activity_notifications(elem: &Element) -> Vec<RoomActivity> {
-    if !is_activity_element(elem) {
-        return Vec::new();
-    }
-
-    elem.children()
-        .filter(|c| c.name() == "active" && c.ns() == NS_MUC_ACTIVITY)
-        .filter_map(|c| {
-            let jid = c.attr("jid").filter(|s| !s.is_empty())?.to_owned();
-            let ts = c
-                .attr("last-activity")
-                .and_then(|s| s.parse::<DateTime<Utc>>().ok());
-            Some(RoomActivity {
-                room_jid: jid,
-                last_activity: ts,
-                has_new_messages: true,
-            })
-        })
-        .collect()
+/// Build the XEP-0502 roominfo field containing messages/hour.
+pub fn build_message_activity_field(messages_per_hour: f64) -> Element {
+    Element::builder("field", NS_DATA_FORMS)
+        .attr(
+            minidom::rxml::xml_ncname!("var").to_owned(),
+            FIELD_MESSAGE_ACTIVITY,
+        )
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append(message_activity_value(messages_per_hour))
+                .build(),
+        )
+        .build()
 }
 
-// ── Building ─────────────────────────────────────────────────────────
-
-/// Build an `<activity/>` notification element.
-pub fn build_activity_notification(activities: &[&RoomActivity]) -> Element {
-    let mut activity = Element::builder("activity", NS_MUC_ACTIVITY).build();
-
-    for ra in activities {
-        let mut active = Element::builder("active", NS_MUC_ACTIVITY)
-            .attr(
-                minidom::rxml::xml_ncname!("jid").to_owned(),
-                ra.room_jid.as_str(),
-            )
-            .build();
-        if let Some(ts) = ra.last_activity {
-            active.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("last-activity").to_owned(),
-                ts.to_rfc3339(),
-            );
-        }
-        activity.append_child(active);
+/// Parse the XEP-0502 roominfo activity field.
+pub fn parse_message_activity_field(field: &Element) -> Option<f64> {
+    if !field.is("field", NS_DATA_FORMS) || field.attr("var") != Some(FIELD_MESSAGE_ACTIVITY) {
+        return None;
     }
-
-    activity
+    field
+        .get_child("value", NS_DATA_FORMS)
+        .and_then(|value| value.text().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
-/// Build a subscribe request element.
-pub fn build_subscribe_element(room_jids: &[&str]) -> Element {
-    let mut activity = Element::builder("activity", NS_MUC_ACTIVITY).build();
-    for jid in room_jids {
-        let sub = Element::builder("subscribe", NS_MUC_ACTIVITY)
-            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), *jid)
-            .build();
-        activity.append_child(sub);
-    }
-    activity
+/// Build a MUC roominfo extension form containing XEP-0502 activity.
+pub fn build_muc_activity_roominfo_form(messages_per_hour: f64) -> Element {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(FORM_TYPE_MUC_ROOMINFO))
+        .add_field(Field::text_single(
+            FIELD_MESSAGE_ACTIVITY,
+            message_activity_value(messages_per_hour),
+        ))
+        .to_element()
 }
 
 #[cfg(test)]
@@ -215,15 +171,6 @@ mod tests {
         Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
             .single()
             .expect("valid test date")
-    }
-
-    #[test]
-    fn test_is_activity_element() {
-        let elem = Element::builder("activity", NS_MUC_ACTIVITY).build();
-        assert!(is_activity_element(&elem));
-
-        let wrong = Element::builder("activity", "jabber:client").build();
-        assert!(!is_activity_element(&wrong));
     }
 
     #[test]
@@ -260,68 +207,55 @@ mod tests {
         tracker.record_activity("room2@muc", test_time());
 
         assert!(tracker.has_activity("room1@muc"));
-        assert!(tracker.has_activity("room2@muc"));
         assert_eq!(tracker.active_count(), 2);
         assert_eq!(tracker.active_rooms().len(), 2);
 
         tracker.mark_read("room1@muc");
         assert!(!tracker.has_activity("room1@muc"));
+        assert!(tracker.has_activity("room2@muc"));
         assert_eq!(tracker.active_count(), 1);
-    }
 
-    #[test]
-    fn test_tracker_remove() {
-        let mut tracker = ActivityTracker::new();
-        tracker.record_activity("room@muc", test_time());
-        tracker.remove("room@muc");
-        assert!(tracker.get("room@muc").is_none());
-    }
+        tracker.remove("room2@muc");
+        assert_eq!(tracker.active_count(), 0);
 
-    #[test]
-    fn test_tracker_clear() {
-        let mut tracker = ActivityTracker::new();
-        tracker.record_activity("a@muc", test_time());
-        tracker.record_activity("b@muc", test_time());
         tracker.clear();
         assert_eq!(tracker.active_count(), 0);
     }
 
     #[test]
-    fn test_build_and_parse_notifications() {
-        let ra1 = RoomActivity::new("room1@muc").with_last_activity(test_time());
-        let ra2 = RoomActivity::new("room2@muc").with_activity_now();
-
-        let elem = build_activity_notification(&[&ra1, &ra2]);
-        assert_eq!(elem.name(), "activity");
-        assert_eq!(elem.ns(), NS_MUC_ACTIVITY);
-
-        let parsed = parse_activity_notifications(&elem);
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].room_jid, "room1@muc");
-        assert!(parsed[0].has_new_messages);
-        assert_eq!(parsed[1].room_jid, "room2@muc");
+    fn test_build_message_activity_field() {
+        let field = build_message_activity_field(12.5);
+        assert_eq!(field.name(), "field");
+        assert_eq!(field.ns(), NS_DATA_FORMS);
+        assert_eq!(field.attr("var"), Some(FIELD_MESSAGE_ACTIVITY));
+        assert_eq!(parse_message_activity_field(&field), Some(12.5));
     }
 
     #[test]
-    fn test_parse_empty() {
-        let elem = Element::builder("activity", NS_MUC_ACTIVITY).build();
-        let parsed = parse_activity_notifications(&elem);
-        assert!(parsed.is_empty());
+    fn test_message_activity_field_rejects_foreign_fields() {
+        let field = Element::builder("field", NS_DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "other")
+            .append(Element::builder("value", NS_DATA_FORMS).append("1").build())
+            .build();
+        assert_eq!(parse_message_activity_field(&field), None);
     }
 
     #[test]
-    fn test_parse_wrong_element() {
-        let elem = Element::builder("other", NS_MUC_ACTIVITY).build();
-        let parsed = parse_activity_notifications(&elem);
-        assert!(parsed.is_empty());
-    }
+    fn test_build_roominfo_activity_form() {
+        let form = build_muc_activity_roominfo_form(3.25);
+        assert_eq!(form.name(), "x");
+        assert_eq!(form.ns(), NS_DATA_FORMS);
+        assert_eq!(form.attr("type"), Some("result"));
 
-    #[test]
-    fn test_build_subscribe() {
-        let elem = build_subscribe_element(&["room1@muc", "room2@muc"]);
-        assert_eq!(elem.children().count(), 2);
-        let first = elem.children().next().expect("first child");
-        assert_eq!(first.name(), "subscribe");
-        assert_eq!(first.attr("jid"), Some("room1@muc"));
+        let field = form
+            .children()
+            .find(|child| child.attr("var") == Some(FIELD_MESSAGE_ACTIVITY))
+            .expect("message activity field");
+        assert_eq!(
+            field
+                .get_child("value", NS_DATA_FORMS)
+                .map(|value| value.text()),
+            Some("3.25".to_owned())
+        );
     }
 }

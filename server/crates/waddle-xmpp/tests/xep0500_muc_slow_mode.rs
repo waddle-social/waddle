@@ -5,32 +5,26 @@
 //! enforcement rules (first message allowed, cooldown rate-limits,
 //! moderator exemption, per-occupant isolation, leave/clear resets).
 //!
-//! Known spec divergence (reported, not pinned as conformant):
-//! xep-0500.xml names the room-config field
-//! `muc#roomconfig_slow_mode_duration` (and the disco surface
-//! `muc#roominfo_slow_mode_duration`), whereas this module registers
-//! `muc#roomconfig_slow_mode_interval`. The tests below pin the
-//! module's actual constant; renaming to the spec field is production
-//! work outside this suite's scope.
-
 use std::time::Duration;
+use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0500::{
-    parse_slow_mode_interval, SlowModeCheck, SlowModeConfig, SlowModeTracker,
-    FIELD_SLOW_MODE_INTERVAL, SLOW_MODE_DISABLED,
+    build_muc_slow_mode_roominfo_form, build_roominfo_slow_mode_duration_field,
+    parse_slow_mode_duration, SlowModeCheck, SlowModeConfig, SlowModeTracker,
+    FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION, SLOW_MODE_DISABLED,
 };
 
 // ── Config field + value parsing ─────────────────────────────────────
 
 #[test]
 fn xep0500_field_constant_is_a_muc_roomconfig_field() {
-    // See the module-level divergence note: the exact suffix differs
-    // from xep-0500.xml (`_duration`), but the field must at minimum
-    // stay in the `muc#roomconfig_` registry namespace so it rides
-    // the XEP-0045 configuration form.
-    assert!(FIELD_SLOW_MODE_INTERVAL.starts_with("muc#roomconfig_"));
+    assert!(FIELD_SLOW_MODE_DURATION.starts_with("muc#roomconfig_"));
     assert_eq!(
-        FIELD_SLOW_MODE_INTERVAL,
-        "muc#roomconfig_slow_mode_interval"
+        FIELD_SLOW_MODE_DURATION,
+        "muc#roomconfig_slow_mode_duration"
+    );
+    assert_eq!(
+        FIELD_ROOMINFO_SLOW_MODE_DURATION,
+        "muc#roominfo_slow_mode_duration"
     );
 }
 
@@ -46,19 +40,19 @@ fn xep0500_zero_means_disabled() {
 }
 
 #[test]
-fn xep0500_parse_interval_accepts_positive_integers_only() {
-    assert_eq!(parse_slow_mode_interval("20"), 20);
-    assert_eq!(parse_slow_mode_interval(" 60 "), 60, "whitespace trimmed");
-    assert_eq!(parse_slow_mode_interval("0"), 0);
+fn xep0500_parse_duration_accepts_positive_integers_only() {
+    assert_eq!(parse_slow_mode_duration("20"), 20);
+    assert_eq!(parse_slow_mode_duration(" 60 "), 60, "whitespace trimmed");
+    assert_eq!(parse_slow_mode_duration("0"), 0);
 }
 
 #[test]
-fn xep0500_parse_interval_degrades_malformed_values_to_disabled() {
+fn xep0500_parse_duration_degrades_malformed_values_to_disabled() {
     // A malformed form value must fail safe (slow mode off), never
     // panic or produce a bogus interval.
     for raw in ["", "abc", "-5", "1.5", "10s", "99999999999999999999999"] {
         assert_eq!(
-            parse_slow_mode_interval(raw),
+            parse_slow_mode_duration(raw),
             SLOW_MODE_DISABLED,
             "`{raw}` must parse to disabled"
         );
@@ -68,6 +62,38 @@ fn xep0500_parse_interval_degrades_malformed_values_to_disabled() {
 #[test]
 fn xep0500_config_interval_is_seconds() {
     assert_eq!(SlowModeConfig::new(30).interval(), Duration::from_secs(30));
+}
+
+#[test]
+fn xep0500_roominfo_field_uses_spec_var() {
+    let field = build_roominfo_slow_mode_duration_field(20);
+    assert_eq!(field.name(), "field");
+    assert_eq!(field.ns(), NS_DATA_FORMS);
+    assert_eq!(field.attr("var"), Some(FIELD_ROOMINFO_SLOW_MODE_DURATION));
+    assert_eq!(
+        field
+            .get_child("value", NS_DATA_FORMS)
+            .map(|value| value.text()),
+        Some("20".to_owned())
+    );
+}
+
+#[test]
+fn xep0500_roominfo_form_carries_duration_field() {
+    let form = build_muc_slow_mode_roominfo_form(0);
+    assert_eq!(form.name(), "x");
+    assert_eq!(form.ns(), NS_DATA_FORMS);
+    assert_eq!(form.attr("type"), Some("result"));
+    let field = form
+        .children()
+        .find(|child| child.attr("var") == Some(FIELD_ROOMINFO_SLOW_MODE_DURATION))
+        .expect("slow mode roominfo field");
+    assert_eq!(
+        field
+            .get_child("value", NS_DATA_FORMS)
+            .map(|value| value.text()),
+        Some("0".to_owned())
+    );
 }
 
 // ── Check-outcome semantics ──────────────────────────────────────────

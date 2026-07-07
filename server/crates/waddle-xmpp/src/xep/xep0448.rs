@@ -227,31 +227,84 @@ pub fn is_encrypted_file_element(elem: &Element) -> bool {
     elem.is("encrypted", NS_ESFS)
 }
 
-/// Attach an `<encrypted/>` envelope to a message payload.
+/// Attach an `<encrypted/>` envelope inside a XEP-0447
+/// `<file-sharing><sources/>` payload.
 pub fn set_encrypted_file(
     msg: &mut Message,
     enc: &EncryptedFile,
 ) -> Result<(), EncryptedFileError> {
-    msg.payloads.push(build_encrypted_element(enc)?);
-    Ok(())
+    let encrypted = build_encrypted_element(enc)?;
+    msg.payloads
+        .retain(|payload| !is_encrypted_file_element(payload));
+
+    if let Some(file_sharing) = msg
+        .payloads
+        .iter_mut()
+        .find(|payload| payload.is("file-sharing", NS_SFS))
+    {
+        if let Some(sources) = file_sharing.get_child_mut("sources", NS_SFS) {
+            sources.remove_child("encrypted", NS_ESFS);
+            sources.append_child(encrypted);
+        } else {
+            let mut sources = Element::builder("sources", NS_SFS).build();
+            sources.append_child(encrypted);
+            file_sharing.append_child(sources);
+        }
+        return Ok(());
+    }
+
+    Err(EncryptedFileError::MissingChild("file-sharing"))
 }
 
-/// Extract the first `<encrypted/>` element from a message payload.
+/// Extract the first `<encrypted/>` element from a XEP-0447 source list.
 pub fn extract_encrypted_file(msg: &Message) -> Option<Result<EncryptedFile, EncryptedFileError>> {
     msg.payloads
         .iter()
-        .find(|p| is_encrypted_file_element(p))
+        .filter(|payload| payload.is("file-sharing", NS_SFS))
+        .filter_map(|file_sharing| file_sharing.get_child("sources", NS_SFS))
+        .flat_map(Element::children)
+        .find(|child| is_encrypted_file_element(child))
         .map(parse_encrypted_element)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::xep0446::NS_FILE_METADATA;
     use super::*;
 
     fn sample() -> EncryptedFile {
         EncryptedFile::new(Cipher::Aes256GcmNoPadding, "a2V5", "aXY=")
             .with_hash("sha-256", "aGFzaA==")
             .with_source("https://files.example.com/blob.enc")
+    }
+
+    fn message_with_file_sharing(to: jid::Jid) -> Message {
+        let mut msg = Message::new(Some(to));
+        let file = Element::builder("file", NS_FILE_METADATA)
+            .append(
+                Element::builder("name", NS_FILE_METADATA)
+                    .append("plain.bin")
+                    .build(),
+            )
+            .append(
+                Element::builder("size", NS_FILE_METADATA)
+                    .append("123")
+                    .build(),
+            )
+            .append(
+                Element::builder("hash", NS_HASHES)
+                    .attr(minidom::rxml::xml_ncname!("algo").to_owned(), "sha-256")
+                    .append("cGxhaW4=")
+                    .build(),
+            )
+            .build();
+        msg.payloads.push(
+            Element::builder("file-sharing", NS_SFS)
+                .append(file)
+                .append(Element::builder("sources", NS_SFS).build())
+                .build(),
+        );
+        msg
     }
 
     #[test]
@@ -306,9 +359,9 @@ mod tests {
     #[test]
     fn test_set_and_extract_on_message() {
         use jid::BareJid;
-        let mut msg = Message::new(Some(jid::Jid::from(
+        let mut msg = message_with_file_sharing(jid::Jid::from(
             "bob@example.com".parse::<BareJid>().unwrap(),
-        )));
+        ));
         let enc = sample();
         set_encrypted_file(&mut msg, &enc).unwrap();
         let extracted = extract_encrypted_file(&msg).unwrap().unwrap();

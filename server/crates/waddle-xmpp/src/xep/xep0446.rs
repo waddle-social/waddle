@@ -13,6 +13,7 @@
 //!   <size>12345</size>
 //!   <width>800</width>
 //!   <height>600</height>
+//!   <length>63000</length>
 //!   <desc>A sunset photo</desc>
 //! </file>
 //! ```
@@ -25,6 +26,7 @@
 //! - Provide file descriptions for accessibility
 
 use minidom::Element;
+use std::convert::TryFrom;
 use thiserror::Error;
 use xmpp_parsers::message::Message;
 
@@ -35,7 +37,7 @@ pub const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 #[derive(Debug, Error)]
 pub enum FileMetadataError {
     /// Invalid size value.
-    #[error("invalid file size: {0}")]
+    #[error("invalid file metadata size: {0}")]
     InvalidSize(String),
 }
 
@@ -54,8 +56,8 @@ pub struct FileMetadata {
     pub height: Option<u32>,
     /// Human-readable description.
     pub desc: Option<String>,
-    /// Duration in seconds (for audio/video).
-    pub duration: Option<u64>,
+    /// Audio/video length in milliseconds.
+    pub length_ms: Option<u64>,
 }
 
 impl FileMetadata {
@@ -68,7 +70,7 @@ impl FileMetadata {
             width: None,
             height: None,
             desc: None,
-            duration: None,
+            length_ms: None,
         }
     }
 
@@ -103,9 +105,9 @@ impl FileMetadata {
         self
     }
 
-    /// Set the duration in seconds.
-    pub fn with_duration(mut self, duration: u64) -> Self {
-        self.duration = Some(duration);
+    /// Set the audio/video length in milliseconds.
+    pub fn with_length_ms(mut self, length_ms: u64) -> Self {
+        self.length_ms = Some(length_ms);
         self
     }
 
@@ -188,11 +190,11 @@ pub fn extract_file_metadata_from_message(msg: &Message) -> Option<FileMetadata>
     msg.payloads
         .iter()
         .find(|e| is_file_metadata_element(e))
-        .map(parse_file_metadata_element)
+        .and_then(|elem| parse_file_metadata_element(elem).ok())
 }
 
 /// Parse a `<file/>` element into FileMetadata.
-pub fn parse_file_metadata_element(elem: &Element) -> FileMetadata {
+pub fn parse_file_metadata_element(elem: &Element) -> Result<FileMetadata, FileMetadataError> {
     let text_child = |name: &str| -> Option<String> {
         elem.children()
             .find(|c| c.name() == name && c.ns() == NS_FILE_METADATA)
@@ -201,16 +203,24 @@ pub fn parse_file_metadata_element(elem: &Element) -> FileMetadata {
     };
 
     let num_child = |name: &str| -> Option<u64> { text_child(name).and_then(|t| t.parse().ok()) };
+    let dimension_child = |name: &str| -> Result<Option<u32>, FileMetadataError> {
+        match num_child(name) {
+            Some(value) => u32::try_from(value)
+                .map(Some)
+                .map_err(|_| FileMetadataError::InvalidSize(format!("{name}={value}"))),
+            None => Ok(None),
+        }
+    };
 
-    FileMetadata {
+    Ok(FileMetadata {
         media_type: text_child("media-type"),
         name: text_child("name"),
         size: num_child("size"),
-        width: num_child("width").map(|v| v as u32),
-        height: num_child("height").map(|v| v as u32),
+        width: dimension_child("width")?,
+        height: dimension_child("height")?,
         desc: text_child("desc"),
-        duration: num_child("duration"),
-    }
+        length_ms: num_child("length"),
+    })
 }
 
 // ── Building ─────────────────────────────────────────────────────────
@@ -243,8 +253,8 @@ pub fn build_file_metadata_element(meta: &FileMetadata) -> Element {
     if let Some(ref desc) = meta.desc {
         append_text(&mut file, "desc", desc);
     }
-    if let Some(duration) = meta.duration {
-        append_text(&mut file, "duration", &duration.to_string());
+    if let Some(length_ms) = meta.length_ms {
+        append_text(&mut file, "length", &length_ms.to_string());
     }
 
     file
@@ -337,7 +347,7 @@ mod tests {
         assert_eq!(elem.name(), "file");
         assert_eq!(elem.ns(), NS_FILE_METADATA);
 
-        let parsed = parse_file_metadata_element(&elem);
+        let parsed = parse_file_metadata_element(&elem).expect("metadata parses");
         assert_eq!(parsed.media_type.as_deref(), Some("application/pdf"));
         assert_eq!(parsed.name.as_deref(), Some("report.pdf"));
         assert_eq!(parsed.size, Some(1048576));
@@ -350,13 +360,13 @@ mod tests {
             .with_media_type("video/mp4")
             .with_name("clip.mp4")
             .with_dimensions(1920, 1080)
-            .with_duration(120);
+            .with_length_ms(120_000);
 
         let elem = build_file_metadata_element(&meta);
-        let parsed = parse_file_metadata_element(&elem);
+        let parsed = parse_file_metadata_element(&elem).expect("metadata parses");
         assert_eq!(parsed.width, Some(1920));
         assert_eq!(parsed.height, Some(1080));
-        assert_eq!(parsed.duration, Some(120));
+        assert_eq!(parsed.length_ms, Some(120_000));
         assert!(parsed.is_video());
     }
 

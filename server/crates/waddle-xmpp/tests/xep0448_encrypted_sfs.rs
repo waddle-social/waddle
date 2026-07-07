@@ -3,14 +3,6 @@
 //! Note: `server/TODO.md` previously claimed this suite existed; it did
 //! not. This file is the actual dedicated coverage.
 //!
-//! Known spec divergence (reported in issue #1150, not pinned as
-//! conformant): xep-0448.xml places `<encrypted/>` only inside the
-//! `<sources/>` of a XEP-0447 `<file-sharing/>`; `set_encrypted_file`
-//! attaches it as a direct `<message/>` child instead. The
-//! element-internal shape (cipher URIs, key/iv/hash/inner sources) is
-//! conformant; the placement tests pin actual behaviour pending
-//! reconciliation.
-//!
 //! Pins:
 //! - the registrar namespace `urn:xmpp:esfs:0` and the two cipher URIs
 //!   Waddle implements (`aes-128/256-gcm-nopadding`),
@@ -23,6 +15,7 @@
 
 use minidom::Element;
 use waddle_xmpp::xep::xep0300::NS_HASHES;
+use waddle_xmpp::xep::xep0446::NS_FILE_METADATA;
 use waddle_xmpp::xep::xep0447::NS_SFS;
 use waddle_xmpp::xep::xep0448::{
     build_encrypted_element, extract_encrypted_file, is_encrypted_file_element,
@@ -35,6 +28,35 @@ fn sample() -> EncryptedFile {
     EncryptedFile::new(Cipher::Aes256GcmNoPadding, "a2V5", "aXY=")
         .with_hash("sha-256", "aGFzaA==")
         .with_source("https://files.example.com/blob.enc")
+}
+
+fn message_with_file_sharing() -> Message {
+    let mut msg = Message::new(None::<jid::Jid>);
+    let file = Element::builder("file", NS_FILE_METADATA)
+        .append(
+            Element::builder("name", NS_FILE_METADATA)
+                .append("plain.jpg")
+                .build(),
+        )
+        .append(
+            Element::builder("size", NS_FILE_METADATA)
+                .append("1234")
+                .build(),
+        )
+        .append(
+            Element::builder("hash", NS_HASHES)
+                .attr(minidom::rxml::xml_ncname!("algo").to_owned(), "sha-256")
+                .append("cGxhaW4taGFzaA==")
+                .build(),
+        )
+        .build();
+    msg.payloads.push(
+        Element::builder("file-sharing", NS_SFS)
+            .append(file)
+            .append(Element::builder("sources", NS_SFS).build())
+            .build(),
+    );
+    msg
 }
 
 // ── Namespace + cipher URI exactness ─────────────────────────────────
@@ -248,14 +270,48 @@ fn xep0448_build_refuses_envelope_without_sources() {
 
 #[test]
 fn xep0448_message_set_and_extract_round_trip() {
-    let mut msg = Message::new(None::<jid::Jid>);
+    let mut msg = message_with_file_sharing();
     let enc = sample();
     set_encrypted_file(&mut msg, &enc).expect("has sources");
+
+    assert!(
+        msg.payloads
+            .iter()
+            .all(|payload| !is_encrypted_file_element(payload)),
+        "XEP-0448 encrypted must not be a direct message child"
+    );
+    let file_sharing = msg
+        .payloads
+        .iter()
+        .find(|payload| payload.is("file-sharing", NS_SFS))
+        .expect("file-sharing payload");
+    let sources = file_sharing
+        .get_child("sources", NS_SFS)
+        .expect("file-sharing sources");
+    assert!(
+        sources.children().any(is_encrypted_file_element),
+        "encrypted is nested inside file-sharing sources"
+    );
 
     let extracted = extract_encrypted_file(&msg)
         .expect("payload present")
         .expect("payload parses");
     assert_eq!(extracted, enc);
+}
+
+#[test]
+fn xep0448_set_refuses_to_fabricate_file_sharing_payload() {
+    let mut msg = Message::new(None::<jid::Jid>);
+    let enc = sample();
+
+    assert_eq!(
+        set_encrypted_file(&mut msg, &enc),
+        Err(EncryptedFileError::MissingChild("file-sharing"))
+    );
+    assert!(
+        msg.payloads.is_empty(),
+        "failed set must not create placeholder file-sharing"
+    );
 }
 
 #[test]

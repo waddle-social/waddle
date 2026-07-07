@@ -1,13 +1,13 @@
 //! XEP-0500: MUC Slow Mode
 //!
 //! Provides rate limiting for MUC rooms. When enabled, occupants must
-//! wait a configurable interval between messages. Moderators are exempt.
+//! wait a configurable duration between messages. Moderators are exempt.
 //!
 //! ## Configuration
 //!
 //! Set via room configuration form (XEP-0045):
 //! ```xml
-//! <field var='muc#roomconfig_slow_mode_interval' type='text-single'>
+//! <field var='muc#roomconfig_slow_mode_duration' type='text-single'>
 //!   <value>30</value>
 //! </field>
 //! ```
@@ -29,15 +29,24 @@
 //!
 //! ## Client Behavior
 //!
-//! - Parse the slow mode interval from room config
+//! - Parse the slow mode duration from room config
 //! - Show a countdown timer after sending a message
 //! - Disable the send button during cooldown
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Room configuration field for slow mode interval.
-pub const FIELD_SLOW_MODE_INTERVAL: &str = "muc#roomconfig_slow_mode_interval";
+use minidom::Element;
+
+use super::xep0004::{DataForm, Field, FormType, ToElement, NS_DATA_FORMS};
+
+/// Room configuration field for slow mode duration.
+pub const FIELD_SLOW_MODE_DURATION: &str = "muc#roomconfig_slow_mode_duration";
+
+/// MUC roominfo disco field for slow mode duration.
+pub const FIELD_ROOMINFO_SLOW_MODE_DURATION: &str = "muc#roominfo_slow_mode_duration";
+
+const FORM_TYPE_MUC_ROOMINFO: &str = "http://jabber.org/protocol/muc#roominfo";
 
 /// Default: slow mode disabled (0 seconds).
 pub const SLOW_MODE_DISABLED: u64 = 0;
@@ -185,9 +194,35 @@ impl SlowModeTracker {
     }
 }
 
-/// Parse slow mode interval from a room config form field value.
-pub fn parse_slow_mode_interval(value: &str) -> u64 {
+/// Parse slow mode duration from a room config or disco field value.
+pub fn parse_slow_mode_duration(value: &str) -> u64 {
     value.trim().parse().unwrap_or(SLOW_MODE_DISABLED)
+}
+
+/// Build the XEP-0500 roominfo field for disco#info extension forms.
+pub fn build_roominfo_slow_mode_duration_field(duration_secs: u64) -> Element {
+    Element::builder("field", NS_DATA_FORMS)
+        .attr(
+            minidom::rxml::xml_ncname!("var").to_owned(),
+            FIELD_ROOMINFO_SLOW_MODE_DURATION,
+        )
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append(duration_secs.to_string())
+                .build(),
+        )
+        .build()
+}
+
+/// Build a MUC roominfo data-form extension containing the slow mode duration.
+pub fn build_muc_slow_mode_roominfo_form(duration_secs: u64) -> Element {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(FORM_TYPE_MUC_ROOMINFO))
+        .add_field(Field::text_single(
+            FIELD_ROOMINFO_SLOW_MODE_DURATION,
+            duration_secs.to_string(),
+        ))
+        .to_element()
 }
 
 #[cfg(test)]
@@ -308,11 +343,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_slow_mode_interval() {
-        assert_eq!(parse_slow_mode_interval("30"), 30);
-        assert_eq!(parse_slow_mode_interval("0"), 0);
-        assert_eq!(parse_slow_mode_interval(""), 0);
-        assert_eq!(parse_slow_mode_interval("abc"), 0);
-        assert_eq!(parse_slow_mode_interval(" 60 "), 60);
+    fn test_parse_slow_mode_duration() {
+        assert_eq!(parse_slow_mode_duration("30"), 30);
+        assert_eq!(parse_slow_mode_duration("0"), 0);
+        assert_eq!(parse_slow_mode_duration(""), 0);
+        assert_eq!(parse_slow_mode_duration("abc"), 0);
+        assert_eq!(parse_slow_mode_duration(" 60 "), 60);
+    }
+
+    #[test]
+    fn test_build_roominfo_slow_mode_duration_field() {
+        let field = build_roominfo_slow_mode_duration_field(20);
+        assert_eq!(field.name(), "field");
+        assert_eq!(field.ns(), NS_DATA_FORMS);
+        assert_eq!(field.attr("var"), Some(FIELD_ROOMINFO_SLOW_MODE_DURATION));
+        assert_eq!(
+            field.get_child("value", NS_DATA_FORMS).map(|v| v.text()),
+            Some("20".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_build_muc_slow_mode_roominfo_form() {
+        let form = build_muc_slow_mode_roominfo_form(20);
+        assert_eq!(form.name(), "x");
+        assert_eq!(form.ns(), NS_DATA_FORMS);
+        assert_eq!(form.attr("type"), Some("result"));
+        assert!(form
+            .children()
+            .any(|child| child.attr("var") == Some(FIELD_ROOMINFO_SLOW_MODE_DURATION)));
     }
 }

@@ -192,7 +192,7 @@ pub fn parse_file_sharing_element(elem: &Element) -> Option<FileSharing> {
     let file_elem = elem
         .children()
         .find(|c| xep0446::is_file_metadata_element(c))?;
-    let metadata = xep0446::parse_file_metadata_element(file_elem);
+    let metadata = xep0446::parse_file_metadata_element(file_elem).ok()?;
 
     // Parse sources
     let mut sources = Vec::new();

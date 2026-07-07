@@ -470,17 +470,6 @@ pub fn build_outbound_message(
     }
     for file in &options.shared_files {
         builder = builder.append(build_file_sharing_element(file));
-        // XEP-0448: when the bytes at `file.url` are ciphertext, emit a
-        // sibling `<encrypted/>` envelope carrying the cipher/key/iv/hash
-        // metadata recipients need to decrypt. The `<file-sharing/>` element
-        // continues to advertise the plaintext metadata (filename, size,
-        // media-type) so peers without encryption support still see the
-        // attachment offer.
-        if let Some(encrypted) = file.encrypted.as_ref() {
-            if let Some(encrypted_el) = xep_encrypted_file::build_encrypted_element(encrypted) {
-                builder = builder.append(encrypted_el);
-            }
-        }
     }
     if let Some(token) = options.link_preview_token.as_ref() {
         builder = builder.append(
@@ -560,6 +549,11 @@ pub fn build_file_sharing_element(file: &SharedFile) -> Element {
             )
             .build(),
     );
+    if let Some(encrypted) = file.encrypted.as_ref() {
+        if let Some(encrypted_el) = xep_encrypted_file::build_encrypted_element(encrypted) {
+            sources.append_child(encrypted_el);
+        }
+    }
     file_sharing.append_child(sources);
     file_sharing
 }

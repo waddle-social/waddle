@@ -4048,14 +4048,17 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
 
     let message_xml = format!(
         "<message xmlns='jabber:client' to='{}' type='chat' id='dm-esfs-1'>\
-                <file-sharing xmlns='urn:xmpp:sfs:0'/>\
-                <encrypted xmlns='urn:xmpp:esfs:0' cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
-                    <key>a2V5</key>\
-                    <iv>aXY=</iv>\
+                <file-sharing xmlns='urn:xmpp:sfs:0'>\
                     <sources xmlns='urn:xmpp:sfs:0'>\
-                        <url-data target='https://files.example.com/secret.enc'/>\
+                        <encrypted xmlns='urn:xmpp:esfs:0' cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
+                            <key>a2V5</key>\
+                            <iv>aXY=</iv>\
+                            <sources xmlns='urn:xmpp:sfs:0'>\
+                                <url-data target='https://files.example.com/secret.enc'/>\
+                            </sources>\
+                        </encrypted>\
                     </sources>\
-                </encrypted>\
+                </file-sharing>\
              </message>",
         bob_jid.to_bare()
     );
