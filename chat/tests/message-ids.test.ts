@@ -34,6 +34,23 @@ describe("message id aliasing", () => {
     expect(findMessageIndexById(messages, null)).toBe(-1);
   });
 
+  test("a later primary-id match wins over earlier alias ambiguity", () => {
+    // Two rows share a reused origin-id alias; a third row's PRIMARY id is
+    // the lookup candidate. The scan must reach the primary match instead
+    // of short-circuiting to the ambiguity sentinel — otherwise a
+    // redelivered copy of "c" (e.g. MAM catch-up after a server restart)
+    // fails to reconcile and appends a duplicate row.
+    const messages: Message[] = [
+      { id: "a", wireIds: ["c"], body: "first-claimer" },
+      { id: "b", wireIds: ["c"], body: "second-claimer" },
+      { id: "c", body: "primary-owner" },
+    ];
+    expect(findMessageIndexById(messages, "c")).toBe(2);
+    expect(findMessageById(messages, "c")?.body).toBe("primary-owner");
+    // Without a primary owner the alias stays ambiguous.
+    expect(findMessageIndexById(messages.slice(0, 2), "c")).toBe(-1);
+  });
+
   test("findMessageIndexById predicate narrows candidates without losing collision safety", () => {
     const messages = [
       { id: "remote-1", wireIds: ["origin"], body: "remote", isSelf: false },

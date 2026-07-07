@@ -83,6 +83,10 @@ export function useNotificationOrchestration(deps: NotificationOrchestrationDeps
   /** Inbound DM surfaced by the connection layer — show a banner/sound
    * unless the user is looking at that conversation right now. */
   function notifyDmActivity(msg: LiveDmMessage): void {
+    // MAM catch-up re-emissions (archive decodes) never notify: the
+    // message may already have been shown live before a reconnect, and
+    // replaying a banner/sound per re-fetched row spams the user.
+    if (msg.createdAtSource === "archive") return;
     showForegroundNotificationForDmActivity(msg, {
       notifySettings,
       notifications,

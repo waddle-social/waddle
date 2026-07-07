@@ -55,6 +55,8 @@ interface ConnectionLifecycleDeps {
   activeRightPanel: Ref<ActiveRightPanel | null>;
   selectedChannelRoomJids: Ref<Record<string, string>>;
   isActiveDirectDmSurface: () => boolean;
+  /** Backoff between inbox-hydrate retries; injectable for tests. */
+  inboxHydrateRetryDelaysMs?: number[];
   presence: ReturnType<typeof usePresenceSync>;
   notificationOrchestration: ReturnType<typeof useNotificationOrchestration>;
   routeSync: ReturnType<typeof useRouteSync>;
@@ -117,9 +119,30 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
   // resources only — a detached session misses them (e.g. cross-device
   // mark-read while detached), so the local unread map can be stale
   // after any resume.
+  // With catch-up re-emissions no longer bumping unread locally, the
+  // inbox hydrate is the sole unread source for messages missed while
+  // disconnected — a single failed IQ on a still-flaky reconnect link
+  // must not leave badges stuck at zero until the next session.
+  const inboxHydrateRetryDelaysMs = deps.inboxHydrateRetryDelaysMs ?? [2_000, 8_000];
+  function hydrateInboxWithRetry(hydrate: () => Promise<boolean>) {
+    // Bound the chain to the session that started it: after a
+    // logout→re-login inside the backoff window the new session runs its
+    // own bootstrap — a stale chain firing into it would supersede that
+    // hydrate and burn its retry budget.
+    const ownerJid = connectionStore.session?.jid ?? null;
+    void (async () => {
+      if (await hydrate()) return;
+      for (const delayMs of inboxHydrateRetryDelaysMs) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if ((connectionStore.session?.jid ?? null) !== ownerJid || !connectionStore.session) return;
+        if (await hydrate()) return;
+      }
+    })();
+  }
+
   function runSessionBootstrap(client: BrowserXmppClient, lifecycle: "fresh" | "resumed") {
-    void dmConversations.hydrateFromInbox();
-    void channelUnread.hydrateFromInbox();
+    hydrateInboxWithRetry(() => dmConversations.hydrateFromInbox());
+    hydrateInboxWithRetry(() => channelUnread.hydrateFromInbox());
     void socialFeed.refresh();
     void stories.refresh();
     void communityEvents.refresh();
