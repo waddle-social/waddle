@@ -705,13 +705,22 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
     .actor_ref;
 
     // Stale resolver-derived Member from before the revocation.
-    actor
+    let seed_revision = snapshot_room(state.as_ref(), &room_jid)
+        .await
+        .admission_revision;
+    let seeded = actor
         .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
             jid: sender_jid.to_bare(),
             affiliation: waddle_xmpp::Affiliation::Member,
+            expected_admission_revision: seed_revision,
         })
         .await
         .expect("seed stale resolver-derived member");
+    assert_eq!(
+        seeded,
+        waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied,
+        "seeding the stale member must apply"
+    );
 
     // No permission tuples exist for bob: the resolver reports None.
     let denied = handle_muc_join(

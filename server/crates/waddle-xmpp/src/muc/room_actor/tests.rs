@@ -36,6 +36,14 @@ async fn spawn_room_actor() -> ActorRef<RoomActor> {
     RoomActor::spawn(RoomActor::new(test_room(), test_secret()))
 }
 
+async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
+    actor
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot")
+        .admission_revision
+}
+
 async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomActor> {
     let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
     config.name = "Test Room".to_string();
@@ -159,7 +167,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("first join should succeed");
@@ -170,7 +178,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("existing session rejoin should bypass full-room rejection");
@@ -887,7 +895,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("first session join");
@@ -897,7 +905,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("same nick sibling session join");
@@ -950,7 +958,7 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("first nick join");
@@ -960,7 +968,7 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
             nick: "alice-phone".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("second nick join");
@@ -999,7 +1007,7 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("open-room inherited member join");
@@ -1036,7 +1044,7 @@ async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none(
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("stale-open join");
@@ -1294,7 +1302,7 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("resolver-derived member join");
@@ -1339,7 +1347,7 @@ async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::CreatorOwner,
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("creator join");
@@ -1355,7 +1363,7 @@ async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
             nick: "bob".to_string(),
             affiliation_grant: JoinAffiliationGrant::CreatorOwner,
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("racing second creator-join");
@@ -1384,7 +1392,7 @@ async fn same_full_jid_joining_under_second_nick_is_rejected() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("first join");
@@ -1395,7 +1403,7 @@ async fn same_full_jid_joining_under_second_nick_is_rejected() {
             nick: "alice-again".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await;
     assert!(
@@ -1485,7 +1493,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("rejoin");
@@ -1511,7 +1519,7 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("join");
@@ -2242,7 +2250,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("desktop join");
@@ -2252,7 +2260,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("mobile join recognized as same-bare multi-session");
@@ -2291,7 +2299,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("desktop join");
@@ -2301,7 +2309,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("mobile join");
@@ -2345,7 +2353,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             nick: "bob".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("bob join");
@@ -2389,7 +2397,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("desktop join");
@@ -2399,7 +2407,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("mobile join");
@@ -2419,7 +2427,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             nick: "bob".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("bob join");
@@ -2586,7 +2594,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
             nick: "carol".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("carol join");
@@ -2659,7 +2667,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
             nick: "bob".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("bob join");
@@ -2712,7 +2720,7 @@ async fn leaving_occupant_clears_muji_state() {
             nick: "carol".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("carol join");
@@ -2742,7 +2750,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("desktop join");
@@ -2752,7 +2760,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("mobile join recognized as same-bare multi-session");
@@ -2801,7 +2809,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             nick: "carol".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("carol join");
@@ -2833,7 +2841,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("desktop join");
@@ -2843,7 +2851,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("mobile join");
@@ -2873,7 +2881,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             nick: "carol".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("carol join");
@@ -2901,7 +2909,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("desktop join");
@@ -2911,7 +2919,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("mobile join");
@@ -2955,7 +2963,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             nick: "carol".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("carol join");
@@ -2985,7 +2993,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("join alice desktop");
@@ -2995,7 +3003,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("join alice mobile");
@@ -3042,7 +3050,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("join alice desktop");
@@ -3052,7 +3060,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("join alice mobile");
@@ -3095,7 +3103,7 @@ async fn non_removing_admin_changes_report_no_moderation_removals() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("join alice");
@@ -3141,7 +3149,7 @@ async fn admin_set_error_after_ban_item_must_not_partially_apply() {
             nick: "victim".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("victim joins");
@@ -3216,7 +3224,7 @@ async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
             nick: "victim".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("victim joins");
@@ -3327,7 +3335,7 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("resolver-derived member joins the members-only room");
@@ -3445,7 +3453,7 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
-            admission_revision: 0,
+            admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("resolver-derived member joins the members-only room");
@@ -3456,13 +3464,19 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
         .await
         .expect("leave");
 
-    actor
+    let outcome = actor
         .ask(SyncResolverAffiliation {
             jid: alice_bare.clone(),
             affiliation: Affiliation::None,
+            expected_admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("sync resolver affiliation");
+    assert_eq!(
+        outcome,
+        ResolverAffiliationSyncOutcome::Applied,
+        "a sync at the current admission revision must apply"
+    );
 
     let affiliation = actor
         .ask(GetAffiliation { jid: alice_bare })
@@ -3493,6 +3507,7 @@ async fn sync_resolver_affiliation_does_not_touch_explicit_grants() {
         .ask(SyncResolverAffiliation {
             jid: banned.clone(),
             affiliation: Affiliation::None,
+            expected_admission_revision: current_admission_revision(&actor).await,
         })
         .await
         .expect("sync resolver affiliation");
@@ -3505,6 +3520,127 @@ async fn sync_resolver_affiliation_does_not_touch_explicit_grants() {
         affiliation,
         Affiliation::Outcast,
         "the explicit ban must survive the resolver-derived sync"
+    );
+}
+
+/// Admission-revision freshness guard: join A is rejected at revision
+/// R (resolver None), the user is re-granted, join B succeeds at R and
+/// re-derives Member (bumping the admission revision), THEN A's
+/// delayed `SyncResolverAffiliation { None, expected: R }` lands. The
+/// stale sync must be refused — otherwise it clears the Member of a
+/// live occupant admitted by join B.
+#[tokio::test]
+async fn stale_sync_resolver_affiliation_does_not_clear_readmitted_member() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let alice_bare = alice.to_bare();
+
+    // The revision both join A's rejection decision and join B's
+    // admission were computed against.
+    let stale_revision = current_admission_revision(&actor).await;
+
+    // Join B succeeds and re-derives Member — an admission-relevant
+    // affiliation change, so the admission revision moves on.
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: stale_revision,
+        })
+        .await
+        .expect("re-granted member joins the members-only room");
+    assert_ne!(
+        current_admission_revision(&actor).await,
+        stale_revision,
+        "a join that re-derives the resolver affiliation must bump the admission revision"
+    );
+
+    // Join A's delayed rejection sync lands with the stale revision.
+    let outcome = actor
+        .ask(SyncResolverAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::None,
+            expected_admission_revision: stale_revision,
+        })
+        .await
+        .expect("ask");
+    assert_eq!(
+        outcome,
+        ResolverAffiliationSyncOutcome::StaleAdmissionRevision,
+        "the stale sync must be refused"
+    );
+
+    let affiliation = actor
+        .ask(GetAffiliation { jid: alice_bare })
+        .await
+        .expect("affiliation query");
+    assert_eq!(
+        affiliation,
+        Affiliation::Member,
+        "a stale rejection sync must not clear the live occupant's re-derived Member"
+    );
+}
+
+/// A sealed actor (#1108) is pending destruction; a delayed rejection
+/// sync must be refused instead of mutating state the registry already
+/// decided to drop.
+#[tokio::test]
+async fn sync_resolver_affiliation_refuses_sealed_actor() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        persistent: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice: BareJid = "alice@example.com".parse().expect("bare jid");
+    actor
+        .ask(SyncResolverAffiliation {
+            jid: alice.clone(),
+            affiliation: Affiliation::Member,
+            expected_admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("seed resolver-derived member");
+
+    let probe = actor
+        .ask(crate::muc::room_actor::IsDormant)
+        .await
+        .expect("dormancy probe");
+    let sealed = actor
+        .ask(crate::muc::room_actor::SealIfInactive {
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: crate::muc::room_actor::SealGuard::EmptyNonPersistent,
+        })
+        .await
+        .expect("seal");
+    assert!(sealed, "empty non-persistent room must seal");
+
+    let outcome = actor
+        .ask(SyncResolverAffiliation {
+            jid: alice.clone(),
+            affiliation: Affiliation::None,
+            expected_admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("ask");
+    assert_eq!(
+        outcome,
+        ResolverAffiliationSyncOutcome::RoomSealed,
+        "a sealed actor must refuse the sync"
+    );
+    let affiliation = actor
+        .ask(GetAffiliation { jid: alice })
+        .await
+        .expect("affiliation query");
+    assert_eq!(
+        affiliation,
+        Affiliation::Member,
+        "the refused sync must leave the sealed actor's state untouched"
     );
 }
 

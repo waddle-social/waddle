@@ -66,8 +66,20 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 // `set_with_provenance` keeps this safe — it refuses
                 // resolver writes over explicit grants (bans survive)
                 // and removes the map entry on a None write.
-                self.room
-                    .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation);
+                //
+                // An applied change bumps the admission revision (like
+                // `ChangeAffiliation`): a delayed
+                // `SyncResolverAffiliation` from an earlier rejected
+                // join of this user carries the pre-change revision and
+                // must be refused, or it would clear the affiliation
+                // this join just re-derived.
+                if self
+                    .room
+                    .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation)
+                    .is_some()
+                {
+                    self.admission_revision = self.admission_revision.saturating_add(1);
+                }
             }
             JoinAffiliationGrant::CreatorOwner => {
                 // #1134 defense-in-depth on top of the registry's
@@ -555,18 +567,52 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
 pub struct SyncResolverAffiliation {
     pub jid: BareJid,
     pub affiliation: Affiliation,
+    /// The `admission_revision` the caller's rejection decision was
+    /// computed against (the room snapshot of that same join attempt).
+    /// The sync applies only while the room is still at that revision:
+    /// any interleaved admission/affiliation change — including a later
+    /// successful join of the re-granted user — invalidates this
+    /// delayed sync instead of letting it clear a live occupant's
+    /// freshly re-derived affiliation.
+    pub expected_admission_revision: u64,
+}
+
+/// Typed outcome of a [`SyncResolverAffiliation`] request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum ResolverAffiliationSyncOutcome {
+    /// The resolver verdict was applied (or was already in effect).
+    Applied,
+    /// The room's admission state changed since the caller snapshotted
+    /// it; the stale sync was refused.
+    StaleAdmissionRevision,
+    /// The actor is sealed pending destruction (#1108); nothing to sync.
+    RoomSealed,
 }
 
 impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
-    type Reply = Result<(), Infallible>;
+    type Reply = ResolverAffiliationSyncOutcome;
 
     async fn handle(
         &mut self,
         msg: SyncResolverAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room
-            .update_affiliation_from_resolver(msg.jid, msg.affiliation);
-        Ok(())
+        if self.sealed {
+            return ResolverAffiliationSyncOutcome::RoomSealed;
+        }
+        if msg.expected_admission_revision != self.admission_revision {
+            return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
+        }
+        // An applied change is itself an admission-relevant affiliation
+        // change, so it bumps the revision like `ChangeAffiliation` —
+        // any join admitted against the pre-sync snapshot retries.
+        if self
+            .room
+            .update_affiliation_from_resolver(msg.jid, msg.affiliation)
+            .is_some()
+        {
+            self.admission_revision = self.admission_revision.saturating_add(1);
+        }
+        ResolverAffiliationSyncOutcome::Applied
     }
 }

@@ -47,24 +47,47 @@ pub async fn handle_muc_join(
 /// repair, the authoritative admission decision was already made by
 /// the resolver. The actor-side handler is provenance-aware
 /// (`update_affiliation_from_resolver`), so explicit grants survive.
+/// The sync shares the `admission_revision` the rejection decision was
+/// computed against; the actor refuses it if any admission/affiliation
+/// change (e.g. the re-granted user's successful join) landed in
+/// between, so a delayed sync can never clear a live occupant's fresh
+/// affiliation.
 async fn sync_resolver_affiliation_on_rejection(
     existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
     room_jid: &BareJid,
     jid: BareJid,
     affiliation: Affiliation,
+    expected_admission_revision: u64,
 ) {
     let Some(actor) = existing_room_actor else {
         return;
     };
-    if let Err(error) = actor
-        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation { jid, affiliation })
+    match actor
+        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
+            jid,
+            affiliation,
+            expected_admission_revision,
+        })
         .await
     {
-        warn!(
-            room = %room_jid,
-            error = ?error,
-            "Failed to sync resolver affiliation into live room actor on rejected join"
-        );
+        Ok(waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied) => {}
+        Ok(outcome) => {
+            // Best-effort staleness repair only: a refused sync means the
+            // room's admission state already moved on (or the actor is
+            // sealed) — the newer state wins.
+            debug!(
+                room = %room_jid,
+                outcome = ?outcome,
+                "Skipped resolver affiliation sync on rejected join"
+            );
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "Failed to sync resolver affiliation into live room actor on rejected join"
+            );
+        }
     }
 }
 
@@ -196,6 +219,7 @@ async fn handle_muc_join_unlocked(
                         // the same key.
                         sender_jid.to_bare(),
                         Affiliation::Outcast,
+                        admission_revision,
                     )
                     .await;
                     return vec![build_muc_presence_error_xml(
@@ -225,6 +249,7 @@ async fn handle_muc_join_unlocked(
                             // `sender_jid.to_bare()`.
                             sender_jid.to_bare(),
                             Affiliation::None,
+                            admission_revision,
                         )
                         .await;
                         return vec![build_muc_presence_error_xml(
