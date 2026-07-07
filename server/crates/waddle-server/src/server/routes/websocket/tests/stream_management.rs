@@ -1714,12 +1714,12 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
     let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
+    let bob_owner = state
         .deps
         .protocol
         .connection_registry
         .register(bob_jid.clone(), bob_tx);
-    state
+    let alice_owner = state
         .deps
         .protocol
         .connection_registry
@@ -1727,6 +1727,10 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
 
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+    // #1208: presence registry writes are owner-gated; the fixture
+    // registers out-of-band, so carry the owner token like real
+    // registration does.
+    alice.registry_owner = Some(alice_owner);
     let _ = handle_xmpp_frame(
             r#"<iq xmlns="jabber:client" type="get" id="alice-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
             "example.com",
@@ -1745,6 +1749,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+    bob.registry_owner = Some(bob_owner);
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",

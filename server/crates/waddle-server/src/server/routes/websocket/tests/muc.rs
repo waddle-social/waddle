@@ -3334,6 +3334,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -3346,6 +3347,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         state.as_ref(),
         &alice_phase,
         &None,
+        None,
     )
     .await;
     let recorded = recorder.snapshot();
@@ -3444,6 +3446,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
 
@@ -3456,6 +3459,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3507,6 +3511,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
     // Anchor the call thread in the inbox under the same thread id the
@@ -3558,6 +3563,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3634,6 +3640,7 @@ async fn active_muji_presence_without_sfu_does_not_register_call_thread_anchor()
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3672,6 +3679,7 @@ async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3722,6 +3730,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         state.as_ref(),
         &bob_phase,
         &None,
+        None,
     )
     .await;
 
@@ -3734,6 +3743,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3802,6 +3812,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         state.as_ref(),
         &bob_phase,
         &None,
+        None,
     )
     .await;
     while alice_rx.try_recv().is_ok() {}
@@ -3814,6 +3825,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         state.as_ref(),
         &bob_phase,
         &None,
+        None,
     )
     .await;
 
@@ -3891,6 +3903,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
 
@@ -3902,6 +3915,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3953,6 +3967,7 @@ async fn same_nick_late_join_replays_existing_muji_with_exact_owner() {
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -4030,6 +4045,7 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         state.as_ref(),
         &mobile_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -4125,6 +4141,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4138,6 +4155,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         state.as_ref(),
         &mobile_phase,
         &None,
+        None,
     )
     .await;
 
@@ -4227,6 +4245,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while mobile_rx.try_recv().is_ok() {}
@@ -4321,6 +4340,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4335,6 +4355,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         state.as_ref(),
         &mobile_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}

@@ -849,6 +849,44 @@ fn update_presence_state_if_owner_refuses_stale_owner() {
     assert_eq!(state.priority, 3);
 }
 
+/// Same race for the unavailable path: a superseded connection's late
+/// `<presence type='unavailable'/>` must not clear the replacement's
+/// JID-keyed presence state. The ownership check and the
+/// `presence_states` removal happen inside one owner-gated call.
+#[test]
+fn clear_presence_state_if_owner_refuses_stale_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    let (tx_a, _rx_a) = mpsc::channel(4);
+    let stale_owner = registry.register(jid.clone(), tx_a);
+
+    let (tx_b, _rx_b) = mpsc::channel(4);
+    let live_owner = registry.register(jid.clone(), tx_b);
+    assert!(registry.update_presence_state_if_owner(
+        &jid,
+        &live_owner,
+        Some("dnd".to_string()),
+        Some("busy".to_string()),
+        3,
+        Vec::new(),
+    ));
+
+    // A's stale-owner clear must be refused and leave B's state intact.
+    assert!(
+        !registry.clear_presence_state_if_owner(&jid, &stale_owner),
+        "a stale owner must not clear presence state"
+    );
+    assert!(
+        registry.get_presence_state(&jid).is_some(),
+        "the replacement's presence state must survive the stale-owner clear"
+    );
+
+    // The live owner's clear lands.
+    assert!(registry.clear_presence_state_if_owner(&jid, &live_owner));
+    assert!(registry.get_presence_state(&jid).is_none());
+}
+
 /// Owner-gated presence-state write against an unregistered JID is
 /// refused and writes nothing.
 #[test]

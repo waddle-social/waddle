@@ -53,6 +53,11 @@ pub(super) use subscription::{
     send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
 };
 
+/// `registry_owner` is the connection's registry ownership token
+/// (`WsConnState::registry_owner`); the regular-presence path uses it to
+/// owner-gate its JID-keyed registry writes (issue #1208). `None` means the
+/// connection owns no registry slot (never registered, or its registration
+/// was rolled back) and is treated as a non-owner: those writes are skipped.
 pub async fn handle_presence(
     presence: xmpp_parsers::presence::Presence,
     domain: &str,
@@ -60,6 +65,7 @@ pub async fn handle_presence(
     state: &WebSocketState,
     phase: &ConnectionPhase,
     _authenticated_session: &Option<Session>,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
     handle_presence_impl(
         presence,
@@ -68,6 +74,7 @@ pub async fn handle_presence(
         state,
         phase,
         _authenticated_session,
+        registry_owner,
     )
     .await
 }
@@ -79,6 +86,7 @@ async fn handle_presence_impl(
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: &Option<Session>,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
     strip_client_authored_delay(&mut presence);
     let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
@@ -168,7 +176,8 @@ async fn handle_presence_impl(
             handle_presence_probe(state, from, to, to_full).await;
         }
         Ok(PresenceAction::PresenceUpdate(presence_update)) => {
-            handle_regular_presence_update(state, sender_jid, presence_update).await;
+            handle_regular_presence_update(state, sender_jid, registry_owner, presence_update)
+                .await;
         }
         Err(error) => {
             warn!(error = %error, "Invalid presence stanza");

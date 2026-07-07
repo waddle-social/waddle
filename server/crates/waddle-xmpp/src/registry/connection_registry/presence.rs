@@ -125,6 +125,25 @@ impl ConnectionRegistry {
         self.presence_states.remove(jid);
     }
 
+    /// Owner-gated [`Self::clear_presence_state`]: removes the JID-keyed
+    /// presence state only while the connections entry still belongs to
+    /// `owner` (`Arc::ptr_eq` on the carbons handle, as in `entry_if_owner`).
+    /// The connections entry guard is held across the removal, so a same-JID
+    /// replacement registering concurrently cannot interleave between check
+    /// and clear (same lock-order argument as
+    /// [`Self::update_presence_state_if_owner`]). Returns false when the
+    /// entry is absent or owned by a replacement.
+    pub fn clear_presence_state_if_owner(&self, jid: &FullJid, owner: &Arc<AtomicBool>) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+            return false;
+        }
+        self.presence_states.remove(jid);
+        true
+    }
+
     /// Record last offline activity for a bare JID.
     pub fn record_last_activity(&self, bare_jid: &BareJid, status: Option<String>) {
         self.last_activity.insert(

@@ -51,6 +51,7 @@ async fn handle_xmpp_frame_impl(
         suppress_sm_record_next_batch,
         state_machine,
         stream_open_sent,
+        registry_owner,
         ..
     } = conn;
     let muc_domain = state.deps.service_domains.muc.clone();
@@ -227,6 +228,7 @@ async fn handle_xmpp_frame_impl(
                             state,
                             phase,
                             authenticated_session,
+                            registry_owner.as_ref(),
                         )
                         .await
                     }
