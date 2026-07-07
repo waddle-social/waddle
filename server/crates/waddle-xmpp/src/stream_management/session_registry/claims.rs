@@ -382,24 +382,15 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         if let Some(client_h) = client_h {
-            if !session.is_expired() && session.handled_count_exceeds_outbound(client_h) {
-                let restored = {
-                    let mut claimed = self
-                        .claimed_sessions
-                        .write()
-                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                    claimed.remove(stream_id)
-                };
-                if let Some(restored) = restored {
-                    let mut sessions = self
-                        .sessions
-                        .write()
-                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                    sessions.insert(stream_id.to_string(), restored.clone());
-                    return Ok(Some(SmClaimCompletion::HandledCountTooHigh(restored)));
-                }
-                return Ok(None);
-            }
+            // Ordering matters, mirroring the websocket resume path:
+            // `handled_count_exceeds_outbound` is an exact mod-2^32
+            // window from last_acked that also classifies the
+            // regressed half-space as "outside the window".
+            // `can_resume_from` rejects a regressed `h` first, so a
+            // stale mod-behind `h` stays ReplayWindowTruncated (a
+            // failed resume) rather than HandledCountTooHigh; an
+            // ahead-of-window `h` passes it and hits the too-high
+            // branch below.
             if !session.is_expired() && !session.can_resume_from(client_h) {
                 let restored = {
                     let mut claimed = self
@@ -415,6 +406,24 @@ impl InMemorySmSessionRegistry {
                         .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                     sessions.insert(stream_id.to_string(), restored.clone());
                     return Ok(Some(SmClaimCompletion::ReplayWindowTruncated(restored)));
+                }
+                return Ok(None);
+            }
+            if !session.is_expired() && session.handled_count_exceeds_outbound(client_h) {
+                let restored = {
+                    let mut claimed = self
+                        .claimed_sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    claimed.remove(stream_id)
+                };
+                if let Some(restored) = restored {
+                    let mut sessions = self
+                        .sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    sessions.insert(stream_id.to_string(), restored.clone());
+                    return Ok(Some(SmClaimCompletion::HandledCountTooHigh(restored)));
                 }
                 return Ok(None);
             }

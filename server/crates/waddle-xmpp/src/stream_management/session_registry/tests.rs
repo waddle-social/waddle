@@ -144,6 +144,43 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
     );
 }
 
+/// XEP-0198 §4 too-high detection on the detached/resume path must be
+/// the same exact mod-2^32 window as the live ack path, measured from
+/// `last_acked`: `sequence_gt` is false at exactly distance 2^31, so
+/// `h == outbound_count + 0x8000_0000` used to pass as valid and
+/// corrupt the restored counters on resume.
+#[test]
+fn handled_count_exceeds_outbound_is_an_exact_window_from_last_acked() {
+    let mut session = make_test_session_with_unacked("stream-window", Vec::new());
+    session.outbound_count = 2;
+    session.last_acked = 2;
+
+    assert!(
+        !session.handled_count_exceeds_outbound(2),
+        "h == outbound is a valid full ack"
+    );
+    assert!(
+        session.handled_count_exceeds_outbound(2u32.wrapping_add(0x7fff_ffff)),
+        "h just below the half-space boundary is too high"
+    );
+    assert!(
+        session.handled_count_exceeds_outbound(2u32.wrapping_add(0x8000_0000)),
+        "h at exactly distance 2^31 is too high (the sequence_gt corner)"
+    );
+    assert!(
+        session.handled_count_exceeds_outbound(2u32.wrapping_add(0x8000_0001)),
+        "the regressed half-space measures outside the exact window \
+         (the resume path classifies it as a failed resume via \
+         can_resume_from running first)"
+    );
+
+    // Wrap-awareness: outbound wrapped to 2, client acked u32::MAX - 1.
+    session.last_acked = u32::MAX - 1;
+    assert!(!session.handled_count_exceeds_outbound(u32::MAX));
+    assert!(!session.handled_count_exceeds_outbound(2));
+    assert!(session.handled_count_exceeds_outbound(3));
+}
+
 #[tokio::test]
 async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
     // XEP-0424 §"prevent further distribution" + XEP-0198 resume

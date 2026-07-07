@@ -148,6 +148,23 @@ pub(super) async fn apply_sm_ack(
     phase: &mut ConnectionPhase,
     h: u32,
 ) -> Vec<String> {
+    // Ordering matters: the regress check MUST run before the exceeds
+    // check. `ack_exceeds_outbound` is an exact mod-2^32 window from
+    // last_acked, which classifies the regressed half-space as
+    // "outside the window" too — a stale mod-behind `h` must stay an
+    // ignored no-op rather than be reclassified as too-high.
+    if sm_state.ack_regresses_last_acked(h) {
+        // Stale or garbage `h` behind the confirmed window: ignore it
+        // entirely. Acknowledging would corrupt last_acked, and the
+        // numeric range-delete below would wipe every pending row.
+        warn!(
+            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            client_h = h,
+            last_acked = sm_state.last_acked,
+            "SM ack ignored: handled count regressed behind last_acked"
+        );
+        return vec![];
+    }
     if sm_state.ack_exceeds_outbound(h) {
         let send_count = sm_state.outbound_count;
         info!(
@@ -161,18 +178,6 @@ pub(super) async fn apply_sm_ack(
             build_handled_count_too_high_stream_error(h, send_count),
             websocket_stream_close_xml(),
         ];
-    }
-    if sm_state.ack_regresses_last_acked(h) {
-        // Stale or garbage `h` behind the confirmed window: ignore it
-        // entirely. Acknowledging would corrupt last_acked, and the
-        // numeric range-delete below would wipe every pending row.
-        warn!(
-            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
-            client_h = h,
-            last_acked = sm_state.last_acked,
-            "SM ack ignored: handled count regressed behind last_acked"
-        );
-        return vec![];
     }
     sm_state.acknowledge(h);
     if let Some(stream_id) = sm_state.stream_id.clone() {
@@ -322,6 +327,36 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
 
     let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
+    // Ordering matters, mirroring the live ack path:
+    // `handled_count_exceeds_outbound` is an exact mod-2^32 window
+    // from last_acked, which classifies the regressed half-space as
+    // "outside the window" too. `can_resume_from` rejects a regressed
+    // `h` first, so a stale mod-behind `h` stays a failed resume
+    // (`<failed/>`, client starts a fresh session) rather than being
+    // reclassified as a handled-count-too-high stream error; an
+    // ahead-of-window `h` passes it and hits the too-high error below.
+    if !detached.can_resume_from(resume.h) {
+        warn!(
+            stream_id = %resume.previd,
+            jid = %detached.jid,
+            client_h = resume.h,
+            replay_gap_through = ?detached.replay_gap_through,
+            "SM resume rejected: replay window no longer contains every stanza required by client h"
+        );
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .release_claim(&resume.previd)
+            .await
+        {
+            warn!(stream_id = %resume.previd, error = %error, "Failed to release truncated SM resume claim");
+        }
+        return vec![
+            SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
+        ];
+    }
+
     if detached.handled_count_exceeds_outbound(resume.h) {
         if let Err(error) = state
             .deps
@@ -342,28 +377,6 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         return vec![
             build_handled_count_too_high_stream_error(resume.h, detached.outbound_count),
             websocket_stream_close_xml(),
-        ];
-    }
-
-    if !detached.can_resume_from(resume.h) {
-        warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
-            client_h = resume.h,
-            replay_gap_through = ?detached.replay_gap_through,
-            "SM resume rejected: replay window no longer contains every stanza required by client h"
-        );
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .release_claim(&resume.previd)
-            .await
-        {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release truncated SM resume claim");
-        }
-        return vec![
-            SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
         ];
     }
 

@@ -136,11 +136,18 @@ impl DetachedSession {
 
     /// Whether a resume `h` claims more stanzas handled than this
     /// stream ever sent (XEP-0198 §4 handled-count-too-high). Judged
-    /// mod 2^32, matching the live ack path's
-    /// `StreamManagementState::ack_exceeds_outbound` — an `h` a few
-    /// stanzas behind a freshly wrapped `outbound_count` is valid.
+    /// as an EXACT mod-2^32 window measured from `last_acked`,
+    /// matching the live ack path's
+    /// `StreamManagementState::ack_exceeds_outbound`: a valid `h` sits
+    /// inside `[last_acked, outbound_count]`, so an `h` a few stanzas
+    /// behind a freshly wrapped `outbound_count` is valid while the
+    /// half-space comparison's blind spot at exactly distance 2^31
+    /// (`h == outbound_count + 0x8000_0000`) is rejected. The
+    /// regressed half-space also measures "outside the window";
+    /// resume callers run [`Self::can_resume_from`] FIRST so a
+    /// mod-behind `h` is a failed resume, not a stream error.
     pub fn handled_count_exceeds_outbound(&self, client_h: u32) -> bool {
-        sequence_gt(client_h, self.outbound_count)
+        client_h.wrapping_sub(self.last_acked) > self.outbound_count.wrapping_sub(self.last_acked)
     }
 
     /// Whether this detached session can satisfy XEP-0198 replay for `client_h`.

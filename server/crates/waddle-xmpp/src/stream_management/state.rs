@@ -234,11 +234,17 @@ impl StreamManagementState {
     /// Whether a client `<a h='N'/>` claims more stanzas handled than
     /// this stream has sent (XEP-0198 §4 handled-count-too-high).
     ///
-    /// Judged mod 2^32: counters wrap, so "greater than" uses the same
-    /// wrap-aware ordering as the unacked queue — an ack a few stanzas
-    /// behind a freshly-wrapped `outbound_count` is valid.
+    /// Judged as an EXACT mod-2^32 window measured from `last_acked`:
+    /// a valid `h` sits inside `[last_acked, outbound_count]`, so an
+    /// ack a few stanzas behind a freshly-wrapped `outbound_count` is
+    /// valid, while the half-space comparison's blind spot at exactly
+    /// distance 2^31 (`h == outbound_count + 0x8000_0000`) is
+    /// rejected instead of poisoning `last_acked`. The regressed
+    /// half-space also measures "outside the window" here; callers
+    /// must run [`Self::ack_regresses_last_acked`] FIRST so a stale
+    /// mod-behind `h` is ignored rather than reclassified as too-high.
     pub fn ack_exceeds_outbound(&self, h: u32) -> bool {
-        sequence_gt(h, self.outbound_count)
+        h.wrapping_sub(self.last_acked) > self.outbound_count.wrapping_sub(self.last_acked)
     }
 
     /// Whether a client `<a h='N'/>` regressed mod-2^32 behind what it
@@ -387,6 +393,55 @@ mod tests {
 
         state.acknowledge(2);
         assert_eq!(state.unacked_count(), 1);
+    }
+
+    /// XEP-0198 §4 too-high detection must be an EXACT mod-2^32 window
+    /// measured from `last_acked`, not a half-space comparison:
+    /// `sequence_gt` is false at exactly distance 2^31, so
+    /// `h == outbound_count + 0x8000_0000` used to slip through,
+    /// poison `last_acked`, and corrupt replay/pending state.
+    #[test]
+    fn ack_exceeds_outbound_is_an_exact_window_from_last_acked() {
+        let mut state = StreamManagementState::new();
+        state.enable("exact-window".to_string(), true, Some(300));
+        state.outbound_count = 2;
+        state.last_acked = 2;
+
+        assert!(
+            !state.ack_exceeds_outbound(2),
+            "h == outbound is a valid full ack"
+        );
+        assert!(
+            state.ack_exceeds_outbound(2u32.wrapping_add(0x7fff_ffff)),
+            "h just below the half-space boundary is too high"
+        );
+        assert!(
+            state.ack_exceeds_outbound(2u32.wrapping_add(0x8000_0000)),
+            "h at exactly distance 2^31 is too high (the sequence_gt corner)"
+        );
+        assert!(
+            state.ack_exceeds_outbound(2u32.wrapping_add(0x8000_0001)),
+            "the regressed half-space measures outside the exact window \
+             (the live path ignores it via the regress check running first)"
+        );
+    }
+
+    /// The exact window must stay wrap-aware: with `outbound_count`
+    /// wrapped past 2^32 and `last_acked` just behind the wrap, an `h`
+    /// inside [last_acked, outbound] is valid whichever side of the
+    /// wrap it sits on.
+    #[test]
+    fn ack_exceeds_outbound_accepts_valid_h_across_the_wrap() {
+        let mut state = StreamManagementState::new();
+        state.enable("wrap-window".to_string(), true, Some(300));
+        state.outbound_count = 2;
+        state.last_acked = u32::MAX - 1;
+
+        assert!(!state.ack_exceeds_outbound(u32::MAX - 1));
+        assert!(!state.ack_exceeds_outbound(u32::MAX));
+        assert!(!state.ack_exceeds_outbound(0));
+        assert!(!state.ack_exceeds_outbound(2));
+        assert!(state.ack_exceeds_outbound(3));
     }
 
     #[test]

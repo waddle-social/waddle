@@ -911,6 +911,232 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
 }
 
 #[tokio::test]
+async fn sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged() {
+    // XEP-0198 §4 exact-window corner: h == outbound_count +
+    // 0x8000_0000 sits at exactly mod-2^32 distance 2^31 from the
+    // confirmed window — the one point where "ahead" and "behind" are
+    // indistinguishable. Whatever it is classified as, it MUST NOT be
+    // acknowledged (that would poison last_acked and purge the replay
+    // queue). The regress guard runs first and its half-space
+    // comparison is true at exactly 2^31, so the live path ignores it
+    // inert, exactly like any other stale mod-behind h.
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    // Full valid ack first: last_acked == outbound_count == 2.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='2'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(responses.is_empty(), "full ack is valid");
+
+    let bogus_h = 2u32.wrapping_add(0x8000_0000);
+    let responses = handle_xmpp_frame(
+        &format!("<a xmlns='urn:xmpp:sm:3' h='{bogus_h}'/>"),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "half-window h must be ignored inert: {responses:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "ignored half-window h must not close the stream"
+    );
+    // MUST NOT have acknowledged: a later in-window ack still works
+    // against uncorrupted state.
+    assert_eq!(
+        conn.sm_state.unacked_count(),
+        0,
+        "last_acked must not be poisoned by the ignored h"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
+    // h == outbound_count + 0x8000_0001 lands mod-2^32 BEHIND
+    // last_acked: the regress guard must ignore it wholesale (before
+    // the exact-window too-high check reclassifies it), leaving the
+    // replay queue and last_acked untouched.
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    // Partial ack: last_acked = 1, one stanza still unacked.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(responses.is_empty(), "partial ack is valid");
+
+    let stale_h = 2u32.wrapping_add(0x8000_0001);
+    let responses = handle_xmpp_frame(
+        &format!("<a xmlns='urn:xmpp:sm:3' h='{stale_h}'/>"),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "regressed-half-space h must be ignored inert: {responses:?}"
+    );
+    assert!(!conn.phase.is_closing(), "ignored ack must not close");
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(1).len(),
+        1,
+        "ignored ack must not purge the replay queue"
+    );
+}
+
+#[tokio::test]
+async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high() {
+    // Resume-path twin of the live half-window corner: a detached
+    // session with outbound_count == last_acked == 2 must reject
+    // h == 2 + 0x8000_0000 as handled-count-too-high instead of
+    // resuming and poisoning the restored counters.
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-half-window".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 2,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let bogus_h = 2u32.wrapping_add(0x8000_0000);
+    let resume_frame = resume_frame_xml("stream-half-window", bogus_h);
+    let responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert!(
+        !responses.iter().any(|frame| frame.contains("<resumed")),
+        "half-window h must not resume: {responses:?}"
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("handled-count-too-high")),
+        "expected handled-count-too-high stream error: {responses:?}"
+    );
+    assert!(
+        conn.phase.is_closing(),
+        "connection must be Closing after handled-count-too-high"
+    );
+}
+
+#[tokio::test]
+async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
+    // A resume h mod-2^32 BEHIND the detached last_acked is a failed
+    // resume (<failed/> resource-constraint via can_resume_from), NOT
+    // a handled-count-too-high stream error — matching the live path
+    // where the regress guard runs before the exact-window check.
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-regressed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 2,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let resume_frame = resume_frame_xml("stream-regressed", 1);
+    let responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("<failed") && frame.contains("resource-constraint")),
+        "regressed h must produce a failed resume: {responses:?}"
+    );
+    assert!(
+        !responses
+            .iter()
+            .any(|frame| frame.contains("handled-count-too-high")),
+        "regressed h must not be reclassified as too-high: {responses:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "failed resume keeps the stream open for a fresh session"
+    );
+}
+
+#[tokio::test]
 async fn sm_resume_restores_session_and_replays_unacked() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
     let state = create_test_websocket_state().await;
