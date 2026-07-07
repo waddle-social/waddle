@@ -5,6 +5,7 @@ use crate::error::ClientResult;
 use crate::request::StanzaId;
 use crate::xep::encrypted_file as xep_encrypted_file;
 use crate::xep::{reply as xep_reply, thread as xep_thread};
+use waddle_xmpp_core::CoreError;
 
 use super::namespaces::*;
 use super::parsing::payloads::validate_chat_state;
@@ -469,18 +470,7 @@ pub fn build_outbound_message(
         builder = builder.append(ref_builder.build());
     }
     for file in &options.shared_files {
-        builder = builder.append(build_file_sharing_element(file));
-        // XEP-0448: when the bytes at `file.url` are ciphertext, emit a
-        // sibling `<encrypted/>` envelope carrying the cipher/key/iv/hash
-        // metadata recipients need to decrypt. The `<file-sharing/>` element
-        // continues to advertise the plaintext metadata (filename, size,
-        // media-type) so peers without encryption support still see the
-        // attachment offer.
-        if let Some(encrypted) = file.encrypted.as_ref() {
-            if let Some(encrypted_el) = xep_encrypted_file::build_encrypted_element(encrypted) {
-                builder = builder.append(encrypted_el);
-            }
-        }
+        builder = builder.append(build_file_sharing_element(file)?);
     }
     if let Some(token) = options.link_preview_token.as_ref() {
         builder = builder.append(
@@ -505,7 +495,7 @@ fn build_origin_id(stanza_id: &str) -> Element {
         .build()
 }
 
-pub fn build_file_sharing_element(file: &SharedFile) -> Element {
+pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
     let mut file_sharing = Element::builder("file-sharing", NS_SFS)
         .attr(
             minidom::rxml::xml_ncname!("disposition").to_owned(),
@@ -552,14 +542,48 @@ pub fn build_file_sharing_element(file: &SharedFile) -> Element {
     file_sharing.append_child(metadata);
 
     let mut sources = Element::builder("sources", NS_SFS).build();
-    sources.append_child(
-        Element::builder("url-data", NS_URL_DATA)
-            .attr(
-                minidom::rxml::xml_ncname!("target").to_owned(),
-                file.url.as_str(),
-            )
-            .build(),
-    );
+    if let Some(encrypted) = file.encrypted.as_ref() {
+        let encrypted_with_source;
+        let mut sources_for_encrypted: Vec<String> = encrypted
+            .sources
+            .iter()
+            .map(|source| source.trim())
+            .filter(|source| !source.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        let primary_source = file.url.trim();
+        if !primary_source.is_empty() {
+            sources_for_encrypted.retain(|source| source != primary_source);
+            sources_for_encrypted.insert(0, primary_source.to_owned());
+        }
+        if sources_for_encrypted.is_empty() {
+            return Err(CoreError::bad_request(Some(
+                "encrypted shared file requires a ciphertext source URL".to_string(),
+            ))
+            .into());
+        }
+        let encrypted = if sources_for_encrypted == encrypted.sources {
+            encrypted
+        } else {
+            encrypted_with_source = xep_encrypted_file::EncryptedFile {
+                sources: sources_for_encrypted,
+                ..encrypted.clone()
+            };
+            &encrypted_with_source
+        };
+        if let Some(encrypted_el) = xep_encrypted_file::build_encrypted_element(encrypted) {
+            sources.append_child(encrypted_el);
+        }
+    } else {
+        sources.append_child(
+            Element::builder("url-data", NS_URL_DATA)
+                .attr(
+                    minidom::rxml::xml_ncname!("target").to_owned(),
+                    file.url.as_str(),
+                )
+                .build(),
+        );
+    }
     file_sharing.append_child(sources);
-    file_sharing
+    Ok(file_sharing)
 }

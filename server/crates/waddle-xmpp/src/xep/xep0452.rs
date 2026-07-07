@@ -1,18 +1,23 @@
 //! XEP-0452: MUC Mention Notifications
 //!
-//! Provides mention notification elements for MUC rooms. When a user
-//! is @mentioned in a room, the server can send a notification message
-//! to the mentioned user even if they aren't actively viewing the room.
+//! Provides mention notification elements for MUC rooms. When a user is
+//! mentioned in a room, the server can send a notification message to the
+//! mentioned user even if they are not actively viewing the room.
 //!
 //! ## XML Format
 //!
 //! Notification message sent to a mentioned user:
 //! ```xml
-//! <message from='room@muc.example.com' to='alice@example.com' type='groupchat'>
-//!   <mention xmlns='urn:xmpp:mmn:0'
-//!            id='original-msg-id'
-//!            by='room@muc.example.com/nick'/>
-//!   <body>@alice check this out!</body>
+//! <message from='room@muc.example.com' to='alice@example.com'>
+//!   <mentions xmlns='urn:xmpp:mmn:0'>
+//!     <forwarded xmlns='urn:xmpp:forward:0'>
+//!       <message xmlns='jabber:client'
+//!                type='groupchat'
+//!                id='original-msg-id'
+//!                from='room@muc.example.com/nick'
+//!                to='room@muc.example.com'/>
+//!     </forwarded>
+//!   </mentions>
 //! </message>
 //! ```
 //!
@@ -30,10 +35,13 @@
 //! 3. Generate a mention notification for delivery/push
 
 use minidom::Element;
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 /// Namespace for XEP-0452 MUC Mention Notifications.
 pub const NS_MENTION_NOTIFICATION: &str = "urn:xmpp:mmn:0";
+
+/// Namespace for XEP-0297 Stanza Forwarding, used by XEP-0452.
+pub const NS_FORWARD: &str = "urn:xmpp:forward:0";
 
 /// A mention notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,9 +96,9 @@ impl MentionNotificationCarrier for Message {
 
 // ── Detection ────────────────────────────────────────────────────────
 
-/// Check if an element is a `<mention/>` notification element.
+/// Check if an element is a `<mentions/>` notification element.
 pub fn is_mention_notification_element(elem: &Element) -> bool {
-    elem.ns() == NS_MENTION_NOTIFICATION && elem.name() == "mention"
+    elem.is("mentions", NS_MENTION_NOTIFICATION)
 }
 
 /// Check if a message contains a mention notification.
@@ -106,72 +114,97 @@ pub fn extract_mention_notification(msg: &Message) -> Option<MentionNotification
         .payloads
         .iter()
         .find(|e| is_mention_notification_element(e))?;
+    let outer_room = msg.from.as_ref()?.to_bare();
+    let forwarded = elem.get_child("forwarded", NS_FORWARD)?;
+    let forwarded_message_el = forwarded
+        .children()
+        .find(|child| child.name() == "message")?;
+    let forwarded_message = Message::try_from(forwarded_message_el.clone()).ok()?;
+    if forwarded_message.type_ != MessageType::Groupchat {
+        return None;
+    }
 
-    let message_id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
-    let mentioned_by = elem
-        .attr("by")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_owned());
-    let room_jid = msg.from.as_ref().map(|j| j.to_string());
+    if forwarded_message
+        .from
+        .as_ref()
+        .is_some_and(|from| from.to_bare() != outer_room)
+    {
+        return None;
+    }
+    if forwarded_message
+        .to
+        .as_ref()
+        .is_some_and(|to| to.to_bare() != outer_room)
+    {
+        return None;
+    }
+
+    let message_id = forwarded_message
+        .id
+        .as_ref()
+        .map(|id| id.0.as_str())
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    let mentioned_by = forwarded_message.from.as_ref().map(ToString::to_string);
 
     Some(MentionNotification {
         message_id,
         mentioned_by,
-        room_jid,
+        room_jid: Some(outer_room.to_string()),
     })
 }
 
 // ── Building ─────────────────────────────────────────────────────────
 
-/// Build a `<mention/>` notification element.
-pub fn build_mention_notification_element(notification: &MentionNotification) -> Element {
-    let mut builder = Element::builder("mention", NS_MENTION_NOTIFICATION).attr(
-        minidom::rxml::xml_ncname!("id").to_owned(),
-        notification.message_id.as_str(),
-    );
+/// Build a `<mentions/>` notification from the original MUC message.
+///
+/// XEP-0452 forwards the whole original groupchat stanza, including payloads
+/// added by the room such as stanza IDs and references.
+pub fn build_mention_notification_element(original: &Message) -> Element {
+    Element::builder("mentions", NS_MENTION_NOTIFICATION)
+        .append(
+            Element::builder("forwarded", NS_FORWARD)
+                .append(Element::from(original.clone()))
+                .build(),
+        )
+        .build()
+}
 
-    if let Some(ref by) = notification.mentioned_by {
-        builder = builder.attr(minidom::rxml::xml_ncname!("by").to_owned(), by.as_str());
-    }
-
-    builder.build()
+fn room_from_forwarded_message(original: &Message) -> Option<jid::BareJid> {
+    original
+        .from
+        .as_ref()
+        .map(|from| from.to_bare())
+        .or_else(|| original.to.as_ref().map(|to| to.to_bare()))
 }
 
 /// Build a mention notification message.
 ///
-/// Creates a message to notify a user they were mentioned in a room.
-pub fn build_mention_notification_message(
-    to: jid::Jid,
-    from_room: jid::Jid,
-    notification: &MentionNotification,
-    body_preview: Option<&str>,
-) -> Message {
+/// Creates a message from the room bare JID to notify a user they were
+/// mentioned in the forwarded original MUC message.
+pub fn build_mention_notification_message(to: jid::Jid, original: &Message) -> Option<Message> {
+    let room = room_from_forwarded_message(original)?;
     let mut msg = Message::new(Some(to));
-    msg.from = Some(from_room);
-    msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    msg.type_ = MessageType::Normal;
+    msg.from = Some(jid::Jid::from(room));
     msg.payloads
-        .push(build_mention_notification_element(notification));
+        .push(build_mention_notification_element(original));
 
-    if let Some(preview) = body_preview {
-        msg.bodies
-            .insert(xmpp_parsers::message::Lang::new(), preview.to_owned());
-    }
-
-    msg
+    Some(msg)
 }
 
 // ── Mutation ─────────────────────────────────────────────────────────
 
 /// Add a mention notification to a message.
-pub fn set_mention_notification(msg: &mut Message, notification: &MentionNotification) {
-    msg.payloads.retain(|e| e.ns() != NS_MENTION_NOTIFICATION);
+pub fn set_mention_notification(msg: &mut Message, original: &Message) {
+    msg.payloads.retain(|e| !is_mention_notification_element(e));
     msg.payloads
-        .push(build_mention_notification_element(notification));
+        .push(build_mention_notification_element(original));
 }
 
 /// Remove mention notification from a message.
 pub fn strip_mention_notification(msg: &mut Message) {
-    msg.payloads.retain(|e| e.ns() != NS_MENTION_NOTIFICATION);
+    msg.payloads.retain(|e| !is_mention_notification_element(e));
 }
 
 // ── Mention tracking ─────────────────────────────────────────────────
@@ -231,20 +264,21 @@ mod tests {
 
     #[test]
     fn test_is_mention_notification_element() {
-        let elem = Element::builder("mention", NS_MENTION_NOTIFICATION)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
-            .build();
+        let elem = Element::builder("mentions", NS_MENTION_NOTIFICATION).build();
         assert!(is_mention_notification_element(&elem));
 
-        let wrong = Element::builder("mention", "jabber:client").build();
+        let wrong = Element::builder("mention", NS_MENTION_NOTIFICATION).build();
         assert!(!is_mention_notification_element(&wrong));
     }
 
     #[test]
     fn test_extract_mention_notification() {
-        let xml = "<message xmlns='jabber:client' type='groupchat' from='room@muc.example.com'>\
-                    <body>@alice hey!</body>\
-                    <mention xmlns='urn:xmpp:mmn:0' id='msg-42' by='room@muc.example.com/bob'/>\
+        let xml = "<message xmlns='jabber:client' from='room@muc.example.com'>\
+                    <mentions xmlns='urn:xmpp:mmn:0'>\
+                      <forwarded xmlns='urn:xmpp:forward:0'>\
+                        <message xmlns='jabber:client' type='groupchat' id='msg-42' from='room@muc.example.com/bob' to='room@muc.example.com'/>\
+                      </forwarded>\
+                    </mentions>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -266,47 +300,83 @@ mod tests {
 
     #[test]
     fn test_build_mention_notification() {
-        let notif = MentionNotification::new("msg-1")
-            .with_by("room@muc/nick")
-            .with_room("room@muc");
-        let elem = build_mention_notification_element(&notif);
+        let original = Message::try_from(
+            "<message xmlns='jabber:client' type='groupchat' id='msg-1' \
+                 from='room@muc/nick' to='room@muc'>\
+               <body>hello</body>\
+             </message>"
+                .parse::<Element>()
+                .expect("valid xml"),
+        )
+        .expect("valid message");
+        let elem = build_mention_notification_element(&original);
 
-        assert_eq!(elem.name(), "mention");
+        assert_eq!(elem.name(), "mentions");
         assert_eq!(elem.ns(), NS_MENTION_NOTIFICATION);
-        assert_eq!(elem.attr("id"), Some("msg-1"));
-        assert_eq!(elem.attr("by"), Some("room@muc/nick"));
+        let forwarded = elem.get_child("forwarded", NS_FORWARD).expect("forwarded");
+        let message = forwarded
+            .children()
+            .find(|child| child.name() == "message")
+            .expect("forwarded message");
+        assert_eq!(message.attr("id"), Some("msg-1"));
+        assert_eq!(message.attr("from"), Some("room@muc/nick"));
+        assert_eq!(
+            message
+                .get_child("body", "jabber:client")
+                .map(|body| body.text()),
+            Some("hello".to_owned())
+        );
     }
 
     #[test]
     fn test_build_notification_message() {
         let to: jid::Jid = "alice@example.com".parse().expect("valid");
-        let room: jid::Jid = "room@muc.example.com".parse().expect("valid");
-        let notif = MentionNotification::new("msg-1").with_by("room@muc.example.com/bob");
+        let original = Message::try_from(
+            "<message xmlns='jabber:client' type='groupchat' id='msg-1' \
+                 from='room@muc.example.com/bob' to='room@muc.example.com'>\
+               <body>@alice hey!</body>\
+             </message>"
+                .parse::<Element>()
+                .expect("valid xml"),
+        )
+        .expect("valid message");
 
-        let msg = build_mention_notification_message(
-            to.clone(),
-            room.clone(),
-            &notif,
-            Some("@alice hey!"),
-        );
+        let msg = build_mention_notification_message(to.clone(), &original)
+            .expect("original has room jid");
 
         assert_eq!(msg.to, Some(to));
-        assert_eq!(msg.from, Some(room));
-        assert_eq!(msg.type_, MessageType::Groupchat);
+        assert_eq!(
+            msg.from,
+            Some("room@muc.example.com".parse().expect("valid room"))
+        );
+        assert_eq!(msg.type_, MessageType::Normal);
         assert!(has_mention_notification(&msg));
-        assert!(!msg.bodies.is_empty());
+        assert!(msg.bodies.is_empty());
     }
 
     #[test]
     fn test_set_mention_notification() {
         let mut msg = Message::new(None::<jid::Jid>);
-        let notif = MentionNotification::new("msg-1");
-        set_mention_notification(&mut msg, &notif);
+        msg.from = Some("room@muc.example.com".parse().expect("valid room"));
+        let original = Message::try_from(
+            "<message xmlns='jabber:client' type='groupchat' id='msg-1' \
+                 from='room@muc.example.com/bob' to='room@muc.example.com'/>"
+                .parse::<Element>()
+                .expect("valid xml"),
+        )
+        .expect("valid message");
+        set_mention_notification(&mut msg, &original);
         assert!(has_mention_notification(&msg));
 
         // Replace
-        let notif2 = MentionNotification::new("msg-2");
-        set_mention_notification(&mut msg, &notif2);
+        let replacement = Message::try_from(
+            "<message xmlns='jabber:client' type='groupchat' id='msg-2' \
+                 from='room@muc.example.com/bob' to='room@muc.example.com'/>"
+                .parse::<Element>()
+                .expect("valid xml"),
+        )
+        .expect("valid message");
+        set_mention_notification(&mut msg, &replacement);
         let extracted = extract_mention_notification(&msg).expect("has notif");
         assert_eq!(extracted.message_id, "msg-2");
     }
@@ -314,15 +384,27 @@ mod tests {
     #[test]
     fn test_strip_mention_notification() {
         let mut msg = Message::new(None::<jid::Jid>);
-        set_mention_notification(&mut msg, &MentionNotification::new("msg-1"));
+        msg.from = Some("room@muc.example.com".parse().expect("valid room"));
+        let original = Message::try_from(
+            "<message xmlns='jabber:client' type='groupchat' id='msg-1' \
+                 from='room@muc.example.com/bob' to='room@muc.example.com'/>"
+                .parse::<Element>()
+                .expect("valid xml"),
+        )
+        .expect("valid message");
+        set_mention_notification(&mut msg, &original);
         strip_mention_notification(&mut msg);
         assert!(!has_mention_notification(&msg));
     }
 
     #[test]
     fn test_mention_notification_carrier_trait() {
-        let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <mention xmlns='urn:xmpp:mmn:0' id='msg-1'/>\
+        let xml = "<message xmlns='jabber:client' from='room@muc.example.com'>\
+                    <mentions xmlns='urn:xmpp:mmn:0'>\
+                      <forwarded xmlns='urn:xmpp:forward:0'>\
+                        <message xmlns='jabber:client' type='groupchat' id='msg-1' to='room@muc.example.com'/>\
+                      </forwarded>\
+                    </mentions>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");

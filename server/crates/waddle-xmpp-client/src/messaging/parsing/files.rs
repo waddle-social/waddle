@@ -2,6 +2,7 @@ use minidom::Element;
 
 use super::super::namespaces::*;
 use super::super::types::*;
+use crate::xep::encrypted_file as xep_encrypted_file;
 
 pub(super) fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
     // Look for nested file metadata; structure varies by implementation.
@@ -67,6 +68,7 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
     let disposition_attr = file_sharing_el.attr("disposition");
+    let mut encrypted = None;
 
     if let Some(file_el) = file_sharing_el.get_child("file", NS_FILE_METADATA) {
         name = file_el
@@ -87,10 +89,20 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
     }
 
     if let Some(sources_el) = file_sharing_el.get_child("sources", NS_SFS) {
-        url = sources_el
-            .get_child("url-data", NS_URL_DATA)
-            .and_then(|e| e.attr("target"))
-            .map(String::from);
+        for source_el in sources_el.children() {
+            if source_el.is("url-data", NS_URL_DATA) {
+                if url.is_none() {
+                    url = source_el.attr("target").map(String::from);
+                }
+            } else if xep_encrypted_file::is_encrypted_element(source_el) {
+                encrypted = xep_encrypted_file::parse_encrypted_element(source_el);
+            }
+        }
+    }
+    if url.is_none() {
+        url = encrypted
+            .as_ref()
+            .and_then(|encrypted| encrypted.sources.first().cloned());
     }
 
     let disposition =
@@ -103,6 +115,6 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
         width,
         height,
         disposition,
-        encrypted: None,
+        encrypted,
     })
 }

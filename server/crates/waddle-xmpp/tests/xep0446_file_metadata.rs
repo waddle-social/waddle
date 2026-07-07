@@ -2,23 +2,20 @@
 //!
 //! Pins:
 //! - the registrar namespace `urn:xmpp:file:metadata:0`,
-//! - Known spec divergence (reported in issue #1150, not pinned as
-//!   conformant): the module emits `<duration>` in seconds where
-//!   xep-0446.xml defines `<length>` in milliseconds, and
-//!   `width`/`height` values above `u32::MAX` are silently truncated.
 //! - the `<file/>` wire shape with namespaced children
-//!   (`media-type`, `name`, `size`, `width`, `height`, `desc`),
+//!   (`media-type`, `name`, `size`, `width`, `height`, `length`, `desc`),
 //! - build → serialize → reparse round-trips,
 //! - parser robustness: malformed numerics, foreign-namespace
 //!   children, and empty text values all degrade to `None` instead of
 //!   panicking or fabricating values,
+//! - dimension overflow returns `FileMetadataError::InvalidSize`,
 //! - single-payload replace semantics of `set_file_metadata`.
 
 use minidom::Element;
 use waddle_xmpp::xep::xep0446::{
     build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
     is_file_metadata_element, parse_file_metadata_element, set_file_metadata, strip_file_metadata,
-    FileMetadata, FileMetadataCarrier, NS_FILE_METADATA,
+    FileMetadata, FileMetadataCarrier, FileMetadataError, NS_FILE_METADATA,
 };
 use xmpp_parsers::message::Message;
 
@@ -40,20 +37,25 @@ fn xep0446_full_metadata_survives_serialize_reparse_round_trip() {
         .with_size(6144)
         .with_dimensions(800, 600)
         .with_desc("Picture of 24th XSF Summit")
-        .with_duration(0);
+        .with_length_ms(63_000);
 
     let elem = build_file_metadata_element(&original);
     let xml = String::from(&elem);
     let reparsed: Element = xml.parse().expect("built element must reparse");
 
     assert!(is_file_metadata_element(&reparsed));
-    let parsed = parse_file_metadata_element(&reparsed);
+    let parsed = parse_file_metadata_element(&reparsed).expect("metadata parses");
     assert_eq!(parsed.media_type.as_deref(), Some("image/png"));
     assert_eq!(parsed.name.as_deref(), Some("summit.png"));
     assert_eq!(parsed.size, Some(6144));
     assert_eq!(parsed.width, Some(800));
     assert_eq!(parsed.height, Some(600));
+    assert_eq!(parsed.length_ms, Some(63_000));
     assert_eq!(parsed.desc.as_deref(), Some("Picture of 24th XSF Summit"));
+    assert!(
+        reparsed.get_child("duration", NS_FILE_METADATA).is_none(),
+        "xep-0446 uses <length/>, never legacy <duration/>"
+    );
 }
 
 #[test]
@@ -84,7 +86,7 @@ fn xep0446_empty_metadata_builds_childless_element() {
     assert!(is_file_metadata_element(&elem));
     assert_eq!(elem.children().count(), 0);
 
-    let parsed = parse_file_metadata_element(&elem);
+    let parsed = parse_file_metadata_element(&elem).expect("metadata parses");
     assert_eq!(parsed, FileMetadata::new());
 }
 
@@ -98,7 +100,7 @@ fn xep0446_malformed_size_degrades_to_none() {
         </file>"
         .parse()
         .expect("valid xml");
-    let parsed = parse_file_metadata_element(&elem);
+    let parsed = parse_file_metadata_element(&elem).expect("metadata parses");
     assert_eq!(parsed.name.as_deref(), Some("bad.bin"));
     assert_eq!(parsed.size, None, "unparseable size must become None");
 }
@@ -109,7 +111,12 @@ fn xep0446_negative_size_degrades_to_none() {
     let elem: Element = "<file xmlns='urn:xmpp:file:metadata:0'><size>-42</size></file>"
         .parse()
         .expect("valid xml");
-    assert_eq!(parse_file_metadata_element(&elem).size, None);
+    assert_eq!(
+        parse_file_metadata_element(&elem)
+            .expect("metadata parses")
+            .size,
+        None
+    );
 }
 
 #[test]
@@ -122,7 +129,7 @@ fn xep0446_foreign_namespace_children_are_ignored() {
         </file>"
         .parse()
         .expect("valid xml");
-    let parsed = parse_file_metadata_element(&elem);
+    let parsed = parse_file_metadata_element(&elem).expect("metadata parses");
     assert_eq!(parsed.name, None, "foreign-ns <name> child must be ignored");
     assert_eq!(parsed.size, Some(10));
 }
@@ -134,9 +141,34 @@ fn xep0446_empty_text_children_become_none() {
     let elem: Element = "<file xmlns='urn:xmpp:file:metadata:0'><name/><desc></desc></file>"
         .parse()
         .expect("valid xml");
-    let parsed = parse_file_metadata_element(&elem);
+    let parsed = parse_file_metadata_element(&elem).expect("metadata parses");
     assert_eq!(parsed.name, None);
     assert_eq!(parsed.desc, None);
+}
+
+#[test]
+fn xep0446_width_height_over_u32_limits_return_invalid_size() {
+    let too_wide: Element = "<file xmlns='urn:xmpp:file:metadata:0'>\
+            <width>4294967296</width>\
+        </file>"
+        .parse()
+        .expect("valid xml");
+    assert_eq!(
+        parse_file_metadata_element(&too_wide)
+            .unwrap_err()
+            .to_string(),
+        FileMetadataError::InvalidSize("width=4294967296".to_owned()).to_string()
+    );
+
+    let too_tall: Element = "<file xmlns='urn:xmpp:file:metadata:0'>\
+            <height>4294967296</height>\
+        </file>"
+        .parse()
+        .expect("valid xml");
+    assert!(matches!(
+        parse_file_metadata_element(&too_tall),
+        Err(FileMetadataError::InvalidSize(raw)) if raw == "height=4294967296"
+    ));
 }
 
 #[test]
@@ -156,7 +188,7 @@ fn xep0446_message_round_trip_via_carrier_trait() {
     let meta = FileMetadata::new()
         .with_media_type("audio/ogg")
         .with_name("voice.ogg")
-        .with_duration(37);
+        .with_length_ms(37_000);
     set_file_metadata(&mut msg, &meta);
 
     assert!(has_file_metadata(&msg));

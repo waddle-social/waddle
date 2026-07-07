@@ -7,7 +7,6 @@ use std::borrow::Cow;
 use chrono::{DateTime, Utc};
 use minidom::Element;
 
-use crate::xep::encrypted_file::{self as xep_encrypted_file, NS_ESFS as NS_ENCRYPTED_FILE};
 use crate::xep::fallback::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
 use crate::xep::{call_thread as xep_call_thread, reply as xep_reply, thread as xep_thread};
 use waddle_xmpp_core::{
@@ -255,47 +254,6 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
                         encrypted: None,
                     });
                 }
-            }
-        }
-    }
-
-    // XEP-0448: top-level `<encrypted xmlns='urn:xmpp:esfs:0'/>` siblings
-    // carry the cipher/key/iv metadata for the file-sharing entries
-    // collected above (XEP-0447 file-sharing AND legacy XEP-0385 SIMS).
-    // Match by URL so a `SharedFile` whose `url` already names the
-    // ciphertext gains the metadata needed to decrypt it; if multiple
-    // entries reference the same source URL (rare but legal — same blob
-    // shared twice in one stanza) every one of them is annotated so none
-    // render broken.
-    for encrypted_el in el
-        .children()
-        .filter(|c| c.name() == "encrypted" && c.ns() == NS_ENCRYPTED_FILE)
-    {
-        let Some(encrypted) = xep_encrypted_file::parse_encrypted_element(encrypted_el) else {
-            continue;
-        };
-        let mut matched = false;
-        for file in shared_files.iter_mut() {
-            if encrypted.sources.iter().any(|src| src == &file.url) {
-                file.encrypted = Some(encrypted.clone());
-                matched = true;
-            }
-        }
-        // If no matching `<file-sharing/>` (or `<sims>`) sibling exists,
-        // synthesise one from the encrypted envelope's first source so
-        // the recipient still sees the attachment.
-        if !matched {
-            if let Some(url) = encrypted.sources.first().cloned() {
-                shared_files.push(SharedFile {
-                    url,
-                    name: None,
-                    media_type: None,
-                    size: None,
-                    width: None,
-                    height: None,
-                    disposition: SharedFileDisposition::Attachment,
-                    encrypted: Some(encrypted),
-                });
             }
         }
     }

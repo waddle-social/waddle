@@ -320,8 +320,10 @@ pub use super::xep0431::{matches_fulltext, MamSearchQuery, SearchResult, FIELD_F
 pub use super::xep0437::UnreadTracker;
 
 pub use super::xep0433::{
-    build_search_request, build_search_response, is_search_request, parse_search_request,
-    parse_search_results, ChannelResult, SearchRequest, Searchable, NS_CHANNEL_SEARCH,
+    build_search_form_response, build_search_request, build_search_response,
+    build_search_response_with_rsm, is_search_form_request, is_search_request,
+    parse_search_request, parse_search_results, parse_search_rsm_response, ChannelResult,
+    SearchRequest, Searchable, FIELD_QUERY, NS_CHANNEL_SEARCH, NS_CHANNEL_SEARCH_PARAMS,
 };
 
 pub use super::xep0449::{
@@ -391,25 +393,24 @@ pub use waddle_xmpp_core::xep0501::{
     NS_STORIES, PUBSUB_NODE_STORIES,
 };
 
-pub use super::xep0502::{
-    build_activity_notification, build_subscribe_element,
-    is_activity_element as is_muc_activity_element, parse_activity_notifications, ActivityTracker,
-    RoomActivity, NS_MUC_ACTIVITY,
-};
+pub use super::xep0502::{ActivityTracker, RoomActivity};
 
 pub use super::xep0500::{
-    parse_slow_mode_interval, SlowModeCheck, SlowModeConfig, SlowModeTracker,
-    FIELD_SLOW_MODE_INTERVAL, SLOW_MODE_DISABLED,
+    build_muc_slow_mode_roominfo_form, build_roominfo_slow_mode_duration_field,
+    parse_slow_mode_duration, SlowModeCheck, SlowModeConfig, SlowModeTracker,
+    FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION, SLOW_MODE_DISABLED,
 };
 
 pub use super::xep0486::{extract_avatar_hash_from_presence, MucAvatar, MucAvatarCache};
 
 pub use super::xep0488::{
-    build_invite_message_element, build_invite_request, build_invite_response,
-    build_invite_share_message, extract_invite_from_iq, extract_invite_from_message,
-    has_invite_in_message, is_invite_element, is_invite_request, set_invite_on_message,
-    strip_invite_from_message, InviteToken, InviteTokenCarrier, InviteTokenError,
-    NS_MUC_TOKEN_INVITE,
+    build_invite_request, build_invite_request_with_constraints, build_invite_response,
+    build_invite_response_from_token, build_invite_share_message, build_revoke_request,
+    build_revoke_response, build_tokens_request, build_tokens_response, extract_invite_from_iq,
+    extract_invite_from_message, extract_invite_request_from_iq, extract_revoke_from_iq,
+    extract_tokens_from_iq, has_invite_in_message, is_invite_element, is_invite_request,
+    is_revoke_request, is_tokens_request, strip_invite_from_message, InviteToken,
+    InviteTokenCarrier, InviteTokenError, InviteTokenRequest, NS_MUC_TOKEN_INVITE,
 };
 
 pub use super::xep0490::{

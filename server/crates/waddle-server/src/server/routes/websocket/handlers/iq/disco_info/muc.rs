@@ -369,6 +369,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         if has_space_metadata {
             features.push(Feature::spaces());
         }
+        extensions.push(build_muc_slow_mode_roominfo_form(0));
         extensions.push(build_room_metadata_form(
             channel_type,
             snapshot.config.pin_permission.as_form_value(),
@@ -413,6 +414,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         }
         // #422: read the persisted pin policy from the channel record so
         // dormant rooms advertise the truth, not the default.
+        extensions.push(build_muc_slow_mode_roominfo_form(0));
         extensions.push(build_room_metadata_form(
             &channel.channel_type,
             channel.pin_permission.as_form_value(),

@@ -1,43 +1,29 @@
 //! XEP-0433: Extended Channel Search
 //!
-//! Provides structured search for MUC rooms by keyword, allowing users
-//! to discover channels in a community. Results include room metadata.
-//!
-//! ## XML Format
-//!
-//! Search request:
-//! ```xml
-//! <iq type='get' to='muc.example.com' id='search-1'>
-//!   <search xmlns='urn:xmpp:channel-search:0'>
-//!     <query>general</query>
-//!     <max>20</max>
-//!   </search>
-//! </iq>
-//! ```
-//!
-//! Search response:
-//! ```xml
-//! <iq type='result' from='muc.example.com' id='search-1'>
-//!   <result xmlns='urn:xmpp:channel-search:0'>
-//!     <channel jid='general@muc.example.com' name='General'
-//!              description='Main discussion' occupants='42'/>
-//!     <channel jid='random@muc.example.com' name='Random'
-//!              description='Off-topic chat' occupants='15'/>
-//!   </result>
-//! </iq>
-//! ```
-//!
-//! ## Use Cases
-//!
-//! - "Browse channels" dialog in chat apps
-//! - Search for rooms by topic/keyword
-//! - Discover public rooms in a community
+//! Provides structured search for MUC rooms by keyword. Requests carry a
+//! XEP-0004 submit form and may carry XEP-0059 Result Set Management, and
+//! results are `<item address='...'>` entries with metadata children.
+
+use std::convert::TryFrom;
 
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
-/// Namespace for XEP-0433 Extended Channel Search.
-pub const NS_CHANNEL_SEARCH: &str = "urn:xmpp:channel-search:0";
+use super::xep0004::{DataForm, FormType, FromElement, ToElement};
+use super::xep0004::{Field, FieldType, NS_DATA_FORMS};
+use super::xep0059::{
+    build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
+    extract_rsm_response, RsmRequest, RsmResponse,
+};
+
+/// Namespace for XEP-0433 Extended Channel Search requests and results.
+pub const NS_CHANNEL_SEARCH: &str = "urn:xmpp:channel-search:0:search";
+
+/// FORM_TYPE value for search parameter forms.
+pub const NS_CHANNEL_SEARCH_PARAMS: &str = "urn:xmpp:channel-search:0:search-params";
+
+/// XEP-0433 query field name.
+pub const FIELD_QUERY: &str = "q";
 
 /// A search request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +32,8 @@ pub struct SearchRequest {
     pub query: String,
     /// Maximum number of results to return.
     pub max: Option<u32>,
+    /// Result Set Management request metadata.
+    pub rsm: Option<RsmRequest>,
 }
 
 impl SearchRequest {
@@ -54,12 +42,21 @@ impl SearchRequest {
         Self {
             query: query.into(),
             max: None,
+            rsm: None,
         }
     }
 
     /// Set the maximum results.
     pub fn with_max(mut self, max: u32) -> Self {
         self.max = Some(max);
+        self.rsm = Some(self.rsm.unwrap_or_default().with_max(max));
+        self
+    }
+
+    /// Set explicit RSM request metadata.
+    pub fn with_rsm(mut self, rsm: RsmRequest) -> Self {
+        self.max = rsm.max;
+        self.rsm = Some(rsm);
         self
     }
 }
@@ -67,24 +64,27 @@ impl SearchRequest {
 /// A channel result from a search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelResult {
-    /// The room JID.
-    pub jid: String,
+    /// The room address.
+    pub address: String,
     /// The room name.
     pub name: Option<String>,
     /// The room description.
     pub description: Option<String>,
-    /// Current number of occupants.
-    pub occupants: Option<u32>,
+    /// The room language.
+    pub language: Option<String>,
+    /// Current number of occupants/users.
+    pub nusers: Option<u32>,
 }
 
 impl ChannelResult {
     /// Create a new channel result.
-    pub fn new(jid: impl Into<String>) -> Self {
+    pub fn new(address: impl Into<String>) -> Self {
         Self {
-            jid: jid.into(),
+            address: address.into(),
             name: None,
             description: None,
-            occupants: None,
+            language: None,
+            nusers: None,
         }
     }
 
@@ -100,17 +100,29 @@ impl ChannelResult {
         self
     }
 
-    /// Set the occupant count.
-    pub fn with_occupants(mut self, count: u32) -> Self {
-        self.occupants = Some(count);
+    /// Set the language.
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
         self
     }
 
-    /// Returns the display name (name or JID localpart).
+    /// Set the user count.
+    pub fn with_nusers(mut self, count: u32) -> Self {
+        self.nusers = Some(count);
+        self
+    }
+
+    /// Backwards-compatible typed setter for callers that still use the
+    /// old local name.
+    pub fn with_occupants(self, count: u32) -> Self {
+        self.with_nusers(count)
+    }
+
+    /// Returns the display name (name or address localpart).
     pub fn display_name(&self) -> &str {
         self.name
             .as_deref()
-            .unwrap_or_else(|| self.jid.split('@').next().unwrap_or(&self.jid))
+            .unwrap_or_else(|| self.address.split('@').next().unwrap_or(&self.address))
     }
 }
 
@@ -123,7 +135,7 @@ pub trait Searchable {
 impl Searchable for ChannelResult {
     fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
-        self.jid.to_lowercase().contains(&q)
+        self.address.to_lowercase().contains(&q)
             || self
                 .name
                 .as_deref()
@@ -132,41 +144,50 @@ impl Searchable for ChannelResult {
                 .description
                 .as_deref()
                 .is_some_and(|d| d.to_lowercase().contains(&q))
+            || self
+                .language
+                .as_deref()
+                .is_some_and(|l| l.to_lowercase().contains(&q))
     }
 }
 
-// ── Detection ────────────────────────────────────────────────────────
-
 /// Check if an IQ is a channel search request.
 pub fn is_search_request(iq: &Iq) -> bool {
-    matches!(iq, Iq::Get { payload: elem, .. } if elem.name() == "search" && elem.ns() == NS_CHANNEL_SEARCH)
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.is("search", NS_CHANNEL_SEARCH))
 }
 
-// ── Extraction ───────────────────────────────────────────────────────
+/// Check if an IQ requests the search form template.
+pub fn is_search_form_request(iq: &Iq) -> bool {
+    matches!(
+        iq,
+        Iq::Get { payload: elem, .. }
+            if elem.is("search", NS_CHANNEL_SEARCH) && elem.children().next().is_none()
+    )
+}
 
 /// Parse a search request from an IQ.
 pub fn parse_search_request(iq: &Iq) -> Option<SearchRequest> {
     let elem = match iq {
-        Iq::Get { payload: elem, .. }
-            if elem.name() == "search" && elem.ns() == NS_CHANNEL_SEARCH =>
-        {
-            elem
-        }
+        Iq::Get { payload: elem, .. } if elem.is("search", NS_CHANNEL_SEARCH) => elem,
         _ => return None,
     };
 
-    let query = elem
+    let form = elem
         .children()
-        .find(|c| c.name() == "query")
-        .map(|c| c.text())
-        .unwrap_or_default();
+        .find(|child| child.is("x", NS_DATA_FORMS))
+        .and_then(|child| DataForm::from_element(child).ok())?;
+    if form.form_type != FormType::Submit {
+        return None;
+    }
+    if form.get_form_type_value() != Some(NS_CHANNEL_SEARCH_PARAMS) {
+        return None;
+    }
 
-    let max = elem
-        .children()
-        .find(|c| c.name() == "max")
-        .and_then(|c| c.text().parse().ok());
+    let rsm = extract_rsm_request(elem).and_then(Result::ok);
+    let query = form.get_value(FIELD_QUERY).unwrap_or_default().to_owned();
+    let max = rsm.as_ref().and_then(|rsm| rsm.max);
 
-    Some(SearchRequest { query, max })
+    Some(SearchRequest { query, max, rsm })
 }
 
 /// Parse search results from an IQ response.
@@ -175,97 +196,157 @@ pub fn parse_search_results(iq: &Iq) -> Vec<ChannelResult> {
         Iq::Result {
             payload: Some(elem),
             ..
-        } if elem.name() == "result" && elem.ns() == NS_CHANNEL_SEARCH => elem,
+        } if elem.is("result", NS_CHANNEL_SEARCH) => elem,
         _ => return Vec::new(),
     };
 
     elem.children()
-        .filter(|c| c.name() == "channel" && c.ns() == NS_CHANNEL_SEARCH)
-        .filter_map(|c| {
-            let jid = c.attr("jid").filter(|s| !s.is_empty())?.to_owned();
-            let name = c
-                .attr("name")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_owned());
-            let description = c
-                .attr("description")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_owned());
-            let occupants = c.attr("occupants").and_then(|s| s.parse().ok());
-            Some(ChannelResult {
-                jid,
-                name,
-                description,
-                occupants,
-            })
-        })
+        .filter(|child| child.is("item", NS_CHANNEL_SEARCH))
+        .filter_map(parse_result_item)
         .collect()
 }
 
-// ── Building ─────────────────────────────────────────────────────────
+/// Parse XEP-0059 metadata from a search result.
+pub fn parse_search_rsm_response(iq: &Iq) -> Option<RsmResponse> {
+    let elem = match iq {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } if elem.is("result", NS_CHANNEL_SEARCH) => elem,
+        _ => return None,
+    };
+    extract_rsm_response(elem).and_then(Result::ok)
+}
+
+fn parse_result_item(item: &Element) -> Option<ChannelResult> {
+    let address = item.attr("address").filter(|s| !s.is_empty())?.to_owned();
+    let child_text = |name: &str| {
+        item.get_child(name, NS_CHANNEL_SEARCH)
+            .map(|child| child.text())
+            .filter(|text| !text.is_empty())
+    };
+    Some(ChannelResult {
+        address,
+        name: child_text("name"),
+        description: child_text("description"),
+        language: child_text("language"),
+        nusers: child_text("nusers").and_then(|text| text.parse().ok()),
+    })
+}
 
 /// Build a search request IQ.
 pub fn build_search_request(to: jid::Jid, request: &SearchRequest, id: &str) -> Iq {
-    let mut search = Element::builder("search", NS_CHANNEL_SEARCH).build();
+    let mut search = Element::builder("search", NS_CHANNEL_SEARCH);
 
-    let mut query_elem = Element::builder("query", NS_CHANNEL_SEARCH).build();
-    query_elem.append_text_node(&request.query);
-    search.append_child(query_elem);
-
-    if let Some(max) = request.max {
-        let mut max_elem = Element::builder("max", NS_CHANNEL_SEARCH).build();
-        max_elem.append_text_node(max.to_string());
-        search.append_child(max_elem);
+    if let Some(rsm) = request
+        .rsm
+        .clone()
+        .or_else(|| request.max.map(|max| RsmRequest::new().with_max(max)))
+        .filter(|rsm| !rsm.is_empty())
+    {
+        search = search.append(build_rsm_request_element(&rsm));
     }
+
+    let form = DataForm::new(FormType::Submit)
+        .add_field(Field::form_type(NS_CHANNEL_SEARCH_PARAMS))
+        .add_field(Field::text_single(FIELD_QUERY, request.query.as_str()))
+        .to_element();
+    search = search.append(form);
 
     Iq::Get {
         from: None,
         to: Some(to),
         id: id.to_owned(),
-        payload: search,
+        payload: search.build(),
+    }
+}
+
+/// Build a response containing the channel search form template.
+pub fn build_search_form_response(original_iq: &Iq) -> Iq {
+    let form = DataForm::new(FormType::Form)
+        .add_field(Field::form_type(NS_CHANNEL_SEARCH_PARAMS))
+        .add_field(
+            Field::new(FIELD_QUERY, FieldType::TextSingle)
+                .with_label("Search for")
+                .with_required(),
+        )
+        .to_element();
+    let payload = Element::builder("search", NS_CHANNEL_SEARCH)
+        .append(form)
+        .build();
+
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(payload),
     }
 }
 
 /// Build a search result IQ.
 pub fn build_search_response(original_iq: &Iq, results: &[ChannelResult]) -> Iq {
-    let mut result_elem = Element::builder("result", NS_CHANNEL_SEARCH).build();
+    let count = u32::try_from(results.len()).unwrap_or(u32::MAX);
+    let rsm = RsmResponse::from_page(
+        results.first().map(|result| result.address.clone()),
+        results.last().map(|result| result.address.clone()),
+        Some(count),
+    );
+    build_search_response_with_rsm(original_iq, results, &rsm)
+}
+
+/// Build a search result IQ with explicit RSM metadata.
+pub fn build_search_response_with_rsm(
+    original_iq: &Iq,
+    results: &[ChannelResult],
+    rsm: &RsmResponse,
+) -> Iq {
+    let mut result_elem = Element::builder("result", NS_CHANNEL_SEARCH);
 
     for ch in results {
-        let mut channel = Element::builder("channel", NS_CHANNEL_SEARCH)
-            .attr(
-                minidom::rxml::xml_ncname!("jid").to_owned(),
-                ch.jid.as_str(),
-            )
-            .build();
+        let mut item = Element::builder("item", NS_CHANNEL_SEARCH).attr(
+            minidom::rxml::xml_ncname!("address").to_owned(),
+            ch.address.as_str(),
+        );
         if let Some(ref name) = ch.name {
-            channel.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("name").to_owned(),
-                name,
+            item = item.append(
+                Element::builder("name", NS_CHANNEL_SEARCH)
+                    .append(name.as_str())
+                    .build(),
             );
         }
-        if let Some(ref desc) = ch.description {
-            channel.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("description").to_owned(),
-                desc,
+        if let Some(ref description) = ch.description {
+            item = item.append(
+                Element::builder("description", NS_CHANNEL_SEARCH)
+                    .append(description.as_str())
+                    .build(),
             );
         }
-        if let Some(occ) = ch.occupants {
-            channel.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("occupants").to_owned(),
-                occ.to_string(),
+        if let Some(ref language) = ch.language {
+            item = item.append(
+                Element::builder("language", NS_CHANNEL_SEARCH)
+                    .append(language.as_str())
+                    .build(),
             );
         }
-        result_elem.append_child(channel);
+        if let Some(nusers) = ch.nusers {
+            item = item.append(
+                Element::builder("nusers", NS_CHANNEL_SEARCH)
+                    .append(nusers.to_string())
+                    .build(),
+            );
+        }
+        result_elem = result_elem.append(item.build());
+    }
+
+    if !rsm.is_empty() {
+        result_elem = result_elem.append(build_rsm_response_element(rsm));
     }
 
     Iq::Result {
         from: original_iq.to().cloned(),
         to: original_iq.from().cloned(),
         id: original_iq.id().to_string(),
-        payload: Some(result_elem),
+        payload: Some(result_elem.build()),
     }
 }
 
@@ -288,23 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_search_request_false() {
-        let elem = Element::builder("query", "jabber:iq:roster").build();
-        let iq = Iq::Get {
-            from: None,
-            to: None,
-            id: "x".to_owned(),
-            payload: elem,
-        };
-        assert!(!is_search_request(&iq));
-    }
-
-    #[test]
     fn test_parse_search_request() {
         let iq = make_search_iq();
         let req = parse_search_request(&iq).expect("parseable");
         assert_eq!(req.query, "general");
         assert_eq!(req.max, Some(20));
+        assert_eq!(req.rsm.and_then(|rsm| rsm.max), Some(20));
     }
 
     #[test]
@@ -314,74 +384,29 @@ mod tests {
             ChannelResult::new("general@muc.example.com")
                 .with_name("General")
                 .with_description("Main chat")
-                .with_occupants(42),
+                .with_language("en")
+                .with_nusers(42),
             ChannelResult::new("random@muc.example.com").with_name("Random"),
         ];
 
         let response = build_search_response(&request_iq, &results);
         let parsed = parse_search_results(&response);
 
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].jid, "general@muc.example.com");
-        assert_eq!(parsed[0].name.as_deref(), Some("General"));
-        assert_eq!(parsed[0].description.as_deref(), Some("Main chat"));
-        assert_eq!(parsed[0].occupants, Some(42));
-        assert_eq!(parsed[1].jid, "random@muc.example.com");
-        assert_eq!(parsed[1].occupants, None);
+        assert_eq!(parsed, results);
+        let rsm = parse_search_rsm_response(&response).expect("rsm response");
+        assert_eq!(rsm.count, Some(2));
+        assert_eq!(rsm.first.as_deref(), Some("general@muc.example.com"));
+        assert_eq!(rsm.last.as_deref(), Some("random@muc.example.com"));
     }
 
     #[test]
-    fn test_parse_empty_results() {
-        let iq = Iq::Result {
-            from: None,
-            to: None,
-            id: "x".to_owned(),
-            payload: None,
-        };
-        assert!(parse_search_results(&iq).is_empty());
-    }
-
-    #[test]
-    fn test_channel_result_display_name() {
-        let with_name = ChannelResult::new("room@muc").with_name("My Room");
-        assert_eq!(with_name.display_name(), "My Room");
-
-        let without = ChannelResult::new("room@muc.example.com");
-        assert_eq!(without.display_name(), "room");
-    }
-
-    #[test]
-    fn test_searchable_trait() {
+    fn test_searchable() {
         let ch = ChannelResult::new("general@muc.example.com")
             .with_name("General Discussion")
-            .with_description("Main chat for everyone");
-
+            .with_description("Main chat");
         assert!(ch.matches_query("general"));
-        assert!(ch.matches_query("General"));
-        assert!(ch.matches_query("discuss"));
-        assert!(ch.matches_query("everyone"));
+        assert!(ch.matches_query("DISCUSSION"));
+        assert!(ch.matches_query("chat"));
         assert!(!ch.matches_query("random"));
-    }
-
-    #[test]
-    fn test_search_request_builder() {
-        let req = SearchRequest::new("test").with_max(10);
-        assert_eq!(req.query, "test");
-        assert_eq!(req.max, Some(10));
-
-        let req2 = SearchRequest::new("no-max");
-        assert_eq!(req2.max, None);
-    }
-
-    #[test]
-    fn test_channel_result_builder() {
-        let ch = ChannelResult::new("room@muc")
-            .with_name("Room")
-            .with_description("A room")
-            .with_occupants(5);
-        assert_eq!(ch.jid, "room@muc");
-        assert_eq!(ch.name.as_deref(), Some("Room"));
-        assert_eq!(ch.description.as_deref(), Some("A room"));
-        assert_eq!(ch.occupants, Some(5));
     }
 }

@@ -341,10 +341,41 @@ scenario: #Scenario & {
 			to:    "muc.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "search"
-				ns:   "urn:xmpp:channel-search:0"
+				ns:   "urn:xmpp:channel-search:0:search"
 				children: [
-					#XmlElement & {name: "query", ns: "urn:xmpp:channel-search:0"},
-					#XmlElement & {name: "max", ns: "urn:xmpp:channel-search:0", text: "5"},
+					#XmlElement & {
+						name: "set"
+						ns:   "http://jabber.org/protocol/rsm"
+						children: [
+							#XmlElement & {name: "max", ns: "http://jabber.org/protocol/rsm", text: "5"},
+						]
+					},
+					#XmlElement & {
+						name: "x"
+						ns:   "jabber:x:data"
+						attrs: {type: "submit"}
+						children: [
+							#XmlElement & {
+								name: "field"
+								ns:   "jabber:x:data"
+								attrs: {
+									var:  "FORM_TYPE"
+									type: "hidden"
+								}
+								children: [
+									#XmlElement & {name: "value", ns: "jabber:x:data", text: "urn:xmpp:channel-search:0:search-params"},
+								]
+							},
+							#XmlElement & {
+								name: "field"
+								ns:   "jabber:x:data"
+								attrs: {var: "q"}
+								children: [
+									#XmlElement & {name: "value", ns: "jabber:x:data"},
+								]
+							},
+						]
+					},
 				]
 			}
 		},
@@ -352,7 +383,7 @@ scenario: #Scenario & {
 			target:   adminPhone
 			id:       "cue-channel-search"
 			type:     "result"
-			contains: ["urn:xmpp:channel-search:0"]
+			contains: ["urn:xmpp:channel-search:0:search"]
 		},
 		#StreamManagement & {
 			actor:  adminPhone

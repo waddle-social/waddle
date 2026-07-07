@@ -791,7 +791,7 @@ async fn websocket_user_and_channel_search_return_results() {
 
     client
         .send(
-            r#"<iq xmlns="jabber:client" type="get" id="ws-channel-search" to="muc.localhost"><search xmlns="urn:xmpp:channel-search:0"><query></query><max>5</max></search></iq>"#,
+            r#"<iq xmlns="jabber:client" type="get" id="ws-channel-search" to="muc.localhost"><search xmlns="urn:xmpp:channel-search:0:search"><set xmlns="http://jabber.org/protocol/rsm"><max>5</max></set><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>urn:xmpp:channel-search:0:search-params</value></field><field var="q"><value></value></field></x></search></iq>"#,
         )
         .await
         .expect("send channel search request");
@@ -801,7 +801,7 @@ async fn websocket_user_and_channel_search_return_results() {
         .expect("channel search response");
     assert!(
         (channels.contains("type='result'") || channels.contains("type='result'"))
-            && channels.contains("urn:xmpp:channel-search:0"),
+            && channels.contains("urn:xmpp:channel-search:0:search"),
         "expected channel search result, got: {channels}"
     );
 
