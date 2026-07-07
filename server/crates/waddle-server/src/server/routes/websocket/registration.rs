@@ -51,41 +51,31 @@ pub(super) fn publish_stream_id_and_presence(
         );
     }
 
-    // One owner check at the top of the block is enough: if we still own the
-    // slot here, a subsequent replacement's own registration/presence writes
-    // supersede ours harmlessly — the pre-existing accepted semantic.
-    if conn.presence_available
-        && state
-            .deps
-            .protocol
-            .connection_registry
-            .entry_if_owner(jid, owner)
-            .is_some()
-    {
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .update_presence(jid, true, conn.presence_priority);
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .update_presence_state(
-                jid,
-                conn.presence_show
-                    .as_ref()
-                    .map(sm_show_name)
-                    .map(str::to_string),
-                conn.presence_status.clone(),
-                conn.presence_priority,
-                // XEP-0198 resume restores the full last presence,
-                // extension payloads included (XEP-0115 caps, XEP-0319
-                // idle) — RFC 6121 §4.3.2 requires probe responses to
-                // reproduce the complete stanza, and the client sends no
-                // new presence after <resumed/> (#1103 follow-up).
-                conn.presence_payloads.clone(),
-            );
+    // Each write re-verifies ownership INSIDE the registry call: a separate
+    // `entry_if_owner(...).is_some()` check ahead of ungated writes would let
+    // a same-JID replacement that registers between check and write inherit
+    // OUR availability/presence. The owner-gated variants hold the entry
+    // guard across check and write, so a refused write means the replacement
+    // owns the slot and its own initial presence supersedes ours.
+    if conn.presence_available {
+        let registry = &state.deps.protocol.connection_registry;
+        registry.update_presence_if_owner(jid, owner, true, conn.presence_priority);
+        registry.update_presence_state_if_owner(
+            jid,
+            owner,
+            conn.presence_show
+                .as_ref()
+                .map(sm_show_name)
+                .map(str::to_string),
+            conn.presence_status.clone(),
+            conn.presence_priority,
+            // XEP-0198 resume restores the full last presence,
+            // extension payloads included (XEP-0115 caps, XEP-0319
+            // idle) — RFC 6121 §4.3.2 requires probe responses to
+            // reproduce the complete stanza, and the client sends no
+            // new presence after <resumed/> (#1103 follow-up).
+            conn.presence_payloads.clone(),
+        );
     }
 }
 
