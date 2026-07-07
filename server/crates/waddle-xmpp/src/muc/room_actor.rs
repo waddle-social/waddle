@@ -790,6 +790,10 @@ pub struct Join {
     pub affiliation: Affiliation,
 }
 
+fn affiliation_overflows_full_room(affiliation: Affiliation) -> bool {
+    matches!(affiliation, Affiliation::Owner | Affiliation::Admin)
+}
+
 impl kameo::message::Message<Join> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
@@ -797,7 +801,7 @@ impl kameo::message::Message<Join> for RoomActor {
         if self.sealed {
             return Err(RoomActorError::RoomSealed);
         }
-        if self.room.is_full() {
+        if self.room.is_full() && !affiliation_overflows_full_room(msg.affiliation) {
             return Err(RoomActorError::RoomFull);
         }
         if self.room.get_occupant(&msg.nick).is_some() {

@@ -29,10 +29,9 @@
 //! </message>
 //! ```
 //!
-//! Per XEP-0425 v1 §3 spec example, `<moderated>` carries the
-//! moderator's XEP-0421 `<occupant-id/>` child when the room is
-//! semi-anonymous — the `by=` JID alone is insufficient there since
-//! the moderator's real bare JID is hidden.
+//! Per XEP-0425 v1 §3, `<moderated>` can carry the moderator's
+//! XEP-0421 `<occupant-id/>` child alongside the room-nick `by=`
+//! attribution.
 //!
 //! ## Server Behavior
 //!
@@ -113,18 +112,14 @@ impl ModerationRequest {
 /// A moderation result broadcast by the server.
 ///
 /// Carries the moderator's MUC JID **and** their XEP-0421
-/// `<occupant-id/>` when present — the latter is mandatory
-/// attribution in semi-anonymous rooms where the `by=` JID alone
-/// cannot identify the moderator.
+/// `<occupant-id/>` when present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModerationResult {
     /// The ID of the moderated message.
     pub target_id: String,
     /// The MUC JID of the moderator who performed the action.
     pub moderated_by: String,
-    /// XEP-0421 occupant-id of the moderator. Required by v1 §3 in
-    /// semi-anonymous rooms; optional for fully non-anonymous rooms
-    /// where `moderated_by` already discloses the real JID.
+    /// XEP-0421 occupant-id of the moderator.
     pub moderator_occupant_id: Option<String>,
     /// Optional reason.
     pub reason: Option<String>,
@@ -192,10 +187,9 @@ pub fn extract_moderation_result(msg: &Message) -> Option<ModerationResult> {
 
 /// Build a complete moderation result message for broadcasting.
 ///
-/// `moderator_occupant_id` is the moderator's XEP-0421 occupant id;
-/// supply it whenever the room would otherwise hide the moderator's
-/// real bare JID (semi-anonymous rooms). For non-anonymous rooms
-/// the spec allows passing `None`, but supplying it is harmless.
+/// `moderator_occupant_id` is the moderator's XEP-0421 occupant id.
+/// Supplying it keeps moderation attribution stable alongside the
+/// room-nick `by=` value.
 pub fn build_moderation_result_message(
     from_room: impl Into<Option<jid::Jid>>,
     target_id: &str,
@@ -228,10 +222,8 @@ pub fn build_moderation_result_message(
 /// ```
 ///
 /// The `<occupant-id>` child is emitted when
-/// `moderator_occupant_id` is `Some`. The spec example in §3 shows
-/// it as the canonical attribution mechanism for semi-anonymous
-/// rooms (XEP-0421 §3) — without it, a moderator's identity cannot
-/// be cited from the broadcast alone, breaking audit trails.
+/// `moderator_occupant_id` is `Some`, matching the §3 attribution
+/// shape.
 pub fn build_moderated_retract_element(
     target_id: &str,
     moderated_by: &str,
@@ -299,8 +291,7 @@ mod tests {
     #[test]
     fn test_parse_moderation_result() {
         // Note the v1 spec shape: `<retract>` outer, `<moderated>`
-        // inner with its own `<occupant-id>` child for semi-anonymous
-        // attribution.
+        // inner with its own `<occupant-id>` child for attribution.
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
                     <retract xmlns='urn:xmpp:message-retract:1' id='target-1'>\
                       <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/modnick'>\

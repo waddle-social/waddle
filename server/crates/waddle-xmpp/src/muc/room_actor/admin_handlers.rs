@@ -8,7 +8,8 @@ use super::{AdminApplyError, AdminContext, RoomActor};
 use crate::muc::admin::{is_role_change_query, AdminItem};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_membership_removal_presence, build_role_change_presence, MucRoom, Occupant,
+    build_membership_removal_presence, build_role_change_presence, MucPresenceStatus, MucRoom,
+    Occupant,
 };
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0421::{OccupantIdSecret, OccupantIdentity};
@@ -21,6 +22,14 @@ fn all_room_sessions(room: &MucRoom) -> Vec<FullJid> {
         .values()
         .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
         .collect()
+}
+
+fn visible_real_jid_for_recipient<'a>(
+    _room: &MucRoom,
+    _recipient: &FullJid,
+    subject_real_jid: &'a FullJid,
+) -> Option<&'a FullJid> {
+    Some(subject_real_jid)
 }
 
 fn occupants_for_bare(room: &MucRoom, target_jid: &BareJid) -> Vec<Occupant> {
@@ -43,21 +52,21 @@ fn removal_presence_updates(
         .with_resource_str(&occupant.nick)
         .expect("nick was previously accepted as resource");
     let occupant_bare = occupant.real_jid.to_bare();
-    let occupant_identity = OccupantIdentity {
-        bare_jid: &occupant_bare,
-        real_jid: Some(&occupant.real_jid),
-        secret: occupant_id_secret,
-    };
     let removed_sessions = room.get_occupant_sessions(&occupant.nick);
     all_room_sessions(room)
         .into_iter()
         .map(|recipient| {
+            let occupant_identity = OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
+                secret: occupant_id_secret,
+            };
             let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
             let presence = build_membership_removal_presence(
                 &from_room_jid,
                 &recipient,
                 status_code,
-                is_self,
+                MucPresenceStatus::new(is_self, true),
                 actor,
                 &occupant_identity,
             );
@@ -103,18 +112,18 @@ fn apply_affiliation_change(
                 .with_resource_str(&occupant.nick)
                 .expect("nick was previously accepted as resource");
             let occupant_bare = occupant.real_jid.to_bare();
-            let occupant_identity = OccupantIdentity {
-                bare_jid: &occupant_bare,
-                real_jid: Some(&occupant.real_jid),
-                secret: occupant_id_secret,
-            };
             let removed_sessions = room.get_occupant_sessions(&occupant.nick);
             updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+                let occupant_identity = OccupantIdentity {
+                    bare_jid: &occupant_bare,
+                    real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
+                    secret: occupant_id_secret,
+                };
                 let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
                 let presence = build_ban_presence(
                     &from_room_jid,
                     &recipient,
-                    is_self,
+                    MucPresenceStatus::new(is_self, true),
                     reason,
                     actor,
                     &occupant_identity,
@@ -162,20 +171,20 @@ fn apply_affiliation_change(
             .with_resource_str(&occupant.nick)
             .expect("nick was previously accepted as resource");
         let occupant_bare = occupant.real_jid.to_bare();
-        let occupant_identity = OccupantIdentity {
-            bare_jid: &occupant_bare,
-            real_jid: Some(&occupant.real_jid),
-            secret: occupant_id_secret,
-        };
         let affected_sessions = room.get_occupant_sessions(&occupant.nick);
         updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+            let occupant_identity = OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
+                secret: occupant_id_secret,
+            };
             let is_self = affected_sessions.iter().any(|jid| jid == &recipient);
             let presence = build_affiliation_change_presence(
                 &from_room_jid,
                 &recipient,
                 new_affiliation,
                 occupant.role,
-                is_self,
+                MucPresenceStatus::new(is_self, true),
                 &occupant_identity,
             );
             (recipient, presence)
@@ -359,20 +368,24 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     .with_resource_str(&target_nick)
                     .expect("nick was previously accepted as resource");
                 let target_bare = target_occupant.real_jid.to_bare();
-                let target_identity = OccupantIdentity {
-                    bare_jid: &target_bare,
-                    real_jid: Some(&target_occupant.real_jid),
-                    secret: &self.occupant_id_secret,
-                };
                 let target_sessions = self.room.get_occupant_sessions(&target_nick);
                 if new_role == Role::None {
                     for recipient in all_room_sessions(&self.room) {
+                        let target_identity = OccupantIdentity {
+                            bare_jid: &target_bare,
+                            real_jid: visible_real_jid_for_recipient(
+                                &self.room,
+                                &recipient,
+                                &target_occupant.real_jid,
+                            ),
+                            secret: &self.occupant_id_secret,
+                        };
                         let is_self = target_sessions.iter().any(|jid| jid == &recipient);
                         let presence = build_kick_presence(
                             &from_room_jid,
                             &recipient,
                             target_occupant.affiliation,
-                            is_self,
+                            MucPresenceStatus::new(is_self, true),
                             item.reason.as_deref(),
                             Some(&msg.sender_jid.to_bare()),
                             &target_identity,
@@ -386,13 +399,22 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                         occ.role = new_role;
                     }
                     for recipient in all_room_sessions(&self.room) {
+                        let target_identity = OccupantIdentity {
+                            bare_jid: &target_bare,
+                            real_jid: visible_real_jid_for_recipient(
+                                &self.room,
+                                &recipient,
+                                &target_occupant.real_jid,
+                            ),
+                            secret: &self.occupant_id_secret,
+                        };
                         let is_self = target_sessions.iter().any(|jid| jid == &recipient);
                         let presence = build_role_change_presence(
                             &from_room_jid,
                             &recipient,
                             target_occupant.affiliation,
                             new_role,
-                            is_self,
+                            MucPresenceStatus::new(is_self, true),
                             &target_identity,
                         );
                         presence_updates.push((recipient, presence));

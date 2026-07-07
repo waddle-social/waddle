@@ -33,7 +33,8 @@ pub use admin::{
 };
 pub use durable::{DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext};
 pub use messages::{
-    create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
+    build_config_change_message, config_change_status_codes, create_broadcast_message,
+    is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucConfigStatusCode, MucMessage,
     OutboundMucMessage,
 };
 pub use owner::{build_config_form, DATA_FORMS_NS, MUC_ROOMCONFIG_NS};
@@ -46,7 +47,7 @@ pub use presence::{
     build_kick_presence, build_leave_presence, build_membership_removal_presence,
     build_occupant_presence, build_occupant_presence_update, build_role_change_presence,
     parse_muc_presence, DestroyRequest, HistoryRequest, MucJoinRequest, MucLeaveRequest,
-    MucPresenceAction, MucPresenceUpdateRequest, OutboundMucPresence,
+    MucPresenceAction, MucPresenceStatus, MucPresenceUpdateRequest, OutboundMucPresence,
 };
 pub use room::{is_remote_jid, MucRoom, Occupant, RoomConfig};
 pub use room_actor::RoomActorError;

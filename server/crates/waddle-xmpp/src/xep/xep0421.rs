@@ -115,11 +115,8 @@ pub enum OccupantIdSecretError {
 ///   JID is disclosed in the MUC `<item jid='…'>`. Used as the HMAC
 ///   message input.
 /// - `real_jid` — whether to disclose the user's full JID in
-///   `<item jid='…'>`. `Some` for non-anonymous and semi-anonymous
-///   rooms; `None` for fully-anonymous rooms (XEP-0045 §15.6.4). The
-///   choice is independent of `bare_jid` — a fully-anonymous room
-///   still stamps occupant-id (XEP-0421 §"Business Rules"), it just
-///   doesn't expose the real JID.
+///   `<item jid='…'>`. The choice is independent of `bare_jid`;
+///   XEP-0421 occupant-id stamping still uses the bare JID input.
 /// - `secret` — the per-deployment HMAC key.
 ///
 /// Bundling these three drops public `build_*_presence` argument counts

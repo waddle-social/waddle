@@ -325,7 +325,7 @@ pub(super) async fn try_handle_muc_presence_update(
                 recipient,
                 outcome.update.sender_affiliation,
                 outcome.update.sender_role,
-                is_self,
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
                 &identity,
             );
 

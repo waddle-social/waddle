@@ -4,8 +4,8 @@ use jid::{BareJid, FullJid};
 use kameo::message::Context;
 
 use super::{
-    JoinExistingOccupant, JoinOutcome, LeaveOutcome, PresenceUpdateOutcome, RoomActor,
-    RoomActorError,
+    affiliation_overflows_full_room, JoinExistingOccupant, JoinOutcome, LeaveOutcome,
+    PresenceUpdateOutcome, RoomActor, RoomActorError,
 };
 use crate::muc::RoomConfig;
 use crate::types::Affiliation;
@@ -134,7 +134,12 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 }
             }
         }
-        if self.room.is_full() && !is_existing_session_rejoin && !is_same_bare_multi_session_join {
+        let joining_affiliation = self.room.get_affiliation(&msg.sender_jid.to_bare());
+        if self.room.is_full()
+            && !is_existing_session_rejoin
+            && !is_same_bare_multi_session_join
+            && !affiliation_overflows_full_room(joining_affiliation)
+        {
             return Err(RoomActorError::RoomFull);
         }
 

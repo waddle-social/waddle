@@ -318,7 +318,7 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
                         &existing.jid,
                         join.new_occupant_affiliation,
                         join.new_occupant_role,
-                        false,
+                        waddle_xmpp::muc::MucPresenceStatus::new(false, true),
                         &waddle_xmpp::xep::xep0421::OccupantIdentity {
                             bare_jid: &bot_bare,
                             real_jid: Some(&bot_full),

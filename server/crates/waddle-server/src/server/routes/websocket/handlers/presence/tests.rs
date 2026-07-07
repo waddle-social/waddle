@@ -100,7 +100,10 @@ fn muc_join_presence_carries_authority_in_xep_0045_payload_only() {
         affiliation: Affiliation::Owner,
         role: Role::Moderator,
         real_jid: &real_jid,
+        disclose_real_jid: true,
         include_self_status: false,
+        room_created: false,
+        include_nonanonymous_status: true,
         muji: None,
         in_call: waddle_xmpp::xep::InCallPresenceState::default(),
     });

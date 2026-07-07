@@ -181,10 +181,6 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
         reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
     },
     FeatureCoverageExemption {
-        feature: "muc_semianonymous",
-        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
-    },
-    FeatureCoverageExemption {
         feature: "muc_temporary",
         reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
     },

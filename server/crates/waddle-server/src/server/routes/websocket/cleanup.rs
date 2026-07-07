@@ -49,17 +49,17 @@ pub(crate) fn broadcast_muc_leave_to_remaining(
         .with_resource_str(&outcome.nick)
         .unwrap_or_else(|_| sender_jid.clone());
     let sender_bare = sender_jid.to_bare();
-    let identity = OccupantIdentity {
-        bare_jid: &sender_bare,
-        real_jid: Some(sender_jid),
-        secret: &state.deps.occupant_id_secret,
-    };
     for occupant_jid in &outcome.remaining_occupants {
+        let identity = OccupantIdentity {
+            bare_jid: &sender_bare,
+            real_jid: Some(sender_jid),
+            secret: &state.deps.occupant_id_secret,
+        };
         let presence = waddle_xmpp::muc::build_leave_presence(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            false,
+            waddle_xmpp::muc::MucPresenceStatus::new(false, true),
             &identity,
         );
         let _ = state
@@ -111,7 +111,7 @@ pub(crate) fn broadcast_muc_muji_clear_to_remaining(
                 occupant_jid,
                 outcome.affiliation,
                 outcome.role,
-                is_self,
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
                 &identity,
             );
             if !muji.is_empty() {

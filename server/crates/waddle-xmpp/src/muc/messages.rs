@@ -3,9 +3,12 @@
 //! Types for handling MUC groupchat message routing and broadcasting.
 
 use jid::{BareJid, FullJid, Jid};
+use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::message::{Message, MessageType};
 
+use super::presence::NS_MUC_USER;
+use super::room::RoomConfig;
 use super::SubjectState;
 use crate::xep::xep0085::{self, ChatStateCarrier};
 use crate::xep::xep0203;
@@ -133,6 +136,85 @@ impl OutboundMucMessage {
     pub fn new(to: FullJid, message: Message) -> Self {
         Self { to, message }
     }
+}
+
+/// XEP-0045 §10.2.1 configuration-change status codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucConfigStatusCode {
+    /// 104: non-privacy-related room configuration change.
+    NonPrivacyConfigurationChange,
+    /// 170: room logging is now enabled.
+    LoggingEnabled,
+    /// 171: room logging is now disabled.
+    LoggingDisabled,
+}
+
+impl MucConfigStatusCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NonPrivacyConfigurationChange => "104",
+            Self::LoggingEnabled => "170",
+            Self::LoggingDisabled => "171",
+        }
+    }
+}
+
+/// Diff two room configs into XEP-0045 §10.2.1 notification codes.
+pub fn config_change_status_codes(
+    previous: &RoomConfig,
+    next: &RoomConfig,
+) -> Vec<MucConfigStatusCode> {
+    let mut codes = Vec::new();
+
+    if previous.enable_logging != next.enable_logging {
+        codes.push(if next.enable_logging {
+            MucConfigStatusCode::LoggingEnabled
+        } else {
+            MucConfigStatusCode::LoggingDisabled
+        });
+    }
+
+    if has_non_privacy_config_change(previous, next) {
+        codes.push(MucConfigStatusCode::NonPrivacyConfigurationChange);
+    }
+
+    codes
+}
+
+fn has_non_privacy_config_change(previous: &RoomConfig, next: &RoomConfig) -> bool {
+    previous.name != next.name
+        || previous.description != next.description
+        || previous.persistent != next.persistent
+        || previous.members_only != next.members_only
+        || previous.public_room != next.public_room
+        || previous.moderated != next.moderated
+        || previous.max_occupants != next.max_occupants
+        || previous.forum != next.forum
+        || previous.group_dm != next.group_dm
+        || previous.pin_permission != next.pin_permission
+        || previous.federation_policy != next.federation_policy
+}
+
+/// Build the per-occupant config-change notification message.
+pub fn build_config_change_message(
+    room_jid: &BareJid,
+    to_jid: &FullJid,
+    status_codes: &[MucConfigStatusCode],
+) -> Message {
+    let mut x = Element::builder("x", NS_MUC_USER);
+    for code in status_codes {
+        x = x.append(
+            Element::builder("status", NS_MUC_USER)
+                .attr(minidom::rxml::xml_ncname!("code").to_owned(), code.as_str())
+                .build(),
+        );
+    }
+
+    let mut message = Message::new(Some(Jid::from(to_jid.clone())));
+    message.from = Some(Jid::from(room_jid.clone()));
+    message.type_ = MessageType::Groupchat;
+    message.payloads.push(x.build());
+    message
 }
 
 /// Result of routing a message through a MUC room.

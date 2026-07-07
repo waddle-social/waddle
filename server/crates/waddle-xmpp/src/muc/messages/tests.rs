@@ -85,6 +85,59 @@ fn test_create_broadcast_message() {
 }
 
 #[test]
+fn config_change_status_codes_cover_logging_and_nonprivacy_changes() {
+    let previous = RoomConfig {
+        name: "Old".to_string(),
+        enable_logging: false,
+        ..RoomConfig::default()
+    };
+    let next = RoomConfig {
+        name: "New".to_string(),
+        enable_logging: true,
+        ..previous.clone()
+    };
+
+    let codes = config_change_status_codes(&previous, &next);
+    assert_eq!(
+        codes,
+        vec![
+            MucConfigStatusCode::LoggingEnabled,
+            MucConfigStatusCode::NonPrivacyConfigurationChange,
+        ]
+    );
+
+    let room: BareJid = "room@muc.example.com".parse().expect("room jid");
+    let to: FullJid = "alice@example.com/web".parse().expect("recipient jid");
+    let message = build_config_change_message(&room, &to, &codes);
+    assert_eq!(message.type_, MessageType::Groupchat);
+    assert_eq!(message.from, Some(Jid::from(room)));
+    assert_eq!(message.to, Some(Jid::from(to)));
+    let x = message
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("muc#user config payload");
+    let wire_codes: Vec<&str> = x
+        .children()
+        .filter(|child| child.is("status", NS_MUC_USER))
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert_eq!(wire_codes, vec!["170", "104"]);
+
+    let disabled_codes = config_change_status_codes(
+        &RoomConfig {
+            enable_logging: true,
+            ..RoomConfig::default()
+        },
+        &RoomConfig {
+            enable_logging: false,
+            ..RoomConfig::default()
+        },
+    );
+    assert_eq!(disabled_codes, vec![MucConfigStatusCode::LoggingDisabled]);
+}
+
+#[test]
 fn test_message_route_result() {
     let success = MessageRouteResult::success(vec![]);
     assert!(success.success);

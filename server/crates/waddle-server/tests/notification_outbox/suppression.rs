@@ -436,7 +436,7 @@ async fn t1_opt_in_without_hint_emits_rich_summary() {
 /// is the room-occupant JID (`room@muc/nick`), never a real JID.
 /// The candidate constructor enforces
 /// `sender_jid.to_bare() == conversation_jid`, so the summary cannot
-/// leak a real JID to the push gateway regardless of room anonymity.
+/// leak a real JID to the push gateway regardless of room visibility.
 #[tokio::test]
 async fn t1_groupchat_rich_sender_is_occupant_jid() {
     let store = store().await;

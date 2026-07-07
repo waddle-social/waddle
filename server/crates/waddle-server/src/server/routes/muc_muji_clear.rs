@@ -114,7 +114,7 @@ pub(crate) fn broadcast_muji_clear(
                 recipient,
                 outcome.update.sender_affiliation,
                 outcome.update.sender_role,
-                is_self,
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
                 &identity,
             );
             if let Some(muji_ref) = muji {

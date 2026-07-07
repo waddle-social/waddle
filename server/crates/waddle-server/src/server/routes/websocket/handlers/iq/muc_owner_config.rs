@@ -180,6 +180,8 @@ pub(super) async fn apply_muc_owner_config(
         })
         .await
         .map_err(|error| format!("config update failed: {error:?}"))?;
+    let config_status_codes =
+        waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
@@ -195,6 +197,16 @@ pub(super) async fn apply_muc_owner_config(
                     .try_send_to(&recipient, Stanza::Presence(presence));
             }
         }
+        let post_update_snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
+        broadcast_muc_config_change(
+            state,
+            room_jid,
+            &post_update_snapshot.room,
+            &config_status_codes,
+        );
         return Ok(());
     };
 
@@ -271,7 +283,44 @@ pub(super) async fn apply_muc_owner_config(
         }
     }
 
+    let post_update_snapshot = room_actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
+    broadcast_muc_config_change(
+        state,
+        room_jid,
+        &post_update_snapshot.room,
+        &config_status_codes,
+    );
+
     Ok(())
+}
+
+fn broadcast_muc_config_change(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room: &waddle_xmpp::muc::MucRoom,
+    status_codes: &[waddle_xmpp::muc::MucConfigStatusCode],
+) {
+    if status_codes.is_empty() {
+        return;
+    }
+
+    for occupant in room.occupants.values() {
+        for recipient_jid in room.get_occupant_sessions(&occupant.nick) {
+            let message = waddle_xmpp::muc::build_config_change_message(
+                room_jid,
+                &recipient_jid,
+                status_codes,
+            );
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&recipient_jid, Stanza::Message(message));
+        }
+    }
 }
 
 #[cfg(test)]

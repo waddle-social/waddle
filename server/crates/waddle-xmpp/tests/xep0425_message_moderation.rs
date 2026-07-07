@@ -11,9 +11,8 @@
 //!   nested `<moderated by=…><occupant-id/></moderated>` and optional
 //!   `<reason>`,
 //! - the XEP-0421 `<occupant-id/>` attribution invariant — the
-//!   broadcast MUST carry the moderator's occupant-id when supplied,
-//!   so semi-anonymous rooms still surface a stable identifier even
-//!   when `by=` hides the real bare JID,
+//!   broadcast MUST carry the moderator's occupant-id when supplied
+//!   so audit trails have a stable identifier alongside `by=`,
 //! - parser robustness: empty `id="…"`, missing `<moderated>`, and
 //!   wrong-namespace near-misses are all rejected.
 
@@ -150,9 +149,8 @@ fn xep0425_request_iq_rejects_get_type() {
 #[test]
 fn xep0425_broadcast_carries_occupant_id_attribution() {
     // XEP-0425 v1 §3 spec example places `<occupant-id>` inside
-    // `<moderated>`. Without it, semi-anonymous rooms (which hide
-    // the moderator's real JID via XEP-0421) have no stable
-    // identifier to cite the moderator from the broadcast alone.
+    // `<moderated>`, giving clients a stable identifier to cite the
+    // moderator from the broadcast.
     //
     // We assert against the typed minidom tree rather than the
     // serialised string so attribute quote-style ambiguity (the
@@ -178,10 +176,7 @@ fn xep0425_broadcast_carries_occupant_id_attribution() {
     let occ = moderated
         .children()
         .find(|c| c.name() == "occupant-id" && c.ns() == "urn:xmpp:occupant-id:0")
-        .expect(
-            "broadcast MUST embed moderator's XEP-0421 occupant-id \
-             for semi-anonymous attribution",
-        );
+        .expect("broadcast MUST embed moderator's XEP-0421 occupant-id attribution");
     assert_eq!(occ.attr("id"), Some("dd72603deec90a38ba552f7c68cbcc61"));
 
     let reason = elem

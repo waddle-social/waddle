@@ -153,6 +153,74 @@ async fn test_join_rejected_when_room_full() {
 }
 
 #[tokio::test]
+async fn test_join_owner_affiliation_allowed_when_room_full() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        max_occupants: 1,
+        ..RoomConfig::default()
+    })
+    .await;
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("first join");
+
+    actor
+        .ask(Join {
+            nick: "owner".to_string(),
+            real_jid: test_full_jid("owner"),
+            role: Role::Moderator,
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("owner affiliation should bypass full-room rejection");
+
+    let count = actor.ask(OccupantCount).await.expect("ask");
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn test_join_with_admin_affiliation_allowed_when_room_full() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        max_occupants: 1,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let admin = test_full_jid("admin");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("first join should succeed");
+
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: admin,
+            nick: "admin".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
+            local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("admin affiliation should bypass full-room rejection");
+
+    assert_eq!(outcome.new_occupant_affiliation, Affiliation::Admin);
+    assert_eq!(outcome.occupant_count, 2);
+}
+
+#[tokio::test]
 async fn test_join_existing_session_allowed_when_room_full() {
     let actor = spawn_room_actor_with_config(RoomConfig {
         max_occupants: 1,

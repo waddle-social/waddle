@@ -111,7 +111,7 @@ fn test_build_occupant_presence() {
         &to,
         Affiliation::Member,
         Role::Participant,
-        true,
+        MucPresenceStatus::new(true, true),
         &OccupantIdentity {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
@@ -141,6 +141,72 @@ fn test_build_occupant_presence() {
 }
 
 #[test]
+fn test_build_occupant_presence_created_room_self_includes_201() {
+    let from: FullJid = "room@muc.example.com/creator".parse().unwrap();
+    let creator: FullJid = "creator@example.com/desktop".parse().unwrap();
+    let peer: FullJid = "peer@example.com/phone".parse().unwrap();
+
+    let secret = test_secret();
+    let creator_bare = creator.to_bare();
+    let identity = OccupantIdentity {
+        bare_jid: &creator_bare,
+        real_jid: Some(&creator),
+        secret: &secret,
+    };
+
+    let self_presence = build_occupant_presence(
+        &from,
+        &creator,
+        Affiliation::Owner,
+        Role::Moderator,
+        MucPresenceStatus::created_self(true),
+        &identity,
+    );
+    let self_x = self_presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("self muc#user payload");
+    let self_codes: Vec<&str> = self_x
+        .children()
+        .filter(|child| child.is("status", NS_MUC_USER))
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        self_codes.contains(&"110"),
+        "creator self-presence must include status 110; got {self_codes:?}"
+    );
+    assert!(
+        self_codes.contains(&"201"),
+        "created-room self-presence must include status 201; got {self_codes:?}"
+    );
+
+    let peer_presence = build_occupant_presence(
+        &from,
+        &peer,
+        Affiliation::Owner,
+        Role::Moderator,
+        MucPresenceStatus {
+            is_self: false,
+            room_created: true,
+            include_nonanonymous_status: true,
+        },
+        &identity,
+    );
+    let peer_x = peer_presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("peer muc#user payload");
+    assert!(
+        !peer_x
+            .children()
+            .any(|child| { child.is("status", NS_MUC_USER) && child.attr("code") == Some("201") }),
+        "status 201 is only valid on the creator's self-presence"
+    );
+}
+
+#[test]
 fn test_build_leave_presence() {
     let from: FullJid = "room@muc.example.com/leaver".parse().unwrap();
     let to: FullJid = "user@example.com/resource".parse().unwrap();
@@ -152,7 +218,7 @@ fn test_build_leave_presence() {
         &from,
         &to,
         Affiliation::Member,
-        true,
+        MucPresenceStatus::new(true, true),
         &OccupantIdentity {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
@@ -203,7 +269,7 @@ fn test_build_kick_presence_self_includes_307_and_110_and_actor_reason() {
         &from,
         &to,
         Affiliation::Member,
-        true,
+        MucPresenceStatus::new(true, true),
         Some("spam"),
         Some(&actor),
         &OccupantIdentity {
@@ -267,7 +333,7 @@ fn test_build_kick_presence_remaining_excludes_110() {
         &from,
         &to,
         Affiliation::Member,
-        false,
+        MucPresenceStatus::new(false, true),
         None,
         Some(&actor),
         &OccupantIdentity {
@@ -319,7 +385,7 @@ fn test_build_ban_presence_self_includes_301_outcast_role_none() {
     let presence = build_ban_presence(
         &from,
         &to,
-        true,
+        MucPresenceStatus::new(true, true),
         Some("trolling"),
         Some(&actor),
         &OccupantIdentity {
@@ -387,7 +453,7 @@ fn test_build_occupant_presence_update_replaces_spoofable_identity_payloads() {
         &to,
         Affiliation::Member,
         Role::Participant,
-        false,
+        MucPresenceStatus::new(false, true),
         &OccupantIdentity {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
