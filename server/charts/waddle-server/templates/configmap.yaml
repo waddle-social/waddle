@@ -16,6 +16,13 @@ data:
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
   WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
   WADDLE_DRAIN_TIMEOUT_SECS: {{ .Values.config.drainTimeoutSeconds | toString | quote }}
+  {{- /*
+    ADR-0017 Phase 3 Slice 10: wired unconditionally, mirroring
+    WADDLE_CLUSTERING_POD_TEMPLATE_HASH's identical precedent in
+    deployment.yaml — harmless while clustering.enabled stays hard-locked
+    false (Phase 0 guard), and ships ahead of Phase 4's chart unlock.
+  */}}
+  WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS: {{ mul (int .Values.clustering.claimReleaseBudgetSeconds) 1000 | toString | quote }}
   WADDLE_SERVER_OWNER_LOCALPARTS: {{ join "," .Values.config.serverOwnerLocalparts | quote }}
   RUST_LOG: {{ .Values.config.rustLog | quote }}
   {{- if .Values.config.corsOrigins }}

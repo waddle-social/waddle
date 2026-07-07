@@ -1407,11 +1407,11 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
 /// 3, element 4's "Unwedge" text) — the `RoomActor` counterpart of
 /// `registry::user_actor::HealthCheck`: a successful reply proves this
 /// actor's mailbox loop is live and responsive right now, since kameo
-/// processes a mailbox strictly in order. No production caller wires this
-/// yet — `RoomActor` claims do not exist until Slice 7 wires durable MUC
-/// room ownership (the only production `LocallyClaimedEntities` implementor
-/// today is `waddle_server::clustering::self_fence::NoLocallyClaimedEntities`,
-/// whose `owned()` is always empty).
+/// processes a mailbox strictly in order. Production callers:
+/// `RoomLocalClaims::health_check` (the Slice 7 owner-veto/reconciliation
+/// path) and `RoomLocalClaims::seal_before_release` (the Slice 10 drain
+/// barrier — a reply after the drain's `owned()` snapshot proves every
+/// mutation queued ahead of it already committed its fenced durable write).
 pub struct HealthCheck;
 
 impl kameo::message::Message<HealthCheck> for RoomActor {

@@ -860,6 +860,7 @@ mod ownership_claims_tests {
                 claim_store: Arc::clone(&claim_store),
                 node_identity: identity.clone(),
                 durable_store: None,
+                rollout_backoff: None,
             })
             .await
             .expect("wire");
@@ -917,6 +918,7 @@ mod ownership_claims_tests {
                 claim_store: Arc::clone(&claim_store),
                 node_identity: identity.clone(),
                 durable_store: None,
+                rollout_backoff: None,
             })
             .await
             .expect("wire");
@@ -1001,6 +1003,7 @@ mod ownership_claims_tests {
                 claim_store: Arc::clone(&claim_store),
                 node_identity: SharedNodeIdentity::new(this_identity()),
                 durable_store: None,
+                rollout_backoff: None,
             })
             .await
             .expect("wire");
@@ -1229,6 +1232,7 @@ mod ownership_claims_tests {
                 claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
                 node_identity: SharedNodeIdentity::new(this_identity()),
                 durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
             })
             .await
             .expect("wire");
@@ -1306,6 +1310,7 @@ mod ownership_claims_tests {
                 claim_store: Arc::new(InProcessClaimStore::new()) as Arc<dyn ClaimStore>,
                 node_identity: SharedNodeIdentity::new(this_identity()),
                 durable_store: Some(durable_store as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
             })
             .await
             .expect("wire");

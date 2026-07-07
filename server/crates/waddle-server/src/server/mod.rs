@@ -192,7 +192,11 @@ pub async fn start_with_config(
     // disabled — the default single-replica path is byte-for-byte unchanged,
     // and `clustering_readiness` simply never flips (stays ready forever).
     let clustering_readiness = crate::clustering::ClusteringReadiness::new();
-    let clustering_handles = crate::clustering::start_if_enabled(
+    // ADR-0017 Phase 3 Slice 10: `clustering_shutdown` is awaited after the
+    // HTTP server exits below — see that await's own comment for why this
+    // node's graceful per-entity claim drain must complete before process
+    // exit, not merely race it in the background.
+    let (clustering_handles, clustering_shutdown) = crate::clustering::start_if_enabled(
         &server_config.clustering,
         db_pool.global(),
         &stop_token,
@@ -211,11 +215,22 @@ pub async fn start_with_config(
     // untouched — today's behavior, unchanged.
     #[cfg(feature = "clustering")]
     if let Some((claim_store, node_identity)) = clustering_handles.claim_pair() {
+        // ADR-0017 Phase 3 Slice 10: rollout-aware acquire placement for
+        // the room re-election path — `None` (no backoff) whenever the
+        // node-lease handle itself is unavailable, mirroring every other
+        // `clustering_handles.*` optional-field fallback in this block.
+        let rollout_backoff = clustering_handles.node_lease.clone().map(|node_lease| {
+            Arc::new(crate::clustering::drain::PostgresRolloutBackoff::new(
+                node_lease,
+                clustering_handles.pod_template_hash.clone(),
+            )) as Arc<dyn waddle_xmpp::ownership::RolloutBackoff>
+        });
         room_registry_handle
             .wire_clustering_claims(
                 claim_store,
                 node_identity,
                 clustering_handles.muc_durable_store.clone(),
+                rollout_backoff,
             )
             .await;
         if let Some(room_local_claims) = &clustering_handles.room_local_claims {
@@ -324,6 +339,23 @@ pub async fn start_with_config(
         Ok(Err(e)) => Err(e),
         Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
     };
+    // ADR-0017 Phase 3 Slice 10: the clustering node-lease loop runs its
+    // own per-entity graceful drain (mark draining, seal + batch-release
+    // owned `RoomActor` claims) on this same `stop_token` firing, in
+    // parallel with the HTTP/SM drain just awaited above — but element 4's
+    // drain sequence requires it "completing before process exit," not
+    // merely racing shutdown in the background. A small fixed margin atop
+    // the configured budget covers this await's own task-exit/logging
+    // overhead beyond the drain loop's own internal budget bound; a no-op
+    // (returns immediately) when clustering is disabled.
+    const CLUSTERING_DRAIN_AWAIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+    clustering_shutdown
+        .await_drain(
+            server_config.clustering.node_lease.claim_release_budget
+                + CLUSTERING_DRAIN_AWAIT_MARGIN,
+        )
+        .await;
+
     // Tear down the shutdown lifecycle task so we don't dangle.
     // If HTTP exited on its own (error path) before any signal
     // arrived, `shutdown_handle.await` would block on

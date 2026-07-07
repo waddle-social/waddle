@@ -363,6 +363,7 @@ async fn cluster_exit_criteria_end_to_end() {
         node_lease: waddle_server::config::ClusteringNodeLeaseConfig {
             heartbeat_interval: Duration::from_secs(1),
             lease_ttl: Duration::from_secs(10),
+            claim_release_budget: Duration::from_secs(5),
         },
         self_fence: waddle_server::config::ClusteringSelfFenceConfig::default(),
         steal_intent: waddle_server::config::ClusteringStealIntentConfig::default(),
@@ -1054,6 +1055,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             std::sync::Arc::clone(&claim_store),
             SharedNodeIdentity::new(identity.clone()),
             Some(std::sync::Arc::new(HangingDurableStore)),
+            None,
         )
         .await;
 
@@ -1116,6 +1118,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             lease_config: ClusteringNodeLeaseConfig {
                 heartbeat_interval,
                 lease_ttl: Duration::from_secs(30),
+                claim_release_budget: Duration::from_secs(5),
             },
             self_fence_config: ClusteringSelfFenceConfig::default(),
             connected_peers: ConnectedPeerCount::new(),
@@ -1123,6 +1126,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             readiness: ClusteringReadiness::new(),
             live_identity,
             claim_store,
+            claim_release_budget: Duration::from_secs(5),
         },
     ));
 

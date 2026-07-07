@@ -122,7 +122,17 @@ impl InMemorySmSessionRegistry {
     /// Pair with [`Self::drain_all_for_shutdown`]: drain returns
     /// the sessions, caller promotes each, caller calls
     /// `confirm_drained` per session after successful promotion.
-    pub async fn confirm_drained(&self, stream_id: &str) {
+    ///
+    /// Returns `true` iff the durable row was deleted and this entity's
+    /// `ClaimStore` claim release was attempted — the SM session's own
+    /// "final fenced write, then release" sequence (ADR-0017 Phase 3 Slice
+    /// 10). `false` means the durable row survives for a restart-time
+    /// retry (the claim is deliberately left held, not released) — the
+    /// caller (`session_janitors::spawn_graceful_shutdown_drain`) counts
+    /// this the same way Slice 10's generic per-entity drain counts an
+    /// abandoned entity, feeding the shared `claims_released_on_drain`/
+    /// `claims_abandoned_on_drain` observability.
+    pub async fn confirm_drained(&self, stream_id: &str) -> bool {
         let stream_lock = match self.stream_lock(stream_id) {
             Ok(lock) => lock,
             Err(error) => {
@@ -131,7 +141,7 @@ impl InMemorySmSessionRegistry {
                     error = %error,
                     "graceful-shutdown drain: stream lock lookup failed before durable delete"
                 );
-                return;
+                return false;
             }
         };
         let _stream_guard = stream_lock.lock().await;
@@ -144,6 +154,7 @@ impl InMemorySmSessionRegistry {
                 // release again (nothing else ever revisits a deleted
                 // session's entity).
                 self.release_claim_store_entry(stream_id).await;
+                true
             }
             Err(error) => {
                 debug!(
@@ -152,6 +163,7 @@ impl InMemorySmSessionRegistry {
                     "graceful-shutdown drain: durable delete failed; \
                      restart-time expiry filter will catch the orphan"
                 );
+                false
             }
         }
     }

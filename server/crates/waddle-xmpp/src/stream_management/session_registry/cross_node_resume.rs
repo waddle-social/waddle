@@ -614,6 +614,18 @@ impl InMemorySmSessionRegistry {
     /// caller retry fresh rather than fight over it here. On success, hands
     /// off to the SAME [`Self::complete_local_claim`] the steal path uses —
     /// FIX B's repair covers this path's post-win failures identically.
+    ///
+    /// ADR-0017 Phase 3 Slice 10 FIX 3 (council-adjudicated): `Draining`
+    /// folds into the SAME `NotFound` arm as `AlreadyClaimed`, not the
+    /// `Err(Internal)` catch-all below. This node refusing a NEW claim
+    /// because it is marked draining is, from the resuming client's point
+    /// of view, indistinguishable from "someone else already owns this" —
+    /// a benign "try again elsewhere" signal (surfaced as the conformant
+    /// XEP-0198 `<failed><item-not-found/></failed>` by this method's
+    /// caller), never an `<internal-server-error/>`. Mirrors
+    /// `pending_delivery::database::claim_error_to_pending_storage_error`
+    /// and `sm_persistence_fenced.rs`'s identical
+    /// `AlreadyClaimed | Conflict | Draining` grouping.
     async fn finish_direct_acquire(
         &self,
         entity: &Entity,
@@ -627,7 +639,9 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => self.complete_local_claim(entity, epoch, stream_id).await,
-            Ok(Err(ClaimError::AlreadyClaimed)) => Ok(CrossNodeResumeOutcome::NotFound),
+            Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Draining)) => {
+                Ok(CrossNodeResumeOutcome::NotFound)
+            }
             Ok(Err(other)) => Err(SmRegistryError::Internal(format!(
                 "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed failed: {other}"
             ))),
@@ -1348,6 +1362,133 @@ mod tests {
         assert!(
             matches!(retry_outcome, CrossNodeResumeOutcome::Claimed(_)),
             "FIX C's retry must actually recover the persisted session; got {retry_outcome:?}"
+        );
+    }
+
+    /// `ClaimStore` test double that delegates every method to a real
+    /// [`InProcessClaimStore`], except [`ClaimStore::ensure_claimed`],
+    /// which always reports [`ClaimError::Draining`] — modeling a node
+    /// that is mid-graceful-drain (ADR-0017 Phase 3 Slice 10: the
+    /// acquire-side draining gate refuses any NEW claim while this node
+    /// is marked draining) fielding a resume request for an entity it
+    /// does not already own.
+    struct DrainingClaimStore {
+        inner: InProcessClaimStore,
+    }
+
+    #[async_trait::async_trait]
+    impl ClaimStore for DrainingClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &crate::ownership::NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+        async fn ensure_claimed(
+            &self,
+            _entity: &Entity,
+            _me: &crate::ownership::NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            Err(ClaimError::Draining)
+        }
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: crate::ownership::StalePredicate,
+            me: &crate::ownership::NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: crate::ownership::ResumeIdentityProof,
+            me: &crate::ownership::NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<crate::ownership::ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &crate::ownership::NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &crate::ownership::NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+        async fn release_many(
+            &self,
+            entities: &[Entity],
+            me: &crate::ownership::NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
+    }
+
+    /// ADR-0017 Phase 3 Slice 10 FIX 3 (council-adjudicated): a resume
+    /// attempt against a genuinely unclaimed-but-persisted entity
+    /// (FIX C's branch 4), on a node whose `ClaimStore::ensure_claimed`
+    /// reports `Draining`, must resolve to the same benign
+    /// `CrossNodeResumeOutcome::NotFound` (→ conformant XEP-0198
+    /// `<failed><item-not-found/></failed>`) as any other "someone else
+    /// owns this"/"nothing to claim here" outcome — never surface as an
+    /// `<internal-server-error/>`.
+    #[tokio::test(start_paused = true)]
+    async fn fix3_draining_node_direct_acquire_reports_not_found_not_internal_error() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(DrainingClaimStore {
+            inner: InProcessClaimStore::new(),
+        });
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+
+        // No claim exists on this entity at all (FIX C's precondition) —
+        // but a persisted snapshot does, so `prepare_cross_node_resume`
+        // reaches branch 4 (`DirectAcquire`) rather than falling straight
+        // through to `NotFound` for lack of anything to steal.
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session("stream-draining", &jid))
+            .await
+            .expect("seed the persisted snapshot");
+
+        let me = crate::ownership::NodeIdentity::new("draining-node", "draining-epoch");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(claim_store, SharedNodeIdentity::new(me));
+
+        let outcome = registry
+            .attempt_cross_node_resume("stream-draining", &jid.to_bare(), Duration::from_secs(2))
+            .await
+            .expect(
+                "a draining node's refused acquire must resolve cleanly, never as an \
+                 Err/internal-server-error",
+            );
+        assert!(
+            matches!(outcome, CrossNodeResumeOutcome::NotFound),
+            "a draining node's direct-acquire refusal must report NotFound \
+             (item-not-found), not error; got {outcome:?}"
         );
     }
 }

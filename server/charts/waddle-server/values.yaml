@@ -7,6 +7,14 @@ replicaCount: 1
 # does. Leave false.
 clustering:
   enabled: false
+  # ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain budget
+  # ("claimReleaseBudget" in the ADR's own Implementation Plan text, named
+  # as a chart value "consumed from Phase 3 on"). Included in the
+  # terminationGracePeriodSeconds floor below (validations.yaml) even while
+  # clustering.enabled stays hard-locked false, mirroring
+  # WADDLE_CLUSTERING_POD_TEMPLATE_HASH's identical "ships ahead of Phase 4's
+  # chart unlock rather than needing a second chart change then" precedent.
+  claimReleaseBudgetSeconds: 5
 
 # Deployment update strategy. While persistence uses a ReadWriteOnce PVC, a
 # RollingUpdate surges a second pod that deadlocks on Multi-Attach, so the
@@ -45,9 +53,11 @@ podSecurityContext:
 
 # Pod termination grace period (seconds).
 # Must cover the full shutdown budget: preStopSleepSeconds (endpoint
-# propagation) + config.drainTimeoutSeconds (connection drain) + a kill margin.
-# Default = 5 + 30 + 5. validations.yaml enforces the floor.
-terminationGracePeriodSeconds: 40
+# propagation) + config.drainTimeoutSeconds (connection drain) +
+# clustering.claimReleaseBudgetSeconds (ADR-0017 Phase 3 Slice 10's
+# per-entity claim-release drain) + a kill margin.
+# Default = 5 + 30 + 5 + 5. validations.yaml enforces the floor.
+terminationGracePeriodSeconds: 45
 
 securityContext:
   runAsNonRoot: true

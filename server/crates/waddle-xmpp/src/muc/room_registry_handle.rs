@@ -381,6 +381,7 @@ impl RoomRegistry {
         claim_store: Arc<dyn ClaimStore>,
         node_identity: SharedNodeIdentity,
         durable_store: Option<Arc<dyn MucDurableStore>>,
+        rollout_backoff: Option<Arc<dyn crate::ownership::RolloutBackoff>>,
     ) {
         if let Err(error) = self
             .inner
@@ -388,6 +389,7 @@ impl RoomRegistry {
                 claim_store,
                 node_identity,
                 durable_store,
+                rollout_backoff,
             })
             .await
         {

@@ -515,6 +515,25 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         return;
     }
 
+    // ADR-0017 Phase 3 Slice 10 (Q5's rollout-aware placement rule): an
+    // old-generation node backs off before racing a matching/newer
+    // -generation node for a just-orphaned claim, so each entity moves
+    // approximately once per deploy instead of up to N times. Resolved
+    // once per sweep (not per candidate) — the current generation cannot
+    // meaningfully change mid-sweep, and this keeps the hot per-candidate
+    // loop below to a single extra comparison, no extra Postgres round
+    // trip per candidate.
+    let backoff_delay = match node_lease.current_generation().await {
+        Ok(current_generation) => crate::clustering::drain::rollout_backoff_delay(
+            clustering.pod_template_hash.as_deref(),
+            current_generation.as_deref(),
+        ),
+        Err(error) => {
+            debug!(%error, "orphan reaper: current_generation lookup failed; proceeding without backoff");
+            std::time::Duration::ZERO
+        }
+    };
+
     let me = identity_handle.current();
     let mut reclaimed: Vec<(Entity, waddle_xmpp::ownership::ClaimEpoch)> = Vec::new();
     for candidate in candidates {
@@ -529,6 +548,13 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
                 "orphan reaper: expire on the dead owner's row failed; retrying next sweep"
             );
             continue;
+        }
+        // ADR-0017 Phase 3 Slice 10: a placement heuristic only — never
+        // affects correctness. `steal_stale`'s own epoch CAS remains the
+        // sole authority over who actually wins; this only decides who
+        // tries first.
+        if !backoff_delay.is_zero() {
+            tokio::time::sleep(backoff_delay).await;
         }
         match claim_store
             .steal_stale(
@@ -876,6 +902,7 @@ mod orphan_reaper_sweep_tests {
             isr_token_store: None,
             node_lease: Some(sweeper_node_lease),
             lease_ttl: Some(lease_ttl),
+            pod_template_hash: None,
             resume_bridge: None,
             stop_token: None,
             resume_handshake_timeout: None,
@@ -1356,6 +1383,31 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     });
 }
 
+/// ADR-0017 Phase 3 Slice 10: feed the SM-session Q6 drain's outcomes into
+/// the SAME `claims_released_on_drain`/`claims_abandoned_on_drain` counters
+/// the generic per-entity room drain uses (`clustering::drain::
+/// run_shutdown_drain`) — one shared observability surface for "how much of
+/// this node's owned state made it out cleanly," regardless of which of
+/// the two independent drain mechanisms (SM sessions vs. rooms) actually
+/// drove a given entity. A no-op on a non-`clustering`-feature build: the
+/// Q6 drain itself is unconditionally compiled (it works with or without
+/// clustering, via `InProcessClaimStore`), but the Slice-10 metrics module
+/// only exists behind the `clustering` Cargo feature.
+fn record_sm_drain_outcome(released: bool) {
+    #[cfg(feature = "clustering")]
+    {
+        if released {
+            crate::clustering::metrics::record_claims_released_on_drain(1);
+        } else {
+            crate::clustering::metrics::record_claims_abandoned_on_drain(1);
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = released;
+    }
+}
+
 pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
@@ -1374,6 +1426,13 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         let _notify_guard = NotifyOnDrop(drain_notify);
 
         drain_token.cancelled().await;
+        // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
+        // timestamp, fed into the SAME `drain_duration_ms` histogram the
+        // generic per-entity room drain records into (below, once the Q6
+        // portion completes) — one shared observability surface across
+        // both independent drain mechanisms.
+        #[cfg(feature = "clustering")]
+        let sm_drain_started = std::time::Instant::now();
         // Issue #1091: live sessions observe the same stop token, send
         // <system-shutdown/> and detach into the SmSessionRegistry.
         // Wait for every connection guard to drop before the Q6 passes
@@ -1417,8 +1476,24 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         loop {
             if std::time::Instant::now() >= drain_deadline {
                 waddle_xmpp::prometheus::increment_sm_drain_timeout();
+                // ADR-0017 Phase 3 Slice 10: whatever this node still
+                // believes it owns at the timeout never even reached
+                // `drain_all_for_shutdown` this pass — abandoned, same as
+                // the generic per-entity drain's own budget-overrun path.
+                let remaining = websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .live_session_ids()
+                    .map(|ids| ids.len())
+                    .unwrap_or(0);
+                if remaining > 0 {
+                    #[cfg(feature = "clustering")]
+                    crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
+                }
                 warn!(
                     total_drained,
+                    remaining,
                     "Graceful shutdown: drain timeout reached. Remaining sessions \
                      keep their durable SM rows and will be retried on next startup \
                      via restore_from_persistence + Q6 expiry."
@@ -1469,6 +1544,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                              promotion to preserve fail-closed XEP-0191 policy. \
                              Durable SM row will be retried on next startup."
                         );
+                        record_sm_drain_outcome(false);
                         continue;
                     }
                 };
@@ -1517,14 +1593,21 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         "Graceful shutdown: promotion had storage failures; \
                          preserving durable SM row for restart-time retry"
                     );
+                    record_sm_drain_outcome(false);
                     continue;
                 }
-                websocket_state
+                let confirmed = websocket_state
                     .deps
                     .protocol
                     .sm_session_registry
                     .confirm_drained(&session.stream_id)
                     .await;
+                // ADR-0017 Phase 3 Slice 10: this session's own "final
+                // fenced write, then release" sequence — `confirm_drained`
+                // deletes the durable row and releases the `ClaimStore`
+                // claim only on success (see that method's own doc
+                // comment).
+                record_sm_drain_outcome(confirmed);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
                 if let Err(error) = websocket_state
@@ -1549,6 +1632,10 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         info!(
             total_drained,
             "Graceful shutdown: SM Q6 drain complete (iterative)"
+        );
+        #[cfg(feature = "clustering")]
+        crate::clustering::metrics::record_drain_duration_ms(
+            sm_drain_started.elapsed().as_secs_f64() * 1000.0,
         );
 
         // Drain the OIDC profile-publish tracker before notifying

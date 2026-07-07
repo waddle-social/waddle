@@ -1787,6 +1787,34 @@ window in practice, not merely in the doc comment's argument.
 **Dependencies**: Slice 5 (claim-scoped consumers must exist for "final fenced writes"
 to mean anything), Slice 7 (room state drain), Slice 6 (SM detach-on-drain).
 
+**As-landed summary (implementation-time findings; see deviations 93–105,
+in "Deviations from / extensions to the ADR text" below and the "Slice 10
+council-adjudicated fixes pass" corrigenda addendum, for the full
+detail)**: the acquire-side draining gate this section's spec assumed
+already existed (per `release_many`'s own trait doc comment) did not — it
+is landed here (93). Q5's mechanism needed a new `first_seen` column no
+prior slice's DDL specified (94). Rollout-aware backoff required two
+call-site strategies across the `waddle-xmpp`/`waddle-server` crate
+boundary, unified behind one pure decision function and a new
+`RolloutBackoff` trait (95). The generic drain (`clustering::drain::
+run_shutdown_drain`) is scoped to `RoomActor` only, composing with — not
+replacing — the existing Q6 SM drain via a shared metrics surface, not a
+shared code path (96, 97). `start_if_enabled` now returns the node-lease
+task's join handle so process exit genuinely waits on the drain completing
+(98). `claimReleaseBudget` landed as a typed config value plus an
+unconditional Helm wire-through (99). The drain-at-modeled-scale exit
+criterion landed as a single-process Postgres-gated test rather than a
+multi-process harness scenario (100). The `release_many` ABA window is
+reproduced at the SQL level and proven closed in practice for the one
+entity type the production drain path actually batches (101). A
+council-adjudicated review pass then found the seal-before-release barrier
+still trivially defaulted `true` in production (never actually implemented
+for `RoomActor`, closed for real in 104) and that heartbeat renewal
+stopped the instant shutdown fired rather than surviving the drain window
+(closed in 105); the drain-interrupted-relay-ask interleaving was found
+unreachable this slice (102), and the SIGKILL-simulation test substitution
+was recorded explicitly (103).
+
 ---
 
 ### Slice 11 — Activate the two deferred Phase 2 harness fencing scaffolds (D10)
@@ -3677,3 +3705,279 @@ duplicated here.
     channels.rs`, account for the gap between the ~14 directly-confirmed
     former-DashMap call sites and the 17-site migration count in deviation
     87.
+
+### Slice 10 as-landed corrigenda (implementation-time findings)
+
+93. **The acquire-side draining gate — the `ClaimStore::release_many` trait
+    doc comment's own forward reference ("`NodeLeaseStore::mark_draining`
+    stops this node from *acquiring* new claims once draining") was
+    aspirational, not yet true, at Slice 10 implementation time** (research
+    confirmed zero references to `draining` in `acquire`/`ensure_claimed`/
+    `steal_stale`). Landed as: a new `ClaimError::Draining` variant, plus an
+    atomic `INSERT ... SELECT ... WHERE NOT EXISTS (... draining ...)`
+    reshape of `acquire`'s CAS (a follow-up read on the cold 0-affected path
+    distinguishes "genuinely already claimed" from "this node's own
+    draining gate blocked it," never a second round-trip on the hot
+    uncontended path) and an added `AND NOT EXISTS (... draining ...)`
+    clause on both `steal_stale` arms (folded into the pre-existing
+    `ClaimError::Conflict` catch-all, no new variant needed there).
+    `ensure_claimed`'s conflict-fallback was widened to treat
+    `AlreadyClaimed`/`Draining` identically when attempting the
+    self-reacquire read, so "keep serving already-owned draining entities"
+    (element 4) composes correctly with the new gate: a self-reacquire on
+    an entity this exact node/epoch already holds still succeeds while
+    draining; only a genuinely new acquisition is refused.
+94. **Q5's "most-recently-registered live node" mechanism required a new
+    `clustering_nodes.first_seen` column**, not specified in Slice 1's
+    original DDL (which only carries `heartbeat`, continuously refreshed on
+    every renewal — unsuitable as a registration-order proxy).
+    `first_seen` defaults to `now()` on INSERT and is deliberately omitted
+    from `register`'s `ON CONFLICT (node_id) DO UPDATE SET` list, so a
+    re-registration under the *same* `node_id` never refreshes it, while a
+    fresh `node_id` (post-fence re-registration, per Q7/element 4) gets its
+    own fresh `first_seen` — matching Q5's own text that a rollback
+    "re-registers newer rows than the half-rolled-out generation it is
+    replacing" and is, by the operational definition, automatically
+    current. `NodeLeaseStore::current_generation() -> Option<String>` reads
+    `pod_template_hash` off the non-expired row with the greatest
+    `first_seen`; deliberately does NOT exclude `draining` rows (unlike
+    `count_other_live_nodes`'s isolation filter — see that method's own
+    reasoning about why a draining node's registration event is still a
+    valid rollout-generation signal).
+95. **Rollout-aware backoff wiring required two separate call-site
+    strategies, not one**, because the two production "steal a
+    dead/orphaned claim" sites straddle the `waddle-xmpp`/`waddle-server`
+    crate boundary the ADR's Q1 unconditional-compilation rule protects:
+    the orphan reaper (`session_janitors.rs`, SM sessions) lives in
+    `waddle-server` and reads `NodeLeaseStore::current_generation` plus
+    `ClusteringHandles::pod_template_hash` (a new field, threaded from
+    `start_if_enabled`'s local `pod_template_hash`) directly. `RoomRegistry`
+    's re-election path (`steal_from_dead_owner`) lives in `waddle-xmpp`,
+    which cannot depend on the `clustering`-feature-gated `NodeLeaseStore`
+    at all — so a new, unconditionally-compiled `waddle_xmpp::ownership::
+    RolloutBackoff` trait (`async fn acquire_delay(&self) -> Duration`) was
+    added, injected into `RoomRegistryActor` via a new optional field on
+    `WireClusteringClaims` (`None` by default — a no-op, correct for every
+    single-node deployment and pre-existing test), with the concrete
+    `clustering::drain::PostgresRolloutBackoff` implementation constructed
+    and wired at `server/mod.rs` alongside the room registry's other
+    clustering handles. Both paths share one pure, unit-tested decision
+    function, `clustering::drain::rollout_backoff_delay`.
+96. **The generic per-entity drain (`clustering::drain::run_shutdown_drain`)
+    is scoped to `EntityType::RoomActor` only — it deliberately does NOT
+    also drive `SmSession` entities**, even though `LocallyClaimedEntities::
+    owned()` (via `CombinedLocalClaims`) reports both. The existing Q6 SM
+    drain (`session_janitors::spawn_graceful_shutdown_drain`,
+    `InMemorySmSessionRegistry::confirm_drained`) already correctly
+    implements "final write, then release" for SM sessions on an
+    independent task racing the same shutdown token; running the generic
+    loop over the same entities concurrently would be exactly the
+    double-drain hazard the plan's own "interaction with existing drain"
+    paragraph warns against (one path could release a claim the other
+    path's promotion is still mid-write under). The two mechanisms compose
+    via a shared observability surface (deviation 97) rather than a shared
+    code path. `EntityType::UserActor` is also skipped, defensively — no
+    production claim-acquisition call site exists yet for it (deviation
+    34).
+97. **`InMemorySmSessionRegistry::confirm_drained`'s signature changed from
+    `-> ()` to `-> bool`** (`true` iff the durable row was deleted and the
+    claim-release was attempted), so `spawn_graceful_shutdown_drain` can
+    feed the Q6 drain's own outcomes into the SAME
+    `claims_released_on_drain`/`claims_abandoned_on_drain` counters the
+    generic room drain uses — one shared observability surface across both
+    independent drain mechanisms, per the "trace and integrate, don't bolt
+    on" instruction. Not marked `#[must_use]` (existing call sites in
+    `sm_promotion.rs`'s SM-expiry-janitor path and every pre-existing test
+    intentionally keep discarding it — that promotion path is routine
+    session expiry, not a graceful-shutdown-drain event, and does not feed
+    these counters). `spawn_graceful_shutdown_drain` was also instrumented
+    at its other two "session left claimed" branches (blocklist-load
+    failure, storage-failure) and at the drain-deadline-timeout break
+    (counting whatever `live_session_ids()` still reports), plus a
+    `drain_duration_ms` histogram record for the Q6 portion's own
+    wall-clock — all landing on the same `waddle.clustering.*` instruments
+    the generic drain records into.
+98. **`clustering::start_if_enabled`'s return type changed from
+    `Result<ClusteringHandles, ClusteringError>` to
+    `Result<(ClusteringHandles, ClusteringShutdown), ClusteringError>`**
+    (one call site, `server/mod.rs`; `ClusteringShutdown` is a small
+    `Option<JoinHandle<()>>` newtype, not a `ClusteringHandles` field,
+    because `JoinHandle` is neither `Clone` nor meaningfully `Default` and
+    `ClusteringHandles` derives both). Before this slice, `run_node_lease`'s
+    task was pure fire-and-forget (`tokio::spawn` with the handle dropped);
+    element 4's drain sequence explicitly requires the per-entity drain
+    "completing before process exit," not merely racing it in the
+    background. `server/mod.rs` now calls
+    `clustering_shutdown.await_drain(claim_release_budget + 2s margin)`
+    after `http_handle.await` returns (the existing Q6/HTTP exit point) and
+    before the Ecdysis lifecycle task teardown — bounded, so a wedged drain
+    task cannot hang process shutdown forever (a timeout here is logged and
+    the process proceeds to exit; any un-released claims are fenced-safe
+    and reclaimed later).
+99. **`claimReleaseBudget` landed as `ClusteringNodeLeaseConfig::
+    claim_release_budget`** (`WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS`,
+    default 5s, same typed-`config.rs`-pipeline pattern as every other
+    clustering timing value — never `WADDLE_DRAIN_TIMEOUT_SECS`'s raw-
+    `std::env::var` shortcut, which predates the typed-config convention
+    and is not clustering-specific). Helm-surfaced as
+    `clustering.claimReleaseBudgetSeconds` (default 5), wired
+    unconditionally into `configmap.yaml`
+    (`WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS`) and into
+    `validations.yaml`'s `terminationGracePeriodSeconds` shutdown-floor
+    formula (`preStopSleepSeconds + config.drainTimeoutSeconds +
+    clustering.claimReleaseBudgetSeconds + kill margin`) even while
+    `clustering.enabled` stays hard-locked `false` by the chart's own Phase
+    0 guard — mirroring `WADDLE_CLUSTERING_POD_TEMPLATE_HASH`'s identical
+    "ships ahead of Phase 4's chart unlock rather than needing a second
+    chart change then" precedent. `terminationGracePeriodSeconds`'s chart
+    default bumped 40 → 45 to keep the default values passing the new
+    floor.
+100. **The ADR's own "drain-at-modeled-scale measurement... as an exit
+     criterion" landed as a Postgres-gated, single-process test**
+     (`clustering::drain::tests::drain_at_modeled_scale_fits_the_claim_release_budget`,
+     2,000 `RoomActor` claims against a real `PostgresClaimStore`, real
+     `release_many` batching, asserting wall clock against a real
+     `claimReleaseBudget`) rather than inside the multi-process
+     `clustering_cluster_e2e.rs` harness the ADR's own Phase 3 text
+     describes. The property under test — one `release_many` round-trip
+     fitting the budget regardless of entity count — does not require
+     multiple processes to observe; multi-process cross-node concerns for
+     this same mechanism (a different node winning a claim mid-drain) are
+     covered separately by the draining-gate tests (deviation 93) and the
+     ABA-window tests (deviation 101). Extending the multi-process harness
+     with a true multi-process drain scenario is carried forward as
+     follow-up scope, not landed this slice.
+101. **`ClaimStore::release_many`'s "plan-sanctioned ABA window" doc
+     comment was verified, not merely trusted, against the actual landed
+     SQL** — `clustering::claims::tests::
+     release_many_epoch_blind_window_deletes_a_fresh_same_node_resume`
+     reproduces the documented window literally: an entity queued for
+     release, then legitimately re-claimed by the SAME node/epoch at a
+     HIGHER epoch via `steal_for_resume` (the one CAS variant the new
+     draining gate does not cover, by design — a draining node must keep
+     accepting resumes for SM sessions it already owns), is deleted by the
+     stale batch entry regardless, exactly as documented. Separately,
+     `clustering::drain::tests::
+     drain_prevents_a_draining_node_from_reclaiming_its_own_just_released_room`
+     proves the window is closed in practice for `RoomActor` entities — the
+     only entity type the generic drain ever batches into `release_many` —
+     because rooms have no `steal_for_resume`-equivalent consent path and
+     the new draining gate (deviation 93) refuses this node's own
+     re-acquire attempts outright. Net: the window is real at the store
+     level (proven), and unreachable through the production drain path for
+     every entity type that path actually touches (also proven) — narrowed
+     to fully closed in practice, not merely by argument, satisfying the
+     Slice 3 forward reference's "prove the mitigations narrow the window
+     in practice, not merely in the doc comment's argument."
+
+### Slice 10 council-adjudicated fixes pass (deviations 102–105)
+
+102. **FIX 4: the "drain-interrupted relay ask increments
+     `claims_abandoned_on_drain`" interleaving named in this section's own
+     Tests paragraph (and major fix 12's follow-through text above) is
+     unreachable this slice, and is deliberately NOT fabricated as a
+     test.** No production call site issues a relay ask against a
+     locally-**owned** entity from inside this node's own drain window: the
+     drain (`clustering::drain::run_shutdown_drain`) *releases* this node's
+     rooms, it does not *ask* anything about them; the MUC `Demote` relay
+     ask fires when a room is stolen FROM this node by another node, not
+     during this node's own drain; and the SM live-steal handshake (Slice
+     6) is issued BY the resuming node, never by the draining node about
+     its own claims. Every actual drain-window cancellation path this
+     slice exercises is covered by the existing `claims_abandoned_on_drain`
+     tests instead (a failed/timed-out `seal_before_release` —
+     `clustering::drain::tests::drain_abandons_a_failed_seal_and_leaves_the_claim_held`,
+     `drain_abandons_a_hung_seal_once_the_budget_is_exhausted`, deviation
+     103 below). Carried forward, unreachable-this-slice, to Phase 4's
+     cross-node routing work, where a drain-window relay ask against an
+     owned entity first becomes possible (a node mid-drain fielding a
+     cross-node request FOR one of its own still-owned entities — no such
+     request exists yet, since Phase 3 does not wire cross-node stanza
+     routing/proxying at all).
+103. **FIX 5(b): the Tests paragraph's "forced early SIGKILL simulation" is
+     landed as `clustering::drain::tests::
+     drain_abandons_a_hung_seal_once_the_budget_is_exhausted`** (a hung
+     `seal_before_release` that outlasts `claim_release_budget`) rather
+     than an actual process-level SIGKILL. Functionally equivalent for what
+     this test needs to prove: from `run_shutdown_drain`'s own perspective,
+     a budget overrun and a SIGKILL both produce the identical observable
+     outcome — the entity's claim is never queued into `release_many`'s
+     batch, so it remains held, fenced-safe, un-released — proving the
+     same "budget overrun leaves the claim held, never released with an
+     in-flight write" invariant a real SIGKILL would, without the harness
+     complexity a genuine process-kill simulation would add for no
+     additional coverage.
+104. **FIX 1 (council-adjudicated): the seal-before-release barrier the
+     Locked spec's "complete its final fenced write while holding the
+     claim, THEN release" ordering depends on is now genuinely
+     implemented**, not merely inherited from
+     [`LocallyClaimedEntities::seal_before_release`]'s trivial `true`
+     default. `RoomLocalClaims::seal_before_release`
+     (`clustering::local_claims`) issues the SAME `HealthCheck` ask
+     `RoomLocalClaims::health_check` (Slice 3) already uses, as a genuine
+     mailbox-ordering barrier: kameo serializes each `RoomActor`'s mailbox
+     strictly in order, and every mutation handler (`UpdateConfig`,
+     `RollbackConfigIfRevision`, `UpdateGroupDmConfigByMember`,
+     `SetSubject`, `ChangeAffiliation`) synchronously `.await`s its own
+     `gate_mutation()` check and durable persist call before returning —
+     so a successful `HealthCheck` reply, issued after the drain's
+     `owned()` snapshot, proves every mutation queued ahead of it has
+     already committed its durable write. A room with no live local actor,
+     or whose ask fails/times out, reports unsealed (`false`), leaving the
+     claim held rather than released — `CombinedLocalClaims::
+     seal_before_release` dispatches to it by `EntityType`
+     (`SmSession`/`UserActor` keep the trait's `true` default: Q6 already
+     owns SM-session drain, and no production `UserActor`
+     claim-acquisition call site exists yet). Tested directly:
+     `clustering::local_claims::tests::
+     seal_before_release_proves_a_queued_ahead_mutation_already_committed`
+     (a mutation fired but not yet awaited when the seal ask is issued must
+     have its durable write committed before the seal ask returns, proven
+     deterministically via a `tokio::sync::Notify` rendezvous rather than a
+     sleep-based race) and the
+     `room_seal_before_release_is_{unsealed,sealed}_*` trio (no-live-actor
+     / dead actor / healthy actor), mirroring `health_check`'s own existing
+     trio.
+105. **FIX 2 (council-adjudicated): a draining node now keeps renewing its
+     own node-lease heartbeat for the FULL duration of its own graceful
+     drain, rather than freezing heartbeat renewal the instant shutdown
+     fires.** Previously every `stop_token.cancelled()` branch in
+     `run_node_lease`'s `'tick` loop called `clustering::drain::
+     run_shutdown_drain(..).await; return;` directly — heartbeat renewal
+     stopped dead the moment shutdown began, so this node's
+     `clustering_nodes` row could go heartbeat-stale (`node_lease_ttl`
+     after that last renewal) while the node was still legitimately
+     sealing/writing its own owned claims, opening a window for another
+     node's orphan reaper to `expire()`/`steal_stale(OwnerStale)` a claim
+     out from under a still-draining owner — split-brain. Landed as
+     `self_fence::run_shutdown_drain_with_heartbeat`: the drain future and
+     a heartbeat-renewal ticker (period `lease_ttl / 2`, no artificial
+     floor anywhere near `lease_ttl` itself — an early draft of this fix
+     floored the ticker period at a flat 1s, which silently INVERTED the
+     fix for any `lease_ttl` configuration below ~2s by renewing slower
+     than the row could go stale, caught by this deviation's own
+     Postgres-gated ordering test before landing) are polled concurrently
+     in the SAME task/stack frame via `tokio::select!` — no
+     `tokio::spawn`, so no `Clone`/`'static` bound is needed on the generic
+     `NodeLeaseStore` type parameter. `run_node_lease` does not return
+     until the drain future itself resolves. Defense-in-depth:
+     `config.rs`'s `ClusteringConfig::from_vars` now rejects a config where
+     `node_lease_ttl` does not exceed `claim_release_budget * 3` (mirroring
+     this same function's other "conservative multiple of the faster
+     timer" floors), and both `ClusteringNodeLeaseConfig::
+     claim_release_budget`'s doc comment and the Helm chart's
+     `validations.yaml` document (but do not additionally validate, since
+     `WADDLE_CLUSTERING_NODE_LEASE_TTL_MS` is not itself a chart value) the
+     further relationship to the separate, raw-env-var
+     `WADDLE_DRAIN_TIMEOUT_SECS` Q6 SM-session drain budget, which this
+     heartbeat-renewal mechanism does NOT itself cover (it only renews
+     through this node's OWN `claim_release_budget` window, not through
+     Q6's independent, potentially much longer one racing the same
+     shutdown token). Tested: `clustering::drain::tests::
+     drain_keeps_the_node_lease_row_fresh_through_a_drain_that_outlives_the_old_heartbeat_interval`
+     (Postgres-gated — a drain whose seal genuinely outlasts several
+     `lease_ttl` intervals must never let a concurrent `NodeLeaseStore::
+     expire` poll commit `expired = true` until the drain completes) plus
+     `config::tests::clustering_rejects_node_lease_ttl_too_close_to_claim_release_budget`
+     / `clustering_accepts_node_lease_ttl_with_comfortable_claim_release_budget_margin`
+     / `clustering_defaults_satisfy_the_claim_release_budget_margin`.

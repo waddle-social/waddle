@@ -14,6 +14,7 @@
 use crate::config::ClusteringConfig;
 use crate::db::{Database, DatabaseDriver};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Peer-allowlist store. Public: the multi-process cluster harness
@@ -35,6 +36,13 @@ pub mod claims;
 pub mod codec;
 #[cfg(feature = "clustering")]
 mod dns;
+/// Graceful per-entity claim drain + rollout-aware acquire placement
+/// (ADR-0017 Phase 3 Slice 10). `pub(crate)` (not `pub`): every caller
+/// (`self_fence::run_node_lease`, `server::session_janitors`'s orphan
+/// reaper) lives inside this crate; the multi-process harness drives drain
+/// behavior through the production shutdown path, not this module directly.
+#[cfg(feature = "clustering")]
+pub(crate) mod drain;
 #[cfg(feature = "clustering")]
 mod identity;
 /// Postgres-authoritative, epoch-fenced XEP-0397 ISR token storage
@@ -53,8 +61,12 @@ pub mod lease;
 /// claim-scoped-hydration and deposed-owner scenarios.
 #[cfg(feature = "clustering")]
 pub mod local_claims;
+/// `pub(crate)` (ADR-0017 Phase 3 Slice 10): `server::session_janitors`'s
+/// Q6 SM-drain path records into the same `claims_released_on_drain`/
+/// `claims_abandoned_on_drain` counters this module's own per-entity drain
+/// uses, so both mechanisms feed one shared observability surface.
 #[cfg(feature = "clustering")]
-mod metrics;
+pub(crate) mod metrics;
 /// Per-node supervised relay actor + client handle. Public: the multi-process
 /// cluster harness drives `RelayHandle` cross-node, and Phase 4's routing
 /// builds on the relay message set.
@@ -335,6 +347,15 @@ pub struct ClusteringHandles {
     /// `WebSocketState`, which does not otherwise carry `ServerConfig`).
     #[cfg(feature = "clustering")]
     pub lease_ttl: Option<std::time::Duration>,
+    /// This node's own `pod_template_hash` (ADR-0017 Phase 3 Slice 10, Q5)
+    /// — the same value passed to `NodeLeaseStore::register`. The orphan
+    /// reaper janitor needs this alongside `node_lease` to compute the
+    /// rollout-aware acquire-backoff delay
+    /// (`clustering::drain::rollout_backoff_delay`) before each
+    /// `steal_stale(OwnerStale)` attempt; it has no other route to
+    /// `ClusteringConfig`, mirroring `lease_ttl`'s identical rationale.
+    #[cfg(feature = "clustering")]
+    pub pod_template_hash: Option<String>,
     /// ADR-0017 Phase 3 Slice 6: the cross-node resume live-handshake's
     /// bridge to this node's own `ConnectionRegistry` — the SAME `Arc` the
     /// swarm's `RelayActor` answers `RelayResumeSteal` asks through, not a
@@ -455,22 +476,59 @@ impl ClusteringHandles {
     }
 }
 
+/// The clustering subsystem's node-lease task join handle (ADR-0017 Phase 3
+/// Slice 10), returned alongside [`ClusteringHandles`] rather than as one of
+/// its fields: `JoinHandle` is neither `Clone` nor meaningfully `Default`,
+/// and `ClusteringHandles` derives both for its many other call sites (it
+/// is cloned onto `AppState`, `WebSocketState`, and every janitor). This
+/// lets `server/mod.rs` await this node's per-entity graceful drain
+/// (`self_fence::run_node_lease`'s own exit, which runs the drain sequence
+/// on its way out) actually completing before process exit — "in parallel
+/// with connection drain but completing before process exit," per element
+/// 4's drain sequence text — rather than a fire-and-forget background task
+/// racing shutdown with no ordering guarantee at all.
+pub struct ClusteringShutdown(Option<tokio::task::JoinHandle<()>>);
+
+impl ClusteringShutdown {
+    /// Await the node-lease loop's own exit, bounded by `budget` so a
+    /// wedged drain task cannot hang process shutdown forever — a timeout
+    /// here is logged and the process proceeds to exit anyway: any
+    /// un-released claims are simply fenced-safe and reclaimed later by
+    /// another node's orphan reaper (`claims_abandoned_on_drain` already
+    /// counts them). A `None` inner handle (clustering disabled, or a
+    /// build without the `clustering` feature) returns immediately.
+    pub async fn await_drain(self, budget: Duration) {
+        let Some(handle) = self.0 else {
+            return;
+        };
+        if tokio::time::timeout(budget, handle).await.is_err() {
+            tracing::warn!(
+                budget_ms = budget.as_millis() as u64,
+                "clustering: node-lease drain did not complete within the shutdown budget; \
+                 proceeding with process exit (fenced-safe: un-released claims are simply \
+                 reclaimed later)"
+            );
+        }
+    }
+}
+
 /// Conditionally start the clustering swarm subsystem.
 ///
-/// Returns `Ok(ClusteringHandles::default())` immediately, doing nothing,
-/// when clustering is disabled — the default single-replica path,
-/// unchanged. When enabled it validates the Postgres control-plane
-/// prerequisite and, on a `clustering`-feature build, brings up the owned
-/// libp2p swarm (later slices) and returns live handles onto the same
-/// `ClaimStore`/node-identity the node-lease loop itself uses.
+/// Returns `Ok((ClusteringHandles::default(), ClusteringShutdown(None)))`
+/// immediately, doing nothing, when clustering is disabled — the default
+/// single-replica path, unchanged. When enabled it validates the Postgres
+/// control-plane prerequisite and, on a `clustering`-feature build, brings
+/// up the owned libp2p swarm (later slices) and returns live handles onto
+/// the same `ClaimStore`/node-identity the node-lease loop itself uses,
+/// plus the node-lease task's own join handle (Slice 10).
 pub async fn start_if_enabled(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: &CancellationToken,
     readiness: ClusteringReadiness,
-) -> Result<ClusteringHandles, ClusteringError> {
+) -> Result<(ClusteringHandles, ClusteringShutdown), ClusteringError> {
     if !config.enabled {
-        return Ok(ClusteringHandles::default());
+        return Ok((ClusteringHandles::default(), ClusteringShutdown(None)));
     }
 
     let driver = db.driver();
@@ -626,12 +684,17 @@ pub async fn start_if_enabled(
             isr_token_store: Some(isr_token_store),
             node_lease: Some(node_lease_handle),
             lease_ttl: Some(config.node_lease.lease_ttl),
+            pod_template_hash: pod_template_hash.clone(),
             resume_bridge: Some(resume_bridge),
             stop_token: Some(clustering_stop.clone()),
             resume_handshake_timeout: Some(config.resume_handshake.timeout),
         };
 
-        tokio::spawn(self_fence::run_node_lease(
+        // ADR-0017 Phase 3 Slice 10: keep the join handle so
+        // `server/mod.rs` can await this node's graceful drain (which this
+        // task runs on its own exit) actually completing before process
+        // exit — see `ClusteringShutdown`'s doc comment.
+        let node_lease_task = tokio::spawn(self_fence::run_node_lease(
             node_lease,
             node_identity,
             clustering_stop,
@@ -648,9 +711,10 @@ pub async fn start_if_enabled(
                 // wraps the same `db` clone, never a second, independent
                 // store.
                 claim_store: Arc::new(claims::PostgresClaimStore::new(db.clone())),
+                claim_release_budget: config.node_lease.claim_release_budget,
             },
         ));
-        Ok(handles)
+        Ok((handles, ClusteringShutdown(Some(node_lease_task))))
     }
 }
 

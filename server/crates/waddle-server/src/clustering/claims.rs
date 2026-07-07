@@ -257,7 +257,23 @@ impl ClaimStore for PostgresClaimStore {
                 -- column (pre-launch project), so it is added directly to the
                 -- `CREATE TABLE IF NOT EXISTS` rather than a separate `ALTER
                 -- TABLE` migration.
-                draining          BOOLEAN NOT NULL DEFAULT FALSE
+                draining          BOOLEAN NOT NULL DEFAULT FALSE,
+                -- ADR-0017 Phase 3 Slice 10 (Q5's operational definition of
+                -- "the current deployment generation" — realized here):
+                -- stamped once, at this row's FIRST registration, and never
+                -- refreshed by a later re-registration under the SAME
+                -- `node_id` (`register`'s upsert explicitly preserves it —
+                -- see that method). "The current generation" for the
+                -- rollout-aware acquire-backoff heuristic is the
+                -- `pod_template_hash` of the row with the greatest
+                -- `first_seen` among non-expired rows
+                -- (`current_generation`, below): a re-registration after a
+                -- self-fence must NOT make an old-generation pod look newer
+                -- than a genuinely newer-generation pod that registered
+                -- later, or the backoff heuristic would misclassify who
+                -- "tries first" during a rollout (never who wins — the CAS
+                -- remains authoritative either way, per Q5).
+                first_seen        TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             "#,
             (),
@@ -329,11 +345,27 @@ impl ClaimStore for PostgresClaimStore {
         // Acquire CAS (element 4): a fresh claim only inserts; a
         // still-live claim on the same entity leaves the row untouched and
         // affects zero rows.
+        //
+        // ADR-0017 Phase 3 Slice 10: the `INSERT ... SELECT ... WHERE NOT
+        // EXISTS (draining)` guard makes "a draining node never acquires a
+        // NEW claim" atomic with the CAS itself — never a separate
+        // check-then-act read, which would leave a TOCTOU window between
+        // observing "not draining" and the INSERT actually landing. A
+        // draining node's own `mark_draining` UPDATE (issued once, at the
+        // start of its shutdown drain sequence) is a single autocommit
+        // statement on the same control-plane pool, so it is visible to
+        // every subsequent `acquire`/`steal_stale` call under ordinary
+        // READ COMMITTED semantics by the time this node's drain loop
+        // itself proceeds to iterate owned entities.
         let affected = conn
             .execute(
                 r#"
                 INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch)
-                VALUES (?, ?, ?, ?, 0)
+                SELECT ?, ?, ?, ?, 0
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes
+                    WHERE node_id = ? AND node_epoch = ? AND draining
+                )
                 ON CONFLICT (entity) DO NOTHING
                 "#,
                 crate::db_params![
@@ -341,14 +373,51 @@ impl ClaimStore for PostgresClaimStore {
                     entity.entity_type.as_db_str().to_string(),
                     me.node_id.clone(),
                     me.node_epoch.clone(),
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
                 ],
             )
             .await
             .map_err(db_err)?;
         if affected == 1 {
-            Ok(ClaimEpoch(0))
-        } else {
-            Err(ClaimError::AlreadyClaimed)
+            return Ok(ClaimEpoch(0));
+        }
+        // Zero rows affected: either a genuine conflict (someone already
+        // holds this entity) or this node's own draining gate blocked the
+        // INSERT before it ever reached `ON CONFLICT`. Distinguish with one
+        // follow-up read — only ever taken on this already-cold "lost the
+        // race" path, never the common uncontended-acquire case above.
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    EXISTS (SELECT 1 FROM clustering_claims WHERE entity = ?) AS claimed,
+                    COALESCE(
+                        (SELECT draining FROM clustering_nodes WHERE node_id = ? AND node_epoch = ?),
+                        false
+                    ) AS draining
+                "#,
+                crate::db_params![entity_key(entity), me.node_id.clone(), me.node_epoch.clone()],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => {
+                let claimed: bool = row.get(0).map_err(db_err)?;
+                let draining: bool = row.get(1).map_err(db_err)?;
+                if claimed {
+                    Err(ClaimError::AlreadyClaimed)
+                } else if draining {
+                    Err(ClaimError::Draining)
+                } else {
+                    // A genuine race: the entity was momentarily claimed by
+                    // someone else and released again between the INSERT
+                    // and this read. Conservative fallback — the caller
+                    // retries.
+                    Err(ClaimError::AlreadyClaimed)
+                }
+            }
+            None => Err(ClaimError::AlreadyClaimed),
         }
     }
 
@@ -360,9 +429,17 @@ impl ClaimStore for PostgresClaimStore {
         // FIX 1: try the real CAS first — the common, uncontended case (a
         // brand-new entity, or a genuine conflict with another node) needs
         // nothing beyond `acquire` itself.
+        //
+        // ADR-0017 Phase 3 Slice 10: `acquire` can now also fail with
+        // `ClaimError::Draining` (this node refused a NEW claim while
+        // marked draining). The self-reacquire fallback below still MUST
+        // run in that case too — "already-owned entities keep being
+        // served" while draining (element 4's drain sequence) — so both
+        // errors take the same fallback path; only the *fallback's own*
+        // outcome decides which error (if any) ultimately surfaces.
         match self.acquire(entity, me).await {
             Ok(epoch) => Ok(epoch),
-            Err(ClaimError::AlreadyClaimed) => {
+            Err(err @ (ClaimError::AlreadyClaimed | ClaimError::Draining)) => {
                 // `acquire` lost the CAS: read the row it lost to. This read
                 // is deliberately **unlocked** (no `FOR SHARE`) — safe
                 // because it never authorizes a write itself; the
@@ -396,11 +473,15 @@ impl ClaimStore for PostgresClaimStore {
                             Err(ClaimError::AlreadyClaimed)
                         }
                     }
-                    // The row vanished between the failed INSERT and this
-                    // read (e.g. released concurrently) — cannot confirm
-                    // self-ownership, so treat it the same as a foreign
-                    // owner: the caller retries with a fresh `acquire`.
-                    None => Err(ClaimError::AlreadyClaimed),
+                    // No row on file at all: cannot confirm self-ownership.
+                    // Propagate `acquire`'s own original error faithfully —
+                    // `ClaimError::Draining` when this node's own draining
+                    // gate is what blocked the INSERT (there is nothing to
+                    // self-reacquire), or `ClaimError::AlreadyClaimed` for
+                    // the momentary-race case `acquire` itself already
+                    // distinguished (the row vanished between the failed
+                    // INSERT and this read — released concurrently).
+                    None => Err(err),
                 }
             }
             Err(other) => Err(other),
@@ -490,6 +571,17 @@ impl ClaimStore for PostgresClaimStore {
                 // the CTE's read and the UPDATE's lock) burns intents
                 // without a steal — bounded, self-healing via the
                 // reporter's next threshold crossing.
+                //
+                // ADR-0017 Phase 3 Slice 10: `AND NOT EXISTS (... draining
+                // ...)` on the outer UPDATE stops a draining node from
+                // winning a NEW claim via the steal-intent path too — a
+                // steal is, from this node's perspective, exactly the kind
+                // of new acquisition `mark_draining` exists to refuse. Zero
+                // rows affected here already means `ClaimError::Conflict`
+                // under the pre-existing contract (stale epoch, predicate
+                // unsatisfied, or claim gone) — draining is simply another
+                // reason folded into that same catch-all, not a new error
+                // variant.
                 let affected = conn
                     .execute(
                         r#"
@@ -508,6 +600,10 @@ impl ClaimStore for PostgresClaimStore {
                         WHERE entity = ?
                           AND claim_epoch = ?
                           AND EXISTS (SELECT 1 FROM consumed)
+                          AND NOT EXISTS (
+                            SELECT 1 FROM clustering_nodes
+                            WHERE node_id = ? AND node_epoch = ? AND draining
+                          )
                         "#,
                         crate::db_params![
                             entity_key(entity),
@@ -519,6 +615,8 @@ impl ClaimStore for PostgresClaimStore {
                             next_epoch,
                             entity_key(entity),
                             observed.0,
+                            me.node_id.clone(),
+                            me.node_epoch.clone(),
                         ],
                     )
                     .await
@@ -547,6 +645,14 @@ impl ClaimStore for PostgresClaimStore {
                 // fresh (non-expired), current epoch. Reads only the
                 // committed `expired` flag, never a raw heartbeat
                 // comparison.
+                //
+                // ADR-0017 Phase 3 Slice 10: the second `NOT EXISTS`
+                // refuses the steal when the STEALER (`me`) is itself
+                // marked draining — a draining node must not win a dead
+                // node's orphaned claim either; that is still a NEW
+                // acquisition from this node's point of view. Zero rows
+                // affected already means `ClaimError::Conflict` under this
+                // method's pre-existing catch-all contract.
                 let affected = conn
                     .execute(
                         r#"
@@ -560,6 +666,10 @@ impl ClaimStore for PostgresClaimStore {
                               AND NOT n.expired
                               AND n.node_epoch = clustering_claims.node_epoch
                           )
+                          AND NOT EXISTS (
+                            SELECT 1 FROM clustering_nodes
+                            WHERE node_id = ? AND node_epoch = ? AND draining
+                          )
                         "#,
                         crate::db_params![
                             me.node_id.clone(),
@@ -567,6 +677,8 @@ impl ClaimStore for PostgresClaimStore {
                             next_epoch,
                             entity_key(entity),
                             observed.0,
+                            me.node_id.clone(),
+                            me.node_epoch.clone(),
                         ],
                     )
                     .await
@@ -977,6 +1089,19 @@ pub trait NodeLeaseStore: Send + Sync {
     async fn list_orphaned_sm_session_claims(
         &self,
     ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError>;
+
+    /// The current deployment generation's `pod_template_hash` (ADR-0017
+    /// Phase 3 Slice 10, Q5's operational definition): the hash stamped on
+    /// the non-expired `clustering_nodes` row with the greatest
+    /// `first_seen`. `None` when there are no live rows at all, or when
+    /// that freshest row's own `pod_template_hash` is `None` (outside
+    /// Kubernetes, or a Deployment that omits the downward-API env var) —
+    /// both treated identically by every acquire-backoff call site as "no
+    /// generation to compare against," never a parse failure. Read-only,
+    /// advisory-only: this is a placement heuristic (decides who tries
+    /// first), never an ownership authority — the claims CAS remains the
+    /// sole source of truth over who actually wins any given claim.
+    async fn current_generation(&self) -> Result<Option<String>, ClaimError>;
 }
 
 /// A candidate orphaned `sm_session` claim: its entity/epoch plus the
@@ -1353,6 +1478,37 @@ impl NodeLeaseStore for PostgresClaimStore {
             });
         }
         Ok(out)
+    }
+
+    async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // Q5's operational definition: the `pod_template_hash` of the
+        // non-expired row with the greatest `first_seen`. Draining rows are
+        // deliberately NOT excluded here (unlike
+        // `count_other_live_nodes`'s isolation-heuristic filter) — a
+        // draining node's own registration event is still a real, valid
+        // signal about which generation most recently rolled in; excluding
+        // it would let a fully-rolled-out new generation whose pods have
+        // all since started draining again (e.g. immediately followed by
+        // another rollout) fall back to reporting a stale prior
+        // generation as "current."
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT pod_template_hash
+                FROM clustering_nodes
+                WHERE NOT expired
+                ORDER BY first_seen DESC
+                LIMIT 1
+                "#,
+                (),
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => row.get::<Option<String>>(0).map_err(db_err),
+            None => Ok(None),
+        }
     }
 }
 
@@ -1923,6 +2079,71 @@ mod tests {
             .expect("empty release_many does not error");
     }
 
+    // ADR-0017 Phase 3 Slice 10, `ClaimStore::release_many`'s own
+    // "plan-sanctioned ABA window" doc comment: literal proof, at the SQL
+    // level, that `release_many` is blind to an entity's individual
+    // `claim_epoch` and matches only `(node_id, node_epoch)` — so a batch
+    // entry queued for release, then legitimately re-claimed by the SAME
+    // node/epoch at a HIGHER epoch before the batched DELETE actually
+    // runs (the doc comment's own example: "a resumed XEP-0198 session
+    // legitimately steals back onto this node via `steal_for_resume`"),
+    // is deleted by the stale batch entry regardless. This is the
+    // documented, accepted risk — not a bug — and Slice 10's own
+    // `crate::clustering::drain::tests::
+    // drain_seals_then_releases_only_room_entities_skipping_sm_sessions`
+    // proves the mitigation: `SmSession` entities (the only ones reachable
+    // via `steal_for_resume`) never enter a `release_many` batch in the
+    // first place, so this window is real at the store level but
+    // unreachable through the production drain path.
+    #[tokio::test]
+    async fn release_many_epoch_blind_window_deletes_a_fresh_same_node_resume() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        let entity = sm_entity("stream-aba");
+        let epoch0 = store.acquire(&entity, &me).await.expect("initial acquire");
+
+        // Drain decides to release this entity (its final write already
+        // committed) and queues it for the batch...
+        let batch = vec![entity.clone()];
+
+        // ...but before `release_many` actually runs, the SAME node
+        // legitimately re-wins this exact entity at a HIGHER epoch via the
+        // one CAS variant the draining gate does not cover
+        // (`steal_for_resume` — a resumed session landing back on this
+        // node while it drains but has not yet exited).
+        let jid: jid::BareJid = "resuming@example.com".parse().expect("valid jid");
+        let proof =
+            waddle_xmpp::ownership::verify_resume_identity(&jid, &jid).expect("identity match");
+        let epoch1 = store
+            .steal_for_resume(&entity, epoch0, proof, &me)
+            .await
+            .expect("same-node resume steal succeeds (no staleness required)");
+        assert_eq!(epoch1, ClaimEpoch(1), "epoch bumped by the resume steal");
+        assert!(
+            store
+                .fence(&entity, &me, epoch1)
+                .await
+                .expect("fence check"),
+            "the entity is genuinely, freshly re-claimed under epoch 1"
+        );
+
+        // The stale batch entry's `release_many` call is blind to that
+        // epoch bump — it deletes the fresh claim anyway.
+        store.release_many(&batch, &me).await.expect("release_many");
+
+        assert!(
+            !store
+                .fence(&entity, &me, epoch1)
+                .await
+                .expect("fence check"),
+            "release_many's epoch-blind DELETE removes the fresh, genuinely-live claim too — \
+             the documented ABA window, reproduced here at the SQL level"
+        );
+    }
+
     // The ADR-named interleaving race: a steal CAS commits while a
     // concurrent transaction holds the claims row's `FOR SHARE` lock (the
     // exact fencing-transaction shape later slices use to guard durable
@@ -2338,6 +2559,258 @@ mod tests {
             .get(0)
             .expect("column present");
         assert!(draining);
+    }
+
+    fn room_entity(id: &str) -> Entity {
+        Entity::new(EntityType::RoomActor, id.to_string())
+    }
+
+    // --- ADR-0017 Phase 3 Slice 10: the acquire-side draining gate -------
+
+    #[tokio::test]
+    async fn acquire_refuses_a_new_claim_once_the_caller_is_marked_draining() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        store.register(&me, None).await.expect("register");
+        store.mark_draining(&me).await.expect("mark draining");
+
+        let entity = room_entity("fresh@muc.example.com");
+        let error = store
+            .acquire(&entity, &me)
+            .await
+            .expect_err("a draining node must refuse a brand-new acquire");
+        assert!(
+            matches!(error, ClaimError::Draining),
+            "expected ClaimError::Draining, got {error:?}"
+        );
+
+        // The entity must genuinely remain unclaimed — a non-draining node
+        // (or this same node, once done draining) can still acquire it.
+        let other = node_identity();
+        store
+            .acquire(&entity, &other)
+            .await
+            .expect("a non-draining node can still acquire the untouched entity");
+    }
+
+    #[tokio::test]
+    async fn ensure_claimed_self_reacquire_still_succeeds_while_draining() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        store.register(&me, None).await.expect("register");
+        let entity = room_entity("already-owned@muc.example.com");
+        let epoch = store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("initial acquire, not yet draining");
+
+        store.mark_draining(&me).await.expect("mark draining");
+
+        // Element 4's drain sequence: "keep serving already-owned draining
+        // entities." A draining node re-observing a claim it already holds
+        // (e.g. a retried first-fenced-write path) must self-reacquire
+        // idempotently, never error.
+        let reacquired = store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("self-reacquire must still succeed while draining");
+        assert_eq!(reacquired, epoch);
+    }
+
+    #[tokio::test]
+    async fn ensure_claimed_refuses_a_genuinely_new_entity_while_draining() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        store.register(&me, None).await.expect("register");
+        store.mark_draining(&me).await.expect("mark draining");
+
+        let entity = room_entity("never-owned@muc.example.com");
+        let error = store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect_err("a draining node must refuse a genuinely new entity");
+        assert!(
+            matches!(error, ClaimError::Draining),
+            "expected ClaimError::Draining, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn steal_stale_owner_stale_refuses_the_stealer_while_draining() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let dead_owner = node_identity();
+        let entity = room_entity("orphaned@muc.example.com");
+        let epoch0 = store.acquire(&entity, &dead_owner).await.expect("acquire");
+        seed_node(&store.db, &dead_owner, true).await; // dead owner: expired
+
+        let stealer = node_identity();
+        store
+            .register(&stealer, None)
+            .await
+            .expect("register stealer");
+        store.mark_draining(&stealer).await.expect("mark draining");
+
+        let error = store
+            .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &stealer)
+            .await
+            .expect_err("a draining node must not win a dead owner's claim either");
+        assert!(matches!(error, ClaimError::Conflict));
+
+        // The entity must genuinely remain stealable — a non-draining node
+        // can still win it.
+        let other = node_identity();
+        store
+            .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &other)
+            .await
+            .expect("a non-draining node can still steal the dead owner's claim");
+    }
+
+    // --- ADR-0017 Phase 3 Slice 10: current_generation (Q5's mechanism) --
+
+    #[tokio::test]
+    async fn current_generation_is_none_with_no_live_nodes() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        assert_eq!(store.current_generation().await.expect("query"), None);
+    }
+
+    #[tokio::test]
+    async fn current_generation_is_the_most_recently_registered_live_nodes_hash() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let old = node_identity();
+        store
+            .register(&old, Some("old-gen-hash".to_string()))
+            .await
+            .expect("register old");
+        // Ensure a strictly later `first_seen` than `old`'s — Postgres
+        // `now()` resolution is high enough that two `register` calls in
+        // the same test could otherwise tie.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let new = node_identity();
+        store
+            .register(&new, Some("new-gen-hash".to_string()))
+            .await
+            .expect("register new");
+
+        assert_eq!(
+            store.current_generation().await.expect("query"),
+            Some("new-gen-hash".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn current_generation_ignores_expired_rows() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let old_live = node_identity();
+        store
+            .register(&old_live, Some("still-live-hash".to_string()))
+            .await
+            .expect("register old_live");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let newer_but_dead = node_identity();
+        store
+            .register(&newer_but_dead, Some("dead-gen-hash".to_string()))
+            .await
+            .expect("register newer_but_dead");
+        // Force this row `expired` directly: `seed_node` INSERTs a fresh
+        // row (it would conflict on `node_id`'s PRIMARY KEY against the
+        // one `register` just created), so an `UPDATE` is the correct
+        // fixture shape here, not `seed_node`.
+        let conn = store.db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET expired = true WHERE node_id = ?",
+            crate::db_params![newer_but_dead.node_id.clone()],
+        )
+        .await
+        .expect("force expire newer_but_dead");
+
+        assert_eq!(
+            store.current_generation().await.expect("query"),
+            Some("still-live-hash".to_string()),
+            "the most-recently-registered row is expired, so the next-freshest LIVE row wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_generation_preserves_first_seen_across_re_registration() {
+        // Register/re-register under the SAME node_id must NOT refresh
+        // `first_seen` — `register`'s `ON CONFLICT (node_id) DO UPDATE`
+        // deliberately omits `first_seen` from its SET list.
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let node = NodeIdentity::new("stable-node-id", "epoch-0");
+        store
+            .register(&node, Some("gen-a".to_string()))
+            .await
+            .expect("first register");
+        // `DbDecode` (this crate's row-decoding trait) has no
+        // `chrono::DateTime` impl, so `first_seen` is read as its Postgres
+        // text representation — a plain string-equality check on the exact
+        // same stored value is exactly what "must not have changed" needs,
+        // with no timestamp-parsing machinery required.
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT first_seen::text FROM clustering_nodes WHERE node_id = ?",
+                crate::db_params![node.node_id.clone()],
+            )
+            .await
+            .expect("query");
+        let first_seen_initial: String = rows
+            .next()
+            .await
+            .expect("row present")
+            .expect("row present")
+            .get(0)
+            .expect("column present");
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let node_reregistered = NodeIdentity::new("stable-node-id", "epoch-1");
+        store
+            .register(&node_reregistered, Some("gen-b".to_string()))
+            .await
+            .expect("re-register under the same node_id, new node_epoch");
+
+        let mut rows = conn
+            .query(
+                "SELECT first_seen::text FROM clustering_nodes WHERE node_id = ?",
+                crate::db_params![node.node_id.clone()],
+            )
+            .await
+            .expect("query");
+        let first_seen_after: String = rows
+            .next()
+            .await
+            .expect("row present")
+            .expect("row present")
+            .get(0)
+            .expect("column present");
+        assert_eq!(
+            first_seen_initial, first_seen_after,
+            "re-registration under the same node_id must not refresh first_seen"
+        );
     }
 
     // FIX 7(c): renamed from `..._under_a_live_local_actor` — this is a pure

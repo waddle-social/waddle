@@ -360,6 +360,19 @@ pub enum ClaimError {
          or the orphan reaper's OwnerStale predicate, instead)"
     )]
     SmSessionExcludedFromStealIntent,
+
+    /// `acquire`/`ensure_claimed`/`steal_stale` refused to grant a NEW
+    /// claim because the calling node has marked itself draining
+    /// (ADR-0017 Phase 3 Slice 10: `NodeLeaseStore::mark_draining` — "stop
+    /// acquiring new claims, keep serving already-owned ones"). Distinct
+    /// from [`ClaimError::AlreadyClaimed`]: the entity may well be
+    /// unclaimed — this node simply refuses to be the one to claim it while
+    /// on its way out. A caller already holding this exact claim is
+    /// unaffected (`ensure_claimed`'s self-reacquire fallback still
+    /// succeeds while draining); only a genuinely NEW acquisition is
+    /// refused.
+    #[error("this node is draining and refuses to acquire a new claim")]
+    Draining,
 }
 
 /// Entity ownership claims: which node currently owns a given `UserActor`/
@@ -514,6 +527,29 @@ pub trait ClaimStore: Send + Sync {
     /// full closure of the race. See Slice 10's Tests paragraph for the
     /// interleaving this implies for the drain test suite.
     async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError>;
+}
+
+/// Rollout-aware claim-acquisition placement (ADR-0017 Phase 3 Slice 10,
+/// Q5's mechanism): how long to wait before attempting to steal a claim
+/// from a dead owner. Unconditionally compiled (like [`ClaimStore`] itself)
+/// so `RoomRegistry`'s re-election path (`steal_from_dead_owner`) can call
+/// it without depending on `waddle-server`'s `clustering`-feature-gated
+/// `NodeLeaseStore`, which is where the real `pod_template_hash`/
+/// `current_generation` comparison lives. `None` (the default on every
+/// construction site until wired) means "no backoff" — correct for every
+/// single-node deployment and every existing test, which never wire this
+/// field at all.
+///
+/// **Never affects correctness.** This is purely a placement heuristic —
+/// it decides who *tries first*, never who *wins*: the claims CAS remains
+/// the sole authority over who actually holds any given entity. A missing
+/// or unwired implementation costs nothing worse than every node trying to
+/// steal a dead owner's claim at the same instant, exactly today's
+/// pre-Slice-10 behavior.
+#[async_trait]
+pub trait RolloutBackoff: Send + Sync {
+    /// How long to wait before this node's next claim-steal attempt.
+    async fn acquire_delay(&self) -> Duration;
 }
 
 #[cfg(test)]

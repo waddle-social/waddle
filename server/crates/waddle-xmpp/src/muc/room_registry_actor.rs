@@ -24,7 +24,7 @@ use super::{MucRoom, RoomConfig};
 use crate::metrics;
 use crate::ownership::{
     ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
-    SharedNodeIdentity, StalePredicate,
+    RolloutBackoff, SharedNodeIdentity, StalePredicate,
 };
 use crate::xep::xep0421::OccupantIdSecret;
 
@@ -75,6 +75,11 @@ pub struct RoomRegistryActor {
     /// single-node/non-clustering deployments, matching today's purely
     /// in-memory room behavior exactly. Wired by [`WireClusteringClaims`].
     durable_store: Option<Arc<dyn MucDurableStore>>,
+    /// Rollout-aware claim-acquisition backoff (ADR-0017 Phase 3 Slice 10):
+    /// `None` (the default) in single-node/non-clustering deployments and
+    /// every existing test — correct, since there is only ever one
+    /// generation to place. Wired by [`WireClusteringClaims`].
+    rollout_backoff: Option<Arc<dyn RolloutBackoff>>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -120,6 +125,7 @@ impl RoomRegistryActor {
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             durable_store: None,
+            rollout_backoff: None,
         }
     }
 
@@ -176,6 +182,18 @@ impl RoomRegistryActor {
         };
         if snapshot.owner_lease_fresh {
             return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()));
+        }
+        // ADR-0017 Phase 3 Slice 10 (Q5's rollout-aware placement rule): an
+        // old-generation node backs off before racing a matching/newer
+        // -generation node for a dead owner's claim, so each room moves
+        // approximately once per deploy instead of up to N times. Purely a
+        // placement heuristic — never affects correctness (the epoch CAS
+        // below remains the sole authority over who actually wins).
+        if let Some(backoff) = &self.rollout_backoff {
+            let delay = backoff.acquire_delay().await;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
         }
         match self
             .claim_store
@@ -379,6 +397,11 @@ pub struct WireClusteringClaims {
     pub claim_store: Arc<dyn ClaimStore>,
     pub node_identity: SharedNodeIdentity,
     pub durable_store: Option<Arc<dyn MucDurableStore>>,
+    /// ADR-0017 Phase 3 Slice 10: `None` when clustering wiring predates
+    /// this field's introduction — every existing/backward call site simply
+    /// omits it via struct-update syntax at its own call site, which is a
+    /// no-op behavior change (no backoff, exactly today's default).
+    pub rollout_backoff: Option<Arc<dyn RolloutBackoff>>,
 }
 
 impl kameo::message::Message<WireClusteringClaims> for RoomRegistryActor {
@@ -392,6 +415,7 @@ impl kameo::message::Message<WireClusteringClaims> for RoomRegistryActor {
         self.claim_store = msg.claim_store;
         self.node_identity = msg.node_identity;
         self.durable_store = msg.durable_store;
+        self.rollout_backoff = msg.rollout_backoff;
     }
 }
 

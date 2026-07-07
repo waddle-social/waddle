@@ -291,6 +291,55 @@ impl LocallyClaimedEntities for RoomLocalClaims {
             .await
             .is_ok()
     }
+
+    /// ADR-0017 Phase 3 Slice 10 FIX 1 (council-adjudicated): the seal
+    /// barrier element 4's drain sequence requires before an owned room
+    /// enters `run_shutdown_drain`'s release batch — landed here for real,
+    /// rather than falling through to the trait's trivial `true` default
+    /// (which would batch every owned room for release **instantly**, with
+    /// no confirmation that a mutation already queued ahead of the drain
+    /// snapshot has finished its final fenced write).
+    ///
+    /// Issues the SAME `HealthCheck` ask [`Self::health_check`] above uses,
+    /// as a genuine mailbox-ordering barrier: kameo serializes each actor's
+    /// mailbox strictly in order (see [`HealthCheck`]'s own doc comment),
+    /// and every mutation handler this actor exposes
+    /// (`UpdateConfig`/`RollbackConfigIfRevision`/
+    /// `UpdateGroupDmConfigByMember`/`SetSubject`/`ChangeAffiliation`, and
+    /// the affiliation-bulk-apply path) synchronously `.await`s its own
+    /// `gate_mutation()` check and durable persist call
+    /// (`persist_config`/`persist_subject`/`persist_affiliation`) before
+    /// returning a reply — so a mutation enqueued ahead of this ask has
+    /// already run its handler to completion, including its durable write's
+    /// commit, by the time this ask's own reply lands. A room with no live
+    /// local actor to ask, or one whose ask fails or times out (wedged),
+    /// reports unsealed (`false`): [`crate::clustering::drain::
+    /// run_shutdown_drain`] then leaves that claim held —
+    /// `claims_abandoned_on_drain`, fenced-safe, reclaimed later — rather
+    /// than releasing a claim whose final state it could not confirm.
+    async fn seal_before_release(&self, entity: &Entity) -> bool {
+        let Some(registry) = self.registry.get() else {
+            return true;
+        };
+        let Some(room_jid) = Self::room_jid(entity) else {
+            return true;
+        };
+        let Ok(Some(actor_ref)) = registry.get_room(room_jid).await else {
+            tracing::warn!(
+                %entity,
+                "RoomLocalClaims::seal_before_release: this node's claim has no live \
+                 local actor to seal; reporting unsealed so the drain leaves the claim \
+                 held rather than releasing state it could not confirm"
+            );
+            return false;
+        };
+        actor_ref
+            .ask(HealthCheck)
+            .mailbox_timeout(ROOM_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(ROOM_HEALTH_CHECK_TIMEOUT)
+            .await
+            .is_ok()
+    }
 }
 
 /// Dispatches [`LocallyClaimedEntities`] calls across `SmSession` and
@@ -356,6 +405,26 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         // is intentionally not forwarded anywhere; named here so a
         // future contributor adding that consumer has an obvious seam.
         let _ = rest;
+    }
+
+    /// ADR-0017 Phase 3 Slice 10 FIX 1: dispatch by `EntityType`, mirroring
+    /// [`Self::demote`]/[`Self::health_check`] above. `SmSession` keeps the
+    /// trait's trivial `true` default — the existing Q6 SM drain
+    /// (`session_janitors::spawn_graceful_shutdown_drain`) already owns
+    /// "final write, then release" for those entities on its own
+    /// independent task (see `clustering::drain`'s module doc), so this
+    /// generic seal is never consulted for `SmSession` at all
+    /// (`clustering::drain::run_shutdown_drain` only ever batches
+    /// `RoomActor` entities). `RoomActor` routes to
+    /// [`RoomLocalClaims::seal_before_release`]'s real barrier.
+    /// `UserActor` keeps the default `true` too — defensive only, no
+    /// production `UserActor` claim-acquisition call site exists yet
+    /// (deviation 21/34).
+    async fn seal_before_release(&self, entity: &Entity) -> bool {
+        match entity.entity_type {
+            EntityType::SmSession | EntityType::UserActor => true,
+            EntityType::RoomActor => self.room.seal_before_release(entity).await,
+        }
     }
 }
 
@@ -582,5 +651,248 @@ mod tests {
         .await
         .is_ok();
         assert!(killed, "demote must hard-kill the deposed RoomActor");
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0017 Phase 3 Slice 10 FIX 1 (council-adjudicated): the real
+    // `seal_before_release` barrier. Mirrors the `health_check` test
+    // trio above (no-live-actor / poisoned / healthy), plus a dedicated
+    // ordering test proving the barrier's actual purpose: a mutation
+    // already queued ahead of the drain's `seal_before_release` ask has
+    // its durable write committed before that ask returns.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn room_seal_before_release_is_unsealed_when_no_live_actor_exists() {
+        let room_local_claims = RoomLocalClaims::new();
+        let registry = waddle_xmpp::muc::RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            test_occupant_id_secret(),
+            None,
+        );
+        room_local_claims.wire(registry);
+
+        // No room was ever created for this JID — mirrors
+        // `room_health_check_is_unhealthy_when_no_live_actor_exists`: the
+        // seal barrier must fail closed (leave the claim held) rather than
+        // report a phantom room sealed.
+        let entity = Entity::new(EntityType::RoomActor, "ghost@muc.example.com".to_string());
+        assert!(
+            !room_local_claims.seal_before_release(&entity).await,
+            "no live local actor must report unsealed, never sealed"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_seal_before_release_is_unsealed_for_a_dead_room_actor() {
+        // FIX 1(b): a hung/dead room's seal must return false, so
+        // `run_shutdown_drain` abandons (leaves claimed) rather than
+        // releases it.
+        let room_local_claims = RoomLocalClaims::new();
+        let registry = waddle_xmpp::muc::RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            test_occupant_id_secret(),
+            None,
+        );
+        room_local_claims.wire(registry.clone());
+
+        let room_jid: jid::BareJid = "dead@muc.example.com".parse().expect("valid jid");
+        let actor_ref = registry
+            .get_or_create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                waddle_xmpp::muc::RoomConfig::default(),
+            )
+            .await
+            .expect("create room")
+            .actor_ref;
+        actor_ref.kill();
+        actor_ref.wait_for_shutdown().await;
+
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        assert!(
+            !room_local_claims.seal_before_release(&entity).await,
+            "a dead room actor must report unsealed, never sealed"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_seal_before_release_is_sealed_for_a_healthy_room_actor() {
+        let room_local_claims = RoomLocalClaims::new();
+        let registry = waddle_xmpp::muc::RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            test_occupant_id_secret(),
+            None,
+        );
+        room_local_claims.wire(registry.clone());
+
+        let room_jid: jid::BareJid = "healthy@muc.example.com".parse().expect("valid jid");
+        registry
+            .get_or_create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                waddle_xmpp::muc::RoomConfig::default(),
+            )
+            .await
+            .expect("create room");
+
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        assert!(
+            room_local_claims.seal_before_release(&entity).await,
+            "a live, responsive RoomActor must report sealed"
+        );
+    }
+
+    /// A `MucDurableStore` test double whose `save_config` signals
+    /// `started` the instant it is entered (so a test can observe that
+    /// the persist call is genuinely in flight) and only records
+    /// `persisted = true` after an artificial delay — modeling a
+    /// durable write that is slow, not instantaneous.
+    struct RecordingDurableStore {
+        started: Arc<tokio::sync::Notify>,
+        persisted: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl waddle_xmpp::muc::MucDurableStore for RecordingDurableStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a waddle_xmpp::muc::RoomConfig,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+            Box::pin(async move {
+                self.started.notify_one();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                self.persisted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// ADR-0017 Phase 3 Slice 10 FIX 1(a) (council-adjudicated): the
+    /// exact invariant the seal barrier exists to prove — a mutation
+    /// (`UpdateConfig`) already enqueued in the room's mailbox ahead of
+    /// the drain's `seal_before_release` ask has its durable write
+    /// committed BEFORE that ask returns, never after. Proven
+    /// deterministically (no sleep-based race): `RecordingDurableStore`
+    /// signals `started` the instant its `save_config` is entered —
+    /// which, because kameo processes a mailbox strictly in order, can
+    /// only happen once the `UpdateConfig` message has already been
+    /// dequeued and its handler is running. The test waits for that
+    /// signal (proving `UpdateConfig`'s handler is now suspended inside
+    /// the still-in-flight persist call) before issuing the
+    /// `seal_before_release` ask — so `HealthCheck` cannot itself be
+    /// dequeued and answered until `UpdateConfig`'s handler, persist
+    /// `.await` and all, has returned.
+    #[tokio::test]
+    async fn seal_before_release_proves_a_queued_ahead_mutation_already_committed() {
+        let room_local_claims = RoomLocalClaims::new();
+        let registry = waddle_xmpp::muc::RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            test_occupant_id_secret(),
+            None,
+        );
+        room_local_claims.wire(registry.clone());
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let persisted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let durable_store: std::sync::Arc<dyn waddle_xmpp::muc::MucDurableStore> =
+            std::sync::Arc::new(RecordingDurableStore {
+                started: Arc::clone(&started),
+                persisted: Arc::clone(&persisted),
+            });
+        registry
+            .wire_clustering_claims(
+                std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                waddle_xmpp::ownership::SharedNodeIdentity::new(
+                    waddle_xmpp::ownership::NodeIdentity::local(),
+                ),
+                Some(durable_store),
+                None,
+            )
+            .await;
+
+        let room_jid: jid::BareJid = "queued@muc.example.com".parse().expect("valid jid");
+        let actor_ref = registry
+            .get_or_create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                waddle_xmpp::muc::RoomConfig::default(),
+            )
+            .await
+            .expect("create room")
+            .actor_ref;
+
+        // Fire `UpdateConfig` in the background — never awaited before
+        // `seal_before_release` is issued below, so the two race exactly
+        // as the drain scenario this fix targets does (a mutation
+        // enqueued ahead of the drain snapshot).
+        let update_task = tokio::spawn({
+            let actor_ref = actor_ref.clone();
+            async move {
+                actor_ref
+                    .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                        config: waddle_xmpp::muc::RoomConfig {
+                            persistent: true,
+                            ..waddle_xmpp::muc::RoomConfig::default()
+                        },
+                    })
+                    .await
+            }
+        });
+
+        // Block until `UpdateConfig`'s handler is provably mid-persist —
+        // i.e. already dequeued, gate_mutation passed, in-memory config
+        // already mutated, and now suspended inside the durable write.
+        started.notified().await;
+        assert!(
+            !persisted.load(std::sync::atomic::Ordering::SeqCst),
+            "sanity: the persist call must still be in flight at this point"
+        );
+
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let sealed = room_local_claims.seal_before_release(&entity).await;
+
+        assert!(sealed, "a healthy room's seal must succeed");
+        assert!(
+            persisted.load(std::sync::atomic::Ordering::SeqCst),
+            "seal_before_release must not return until the mutation queued ahead of it \
+             (UpdateConfig) has already committed its durable write — losing this ordering \
+             is exactly the inversion FIX 1 closes"
+        );
+
+        update_task
+            .await
+            .expect("update task")
+            .expect("UpdateConfig must have succeeded");
     }
 }

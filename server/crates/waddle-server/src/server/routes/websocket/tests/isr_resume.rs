@@ -79,6 +79,7 @@ async fn isr_fixture() -> Option<IsrFixture> {
         isr_token_store: Some(isr_token_store.clone()),
         node_lease: None,
         lease_ttl: None,
+        pod_template_hash: None,
         resume_bridge: None,
         stop_token: None,
         resume_handshake_timeout: None,
@@ -684,6 +685,7 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
         isr_token_store: Some(std::sync::Arc::new(isr_store) as std::sync::Arc<dyn IsrTokenStore>),
         node_lease: None,
         lease_ttl: None,
+        pod_template_hash: None,
         resume_bridge: None,
         stop_token: None,
         // FIX 2: a real handshake budget — node B's cross-node steal must

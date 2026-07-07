@@ -125,7 +125,14 @@ struct PreparedInsertRow {
 /// mapping to be revisited.
 fn claim_error_to_pending_storage_error(error: ClaimError, entity: Entity) -> PendingStorageError {
     match error {
-        ClaimError::AlreadyClaimed | ClaimError::Conflict => {
+        // ADR-0017 Phase 3 Slice 10: `ensure_claimed` surfaces `Draining`
+        // when this node refused a NEW claim while marked draining — from
+        // this fenced-insert path's point of view that is the same signal
+        // as `AlreadyClaimed`/`Conflict`: this node is not (and, for
+        // `Draining`, will not become) the owner, so the caller should
+        // treat it exactly like any other ownership loss, never a
+        // transient backend error.
+        ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining => {
             PendingStorageError::NotOwner { entity }
         }
         ClaimError::Backend(_) | ClaimError::Poisoned => {

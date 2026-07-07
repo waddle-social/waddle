@@ -156,3 +156,70 @@ pub fn record_peers_revoked(count: u64) {
     })
     .add(count, &[]);
 }
+
+/// Record one graceful-shutdown drain's total wall-clock duration (ADR-0017
+/// Phase 3 Slice 10 — the ADR's own Phase 3 Implementation Plan drain text,
+/// NOT element 12, which is unrelated DB pool-size/capacity-planning
+/// configurability): from the moment `mark_draining` is issued to the
+/// moment the batched `release_many` call (or the abandonment path)
+/// completes. First caller: `clustering::drain::run_shutdown_drain`.
+/// Compare against `claimReleaseBudget` (`WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS`)
+/// to see how close a deploy's drains run to the configured budget.
+pub fn record_drain_duration_ms(duration_ms: f64) {
+    static H: OnceLock<Histogram<f64>> = OnceLock::new();
+    H.get_or_init(|| {
+        meter()
+            .f64_histogram("waddle.clustering.drain_duration_ms")
+            .with_description(
+                "Wall-clock duration of a graceful per-entity claim drain, from mark_draining \
+                 to the batched release_many call (or abandonment) completing",
+            )
+            .with_unit("ms")
+            .build()
+    })
+    .record(duration_ms, &[]);
+}
+
+/// Count claims successfully released as part of a graceful drain (ADR-0017
+/// Phase 3 Slice 10 — the ADR's own Phase 3 Implementation Plan drain
+/// text, not element 12; see [`record_drain_duration_ms`]'s doc comment).
+/// First caller: `clustering::drain::run_shutdown_drain`.
+pub fn record_claims_released_on_drain(count: u64) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.claims_released_on_drain")
+            .with_description("Claims successfully released as part of a graceful drain")
+            .with_unit("claim")
+            .build()
+    })
+    .add(count, &[]);
+}
+
+/// Count claims left held (un-released) because the graceful drain's budget
+/// overran, a per-entity seal failed/timed out, or the batched
+/// `release_many` call itself errored (ADR-0017 Phase 3 Slice 10 — the
+/// ADR's own Phase 3 Implementation Plan drain text, not element 12; see
+/// [`record_drain_duration_ms`]'s doc comment). Fenced-safe either way —
+/// an abandoned claim is simply reclaimed
+/// later by another node's orphan reaper, or by this node itself on its
+/// next successful re-registration. **Any nonzero value here is alert
+/// -worthy** (the phase plan's own "alert on nonzero abandonment"
+/// deliverable): unlike a released claim, an abandoned one silently
+/// degrades the "~1 move per entity per deploy" property until the
+/// abandoned claim's lease naturally lapses. First caller:
+/// `clustering::drain::run_shutdown_drain`.
+pub fn record_claims_abandoned_on_drain(count: u64) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.claims_abandoned_on_drain")
+            .with_description(
+                "Claims left held (not released) when a graceful drain's budget overran or a \
+                 per-entity seal/release failed — alert on any nonzero value",
+            )
+            .with_unit("claim")
+            .build()
+    })
+    .add(count, &[]);
+}

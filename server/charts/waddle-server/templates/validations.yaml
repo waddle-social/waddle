@@ -9,10 +9,46 @@
 {{- $killMargin := 5 -}}
 {{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
 {{- $preStopSleep := int .Values.preStopSleepSeconds -}}
+{{- /*
+  ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain
+  (`clustering::drain::run_shutdown_drain`) runs on its own budget,
+  parallel to (not serialized after) the SM-session Q6 drain
+  config.drainTimeoutSeconds bounds — but the floor still has to cover it,
+  because a wedged claim-release drain must not itself blow past the pod's
+  terminationGracePeriodSeconds and get SIGKILLed before its own bounded
+  abandonment logic even gets to run. Included even while
+  clustering.enabled stays hard-locked false below (Phase 0 guard): the
+  ADR's own Implementation Plan text names claimReleaseBudget as a chart
+  value "consumed from Phase 3 on," so the floor accounts for it ahead of
+  Phase 4's chart unlock rather than needing a second validations.yaml
+  change then.
+
+  ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated): a draining node's
+  clustering-lease heartbeat only keeps renewing for the duration of its
+  OWN claim-release drain (bounded by claimReleaseBudgetSeconds here) —
+  `WADDLE_CLUSTERING_NODE_LEASE_TTL_MS` (the code-level default is 30s;
+  NOT currently a chart value, so it cannot be cross-validated in this
+  template the way claimReleaseBudgetSeconds is above) is the separate
+  floor that governs how long this node's `clustering_nodes` row stays
+  looking fresh to another node's orphan reaper. `config.rs`'s own
+  parse-time validation already requires
+  WADDLE_CLUSTERING_NODE_LEASE_TTL_MS >= claimReleaseBudgetSeconds * 3; an
+  operator raising claimReleaseBudgetSeconds well above its 5s default
+  (e.g. to fit a much larger claim set) MUST also raise
+  WADDLE_CLUSTERING_NODE_LEASE_TTL_MS to match once it becomes chart
+  -configurable — otherwise the server refuses to start once
+  clustering.enabled unlocks in Phase 4. Also size it against
+  config.drainTimeoutSeconds above (the separate Q6 SM-session drain
+  budget, which races the same shutdown token but is NOT itself bounded
+  by claimReleaseBudgetSeconds's heartbeat-renewal window): a node whose
+  Q6 drain legitimately outlasts WADDLE_CLUSTERING_NODE_LEASE_TTL_MS can
+  still go heartbeat-stale mid-drain even with this fix landed.
+*/ -}}
+{{- $claimReleaseBudget := int .Values.clustering.claimReleaseBudgetSeconds -}}
 {{- $terminationGrace := int .Values.terminationGracePeriodSeconds -}}
-{{- $shutdownFloor := add $preStopSleep $drainTimeout $killMargin -}}
+{{- $shutdownFloor := add $preStopSleep $drainTimeout $claimReleaseBudget $killMargin -}}
 {{- if lt $terminationGrace $shutdownFloor -}}
-{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $killMargin $shutdownFloor) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + clustering.claimReleaseBudgetSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $claimReleaseBudget $killMargin $shutdownFloor) -}}
 {{- end -}}
 
 {{- /*

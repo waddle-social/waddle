@@ -180,6 +180,29 @@ pub trait LocallyClaimedEntities: Send + Sync {
     async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
         let _ = entities;
     }
+
+    /// ADR-0017 Phase 3 Slice 10: complete `entity`'s final fenced write —
+    /// whatever "durable, up to date, and safe to hand to a new owner"
+    /// means for this entity kind — and report whether it is now safe to
+    /// queue for release. Called ONLY from the graceful-drain sequence
+    /// (`clustering::drain::run_shutdown_drain`), and strictly BEFORE that
+    /// caller ever queues `entity` into a batched
+    /// [`ClaimStore::release_many`](waddle_xmpp::ownership::ClaimStore::release_many)
+    /// call — never after (releasing first and completing a write second
+    /// is the exact fencing violation element 4 forbids). Returns `false`
+    /// on any failure/timeout: the caller leaves the claim held (counted
+    /// `claims_abandoned_on_drain`, fenced-safe, reclaimed later by the
+    /// orphan reaper) rather than force-releasing an entity whose final
+    /// state it could not confirm.
+    ///
+    /// Default `true`: correct for [`NoLocallyClaimedEntities`] (nothing
+    /// owned, never called) and for any entity kind whose durable state is
+    /// already fenced-written synchronously on every mutation, so there is
+    /// nothing new to flush at drain time.
+    async fn seal_before_release(&self, entity: &Entity) -> bool {
+        let _ = entity;
+        true
+    }
 }
 
 /// No claimed entities — see the trait doc for why this is the only
@@ -334,6 +357,12 @@ pub struct NodeLeaseRunConfig {
     /// always binds the identity currently in force, never a stale
     /// pre-fence snapshot.
     pub live_identity: waddle_xmpp::ownership::SharedNodeIdentity,
+    /// ADR-0017 Phase 3 Slice 10: the graceful per-entity claim-release
+    /// drain's time budget (`ClusteringNodeLeaseConfig::claim_release_budget`,
+    /// `claimReleaseBudget` in the ADR's own text) — bound on
+    /// [`crate::clustering::drain::run_shutdown_drain`], called from every
+    /// ordinary-shutdown branch in [`run_node_lease`]'s `'tick` loop below.
+    pub claim_release_budget: Duration,
 }
 
 /// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
@@ -348,7 +377,7 @@ pub struct NodeLeaseRunConfig {
 /// a timed-out or failed attempt here is logged and ignored, never retried
 /// or escalated: it only narrows how quickly other nodes stop counting this
 /// row as live, never a correctness requirement.
-async fn mark_draining_bounded<L>(lease: &L, identity: &NodeIdentity, budget: Duration)
+pub(super) async fn mark_draining_bounded<L>(lease: &L, identity: &NodeIdentity, budget: Duration)
 where
     L: NodeLeaseStore + Send + Sync,
 {
@@ -480,6 +509,116 @@ async fn reclaim_own_expired_claims<L>(
     }
 }
 
+/// ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated): run
+/// [`crate::clustering::drain::run_shutdown_drain`] while CONTINUING to
+/// renew this node's node-lease heartbeat for the drain's full duration —
+/// never as a terminal action taken only AFTER the last heartbeat.
+///
+/// **The bug this closes**: every `stop_token.cancelled()` arm in
+/// [`run_node_lease`]'s `'tick` loop previously did
+/// `crate::clustering::drain::run_shutdown_drain(..).await; return;`
+/// directly — the instant shutdown fired, heartbeat renewal stopped dead,
+/// and the whole per-entity drain (sealing/releasing owned `RoomActor`
+/// claims, bounded by `claim_release_budget`) ran with this node's
+/// `clustering_nodes` row frozen at whatever heartbeat it last landed.
+/// Element 4's drain sequence requires a draining node to "stay live in
+/// `nodes`" (heartbeat fresh, draining flag set) for as long as it is
+/// still actually draining — a node that is still legitimately sealing and
+/// writing owned claims must not simultaneously look heartbeat-stale to
+/// another node's orphan reaper (120s sweep), or that reaper's
+/// `expire()`/`steal_stale(OwnerStale)` can steal a claim this node has not
+/// actually released yet: two nodes writing the same entity, the exact
+/// split-brain fencing exists to exclude. This gap widens with
+/// `claim_release_budget` (an operator-raised budget, or a drain that
+/// legitimately runs long sealing many entities) the closer it gets to
+/// `node_lease_ttl` — see `config.rs`'s validation requiring
+/// `node_lease_ttl` to comfortably exceed `claim_release_budget` for the
+/// defense-in-depth half of this fix.
+///
+/// **The fix**: poll the drain future and a heartbeat-renewal ticker
+/// concurrently, in THIS SAME task/stack frame — no `tokio::spawn`, so no
+/// `Clone`/`'static` bound is needed on `lease` (both futures simply
+/// borrow it for the duration of this call, ordinary structured
+/// concurrency). [`run_node_lease`] does not return from this call until
+/// the drain future itself resolves; the heartbeat ticker keeps this node
+/// looking live to the rest of the cluster for exactly as long as that
+/// takes. Heartbeat renewal here is deliberately best-effort only — a
+/// failed/errored renewal during drain is logged and ignored, never
+/// escalated to a second fence: this node already knows it is shutting
+/// down, and the sole purpose of these renewals is to keep the row
+/// visible as live for as long as this node is still legitimately
+/// finishing its own writes, not to re-run the ordinary fencing-loss
+/// handling mid-drain.
+pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
+    lease: &L,
+    claim_store: &Arc<dyn ClaimStore>,
+    identity: &NodeIdentity,
+    local_claims: &Arc<dyn LocallyClaimedEntities>,
+    claim_release_budget: Duration,
+    lease_ttl: Duration,
+) where
+    L: NodeLeaseStore + Send + Sync,
+{
+    let drain = std::pin::pin!(crate::clustering::drain::run_shutdown_drain(
+        lease,
+        claim_store,
+        identity,
+        local_claims,
+        claim_release_budget,
+    ));
+    let mut drain = drain;
+
+    // Renew comfortably inside `lease_ttl` — halved, floored at a tiny 10ms
+    // (only to guard `tokio::time::interval`'s own "period must be > 0"
+    // panic against a pathological near-zero `lease_ttl`; config
+    // validation already requires `lease_ttl >= heartbeat_interval * 2 >
+    // 0`, so this floor is never the binding constraint in practice).
+    // Deliberately NOT floored at anything close to `lease_ttl` itself —
+    // a fixed floor (e.g. 1s) would make renewal SLOWER than a small
+    // configured `lease_ttl`, inverting this function's entire purpose:
+    // the row would still go stale mid-drain, just via a different
+    // mechanism. This node's heartbeat is already fresh going into this
+    // call (the ordinary tick loop's own last successful renewal is what
+    // got it here), so the ticker's first tick is deliberately consumed
+    // unused below rather than firing an immediate, redundant renewal on
+    // the common, fast-draining path.
+    let renewal_period = (lease_ttl / 2).max(Duration::from_millis(10));
+    let mut ticker = tokio::time::interval(renewal_period);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut drain => {
+                return;
+            }
+            _ = ticker.tick() => {
+                match lease.heartbeat(identity, lease_ttl).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            node_id = %identity.node_id,
+                            "clustering: heartbeat renewal during graceful drain reported \
+                             fencing loss (0 rows affected); continuing the drain regardless \
+                             — this node is already shutting down"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            node_id = %identity.node_id,
+                            "clustering: heartbeat renewal during graceful drain failed; the \
+                             row may go stale before the drain completes (best-effort only — \
+                             this node is already shutting down)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Drive node-lease renewal, demotion reconciliation, isolation-aware
 /// self-fencing, and post-fence re-registration until `stop_token` fires.
 ///
@@ -553,6 +692,7 @@ pub async fn run_node_lease<L>(
         readiness,
         live_identity,
         claim_store,
+        claim_release_budget,
     } = run_config;
     // Seed the shared handle with the identity this loop starts under —
     // see `live_identity`'s doc comment and the `identity = fresh;`
@@ -586,7 +726,7 @@ pub async fn run_node_lease<L>(
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -602,7 +742,7 @@ pub async fn run_node_lease<L>(
             let renewed = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -645,7 +785,7 @@ pub async fn run_node_lease<L>(
             let other_live_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -676,7 +816,7 @@ pub async fn run_node_lease<L>(
             let reconcile_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -711,7 +851,7 @@ pub async fn run_node_lease<L>(
             let intents_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -734,7 +874,7 @@ pub async fn run_node_lease<L>(
                         let healthy = tokio::select! {
                             biased;
                             _ = stop_token.cancelled() => {
-                                mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                                 return;
                             }
                             _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -748,7 +888,7 @@ pub async fn run_node_lease<L>(
                             let cleared = tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
-                                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                                     return;
                                 }
                                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -782,7 +922,7 @@ pub async fn run_node_lease<L>(
                                     tokio::select! {
                                         biased;
                                         _ = stop_token.cancelled() => {
-                                            mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                            run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                                             return;
                                         }
                                         _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -816,7 +956,7 @@ pub async fn run_node_lease<L>(
                             tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
-                                    mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+                                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
                                     return;
                                 }
                                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
@@ -988,6 +1128,12 @@ pub async fn run_node_lease<L>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0017 Phase 3 Slice 10: a generous fixed budget for
+    /// `ClusteringNodeLeaseConfig::claim_release_budget` in tests that don't
+    /// otherwise care about drain timing — kept well above every test's own
+    /// timer/backoff constants so it never itself becomes the bottleneck.
+    const TEST_CLAIM_RELEASE_BUDGET: Duration = Duration::from_secs(5);
 
     #[test]
     fn lone_survivor_never_isolation_fences() {
@@ -1232,6 +1378,13 @@ mod tests {
             // orphaned candidates.
             Ok(Vec::new())
         }
+        async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
+            // Not exercised by this module's tests (the rollout-aware
+            // backoff heuristic is tested directly against
+            // `PostgresClaimStore` in `claims.rs`, and as a pure function in
+            // `clustering::drain`'s own tests).
+            Ok(None)
+        }
     }
 
     fn identity() -> NodeIdentity {
@@ -1278,6 +1431,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 3,
@@ -1289,6 +1443,7 @@ mod tests {
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1322,6 +1477,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 3,
@@ -1333,6 +1489,7 @@ mod tests {
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1370,6 +1527,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 3,
@@ -1381,6 +1539,7 @@ mod tests {
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1430,6 +1589,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 3,
@@ -1441,6 +1601,7 @@ mod tests {
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1590,6 +1751,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     // Isolation fencing is not what this test drives —
@@ -1603,6 +1765,7 @@ mod tests {
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1809,6 +1972,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 1_000,
@@ -1820,6 +1984,7 @@ mod tests {
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1872,6 +2037,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 1_000,
@@ -1883,6 +2049,7 @@ mod tests {
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -1936,6 +2103,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     isolation_intervals: 1_000,
@@ -1947,6 +2115,7 @@ mod tests {
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 
@@ -2049,6 +2218,7 @@ mod tests {
                 lease_config: ClusteringNodeLeaseConfig {
                     heartbeat_interval: interval,
                     lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
                 },
                 self_fence_config: ClusteringSelfFenceConfig {
                     // Isolation fencing is not what this test drives — the
@@ -2064,6 +2234,7 @@ mod tests {
                     initial_identity.clone(),
                 ),
                 claim_store: task_claim_store,
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
         ));
 

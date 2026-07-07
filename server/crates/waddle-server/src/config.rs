@@ -284,6 +284,38 @@ impl Default for ClusteringLeaseConfig {
 pub struct ClusteringNodeLeaseConfig {
     pub heartbeat_interval: Duration,
     pub lease_ttl: Duration,
+    /// ADR-0017 Phase 3 Slice 10: the graceful-drain time budget for this
+    /// node's per-entity claim release sequence
+    /// (`clustering::drain::run_shutdown_drain`) — named `claimReleaseBudget`
+    /// in the ADR's own Implementation Plan text ("already named as a
+    /// chart value consumed from Phase 3 on"). An entity whose final fenced
+    /// write has not committed within this budget is left claimed
+    /// (abandoned, not released) rather than blocking shutdown indefinitely
+    /// — fenced-safe, since an un-released claim is simply reclaimed later
+    /// by another node's orphan reaper. Composes with (does not replace)
+    /// the existing `WADDLE_DRAIN_TIMEOUT_SECS` SM-session Q6 drain budget
+    /// (`session_janitors::max_drain_duration_from_env`): the two run on
+    /// independent tasks racing the same shutdown token, each bounding a
+    /// disjoint entity-type slice of the overall drain. Surfaced through
+    /// Helm's `terminationGracePeriodSeconds` formula alongside
+    /// `preStopSleepSeconds`/`config.drainTimeoutSeconds`, per the ADR text.
+    ///
+    /// **FIX 2 (council-adjudicated)**: `clustering::self_fence::
+    /// run_shutdown_drain_with_heartbeat` keeps renewing this node's own
+    /// `lease_ttl` heartbeat for this entire budget window rather than
+    /// freezing it the instant shutdown fires — element 4's "stay live in
+    /// `nodes` until finished draining" requirement. `from_vars`'s parse
+    /// -time validation requires `lease_ttl` to comfortably exceed this
+    /// value (a conservative 3x floor, mirroring `lease_ttl`'s own 2x
+    /// floor against `heartbeat_interval`) so a slow/overrunning drain
+    /// cannot outrun the margin that renewal buys. Operators should ALSO
+    /// size `lease_ttl` with `WADDLE_DRAIN_TIMEOUT_SECS` (the separate,
+    /// potentially much longer Q6 SM-session drain budget racing the same
+    /// shutdown token) in mind — that value lives outside this typed
+    /// config entirely, so it cannot be cross-validated here; see the
+    /// Helm `terminationGracePeriodSeconds` formula, which already
+    /// composes both budgets.
+    pub claim_release_budget: Duration,
 }
 
 impl Default for ClusteringNodeLeaseConfig {
@@ -291,6 +323,7 @@ impl Default for ClusteringNodeLeaseConfig {
         Self {
             heartbeat_interval: Duration::from_secs(10),
             lease_ttl: Duration::from_secs(30),
+            claim_release_budget: Duration::from_secs(5),
         }
     }
 }
@@ -767,6 +800,72 @@ impl ClusteringConfig {
                 node_lease_heartbeat_interval.as_millis()
             ));
         }
+        // ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain
+        // budget. Same typed-`config.rs`-pipeline pattern every other
+        // clustering timing value uses (never `WADDLE_DRAIN_TIMEOUT_SECS`'s
+        // raw-`std::env::var` shortcut, which is not clustering-specific).
+        let claim_release_budget = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS",
+            millis_u64(node_lease_defaults.claim_release_budget),
+        )?);
+        if claim_release_budget.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS must be greater than 0".to_string(),
+            );
+        }
+        // ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated,
+        // defense-in-depth): `run_shutdown_drain_with_heartbeat`
+        // (`self_fence.rs`) keeps renewing this node's own heartbeat for
+        // the full duration of ITS OWN drain (bounded by
+        // `claim_release_budget`), but `node_lease_ttl` is also the floor
+        // every OTHER node's orphan reaper honors before treating this
+        // node's `clustering_nodes` row as stale enough to steal from
+        // (`NodeLeaseStore::expire`'s own `heartbeat < now() - lease_ttl`
+        // check) — a `claim_release_budget` too close to `node_lease_ttl`
+        // leaves no margin: a single missed/slow renewal mid-drain (a
+        // transient Postgres hiccup, GC pause, etc.) could then let the
+        // row go stale WHILE this node still legitimately holds and is
+        // sealing claims, reopening the exact split-brain window the
+        // runtime restructure closes. `CLAIM_RELEASE_BUDGET_SAFETY_FACTOR`
+        // mirrors this function's other "conservative multiple of the
+        // faster timer" floors (`node_lease_ttl >= heartbeat_interval *
+        // 2`, `intent_ttl >= heartbeat_interval * 2`) one level up.
+        //
+        // This is deliberately the ONLY programmatic cross-check: the
+        // pre-existing, separate Q6 SM-session drain budget
+        // (`WADDLE_DRAIN_TIMEOUT_SECS`, default 30s, operator-clampable to
+        // 600s — `session_janitors::max_drain_duration_from_env`) is a raw
+        // `std::env::var` read outside this typed `ClusteringConfig`
+        // struct entirely (deviation 99's own "never
+        // WADDLE_DRAIN_TIMEOUT_SECS's raw-env-var shortcut" note), so it
+        // cannot be structurally cross-validated here. Operators sizing
+        // `node_lease_ttl` should ALSO account for that budget — this
+        // node's clustering-lease heartbeat only keeps renewing through
+        // its OWN `claim_release_budget` window, not through the
+        // independent, potentially much longer Q6 SM-drain window racing
+        // the same shutdown token — documented on
+        // [`ClusteringNodeLeaseConfig::claim_release_budget`] and in the
+        // Helm `terminationGracePeriodSeconds` formula, which already
+        // composes both budgets.
+        const CLAIM_RELEASE_BUDGET_SAFETY_FACTOR: u32 = 3;
+        if node_lease_ttl < claim_release_budget * CLAIM_RELEASE_BUDGET_SAFETY_FACTOR {
+            return Err(format!(
+                "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}) must be at least {}x \
+                 WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS ({}): a draining node's heartbeat \
+                 renewal only runs for the duration of its own claim-release drain, and \
+                 node_lease_ttl is the floor other nodes' orphan reaper honors before treating \
+                 this node's row as stale — it must leave comfortable margin over \
+                 claim_release_budget (and, operationally, over the separate \
+                 WADDLE_DRAIN_TIMEOUT_SECS SM-session Q6 drain budget this node's SM-session \
+                 drain task races under the same shutdown token, default 30s / clampable to \
+                 600s — not itself part of this typed config, so size node_lease_ttl with that \
+                 in mind too)",
+                node_lease_ttl.as_millis(),
+                CLAIM_RELEASE_BUDGET_SAFETY_FACTOR,
+                claim_release_budget.as_millis()
+            ));
+        }
 
         let self_fence_defaults = ClusteringSelfFenceConfig::default();
         let isolation_intervals = parse_u64_var(
@@ -877,6 +976,7 @@ impl ClusteringConfig {
             node_lease: ClusteringNodeLeaseConfig {
                 heartbeat_interval: node_lease_heartbeat_interval,
                 lease_ttl: node_lease_ttl,
+                claim_release_budget,
             },
             self_fence: ClusteringSelfFenceConfig {
                 isolation_intervals,
@@ -1741,6 +1841,72 @@ mod tests {
         .unwrap();
         assert_eq!(config.node_lease.heartbeat_interval.as_millis(), 5000);
         assert_eq!(config.node_lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_defaults_claim_release_budget_to_five_seconds() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.node_lease.claim_release_budget.as_secs(), 5);
+    }
+
+    #[test]
+    fn clustering_parses_claim_release_budget() {
+        let config =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "7500")])
+                .unwrap();
+        assert_eq!(config.node_lease.claim_release_budget.as_millis(), 7500);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_claim_release_budget() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS"));
+    }
+
+    // --- ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated):
+    // node_lease_ttl must comfortably exceed claim_release_budget, so a
+    // draining node's heartbeat-during-drain renewal has real margin. ---
+
+    #[test]
+    fn clustering_rejects_node_lease_ttl_too_close_to_claim_release_budget() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "10000"),
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "5000"),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS")
+                && err.contains("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS"),
+            "expected the node_lease_ttl-vs-claim_release_budget error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn clustering_accepts_node_lease_ttl_with_comfortable_claim_release_budget_margin() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "15000"),
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "5000"),
+            // Below the default 20s resume-handshake timeout's own
+            // "<= node_lease_ttl" requirement — unrelated to this test's
+            // own assertion, just needed to keep the 15s node_lease_ttl
+            // above valid.
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "10000"),
+        ])
+        .expect("exactly 3x the claim_release_budget must be accepted (the floor is inclusive)");
+        assert_eq!(config.node_lease.lease_ttl.as_millis(), 15000);
+        assert_eq!(config.node_lease.claim_release_budget.as_millis(), 5000);
+    }
+
+    #[test]
+    fn clustering_defaults_satisfy_the_claim_release_budget_margin() {
+        // The shipped defaults (30s lease_ttl, 5s claim_release_budget)
+        // must themselves satisfy the new floor — this is a regression
+        // guard against the defaults and the validation drifting apart.
+        ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>())
+            .expect("default clustering config must satisfy its own validation");
     }
 
     #[test]

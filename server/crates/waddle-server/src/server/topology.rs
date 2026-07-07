@@ -444,6 +444,7 @@ mod tests {
                     "this-epoch",
                 )),
                 durable_store: None,
+                rollout_backoff: None,
             })
             .await
             .expect("wire clustering claims");
