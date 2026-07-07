@@ -49,6 +49,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
     let outcome = project_groupchat_inbox(GroupchatInboxProjectionInputs {
         inbox_storage,
         connection_registry: deps.connection_registry,
+        user_registry: deps.user_registry,
         owner: &owner,
         room: &room,
         message: &message,

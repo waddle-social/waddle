@@ -355,6 +355,7 @@ pub async fn register(
     registry: &waddle_xmpp::commands::CommandRegistry,
     app_state: Arc<AppState>,
     connection_registry: Arc<ConnectionRegistry>,
+    user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) {
@@ -456,13 +457,17 @@ pub async fn register(
     {
         let state = Arc::clone(&app_state);
         let connections = Arc::clone(&connection_registry);
+        let user_registry = user_registry.clone();
         let sm_sessions = Arc::clone(&sm_session_registry);
         registry
             .register(NODE_GROUP_DM_LEAVE, "Leave group DM", move |ctx| {
                 let state = Arc::clone(&state);
                 let connections = Arc::clone(&connections);
+                let user_registry = user_registry.clone();
                 let sm_sessions = Arc::clone(&sm_sessions);
-                async move { handle_group_dm_leave(ctx, state, connections, sm_sessions).await }
+                async move {
+                    handle_group_dm_leave(ctx, state, connections, user_registry, sm_sessions).await
+                }
             })
             .await;
     }
@@ -563,6 +568,7 @@ async fn handle_group_dm_leave(
     ctx: CommandContext,
     state: Arc<AppState>,
     connections: Arc<ConnectionRegistry>,
+    user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: Arc<InMemorySmSessionRegistry>,
 ) -> CommandResult {
     let caller_bare = ctx.from.to_bare();
@@ -581,7 +587,16 @@ async fn handle_group_dm_leave(
         Ok(args) => args,
         Err(e) => return CommandResult::Error(XmppError::bad_request(Some(e))),
     };
-    match run_group_dm_leave(&state, &connections, &sm_sessions, &caller_full, &args).await {
+    match run_group_dm_leave(
+        &state,
+        &connections,
+        &user_registry,
+        &sm_sessions,
+        &caller_full,
+        &args,
+    )
+    .await
+    {
         Ok(result) => CommandResult::Completed {
             form: Some(build_group_dm_leave_form(&result)),
             notes: vec![],
@@ -2037,6 +2052,7 @@ async fn run_group_dm_create(
 async fn run_group_dm_leave(
     state: &AppState,
     connections: &ConnectionRegistry,
+    user_registry: &ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: &InMemorySmSessionRegistry,
     caller_full_jid: &FullJid,
     args: &GroupDmLeaveArgs,
@@ -2088,7 +2104,8 @@ async fn run_group_dm_leave(
         });
     }
 
-    let live_resources = connections.get_resources_for_user(&caller_bare);
+    let live_resources =
+        waddle_xmpp::registry::get_resources_for_user(user_registry, &caller_bare).await;
     let live_resource_set = live_resources.iter().cloned().collect::<BTreeSet<_>>();
     let mut resources = live_resources;
     match sm_sessions.detached_resources_for_user(&caller_bare).await {
@@ -2205,13 +2222,16 @@ async fn run_group_dm_rename(
     let previous_config = snapshot.room.config.clone();
     let mut config = previous_config.clone();
     config.name = args.name.clone().unwrap_or_default();
-    let updated_snapshot = actor
+    let updated_snapshot = match actor
         .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
             config: config.clone(),
             sender_jid: caller_full_jid.clone(),
         })
         .await
-        .map_err(group_dm_rename_update_error)?;
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Err(group_dm_rename_update_error(state, &args.room_jid, error).await),
+    };
     let expected_revision = updated_snapshot.config_revision;
     if find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none() {
         return Err(internal_err(
@@ -2576,7 +2596,9 @@ fn group_dm_shared_name(name: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-fn group_dm_rename_update_error(
+async fn group_dm_rename_update_error(
+    state: &AppState,
+    room_jid: &BareJid,
     error: kameo::error::SendError<
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember,
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError,
@@ -2597,6 +2619,20 @@ fn group_dm_rename_update_error(
                     "Only joined group-DM occupants can rename the room".to_string(),
                 ))))
             }
+            // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
+            // fenced pre-mutation gate observed this node has been
+            // deposed — the rename was NEVER APPLIED. Hard-kill the
+            // stale local actor (mirrors the Demote relay ask's own
+            // receiving-side call) and bounce with a recoverable,
+            // retry-able error, same flavor `dispatch_to_room`'s own
+            // ownership-gap bounce uses.
+            UpdateGroupDmConfigByMemberError::NotOwner => {
+                state.clustering_claims.demote_room_actor(room_jid).await;
+                unavailable("This room's ownership recently moved to another node; please retry.")
+            }
+            UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
+                "group-DM rename applied but durable persist failed: {detail}"
+            )),
         },
         error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),
     }

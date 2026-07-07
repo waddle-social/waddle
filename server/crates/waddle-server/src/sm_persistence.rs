@@ -24,7 +24,14 @@ use xmpp_parsers::presence::Show;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 
 mod atomic_store;
-mod codec;
+/// `pub(crate)` (rather than private, the norm for this module's
+/// siblings) so ADR-0017 Phase 3 Slice 4's `PostgresFencedSmPersistence`
+/// (`crate::sm_persistence_fenced`, a sibling top-level module — not a
+/// submodule of this one, per the "not a decorator" file-layout rule) can
+/// reuse the same wire encode/decode logic against the byte-identical
+/// `sm_sessions`/`sm_unacked` schema, instead of forking a second copy
+/// that could silently drift from this one.
+pub(crate) mod codec;
 mod joined_sessions;
 mod schema;
 
@@ -468,6 +475,90 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     ) -> Result<(), SmPersistenceError> {
         atomic_store::store_session_atomic(self, session, unacked).await
     }
+}
+
+/// Choose between the portable [`DatabaseSmPersistence`] and the
+/// Postgres-fenced `PostgresFencedSmPersistence` (ADR-0017 Phase 3 Slice
+/// 4), gated on `clustering.enabled` — matching element 1's "cluster mode
+/// selects a Postgres-only fenced implementation... The fenced impl is
+/// chosen when `clustering.enabled`" verbatim.
+///
+/// All `clustering`-feature conditional compilation is contained in this
+/// one function (rather than scattered across the call site in
+/// `server/http.rs`) so ordinary construction code stays a single,
+/// unconditional call regardless of build configuration — "config-driven,
+/// no cfg-flag leak into the hot path."
+///
+/// `claim_pair` is `Some((claim_store, node_identity))` only when the
+/// clustering subsystem actually started and handed back live handles
+/// (`clustering::ClusteringHandles::claim_pair`); it is `None` whenever
+/// clustering is disabled, this binary lacks the `clustering` feature, or
+/// (defensively) the subsystem started without producing handles. Any of
+/// those cases — or `clustering_enabled` being false, or the database URL
+/// not being a `postgres://`/`postgresql://` URL — falls back to the
+/// portable implementation, exactly today's behavior.
+///
+/// `global_db` is the same [`Database`] handle `clustering::start_if_enabled`
+/// itself received (`db_pool.global()`) — FIX 4: the fenced impl is
+/// constructed by cloning *this* handle, never by opening a second,
+/// independently-resolved pool from `database_url`. Before that clone even
+/// happens, `database_url`'s resolved DSN is compared against
+/// `global_db.database_url()`; a mismatch while clustering is enabled fails
+/// startup outright with [`SmPersistenceError::ClusterColocationMismatch`]
+/// (both URLs redacted first — DSNs commonly carry credentials) rather than
+/// silently fencing `sm_sessions`/`sm_unacked` writes against a
+/// `clustering_claims` table that may not even exist in whatever database
+/// `database_url` actually points at.
+pub async fn open_for_cluster_mode(
+    database_url: Option<&str>,
+    clustering_enabled: bool,
+    claim_pair: Option<(
+        std::sync::Arc<dyn waddle_xmpp::ownership::ClaimStore>,
+        waddle_xmpp::ownership::SharedNodeIdentity,
+    )>,
+    global_db: &Database,
+) -> Result<Arc<dyn SmPersistenceStorage>, SmPersistenceError> {
+    #[cfg(feature = "clustering")]
+    {
+        let resolved_sm_url = database_url
+            .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"));
+        if let (true, Some(resolved_sm_url)) = (clustering_enabled, resolved_sm_url) {
+            // FIX 4 — co-location invariant, checked before anything else
+            // in this branch runs: clustered SM persistence and the
+            // clustering claims tables must live in the same Postgres
+            // database. Deliberately an EXACT string comparison, no DSN
+            // normalization: two cosmetically-different-but-equivalent
+            // URLs fail closed at startup with a clear error, which is
+            // cheaper than parsing DSN equivalence and never unsafe.
+            if resolved_sm_url != global_db.database_url() {
+                return Err(SmPersistenceError::ClusterColocationMismatch {
+                    sm_database_url: crate::db::redact_database_url(resolved_sm_url),
+                    global_database_url: crate::db::redact_database_url(global_db.database_url()),
+                });
+            }
+            if let Some((claim_store, node_identity)) = claim_pair {
+                let fenced = crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
+                    global_db.clone(),
+                    claim_store,
+                    node_identity,
+                )
+                .await?;
+                return Ok(Arc::new(fenced));
+            }
+            tracing::warn!(
+                "clustering.enabled with a Postgres SM database URL, but the clustering \
+                 subsystem produced no live ClaimStore/NodeIdentity handles; falling back to \
+                 the portable (unfenced) SmPersistenceStorage. This should only happen if \
+                 clustering startup itself failed before this point (which fails the server \
+                 boot), so seeing this warning indicates a wiring bug."
+            );
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (clustering_enabled, claim_pair, global_db);
+    }
+    Ok(Arc::new(DatabaseSmPersistence::open(database_url).await?))
 }
 
 #[cfg(test)]

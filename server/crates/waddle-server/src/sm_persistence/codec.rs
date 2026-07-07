@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, SmPersistenceError> {
+pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, SmPersistenceError> {
     let stream_id: String = row
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -83,7 +83,7 @@ pub(super) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     })
 }
 
-pub(super) fn decode_unacked(
+pub(crate) fn decode_unacked(
     row: &crate::db::Row,
 ) -> Result<PersistedUnackedStanza, SmPersistenceError> {
     let stream_id: String = row
@@ -148,7 +148,7 @@ pub(super) fn decode_unacked_join_row(
     })
 }
 
-pub(super) fn show_wire_str(show: &Show) -> &'static str {
+pub(crate) fn show_wire_str(show: &Show) -> &'static str {
     match show {
         Show::Away => "away",
         Show::Chat => "chat",
@@ -169,7 +169,7 @@ fn parse_show(raw: &str) -> Result<Show, SmPersistenceError> {
     }
 }
 
-pub(super) fn serialize_stanza(stanza: &Stanza) -> Result<String, SmPersistenceError> {
+pub(crate) fn serialize_stanza(stanza: &Stanza) -> Result<String, SmPersistenceError> {
     let element: xmpp_parsers::minidom::Element = match stanza {
         Stanza::Message(m) => m.clone().into(),
         Stanza::Iq(iq) => (*iq.clone()).into(),

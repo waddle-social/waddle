@@ -30,11 +30,11 @@ pub(super) async fn send_existing_subscription_ack(
         status,
         payloads,
     ));
-    let live_resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_resources_for_user(requester);
+    let live_resources = waddle_xmpp::registry::get_resources_for_user(
+        &state.deps.protocol.user_registry,
+        requester,
+    )
+    .await;
     for resource in &live_resources {
         let _ = state
             .deps

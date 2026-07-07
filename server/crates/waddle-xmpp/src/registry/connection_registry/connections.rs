@@ -140,7 +140,11 @@ impl ConnectionRegistry {
         })
     }
 
-    /// Check if a JID is currently connected.
+    /// Check if a JID is currently connected. ADR-0017 Phase 3 Slice 9
+    /// retired its former production caller (the Slice-1 DashMap-liveness
+    /// selection filter); it is retained as a connection-state introspection
+    /// utility used widely across the registry/websocket test suites to
+    /// assert connect/disconnect transitions.
     pub fn is_connected(&self, jid: &FullJid) -> bool {
         self.connections.contains_key(jid)
     }

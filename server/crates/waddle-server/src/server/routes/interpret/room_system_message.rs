@@ -17,7 +17,6 @@ use super::*;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
 pub(super) async fn broadcast_room_system_message_event(
-    registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     room: BareJid,
     mut message: Box<Message>,
@@ -98,17 +97,35 @@ pub(super) async fn broadcast_room_system_message_event(
     // Archive in MAM. We use `0` for `sender_nickname_generation` —
     // the field is a XEP-0308 LMC-correction window guard for
     // user-authored messages; system messages are never corrected.
+    //
+    // ADR-0017 Phase 3 Slice 7 FIX 1: this is a groupchat archive write
+    // like any other, so it is fenced the same way (`resolve_room_claim_fence`
+    // reads the identical typed context `dispatch_to_room`'s pre-fan-out
+    // check uses). On ownership loss, skip the fan-out below entirely —
+    // this function's fan-out loop is the ONLY fan-out for this message
+    // (there is no separate batch to suppress, unlike the interpreter's
+    // `ArchiveGroupchat` event arm), so an early return here is the exact
+    // "not archived, not fanned out" contract.
     if let Some(mam_storage) = deps.mam_storage {
-        match archive_groupchat_message(mam_storage, &room, &message, 0).await {
-            Some(result) => debug!(
+        let fence = resolve_room_claim_fence(deps, &room);
+        match archive_groupchat_message(mam_storage, &room, &message, 0, fence.as_ref()).await {
+            ArchiveGroupchatOutcome::Stored(result) => debug!(
                 room = %room,
                 stanza_id = %result.stored_id,
                 "BroadcastRoomSystemMessage: archived"
             ),
-            None => debug!(
+            ArchiveGroupchatOutcome::Skipped => debug!(
                 room = %room,
                 "BroadcastRoomSystemMessage: archive helper declined (chain bug?)"
             ),
+            ArchiveGroupchatOutcome::OwnershipLost => {
+                warn!(
+                    room = %room,
+                    "BroadcastRoomSystemMessage: fenced archive write observed ownership \
+                     loss; dropping system message entirely (not archived, not fanned out)"
+                );
+                return None;
+            }
         }
     }
 
@@ -122,7 +139,6 @@ pub(super) async fn broadcast_room_system_message_event(
         let mut copy = (*message).clone();
         copy.to = Some(Jid::from(occupant.full_jid.clone()));
         route_to_connection(
-            registry,
             deps,
             Jid::from(occupant.full_jid.clone()),
             Box::new(Stanza::Message(copy)),

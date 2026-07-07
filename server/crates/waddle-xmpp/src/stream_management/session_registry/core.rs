@@ -1,8 +1,14 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use tracing::debug;
+
+use crate::ownership::{
+    ClaimEpoch, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    SharedNodeIdentity,
+};
 
 use super::persistence_codec::{
     detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
@@ -10,6 +16,26 @@ use super::persistence_codec::{
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
 const STREAM_LOCK_SHARDS: usize = 256;
+
+/// Bound on any `ClaimStore` acquire/`ensure_claimed` call made while this
+/// registry holds one of its [`STREAM_LOCK_SHARDS`] stream-shard locks (FIX
+/// 5, council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda:
+/// `claim_session`, `claims.rs::acquire_claim_store_entry_for_detach`, and
+/// [`InMemorySmSessionRegistry::hydrate_reclaimed`] below).
+///
+/// **Shard-fan-in rationale**: `stream_lock` hashes a stream id down to one
+/// of a fixed, small number of shard mutexes — many unrelated stream ids
+/// share the same shard. A hung `ClaimStore` call while holding one shard's
+/// lock therefore does not just stall the one stream id it was issued for;
+/// it stalls every OTHER live stream id that happens to hash to the same
+/// shard too (store/take/claim/release, all of which take the same shard
+/// lock before touching `sessions`/`claimed_sessions`). This is a strictly
+/// wider blast radius than a genuinely per-entity lock would have, which is
+/// why every `ClaimStore` call issued under a shard lock is bounded here —
+/// mirrors `self_fence.rs::expire_bounded`'s bounded/best-effort/logged
+/// pattern one level down (a per-entity claim call instead of a per-node
+/// lease call).
+pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// In-memory implementation of the SM session registry, optionally
 /// backed by a [`SmPersistenceStorage`] so detached sessions survive
@@ -22,7 +48,8 @@ const STREAM_LOCK_SHARDS: usize = 256;
 /// finds sessions that detached before the most recent restart.
 ///
 /// Custom Debug skips the persistence handle (the
-/// [`SmPersistenceStorage`] trait does not require `Debug`).
+/// [`SmPersistenceStorage`] trait does not require `Debug`) and the
+/// claim store (`dyn ClaimStore` does not require `Debug` either).
 pub struct InMemorySmSessionRegistry {
     pub(super) sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
@@ -38,6 +65,52 @@ pub struct InMemorySmSessionRegistry {
     /// this via [`Self::with_persistence`] before Arc-wrapping.
     pub(super) persistence:
         Option<std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>>,
+    /// The entity-ownership authority for this registry's SM-session claims
+    /// (ADR-0017 Phase 3 Slice 1, Q2 "retrofit, not wrap"). Defaults to
+    /// [`InProcessClaimStore`] — correct for every build today, since no
+    /// caller yet constructs this registry with `clustering.enabled`; a
+    /// later slice injects a Postgres-backed store via
+    /// [`Self::with_claim_store`] once `SmPersistenceStorage` itself
+    /// becomes claim-scoped (Slice 4+).
+    ///
+    /// This is the **authority** on whether a claim is granted
+    /// (`claims.rs`'s `claim_session` gates its own outcome on
+    /// [`ClaimStore::acquire`]'s result) and on when a claim ends
+    /// (`release_claim`, every terminal branch of `complete_claim`/
+    /// `complete_claim_if_resumable`, and `invalidate_sessions_for_jid`'s
+    /// removal of a claimed session all call back into it). `stream_locks`/
+    /// `sessions`/`claimed_sessions` remain exactly the in-process
+    /// contention optimization and session-*state* holders the ADR names
+    /// for `StreamLockMap` (element 4) — never a second source of
+    /// ownership truth alongside this store, which is precisely the
+    /// *wrap* design Q2 rejected.
+    pub(super) claim_store: Arc<dyn ClaimStore>,
+    /// This node's identity, as presented to `claim_store`. Single-node
+    /// deployments use a [`SharedNodeIdentity`] wrapping
+    /// [`NodeIdentity::local`]; [`Self::with_claim_store`] (ADR-0017 Phase 3
+    /// Slice 5) instead wires in the SAME live, updatable handle
+    /// `self_fence::run_node_lease` refreshes on every re-registration
+    /// (mirroring `PostgresFencedSmPersistence`'s identical Slice 4
+    /// follow-up plumbing fix) — every call site reads `.current()` at the
+    /// moment it actually needs the identity rather than caching a
+    /// snapshot, so a self-fence/re-registration mid-process-lifetime is
+    /// observed immediately rather than silently binding claim CAS calls to
+    /// a stale, superseded `node_epoch` forever.
+    pub(super) node_identity: SharedNodeIdentity,
+    /// Tracks the epoch this registry last observed for each currently
+    /// claimed SM-session entity, so `release_claim`/`complete_claim` can
+    /// hand the right epoch back to `claim_store.release`. Purely local
+    /// bookkeeping — the `ClaimStore` implementation itself is the
+    /// authority on what epoch is actually current.
+    pub(super) claim_epochs: RwLock<HashMap<String, ClaimEpoch>>,
+    /// ADR-0017 Phase 3 Slice 6: the cross-node "ask the live owner to
+    /// detach" bridge for the XEP-0198 resume path's live-handshake branch.
+    /// `None` for single-node/non-clustering deployments (the cross-node
+    /// resume fallback then never has anything to ask — see
+    /// `cross_node_resume::attempt_cross_node_resume`'s doc comment).
+    /// Production wiring injects a `waddle-server`-side adapter over
+    /// `RelayHandle` via [`Self::with_remote_resume_asker`].
+    pub(super) remote_resume: Option<Arc<dyn super::cross_node_resume::RemoteResumeAsker>>,
 }
 
 impl Default for InMemorySmSessionRegistry {
@@ -60,6 +133,7 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
             )
             .field("stream_lock_shards", &self.stream_locks.len())
             .field("persistence_attached", &self.persistence.is_some())
+            .field("node_identity", &self.node_identity.current())
             .finish()
     }
 }
@@ -74,6 +148,10 @@ impl InMemorySmSessionRegistry {
             max_sessions: DEFAULT_MAX_SESSIONS,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            claim_epochs: RwLock::new(HashMap::new()),
+            remote_resume: None,
         }
     }
 
@@ -86,6 +164,10 @@ impl InMemorySmSessionRegistry {
             max_sessions,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            claim_epochs: RwLock::new(HashMap::new()),
+            remote_resume: None,
         }
     }
 
@@ -101,10 +183,120 @@ impl InMemorySmSessionRegistry {
         self
     }
 
+    /// Inject a `ClaimStore`/live-identity pair other than the single-node
+    /// [`InProcessClaimStore`] default (ADR-0017 Phase 3, Q2). Must be
+    /// called once at construction time before the registry is wrapped in
+    /// `Arc`. ADR-0017 Phase 3 Slice 5 wires this in production
+    /// (`server/http.rs::create_sm_session_registry`) with
+    /// `ClusteringHandles::claim_pair()`'s pair — the *same* `SharedNodeIdentity`
+    /// `self_fence::run_node_lease` updates on every re-registration, not a
+    /// one-time snapshot, so this registry's claim calls always bind
+    /// whatever identity is currently in force.
+    pub fn with_claim_store(
+        mut self,
+        claim_store: Arc<dyn ClaimStore>,
+        me: SharedNodeIdentity,
+    ) -> Self {
+        self.claim_store = claim_store;
+        self.node_identity = me;
+        self
+    }
+
+    /// Inject the cross-node "ask the live owner to detach" bridge
+    /// (ADR-0017 Phase 3 Slice 6). Must be called once at construction time
+    /// before the registry is wrapped in `Arc`, exactly like
+    /// [`Self::with_claim_store`]. Production wiring
+    /// (`server/http.rs::create_sm_session_registry`) sets this alongside
+    /// the claim store whenever clustering is enabled; single-node builds
+    /// leave it `None`, so `cross_node_resume::attempt_cross_node_resume`'s
+    /// live-handshake branch never has anything to ask (byte-identical
+    /// single-node behavior).
+    pub fn with_remote_resume_asker(
+        mut self,
+        asker: Arc<dyn super::cross_node_resume::RemoteResumeAsker>,
+    ) -> Self {
+        self.remote_resume = Some(asker);
+        self
+    }
+
     /// Rebuild the in-memory view from the attached durable store.
     /// Called on server startup before any traffic is accepted, so
     /// an XEP-0198 `<resume previd='…'/>` for a session that
     /// detached before restart still succeeds.
+    ///
+    /// **Startup-time operation only (FIX 2, council-adjudicated ADR-0017
+    /// Phase 3 Slice 5 corrigenda)**: this method's unfenced, unscoped
+    /// `list_all_sessions_with_unacked` table scan is safe only because
+    /// nothing else can plausibly be racing it for a stream id it has not
+    /// yet reached — this runs once, before any traffic is accepted. It
+    /// MUST NOT be re-run against a live, already-serving registry (the
+    /// orphan reaper previously re-ran it after every successful steal,
+    /// which re-scans every row this node already holds on every sweep and
+    /// — worse — can observe a row a live session concurrently
+    /// completes/re-claims mid-scan). [`Self::hydrate_reclaimed`] is the
+    /// live-safe alternative for exactly that case: given the specific
+    /// entities a caller just proved ownership of (via `steal_stale` or an
+    /// equivalent CAS), it hydrates only those, under each one's own
+    /// stream-shard lock, with a fresh in-memory absence re-check — never a
+    /// table scan, never a blind insert.
+    ///
+    /// **ADR-0017 Phase 3 Slice 5 — acquire-then-hydrate** (element 9,
+    /// quoted verbatim: *"hydrates only sessions whose claim this node
+    /// holds or can acquire at startup ... it never performs unscoped
+    /// full-table hydration"*): the read below (`list_all_sessions_with_unacked`)
+    /// is still a full, unfenced table scan — it has to be, there is no
+    /// other way to discover which stream ids exist — but every row is now
+    /// gated on a per-entity [`ClaimStore::ensure_claimed`] call before it
+    /// is allowed into `self.sessions`. A row this node successfully claims
+    /// (a fresh claim on a single-node/first-ever-restore deployment, or a
+    /// self-reacquire of this exact node's own pre-restart claim once
+    /// `ensure_claimed`'s self-match fires under the *same* `node_id` — see
+    /// that method's doc comment) is hydrated; a row genuinely claimed by
+    /// a different, still-live node is skipped — that node already has it
+    /// in memory (or will, on its own restore pass), and this node MUST NOT
+    /// also hydrate a copy (the exact double-ownership hazard this slice
+    /// closes). A row whose owner has died is left unclaimed here (a
+    /// concurrent restore/steal never matches this node's identity, so it
+    /// stays `AlreadyClaimed` against the dead owner until that owner's
+    /// `clustering_nodes` row is provably stale) — the **orphan reaper**
+    /// (`server::session_janitors::spawn_orphan_reaper_janitor`) is the
+    /// mechanism that reclaims those, not this startup pass, since a
+    /// dead-owner determination requires the owner-stale predicate this
+    /// unfenced per-row read does not evaluate.
+    ///
+    /// **Restart-time expired-row deletion (element 9/element 4)**: this
+    /// slice does *not* add an unscoped delete-on-restore step. Code
+    /// research for this slice found no existing unscoped delete to
+    /// claim-scope here — issue #1098 deliberately *hydrates* expired
+    /// sessions rather than deleting them at restore time, specifically so
+    /// their unacked queues still run the Q6 promote → confirm chain
+    /// instead of being silently discarded. Deleting a claimed session
+    /// eagerly here, before that chain runs, would re-introduce exactly
+    /// the data-loss bug #1098 fixed. Once a row is hydrated under this
+    /// node's claim, the (now itself claim-scoped, see
+    /// `server::session_janitors::spawn_sm_expiry_janitor`) SM-expiry
+    /// janitor's `drain_expired`/promote/`confirm_drained` chain is the
+    /// sole deletion path, and its writes already run under the row-locked
+    /// fenced epoch via `PostgresFencedSmPersistence`. Recorded as
+    /// deviation 28 (plan doc; corrected from an earlier "deviation 27"
+    /// citation — see the plan's Slice 5 "Design addition (major fix 6)"
+    /// paragraph, amended in place to point at 28) — the plan's
+    /// major-fix-6 premise of an existing unscoped restore-time delete
+    /// does not match this codebase's actual state.
+    ///
+    /// **Per-row stream-shard-lock discipline (FIX 2)**: each row's
+    /// eventual in-memory insert takes that row's own stream-shard lock —
+    /// the same lock every other registry mutator (`store_session`,
+    /// `take_session`, `claim_session`, …) takes before touching
+    /// `sessions`/`claimed_sessions` — and re-checks the stream id is
+    /// absent from BOTH maps immediately before inserting. This is cheap
+    /// safety for this method's startup-time role (see above): at true
+    /// cold start nothing else can have raced ahead, but the same
+    /// discipline the live-only [`Self::hydrate_reclaimed`] needs is applied
+    /// here too rather than special-cased away, so a row this node's own
+    /// Slice-4 lazy first-fenced-write path (or a live detach) already
+    /// raced into memory ahead of this scan reaching the same row is
+    /// skipped rather than overwritten with a stale durable read.
     ///
     /// Returns the number of sessions hydrated. No-op when no
     /// persistence is attached.
@@ -117,15 +309,56 @@ impl InMemorySmSessionRegistry {
         // N list_unacked) with a single SELECT … LEFT JOIN sm_unacked
         // on backends that override (libSQL/Postgres). In-memory
         // backends fall back to the trait-default N+1 path. Issue
-        // #209 PR #405.
+        // #209 PR #405. This read is unfenced/unscoped by necessity (see
+        // this method's doc comment) — the per-row `ensure_claimed` call
+        // below is what scopes which rows this node is actually allowed to
+        // hydrate.
         let stored = storage
             .list_all_sessions_with_unacked()
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        let mut hydrated_sessions = Vec::with_capacity(stored.len());
+        let mut hydrated = 0usize;
         let mut expired = 0usize;
         let mut bad_rows = 0usize;
+        let mut foreign_claims = 0usize;
+        let mut already_present = 0usize;
+        // Read once per call, not once per row: `restore_from_persistence`
+        // only ever runs at startup, well before this node could have
+        // self-fenced and re-registered under a fresh identity, but reading
+        // through `.current()` here (rather than caching a snapshot for the
+        // whole call) keeps this consistent with every other call site's
+        // discipline of never holding a stale identity across an `.await`.
         for (persisted, unacked) in stored {
+            let identity = self.node_identity.current();
+            let entity = Entity::new(
+                EntityType::SmSession,
+                persisted.stream_id.as_str().to_string(),
+            );
+            let epoch = match self.claim_store.ensure_claimed(&entity, &identity).await {
+                Ok(epoch) => epoch,
+                Err(crate::ownership::ClaimError::AlreadyClaimed) => {
+                    // Another (live) node already holds this entity's
+                    // claim — never hydrate a second in-memory copy. The
+                    // orphan reaper, not this pass, is what reclaims a row
+                    // whose owner has actually died.
+                    foreign_claims += 1;
+                    continue;
+                }
+                Err(error) => {
+                    // A transient backend failure: skip this row rather
+                    // than failing the whole restore pass. It is retried
+                    // on this node's next restart, or reclaimed by the
+                    // orphan reaper if its owner (this node, under a
+                    // now-superseded identity) is later found stale.
+                    debug!(
+                        stream_id = %persisted.stream_id,
+                        %error,
+                        "restore_from_persistence: ClaimStore ensure_claimed failed; \
+                         skipping this row for this pass"
+                    );
+                    continue;
+                }
+            };
             // Expired-during-downtime sessions (detached_at +
             // max_resume_duration <= now) are hydrated too (issue
             // #1098): deleting their rows here would silently discard
@@ -142,32 +375,244 @@ impl InMemorySmSessionRegistry {
             if expires_at <= now {
                 expired += 1;
             }
-            match persisted_to_detached(&persisted, &unacked) {
-                Ok(session) => hydrated_sessions.push(session),
+            let session = match persisted_to_detached(&persisted, &unacked) {
+                Ok(session) => session,
                 Err(error) => {
                     debug!(
                         stream_id = %persisted.stream_id,
                         error = %error,
                         "skipping persisted session: row decode failed (poison pill)"
                     );
+                    // Claimed above but never hydrated (a genuine
+                    // poison-pill row, not a claim conflict) — release the
+                    // now-unused claim rather than leak it, so a future
+                    // pass (or the orphan reaper, once this identity is
+                    // stale) can act on the row again.
+                    self.release_claim_store_entry_under(persisted.stream_id.as_str(), epoch)
+                        .await;
                     bad_rows += 1;
+                    continue;
                 }
+            };
+            // FIX 2: per-row stream-shard-lock discipline (see this
+            // method's doc comment) — take this row's own shard lock and
+            // re-check both maps immediately before inserting, rather than
+            // batching every hydrated row into one insert pass after the
+            // loop (the previous shape, which held no lock at all across
+            // the whole scan).
+            let stream_id = session.stream_id.clone();
+            let stream_lock = self.stream_lock(&stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+            let present = {
+                let sessions = self
+                    .sessions
+                    .read()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                let claimed = self
+                    .claimed_sessions
+                    .read()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+            };
+            if present {
+                already_present += 1;
+                continue;
             }
-        }
-        let hydrated = hydrated_sessions.len();
-        {
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            for session in hydrated_sessions {
-                sessions.insert(session.stream_id.clone(), session);
+            {
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                sessions.insert(stream_id.clone(), session);
             }
+            if let Ok(mut claim_epochs) = self.claim_epochs.write() {
+                claim_epochs.insert(stream_id, epoch);
+            }
+            hydrated += 1;
         }
         debug!(
             hydrated,
-            expired, bad_rows, "restored detached SM sessions from persistence"
+            expired,
+            bad_rows,
+            foreign_claims,
+            already_present,
+            "restored detached SM sessions from persistence"
         );
+        Ok(hydrated)
+    }
+
+    /// Targeted hydration for freshly-reclaimed SM-session claims (FIX 2,
+    /// council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda) — the
+    /// live-safe counterpart to [`Self::restore_from_persistence`] (a
+    /// startup-time-only, whole-table operation; see its doc comment).
+    /// Callers: the orphan reaper janitor, after a successful
+    /// `steal_stale(OwnerStale)` for one or more entities
+    /// (`server::session_janitors::run_orphan_reaper_sweep`), and the
+    /// inline post-fence reclaim in `self_fence::run_node_lease` (FIX 4),
+    /// after this node's own just-superseded identity's claims are stolen
+    /// back under the freshly re-registered identity. Neither caller may
+    /// re-run `restore_from_persistence` — the server is already serving
+    /// live traffic, and an unscoped table scan racing a live session that
+    /// completes/re-claims mid-scan is exactly the **live restore hazard**
+    /// this method exists to close.
+    ///
+    /// Per entity, under that entity's own stream-shard lock (never a
+    /// table scan, never a blind insert):
+    /// 1. Entities whose type is not `SmSession` are skipped (logged) —
+    ///    this registry only ever hydrates SM-session claims.
+    /// 2. Re-checks the stream id is absent from BOTH `sessions` and
+    ///    `claimed_sessions` — if either already holds it (a live session
+    ///    completed, another concurrent hydration already landed it, or
+    ///    this entity was reclaimed more than once across overlapping
+    ///    sweeps), skip: never overwrite a live in-memory copy with a
+    ///    stale durable read.
+    /// 3. Re-confirms this node still holds the claim via a bounded
+    ///    `ClaimStore::ensure_claimed` self-reacquire (FIX 5 — bounded
+    ///    because this call runs under the stream-shard lock; see
+    ///    [`CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`]'s doc comment for the
+    ///    shard-fan-in rationale) — a defensive re-check rather than
+    ///    trusting the caller-supplied epoch blindly, since the caller's
+    ///    `steal_stale` may have committed some time before this call
+    ///    actually reaches this entity's turn in a batch.
+    /// 4. Loads the durable row (`get_session` + `list_unacked`); a
+    ///    missing row (already promoted/deleted by a concurrent sweep) is
+    ///    a no-op, not an error.
+    /// 5. Inserts into `sessions`, recording the epoch `ensure_claimed`
+    ///    confirmed in step 3.
+    ///
+    /// Returns the number of entities actually hydrated — entities skipped
+    /// by steps 1-4 are not counted and do not produce an `Err`, mirroring
+    /// `restore_from_persistence`'s best-effort, skip-and-continue
+    /// semantics for individual rows.
+    pub async fn hydrate_reclaimed(
+        &self,
+        entities: &[(Entity, ClaimEpoch)],
+    ) -> Result<usize, SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(0);
+        };
+        let mut hydrated = 0usize;
+        for (entity, _caller_epoch) in entities {
+            if entity.entity_type != EntityType::SmSession {
+                debug!(
+                    entity = %entity,
+                    "hydrate_reclaimed: skipping a non-SmSession entity"
+                );
+                continue;
+            }
+            let stream_id = entity.id.clone();
+            let stream_lock = self.stream_lock(&stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+
+            let present = {
+                let sessions = self
+                    .sessions
+                    .read()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                let claimed = self
+                    .claimed_sessions
+                    .read()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+            };
+            if present {
+                debug!(
+                    stream_id = %stream_id,
+                    "hydrate_reclaimed: already present in-memory (live session, or already \
+                     hydrated by an overlapping sweep); skipping"
+                );
+                continue;
+            }
+
+            // FIX 5: bounded — see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s
+            // doc comment. On timeout or a lost self-reacquire, skip this
+            // entity for this pass rather than insert a session this node
+            // can no longer prove it owns; the entity remains eligible for
+            // a future sweep.
+            let identity = self.node_identity.current();
+            let epoch = match tokio::time::timeout(
+                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                self.claim_store.ensure_claimed(entity, &identity),
+            )
+            .await
+            {
+                Ok(Ok(epoch)) => epoch,
+                Ok(Err(error)) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        %error,
+                        "hydrate_reclaimed: ClaimStore ensure_claimed self-reacquire failed \
+                         (claim lost again since the caller's steal_stale); skipping"
+                    );
+                    continue;
+                }
+                Err(_timeout) => {
+                    tracing::warn!(
+                        stream_id = %stream_id,
+                        timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                        "hydrate_reclaimed: ClaimStore ensure_claimed timed out while holding \
+                         this stream's shard lock; skipping this entity for this pass"
+                    );
+                    continue;
+                }
+            };
+
+            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+            let persisted = match storage.get_session(&session_id).await {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        "hydrate_reclaimed: no durable row (already promoted/deleted by a \
+                         concurrent sweep); skipping"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        %error,
+                        "hydrate_reclaimed: get_session failed; skipping this entity for this pass"
+                    );
+                    continue;
+                }
+            };
+            let unacked = match storage.list_unacked(&session_id).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        %error,
+                        "hydrate_reclaimed: list_unacked failed; skipping this entity for this pass"
+                    );
+                    continue;
+                }
+            };
+            let session = match persisted_to_detached(&persisted, &unacked) {
+                Ok(session) => session,
+                Err(error) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        %error,
+                        "hydrate_reclaimed: row decode failed (poison pill); skipping"
+                    );
+                    self.release_claim_store_entry_under(&stream_id, epoch)
+                        .await;
+                    continue;
+                }
+            };
+            {
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                sessions.insert(stream_id.clone(), session);
+            }
+            if let Ok(mut claim_epochs) = self.claim_epochs.write() {
+                claim_epochs.insert(stream_id, epoch);
+            }
+            hydrated += 1;
+        }
         Ok(hydrated)
     }
 }

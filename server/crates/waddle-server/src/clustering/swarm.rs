@@ -12,6 +12,7 @@ use super::behaviour::{WaddleBehaviour, WaddleBehaviourEvent};
 use super::lease::{
     KeypairSlotLease, LeaseError, LeaseIdentity, LeasedSlot, PostgresKeypairSlotLease,
 };
+use super::self_fence::ConnectedPeerCount;
 use super::{dns, identity, metrics, relay, NodeId};
 use crate::config::{ClusteringBootstrapConfig, ClusteringConfig};
 use crate::db::Database;
@@ -81,6 +82,12 @@ pub enum SwarmError {
 pub struct SwarmHandle {
     pub local_peer_id: PeerId,
     pub node_id: NodeId,
+    /// Readable snapshot of the swarm's current connected-peer count (Phase
+    /// 2 Slice 1's gauge, reused here per ADR-0017 Phase 3 Slice 2's
+    /// isolation rule — see `self_fence::ConnectedPeerCount`'s doc comment
+    /// for why a coarse peer count, not per-node reachability, is what the
+    /// isolation check reads).
+    pub connected_peers: ConnectedPeerCount,
 }
 
 /// Build the swarm, install the global `ActorSwarm`, start listening, spawn
@@ -101,6 +108,7 @@ pub async fn spawn(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: CancellationToken,
+    relay_bridges: RelayBridges,
 ) -> Result<SwarmHandle, SwarmError> {
     // Parse and validate the listen multiaddrs first, before building any
     // transport or touching the process-global `ActorSwarm` — fail fast on bad
@@ -132,7 +140,17 @@ pub async fn spawn(
     // repeated crash-restarts (each with a fresh node_id) would otherwise
     // chew through the pool one slot per attempt and starve replacements
     // with NoFreeSlot.
-    match bring_up(config, db, node_id, keypair, listen_addrs, &stop_token).await {
+    match bring_up(
+        config,
+        db,
+        node_id,
+        keypair,
+        listen_addrs,
+        &stop_token,
+        relay_bridges,
+    )
+    .await
+    {
         Ok(handle) => {
             if let Some(pending) = pending_lease {
                 tokio::spawn(run_heartbeat(
@@ -156,6 +174,20 @@ pub async fn spawn(
     }
 }
 
+/// Per-node relay bridges bundled into one bring-up parameter (clippy
+/// `too_many_arguments`): the cross-node XEP-0198 resume live-steal
+/// handshake bridge (ADR-0017 Phase 3 Slice 6) and the MUC Demote ask's
+/// local-claims bridge (Slice 7). Both are constructed empty at
+/// `start_if_enabled` time — their respective registries don't exist yet
+/// at that point in startup — and wired later once those registries are
+/// built; see each field's own doc comment upstream
+/// (`ClusteringHandles::resume_bridge`/`room_local_claims`) for the full
+/// construction-order rationale.
+pub struct RelayBridges {
+    pub resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
+    pub room_local_claims: Arc<super::local_claims::RoomLocalClaims>,
+}
+
 /// The fallible remainder of swarm bring-up after the keypair-slot lease:
 /// allowlist load, transport/behaviour build, global `ActorSwarm` install,
 /// listeners, event loop, supervised relay, and the node-id file. Split out
@@ -167,7 +199,12 @@ async fn bring_up(
     keypair: Keypair,
     listen_addrs: Vec<Multiaddr>,
     stop_token: &CancellationToken,
+    relay_bridges: RelayBridges,
 ) -> Result<SwarmHandle, SwarmError> {
+    let RelayBridges {
+        resume_bridge,
+        room_local_claims,
+    } = relay_bridges;
     let local_peer_id = keypair.public().to_peer_id();
 
     // Peer authorization (ADR element 3): load the enrolled peer set before
@@ -242,6 +279,7 @@ async fn bring_up(
             })?;
     }
 
+    let connected_peers = ConnectedPeerCount::new();
     let bootstrap_peers = config.bootstrap_peers.clone();
     tokio::spawn(run_event_loop(
         swarm,
@@ -252,6 +290,7 @@ async fn bring_up(
             current: enrolled,
             interval: config.allowlist_refresh_interval,
         },
+        connected_peers.clone(),
         stop_token.clone(),
     ));
 
@@ -264,11 +303,18 @@ async fn bring_up(
              relay or stall its mailbox — test harnesses only, never production"
         );
     }
-    relay::spawn_supervised(node_id.clone(), config.fault_injection, stop_token.clone());
+    relay::spawn_supervised(
+        node_id.clone(),
+        config.fault_injection,
+        stop_token.clone(),
+        resume_bridge,
+        room_local_claims,
+    );
 
     let handle = SwarmHandle {
         local_peer_id,
         node_id,
+        connected_peers,
     };
 
     // Publish the node identity for the multi-process harness (mirrors the
@@ -528,6 +574,7 @@ async fn run_event_loop(
     bootstrap_peers: Vec<ClusteringBootstrapConfig>,
     dial_interval: Duration,
     mut allowlist: AllowlistRefresh,
+    connected_peers: ConnectedPeerCount,
     stop_token: CancellationToken,
 ) {
     // Peers we currently hold a connection to (authoritative from connection
@@ -675,6 +722,7 @@ async fn run_event_loop(
                     &mut routing_peers,
                     &mut conn_addrs,
                     &mut addr_owners,
+                    &connected_peers,
                 );
             }
         }
@@ -722,20 +770,31 @@ fn apply_allowlist(
     allowlist.current = enrolled;
 }
 
-/// Record a newly connected peer, updating the connected-peer gauge on the
-/// first connection to that peer.
-fn track_peer_connected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
+/// Record a newly connected peer, updating the connected-peer gauge (and the
+/// readable [`ConnectedPeerCount`] ADR-0017 Phase 3 Slice 2's isolation
+/// check reads) on the first connection to that peer.
+fn track_peer_connected(
+    peer_id: PeerId,
+    connected: &mut HashSet<PeerId>,
+    connected_peers: &ConnectedPeerCount,
+) {
     if connected.insert(peer_id) {
         metrics::record_connected_peers(connected.len() as i64);
+        connected_peers.set(connected.len() as i64);
         tracing::debug!(%peer_id, "clustering peer connected");
     }
 }
 
 /// Record a peer whose last connection closed, updating the connected-peer
-/// gauge if it was tracked.
-fn track_peer_disconnected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
+/// gauge (and [`ConnectedPeerCount`]) if it was tracked.
+fn track_peer_disconnected(
+    peer_id: PeerId,
+    connected: &mut HashSet<PeerId>,
+    connected_peers: &ConnectedPeerCount,
+) {
     if connected.remove(&peer_id) {
         metrics::record_connected_peers(connected.len() as i64);
+        connected_peers.set(connected.len() as i64);
         tracing::debug!(%peer_id, "clustering peer disconnected");
     }
 }
@@ -750,6 +809,7 @@ fn handle_swarm_event(
     routing_peers: &mut HashSet<PeerId>,
     conn_addrs: &mut HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
     addr_owners: &mut HashMap<Multiaddr, PeerId>,
+    connected_peers: &ConnectedPeerCount,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -786,7 +846,7 @@ fn handle_swarm_event(
                 );
                 swarm.close_connection(connection_id);
             } else {
-                track_peer_connected(peer_id, connected);
+                track_peer_connected(peer_id, connected, connected_peers);
             }
         }
         SwarmEvent::ConnectionClosed {
@@ -802,7 +862,7 @@ fn handle_swarm_event(
             // keeps the map bounded by *connected* peers under pod churn
             // instead of accumulating every address ever dialed.
             if num_established == 0 {
-                track_peer_disconnected(peer_id, connected);
+                track_peer_disconnected(peer_id, connected, connected_peers);
                 addr_owners.retain(|_, owner| *owner != peer_id);
             }
         }
@@ -899,9 +959,17 @@ mod tests {
         .expect("open test postgres");
         let stop = CancellationToken::new();
 
-        let handle = spawn(&config, &db, stop.clone())
-            .await
-            .expect("swarm brings up cleanly");
+        let handle = spawn(
+            &config,
+            &db,
+            stop.clone(),
+            RelayBridges {
+                resume_bridge: crate::clustering::resume_bridge::ResumeStealBridge::new(),
+                room_local_claims: crate::clustering::local_claims::RoomLocalClaims::new(),
+            },
+        )
+        .await
+        .expect("swarm brings up cleanly");
         assert!(!handle.local_peer_id.to_string().is_empty());
 
         // Relay round-trip through the remote registry + ask path (kameo
@@ -910,7 +978,7 @@ mod tests {
         // handler without a second process; the true cross-node round-trip is
         // a Slice 6 harness case). Registration is async — retry until the
         // relay is discoverable so a slow CI runner cannot flake the test.
-        let mut relay_handle = relay::RelayHandle::new(handle.node_id.clone());
+        let mut relay_handle = relay::RelayHandle::new(handle.node_id.clone(), stop.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let pong = loop {
             match relay_handle.ping().await {
@@ -964,9 +1032,17 @@ mod tests {
         // Listen-addr validation fails before any DB access, so a SQLite
         // scratch handle is fine here.
         let db = scratch_db().await;
-        let err = spawn(&config, &db, CancellationToken::new())
-            .await
-            .expect_err("invalid addr rejected");
+        let err = spawn(
+            &config,
+            &db,
+            CancellationToken::new(),
+            RelayBridges {
+                resume_bridge: crate::clustering::resume_bridge::ResumeStealBridge::new(),
+                room_local_claims: crate::clustering::local_claims::RoomLocalClaims::new(),
+            },
+        )
+        .await
+        .expect_err("invalid addr rejected");
         assert!(matches!(err, SwarmError::ListenAddrInvalid { .. }));
     }
 

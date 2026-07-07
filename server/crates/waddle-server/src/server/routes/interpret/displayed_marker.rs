@@ -56,6 +56,7 @@ pub(super) async fn mark_inbox_read_from_displayed(
 
     apply_mark_read(
         deps.connection_registry,
+        deps.user_registry,
         inbox_storage.as_ref(),
         &owner,
         &room,
@@ -65,6 +66,7 @@ pub(super) async fn mark_inbox_read_from_displayed(
     if let Some(ref thread_id) = thread_id {
         apply_mark_read(
             deps.connection_registry,
+            deps.user_registry,
             inbox_storage.as_ref(),
             &owner,
             &room,
@@ -115,6 +117,7 @@ async fn resolve_thread_id(
 /// key and push the post-update entry to the owner's other resources.
 async fn apply_mark_read(
     connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     inbox_storage: &dyn InboxStorage,
     owner: &BareJid,
     room: &BareJid,
@@ -122,7 +125,7 @@ async fn apply_mark_read(
 ) {
     match inbox_storage.mark_read(owner, room, thread_id).await {
         Ok(Some(entry)) => {
-            push_inbox_update(connection_registry, owner, &entry).await;
+            push_inbox_update(connection_registry, user_registry, owner, &entry).await;
         }
         Ok(None) => {
             debug!(

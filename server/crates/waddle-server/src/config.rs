@@ -168,6 +168,16 @@ pub struct ClusteringConfig {
     /// dials seed peers, picking up pod churn
     /// (`WADDLE_CLUSTERING_DIAL_INTERVAL_MS`).
     pub dial_interval: Duration,
+    /// Cadence for the orphan reaper's `sm_session` claim sweep (ADR-0017
+    /// Phase 3 Slice 5, element 9) — `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`.
+    /// The only cluster timer that, prior to ADR-0017 Phase 3 Slice 11's
+    /// corrigenda (deviation 111), had no env override at all (every
+    /// sibling timer above and below this field does); added so the
+    /// multi-process harness's kill-one hydration capstone
+    /// (`clustering_cluster_e2e.rs::orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`)
+    /// does not have to wait out the full production default in real
+    /// wall-clock time.
+    pub orphan_reaper_interval: Duration,
     /// Enable the relay's fault-injection message set (crash/sleep) for the
     /// multi-process cluster harness (`WADDLE_CLUSTERING_FAULT_INJECTION`).
     /// Never enable in production: it lets any enrolled peer stop this node's
@@ -177,6 +187,51 @@ pub struct ClusteringConfig {
     /// (`WADDLE_CLUSTERING_NODE_ID_FILE`) so the harness can resolve this
     /// node's relay name — mirrors the `WADDLE_HTTP_PORT_FILE` convention.
     pub node_id_file: Option<std::path::PathBuf>,
+    /// Node-lease (`clustering_nodes`) heartbeat/TTL timing (ADR-0017 Phase 3
+    /// Slice 2, Q6): a **second**, conceptually distinct lease from
+    /// `lease` above — that one guards a leased keypair-pool slot (libp2p
+    /// identity); this one guards this node's entity-ownership claims. Q6
+    /// rejected a `nodes`-table config row (bootstrap chicken-and-egg) in
+    /// favor of the same env-var mechanism Phase 2 already established.
+    pub node_lease: ClusteringNodeLeaseConfig,
+    /// Isolation-fencing + re-registration hysteresis timing (ADR-0017 Phase
+    /// 3 Slice 2, element 4's "N=2 lone-survivor carve-out" and
+    /// re-registration hysteresis text).
+    pub self_fence: ClusteringSelfFenceConfig,
+    /// Steal-intent unwedge/owner-veto timing (ADR-0017 Phase 3 Slice 3,
+    /// element 4's "Unwedge" text): how long an uncleared steal-intent row
+    /// must age before `StalePredicate::StealIntentExpired` treats the
+    /// entity as stealable — "a small multiple of the heartbeat interval"
+    /// per the ADR. Named `steal_intent` (not bundled into `node_lease` or
+    /// `self_fence`) because it is a third, conceptually distinct timing
+    /// value from either: it gates the steal-intent CAS, not node-lease
+    /// renewal or isolation fencing. No production call site issues
+    /// `StalePredicate::StealIntentExpired` this slice (Slice 3 lands the
+    /// mechanism; the cross-node reporter that would call it is Slice 5+
+    /// scope) — parsed and validated now so the mechanism and its config
+    /// surface land together, mirroring `node_lease`/`self_fence`'s own
+    /// Slice 2 precedent.
+    pub steal_intent: ClusteringStealIntentConfig,
+    /// ADR-0017 Phase 3 Slice 6: bound on the cross-node XEP-0198 resume
+    /// live-handshake's held-response retry window (element 8's
+    /// owner-unreachable branch — "hold the `<resume/>` response ... retry
+    /// the handshake with backoff, capped at `min(remaining lease TTL,
+    /// resume-handshake timeout)`"). See
+    /// [`ClusteringResumeHandshakeConfig`]'s own doc for the `min(...)`
+    /// simplification this config validates at parse time rather than
+    /// computing per-request.
+    pub resume_handshake: ClusteringResumeHandshakeConfig,
+    /// This pod's `pod-template-hash` label, read once at startup from the
+    /// Kubernetes downward API (`WADDLE_CLUSTERING_POD_TEMPLATE_HASH`) and
+    /// stamped onto this node's `clustering_nodes` row (Q5/element 4/Slice
+    /// 2): identifies which deployment generation this node belongs to, for
+    /// the rollout-aware claim-acquisition backoff rule (Slice 10). `None`
+    /// outside Kubernetes (e.g. the multi-process harness, or a Deployment
+    /// that omits the downward-API env var) — every acquire-backoff site
+    /// treats a missing hash as "no generation to compare," never a parse
+    /// failure. Parsed the same way as every other `ClusteringConfig` string
+    /// field: trimmed, empty ⇒ `None`.
+    pub pod_template_hash: Option<String>,
 }
 
 /// Manual `Debug`: `keypair_pool` holds base64-encoded ed25519 secret-key
@@ -201,8 +256,14 @@ impl std::fmt::Debug for ClusteringConfig {
                 &self.allowlist_refresh_interval,
             )
             .field("dial_interval", &self.dial_interval)
+            .field("orphan_reaper_interval", &self.orphan_reaper_interval)
             .field("fault_injection", &self.fault_injection)
             .field("node_id_file", &self.node_id_file)
+            .field("node_lease", &self.node_lease)
+            .field("self_fence", &self.self_fence)
+            .field("steal_intent", &self.steal_intent)
+            .field("resume_handshake", &self.resume_handshake)
+            .field("pod_template_hash", &self.pod_template_hash)
             .finish()
     }
 }
@@ -221,6 +282,141 @@ impl Default for ClusteringLeaseConfig {
         Self {
             heartbeat_interval: Duration::from_secs(10),
             lease_ttl: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Timing for the node-lease (`clustering_nodes`) heartbeat/expiry CAS
+/// (ADR-0017 element 4). Same shape and same `lease_ttl >=
+/// heartbeat_interval * 2` invariant as [`ClusteringLeaseConfig`], but a
+/// distinct value: this TTL bounds the node's entity-ownership claims, not
+/// its keypair-slot identity (Q6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringNodeLeaseConfig {
+    pub heartbeat_interval: Duration,
+    pub lease_ttl: Duration,
+    /// ADR-0017 Phase 3 Slice 10: the graceful-drain time budget for this
+    /// node's per-entity claim release sequence
+    /// (`clustering::drain::run_shutdown_drain`) — named `claimReleaseBudget`
+    /// in the ADR's own Implementation Plan text ("already named as a
+    /// chart value consumed from Phase 3 on"). An entity whose final fenced
+    /// write has not committed within this budget is left claimed
+    /// (abandoned, not released) rather than blocking shutdown indefinitely
+    /// — fenced-safe, since an un-released claim is simply reclaimed later
+    /// by another node's orphan reaper. Composes with (does not replace)
+    /// the existing `WADDLE_DRAIN_TIMEOUT_SECS` SM-session Q6 drain budget
+    /// (`session_janitors::max_drain_duration_from_env`): the two run on
+    /// independent tasks racing the same shutdown token, each bounding a
+    /// disjoint entity-type slice of the overall drain. Surfaced through
+    /// Helm's `terminationGracePeriodSeconds` formula alongside
+    /// `preStopSleepSeconds`/`config.drainTimeoutSeconds`, per the ADR text.
+    ///
+    /// **FIX 2 (council-adjudicated)**: `clustering::self_fence::
+    /// run_shutdown_drain_with_heartbeat` keeps renewing this node's own
+    /// `lease_ttl` heartbeat for this entire budget window rather than
+    /// freezing it the instant shutdown fires — element 4's "stay live in
+    /// `nodes` until finished draining" requirement. `from_vars`'s parse
+    /// -time validation requires `lease_ttl` to comfortably exceed this
+    /// value (a conservative 3x floor, mirroring `lease_ttl`'s own 2x
+    /// floor against `heartbeat_interval`) so a slow/overrunning drain
+    /// cannot outrun the margin that renewal buys. Operators should ALSO
+    /// size `lease_ttl` with `WADDLE_DRAIN_TIMEOUT_SECS` (the separate,
+    /// potentially much longer Q6 SM-session drain budget racing the same
+    /// shutdown token) in mind — that value lives outside this typed
+    /// config entirely, so it cannot be cross-validated here; see the
+    /// Helm `terminationGracePeriodSeconds` formula, which already
+    /// composes both budgets.
+    pub claim_release_budget: Duration,
+}
+
+impl Default for ClusteringNodeLeaseConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: Duration::from_secs(10),
+            lease_ttl: Duration::from_secs(30),
+            claim_release_budget: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Isolation-fencing + re-registration hysteresis timing (ADR-0017 element
+/// 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringSelfFenceConfig {
+    /// M: consecutive heartbeat intervals of total swarm unreachability
+    /// (with `clustering_nodes` showing >= 2 other live nodes — the N=2
+    /// lone-survivor carve-out never fences on isolation alone) required
+    /// before this node refuses to renew its node lease.
+    pub isolation_intervals: u32,
+    /// Initial delay before the first post-fence re-registration attempt;
+    /// doubles on each subsequent failed/gated attempt up to
+    /// `reregister_backoff_max`.
+    pub reregister_backoff_base: Duration,
+    /// Ceiling on the re-registration backoff delay.
+    pub reregister_backoff_max: Duration,
+}
+
+impl Default for ClusteringSelfFenceConfig {
+    fn default() -> Self {
+        Self {
+            isolation_intervals: 3,
+            reregister_backoff_base: Duration::from_secs(1),
+            reregister_backoff_max: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Steal-intent unwedge/owner-veto timing (ADR-0017 Phase 3 Slice 3,
+/// element 4). `intent_ttl` bounds a sick-but-heartbeating owner's hostage
+/// window: an uncleared steal-intent row must age past this before it makes
+/// the entity stealable via `StalePredicate::StealIntentExpired`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringStealIntentConfig {
+    pub intent_ttl: Duration,
+}
+
+impl Default for ClusteringStealIntentConfig {
+    fn default() -> Self {
+        Self {
+            // "A small multiple of the heartbeat interval" (ADR element 4)
+            // — six times the default node-lease heartbeat interval (10s),
+            // giving the owner's veto scan several chances to clear a
+            // reported intent before it ages out.
+            intent_ttl: Duration::from_secs(60),
+        }
+    }
+}
+
+/// ADR-0017 Phase 3 Slice 6: the cross-node XEP-0198 resume live-handshake's
+/// held-response retry budget (element 8's owner-unreachable branch).
+///
+/// The ADR text caps the held-response retry window at
+/// `min(remaining lease TTL, resume-handshake timeout)` — this deployment's
+/// configured `timeout` here, and the *remaining* time before the owning
+/// node's `clustering_nodes` lease naturally expires. This config
+/// deliberately does not compute that `min(...)` per request (which would
+/// need a live per-owner remaining-TTL read with no existing query to
+/// serve it): instead, parse-time validation requires `timeout <=
+/// node_lease.lease_ttl`, which makes the flat configured `timeout` an
+/// upper bound that is never longer than a **fresh** lease's remaining TTL
+/// — the only imprecision this simplification accepts is holding the
+/// response slightly longer than the *shrinking* remaining TTL of an
+/// owner whose lease is already partway expired, which is harmless: the
+/// janitor-vs-resume ordering invariant (this module's own doc comment)
+/// already guarantees a concurrent orphan-reaper steal is observed as a
+/// clean CAS loss, never a corrupted read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringResumeHandshakeConfig {
+    pub timeout: Duration,
+}
+
+impl Default for ClusteringResumeHandshakeConfig {
+    fn default() -> Self {
+        Self {
+            // Comfortably inside a default 30s node-lease TTL, leaving
+            // headroom for the reaper to win a genuinely dead owner's
+            // claim before this window would have expired anyway.
+            timeout: Duration::from_secs(20),
         }
     }
 }
@@ -286,8 +482,14 @@ impl Default for ClusteringConfig {
             lease: ClusteringLeaseConfig::default(),
             allowlist_refresh_interval: Duration::from_secs(30),
             dial_interval: Duration::from_secs(15),
+            orphan_reaper_interval: Duration::from_secs(120),
             fault_injection: false,
             node_id_file: None,
+            node_lease: ClusteringNodeLeaseConfig::default(),
+            self_fence: ClusteringSelfFenceConfig::default(),
+            steal_intent: ClusteringStealIntentConfig::default(),
+            resume_handshake: ClusteringResumeHandshakeConfig::default(),
+            pod_template_hash: None,
         }
     }
 }
@@ -568,12 +770,213 @@ impl ClusteringConfig {
         if dial_interval.is_zero() {
             return Err("WADDLE_CLUSTERING_DIAL_INTERVAL_MS must be greater than 0".to_string());
         }
+        // ADR-0017 Phase 3 Slice 11 corrigenda (deviation 111): the orphan
+        // reaper's own cadence, parsed and validated the same way every
+        // sibling cluster timer is — previously hardcoded with no override
+        // anywhere (`session_janitors::ORPHAN_REAPER_INTERVAL`).
+        let orphan_reaper_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS",
+            millis_u64(Self::default().orphan_reaper_interval),
+        )?);
+        if orphan_reaper_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS must be greater than 0".to_string(),
+            );
+        }
         let fault_injection = parse_bool_var(&vars, "WADDLE_CLUSTERING_FAULT_INJECTION", false)?;
         let node_id_file = vars
             .get("WADDLE_CLUSTERING_NODE_ID_FILE")
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from);
+        // FIX 6: moved from a raw `std::env::var` read at the `mod.rs`
+        // clustering-bringup call site into the typed config pipeline, like
+        // every sibling var — trimmed, empty ⇒ `None`, never a parse
+        // failure (this is deployment-generation metadata, not something
+        // that gates startup).
+        let pod_template_hash = vars
+            .get("WADDLE_CLUSTERING_POD_TEMPLATE_HASH")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let node_lease_defaults = ClusteringNodeLeaseConfig::default();
+        let node_lease_heartbeat_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+            millis_u64(node_lease_defaults.heartbeat_interval),
+        )?);
+        let node_lease_ttl = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS",
+            millis_u64(node_lease_defaults.lease_ttl),
+        )?);
+        if node_lease_heartbeat_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS must be greater than 0"
+                    .to_string(),
+            );
+        }
+        if node_lease_ttl < node_lease_heartbeat_interval * 2 {
+            return Err(format!(
+                "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}) must be at least 2x \
+                 WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS ({})",
+                node_lease_ttl.as_millis(),
+                node_lease_heartbeat_interval.as_millis()
+            ));
+        }
+        // ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain
+        // budget. Same typed-`config.rs`-pipeline pattern every other
+        // clustering timing value uses (never `WADDLE_DRAIN_TIMEOUT_SECS`'s
+        // raw-`std::env::var` shortcut, which is not clustering-specific).
+        let claim_release_budget = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS",
+            millis_u64(node_lease_defaults.claim_release_budget),
+        )?);
+        if claim_release_budget.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS must be greater than 0".to_string(),
+            );
+        }
+        // ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated,
+        // defense-in-depth): `run_shutdown_drain_with_heartbeat`
+        // (`self_fence.rs`) keeps renewing this node's own heartbeat for
+        // the full duration of ITS OWN drain (bounded by
+        // `claim_release_budget`), but `node_lease_ttl` is also the floor
+        // every OTHER node's orphan reaper honors before treating this
+        // node's `clustering_nodes` row as stale enough to steal from
+        // (`NodeLeaseStore::expire`'s own `heartbeat < now() - lease_ttl`
+        // check) — a `claim_release_budget` too close to `node_lease_ttl`
+        // leaves no margin: a single missed/slow renewal mid-drain (a
+        // transient Postgres hiccup, GC pause, etc.) could then let the
+        // row go stale WHILE this node still legitimately holds and is
+        // sealing claims, reopening the exact split-brain window the
+        // runtime restructure closes. `CLAIM_RELEASE_BUDGET_SAFETY_FACTOR`
+        // mirrors this function's other "conservative multiple of the
+        // faster timer" floors (`node_lease_ttl >= heartbeat_interval *
+        // 2`, `intent_ttl >= heartbeat_interval * 2`) one level up.
+        //
+        // This is deliberately the ONLY programmatic cross-check: the
+        // pre-existing, separate Q6 SM-session drain budget
+        // (`WADDLE_DRAIN_TIMEOUT_SECS`, default 30s, operator-clampable to
+        // 600s — `session_janitors::max_drain_duration_from_env`) is a raw
+        // `std::env::var` read outside this typed `ClusteringConfig`
+        // struct entirely (deviation 99's own "never
+        // WADDLE_DRAIN_TIMEOUT_SECS's raw-env-var shortcut" note), so it
+        // cannot be structurally cross-validated here. Operators sizing
+        // `node_lease_ttl` should ALSO account for that budget — this
+        // node's clustering-lease heartbeat only keeps renewing through
+        // its OWN `claim_release_budget` window, not through the
+        // independent, potentially much longer Q6 SM-drain window racing
+        // the same shutdown token — documented on
+        // [`ClusteringNodeLeaseConfig::claim_release_budget`] and in the
+        // Helm `terminationGracePeriodSeconds` formula, which already
+        // composes both budgets.
+        const CLAIM_RELEASE_BUDGET_SAFETY_FACTOR: u32 = 3;
+        if node_lease_ttl < claim_release_budget * CLAIM_RELEASE_BUDGET_SAFETY_FACTOR {
+            return Err(format!(
+                "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}) must be at least {}x \
+                 WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS ({}): a draining node's heartbeat \
+                 renewal only runs for the duration of its own claim-release drain, and \
+                 node_lease_ttl is the floor other nodes' orphan reaper honors before treating \
+                 this node's row as stale — it must leave comfortable margin over \
+                 claim_release_budget (and, operationally, over the separate \
+                 WADDLE_DRAIN_TIMEOUT_SECS SM-session Q6 drain budget this node's SM-session \
+                 drain task races under the same shutdown token, default 30s / clampable to \
+                 600s — not itself part of this typed config, so size node_lease_ttl with that \
+                 in mind too)",
+                node_lease_ttl.as_millis(),
+                CLAIM_RELEASE_BUDGET_SAFETY_FACTOR,
+                claim_release_budget.as_millis()
+            ));
+        }
+
+        let self_fence_defaults = ClusteringSelfFenceConfig::default();
+        let isolation_intervals = parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_ISOLATION_INTERVALS",
+            u64::from(self_fence_defaults.isolation_intervals),
+        )?;
+        let isolation_intervals = u32::try_from(isolation_intervals).map_err(|_| {
+            format!(
+                "WADDLE_CLUSTERING_ISOLATION_INTERVALS ({isolation_intervals}) does not fit in u32"
+            )
+        })?;
+        if isolation_intervals == 0 {
+            return Err("WADDLE_CLUSTERING_ISOLATION_INTERVALS must be at least 1".to_string());
+        }
+        let reregister_backoff_base = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS",
+            millis_u64(self_fence_defaults.reregister_backoff_base),
+        )?);
+        let reregister_backoff_max = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS",
+            millis_u64(self_fence_defaults.reregister_backoff_max),
+        )?);
+        if reregister_backoff_base.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS must be greater than 0".to_string(),
+            );
+        }
+        if reregister_backoff_max < reregister_backoff_base {
+            return Err(format!(
+                "WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS ({}) must be >= \
+                 WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS ({})",
+                reregister_backoff_max.as_millis(),
+                reregister_backoff_base.as_millis()
+            ));
+        }
+
+        let steal_intent_defaults = ClusteringStealIntentConfig::default();
+        let intent_ttl = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS",
+            millis_u64(steal_intent_defaults.intent_ttl),
+        )?);
+        if intent_ttl.is_zero() {
+            return Err("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS must be greater than 0".to_string());
+        }
+        if intent_ttl < node_lease_heartbeat_interval * 2 {
+            return Err(format!(
+                "WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS ({}) must be at least 2x \
+                 WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS ({}): the owner-veto scan \
+                 only runs once per heartbeat tick, so worst-case phase alignment between an \
+                 intent's report time and the scan's cadence can consume most of one interval \
+                 before the owner's first chance to observe it — 2x is the conservative floor \
+                 guaranteeing at least one full scan interval survives inside intent_ttl \
+                 regardless of phase (mirroring node_lease_ttl's own 2x floor against its \
+                 heartbeat interval)",
+                intent_ttl.as_millis(),
+                node_lease_heartbeat_interval.as_millis()
+            ));
+        }
+
+        let resume_handshake_defaults = ClusteringResumeHandshakeConfig::default();
+        let resume_handshake_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS",
+            millis_u64(resume_handshake_defaults.timeout),
+        )?);
+        if resume_handshake_timeout.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS must be greater than 0".to_string(),
+            );
+        }
+        if resume_handshake_timeout > node_lease_ttl {
+            return Err(format!(
+                "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}): the held-response window is capped \
+                 at min(remaining lease TTL, resume-handshake timeout) per ADR-0017 element 8, \
+                 which this config makes an upper bound by construction rather than computing \
+                 a live per-owner remaining-TTL read (see this config's own doc comment)",
+                resume_handshake_timeout.as_millis(),
+                node_lease_ttl.as_millis()
+            ));
+        }
 
         Ok(Self {
             enabled,
@@ -594,8 +997,24 @@ impl ClusteringConfig {
             },
             allowlist_refresh_interval,
             dial_interval,
+            orphan_reaper_interval,
             fault_injection,
             node_id_file,
+            node_lease: ClusteringNodeLeaseConfig {
+                heartbeat_interval: node_lease_heartbeat_interval,
+                lease_ttl: node_lease_ttl,
+                claim_release_budget,
+            },
+            self_fence: ClusteringSelfFenceConfig {
+                isolation_intervals,
+                reregister_backoff_base,
+                reregister_backoff_max,
+            },
+            steal_intent: ClusteringStealIntentConfig { intent_ttl },
+            resume_handshake: ClusteringResumeHandshakeConfig {
+                timeout: resume_handshake_timeout,
+            },
+            pod_template_hash,
         })
     }
 }
@@ -1374,6 +1793,26 @@ mod tests {
         assert!(err.contains("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS"));
     }
 
+    // ADR-0017 Phase 3 Slice 11 corrigenda (deviation 111, FIX C): the
+    // orphan reaper's cadence, parsed/validated/defaulted exactly like its
+    // sibling timers — see `clustering_parses_allowlist_refresh_and_rejects_zero`
+    // just above.
+    #[test]
+    fn clustering_parses_orphan_reaper_interval_and_rejects_zero() {
+        let config =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS", "500")])
+                .unwrap();
+        assert_eq!(config.orphan_reaper_interval.as_millis(), 500);
+
+        let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(defaults.orphan_reaper_interval.as_secs(), 120);
+
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS", "0")])
+                .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS"));
+    }
+
     #[test]
     fn clustering_parses_harness_knobs() {
         let config = ClusteringConfig::from_vars([
@@ -1399,11 +1838,248 @@ mod tests {
         assert!(err.contains("WADDLE_CLUSTERING_DIAL_INTERVAL_MS"));
     }
 
+    // FIX 6: `pod_template_hash` moved from a raw `std::env::var` read at the
+    // clustering-bringup call site into this typed pipeline — trimmed, empty
+    // ⇒ `None`, absent ⇒ `None`, never a parse failure.
+    #[test]
+    fn clustering_parses_pod_template_hash() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_POD_TEMPLATE_HASH",
+            "  waddle-server-7f8b9c6d5-  ",
+        )])
+        .unwrap();
+        assert_eq!(
+            config.pod_template_hash.as_deref(),
+            Some("waddle-server-7f8b9c6d5-")
+        );
+
+        let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert!(defaults.pod_template_hash.is_none());
+
+        let blank =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_POD_TEMPLATE_HASH", "   ")]).unwrap();
+        assert!(
+            blank.pod_template_hash.is_none(),
+            "a blank/whitespace-only value must parse as absent, not an empty string"
+        );
+    }
+
     #[test]
     fn clustering_rejects_zero_heartbeat_interval() {
         let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "0")])
             .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn clustering_defaults_have_a_valid_node_lease_and_self_fence_config() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.node_lease, ClusteringNodeLeaseConfig::default());
+        assert_eq!(config.self_fence, ClusteringSelfFenceConfig::default());
+        assert_eq!(config.self_fence.isolation_intervals, 3);
+    }
+
+    #[test]
+    fn clustering_parses_node_lease_timing() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "5000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "20000"),
+        ])
+        .unwrap();
+        assert_eq!(config.node_lease.heartbeat_interval.as_millis(), 5000);
+        assert_eq!(config.node_lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_defaults_claim_release_budget_to_five_seconds() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.node_lease.claim_release_budget.as_secs(), 5);
+    }
+
+    #[test]
+    fn clustering_parses_claim_release_budget() {
+        let config =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "7500")])
+                .unwrap();
+        assert_eq!(config.node_lease.claim_release_budget.as_millis(), 7500);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_claim_release_budget() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS"));
+    }
+
+    // --- ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated):
+    // node_lease_ttl must comfortably exceed claim_release_budget, so a
+    // draining node's heartbeat-during-drain renewal has real margin. ---
+
+    #[test]
+    fn clustering_rejects_node_lease_ttl_too_close_to_claim_release_budget() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "10000"),
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "5000"),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS")
+                && err.contains("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS"),
+            "expected the node_lease_ttl-vs-claim_release_budget error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn clustering_accepts_node_lease_ttl_with_comfortable_claim_release_budget_margin() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "15000"),
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "5000"),
+            // Below the default 20s resume-handshake timeout's own
+            // "<= node_lease_ttl" requirement — unrelated to this test's
+            // own assertion, just needed to keep the 15s node_lease_ttl
+            // above valid.
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "10000"),
+        ])
+        .expect("exactly 3x the claim_release_budget must be accepted (the floor is inclusive)");
+        assert_eq!(config.node_lease.lease_ttl.as_millis(), 15000);
+        assert_eq!(config.node_lease.claim_release_budget.as_millis(), 5000);
+    }
+
+    #[test]
+    fn clustering_defaults_satisfy_the_claim_release_budget_margin() {
+        // The shipped defaults (30s lease_ttl, 5s claim_release_budget)
+        // must themselves satisfy the new floor — this is a regression
+        // guard against the defaults and the validation drifting apart.
+        ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>())
+            .expect("default clustering config must satisfy its own validation");
+    }
+
+    #[test]
+    fn clustering_rejects_node_lease_ttl_below_two_heartbeats() {
+        let err = ClusteringConfig::from_vars([
+            (
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+                "10000",
+            ),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "15000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_node_lease_heartbeat_interval() {
+        let err = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+            "0",
+        )])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn clustering_parses_self_fence_timing() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "5"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "500"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "30000"),
+        ])
+        .unwrap();
+        assert_eq!(config.self_fence.isolation_intervals, 5);
+        assert_eq!(config.self_fence.reregister_backoff_base.as_millis(), 500);
+        assert_eq!(config.self_fence.reregister_backoff_max.as_millis(), 30000);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_isolation_intervals() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ISOLATION_INTERVALS"));
+    }
+
+    #[test]
+    fn clustering_rejects_reregister_backoff_max_below_base() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "5000"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "1000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS"));
+    }
+
+    #[test]
+    fn clustering_defaults_have_a_valid_steal_intent_config() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.steal_intent, ClusteringStealIntentConfig::default());
+    }
+
+    #[test]
+    fn clustering_parses_steal_intent_ttl() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "5000"),
+            ("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS", "30000"),
+        ])
+        .unwrap();
+        assert_eq!(config.steal_intent.intent_ttl.as_millis(), 30000);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_steal_intent_ttl() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_steal_intent_ttl_below_two_heartbeats() {
+        let err = ClusteringConfig::from_vars([
+            (
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+                "10000",
+            ),
+            ("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS", "15000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_STEAL_INTENT_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_defaults_have_a_valid_resume_handshake_config() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(
+            config.resume_handshake,
+            ClusteringResumeHandshakeConfig::default()
+        );
+    }
+
+    #[test]
+    fn clustering_parses_resume_handshake_timeout() {
+        let config = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS",
+            "15000",
+        )])
+        .unwrap();
+        assert_eq!(config.resume_handshake.timeout.as_millis(), 15000);
+    }
+
+    #[test]
+    fn clustering_rejects_zero_resume_handshake_timeout() {
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "0")])
+                .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_resume_handshake_timeout_above_node_lease_ttl() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "30000"),
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "45000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS"));
     }
 
     #[test]
@@ -1617,10 +2293,50 @@ mod tests {
     }
 }
 
+/// Typed validation failure for `WADDLE_DB_*` (ADR-0017 element 12: pool
+/// capacity is planned, not discovered — a fat-fingered size fails startup
+/// instead of silently reverting to sqlx's own default).
+///
+/// Per the typed-payloads rule, error results are typed enums; `Display` is
+/// the human-facing startup diagnostic surfaced by
+/// [`DatabaseRuntimeConfig::from_env`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DatabaseRuntimeConfigError {
+    /// `WADDLE_DB_DRIVER` is not `sqlite`/`postgres`/`postgresql`.
+    #[error("invalid WADDLE_DB_DRIVER: {0}")]
+    InvalidDriver(String),
+    /// A `WADDLE_DB_*_POOL_SIZE` var is set but is not a base-10 unsigned
+    /// integer.
+    #[error("{key}='{value}' must be a positive integer")]
+    NotAnInteger { key: &'static str, value: String },
+    /// A pool size of 0 can never serve a connection.
+    #[error("{key}={value} must be at least 1")]
+    PoolSizeZero { key: &'static str, value: u32 },
+    /// `WADDLE_DATABASE_URL` or `WADDLE_DB_DRIVER` is set but blank
+    /// (empty or whitespace-only) after trimming. An empty-templated
+    /// secret/value in a Postgres deployment must fail loudly, never
+    /// silently fall back to the sqlite defaults — unset is the only
+    /// condition that takes the default.
+    #[error("{name} is set but empty; unset it to use the default, or provide a value")]
+    EmptyVar { name: &'static str },
+}
+
+/// Runtime database driver + DSN + pool-sizing contract, parsed from
+/// `WADDLE_DB_*`/`WADDLE_DATABASE_URL` (ADR-0017 element 12).
 #[derive(Debug, Clone)]
 pub struct DatabaseRuntimeConfig {
     pub driver: DatabaseDriver,
     pub database_url: String,
+    /// Main/shared pool connection cap (`WADDLE_DB_POOL_SIZE`, default
+    /// [`crate::db::DEFAULT_POOL_SIZE`]).
+    pub pool_size: u32,
+    /// Dedicated control-plane pool size (`WADDLE_DB_CONTROL_PLANE_POOL_SIZE`,
+    /// default [`crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE`]). Only used
+    /// when `driver` is Postgres — the clustering control plane has no
+    /// SQLite equivalent, so this value is parsed and validated regardless
+    /// of driver (a fat-fingered value should still fail fast) but is simply
+    /// unused by the SQLite path.
+    pub control_plane_pool_size: u32,
 }
 
 impl Default for DatabaseRuntimeConfig {
@@ -1628,27 +2344,222 @@ impl Default for DatabaseRuntimeConfig {
         Self {
             driver: DatabaseDriver::Sqlite,
             database_url: "sqlite::memory:".to_string(),
+            pool_size: crate::db::DEFAULT_POOL_SIZE,
+            control_plane_pool_size: crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE,
         }
     }
 }
 
 impl DatabaseRuntimeConfig {
-    pub fn from_env() -> Result<Self, String> {
-        let driver = std::env::var("WADDLE_DB_DRIVER")
-            .unwrap_or_else(|_| "sqlite".to_string())
-            .parse::<DatabaseDriver>()
-            .map_err(|e| format!("invalid WADDLE_DB_DRIVER: {}", e))?;
+    pub fn from_env() -> Result<Self, DatabaseRuntimeConfigError> {
+        Self::from_vars(std::env::vars())
+    }
 
-        let database_url = std::env::var("WADDLE_DATABASE_URL").unwrap_or_else(|_| match driver {
-            DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
-            DatabaseDriver::Postgres => {
-                "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, DatabaseRuntimeConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        // Unset falls back to the sqlite default; set-but-blank (empty or
+        // whitespace-only after trimming) is a typed error, never a silent
+        // fallback — an empty-templated secret in a Postgres deployment must
+        // never silently boot sqlite::memory:.
+        let driver = match vars.get("WADDLE_DB_DRIVER") {
+            None => DatabaseDriver::Sqlite,
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DB_DRIVER",
+                    });
+                }
+                trimmed
+                    .parse::<DatabaseDriver>()
+                    .map_err(|e| DatabaseRuntimeConfigError::InvalidDriver(e.to_string()))?
             }
-        });
+        };
+
+        let database_url = match vars.get("WADDLE_DATABASE_URL") {
+            None => match driver {
+                DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
+                DatabaseDriver::Postgres => {
+                    "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+                }
+            },
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DATABASE_URL",
+                    });
+                }
+                trimmed.to_string()
+            }
+        };
+
+        let pool_size =
+            db_pool_size_var(&vars, "WADDLE_DB_POOL_SIZE", crate::db::DEFAULT_POOL_SIZE)?;
+        let control_plane_pool_size = db_pool_size_var(
+            &vars,
+            "WADDLE_DB_CONTROL_PLANE_POOL_SIZE",
+            crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE,
+        )?;
 
         Ok(Self {
             driver,
             database_url,
+            pool_size,
+            control_plane_pool_size,
         })
+    }
+}
+
+/// Read a `WADDLE_DB_*_POOL_SIZE` var as `u32`, treating unset/blank as the
+/// default and rejecting zero (a zero-sized pool can never serve a
+/// connection).
+fn db_pool_size_var(
+    vars: &std::collections::HashMap<String, String>,
+    key: &'static str,
+    default: u32,
+) -> Result<u32, DatabaseRuntimeConfigError> {
+    match vars
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(default),
+        Some(raw) => {
+            let value =
+                raw.parse::<u32>()
+                    .map_err(|_| DatabaseRuntimeConfigError::NotAnInteger {
+                        key,
+                        value: raw.to_string(),
+                    })?;
+            if value == 0 {
+                return Err(DatabaseRuntimeConfigError::PoolSizeZero { key, value });
+            }
+            Ok(value)
+        }
+    }
+}
+
+#[cfg(test)]
+mod database_runtime_config_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sqlite_in_memory_with_historical_pool_sizes() {
+        let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.driver, DatabaseDriver::Sqlite);
+        assert_eq!(config.database_url, "sqlite::memory:");
+        assert_eq!(config.pool_size, crate::db::DEFAULT_POOL_SIZE);
+        assert_eq!(
+            config.control_plane_pool_size,
+            crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE
+        );
+    }
+
+    #[test]
+    fn parses_pool_size_overrides() {
+        let config = DatabaseRuntimeConfig::from_vars([
+            ("WADDLE_DB_DRIVER", "postgres"),
+            ("WADDLE_DB_POOL_SIZE", "25"),
+            ("WADDLE_DB_CONTROL_PLANE_POOL_SIZE", "6"),
+        ])
+        .unwrap();
+        assert_eq!(config.driver, DatabaseDriver::Postgres);
+        assert_eq!(config.pool_size, 25);
+        assert_eq!(config.control_plane_pool_size, 6);
+    }
+
+    #[test]
+    fn rejects_zero_pool_size() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_POOL_SIZE", "0")]).unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::PoolSizeZero {
+                key: "WADDLE_DB_POOL_SIZE",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_control_plane_pool_size() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_CONTROL_PLANE_POOL_SIZE", "0")])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::PoolSizeZero {
+                key: "WADDLE_DB_CONTROL_PLANE_POOL_SIZE",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_non_integer_pool_size() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_POOL_SIZE", "ten")]).unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::NotAnInteger {
+                key: "WADDLE_DB_POOL_SIZE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_driver() {
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_DRIVER", "mysql")]).unwrap_err();
+        assert!(matches!(err, DatabaseRuntimeConfigError::InvalidDriver(_)));
+    }
+
+    #[test]
+    fn rejects_empty_db_driver() {
+        for blank in ["", "  "] {
+            let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_DRIVER", blank)]).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DB_DRIVER"
+                    }
+                ),
+                "blank {blank:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_database_url() {
+        for blank in ["", "  "] {
+            let err =
+                DatabaseRuntimeConfig::from_vars([("WADDLE_DATABASE_URL", blank)]).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    DatabaseRuntimeConfigError::EmptyVar {
+                        name: "WADDLE_DATABASE_URL"
+                    }
+                ),
+                "blank {blank:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unset_db_driver_and_database_url_still_use_defaults() {
+        // Byte-for-byte-identical guarantee: unset (never set-but-blank)
+        // must still take the sqlite defaults.
+        let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.driver, DatabaseDriver::Sqlite);
+        assert_eq!(config.database_url, "sqlite::memory:");
     }
 }

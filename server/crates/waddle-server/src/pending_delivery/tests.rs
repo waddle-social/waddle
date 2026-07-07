@@ -1,11 +1,19 @@
 use super::*;
 use chrono::Utc;
+use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
+use waddle_xmpp::registry::UserRegistryActor;
 use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
+}
+
+/// A fresh, empty actor-authoritative registry for
+/// `sm_promotion::promote_session_unacked` (ADR-0017 Phase 3 Slice 9).
+fn test_user_registry() -> ActorRef<UserRegistryActor> {
+    UserRegistryActor::spawn(UserRegistryActor::new())
 }
 
 fn full(s: &str) -> FullJid {
@@ -1571,9 +1579,11 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
     storage.delete_row(&row_id).await.unwrap();
 
     // Step 5: SM-expiry promotion re-creates the pending row.
+    let user_registry = test_user_registry();
     let summary = crate::sm_promotion::promote_session_unacked(
         &detached,
         &registry,
+        &user_registry,
         &storage,
         &waddle_xmpp::protocol::session_state::Blocklist::empty(),
         "example.com",
@@ -1727,6 +1737,175 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
     // other suites.
     let deleted = storage.delete_row(&row_id).await.expect("cleanup");
     assert_eq!(deleted, 1, "test row must be deleted by id");
+}
+
+// ── ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): fenced Q6
+// promotion insert — duplicate-promotion (double-janitor) prevention ──
+//
+// Element 9's locked text: "promotion executes under the row-locked
+// fenced epoch." This proves `insert_fenced`'s wiring end-to-end against
+// real Postgres: two nodes attempting to promote the SAME SM session's
+// unacked queue under different claim states — one holds a now-stale
+// (deposed) claim, the other holds the current one — must have exactly
+// one succeed; the deposed node's attempt aborts fenced
+// (`PendingStorageError::NotOwner`) before writing anything.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (pending_delivery fenced-insert duplicate-promotion regression)"
+        );
+        return;
+    };
+
+    let db = Database::from_config(
+        "pending-delivery-fenced-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, database_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open test postgres");
+
+    let schema_store = PostgresClaimStore::new(db.clone());
+    schema_store
+        .ensure_schema()
+        .await
+        .expect("ensure claims schema");
+
+    let stream_id = format!("stream-dup-{}", uuid::Uuid::new_v4());
+    let entity = Entity::new(EntityType::SmSession, stream_id.clone());
+    let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), stream_id);
+
+    let node_a = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let node_b = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+
+    // Node A originally holds the claim — the ordinary "self-claimed
+    // session" state a Q6 promotion runs under.
+    schema_store
+        .acquire(&entity, &node_a)
+        .await
+        .expect("node A acquires");
+
+    // Simulate a concurrent double-janitor: another node's own
+    // `steal_stale`/orphan-reaper sweep won this exact entity's claim out
+    // from under node A between node A's own claim and this promotion
+    // attempt (element 9's "any node may steal such claims" text) — bump
+    // the row directly to node B's identity/epoch, the same observable
+    // end state a real concurrent steal would leave, without depending on
+    // real-time interleaving for a deterministic test.
+    {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_claims SET node_id = ?, node_epoch = ?, \
+             claim_epoch = claim_epoch + 1 WHERE entity = ?",
+            crate::db_params![
+                node_b.node_id.clone(),
+                node_b.node_epoch.clone(),
+                entity_key.clone(),
+            ],
+        )
+        .await
+        .expect("simulate concurrent steal to node B");
+    }
+
+    let recipient_str = format!("dup-promo-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_str);
+    let row_for_a = transient_row(&recipient_str, "node A's promotion attempt");
+    let row_for_b = transient_row(&recipient_str, "node B's promotion attempt");
+
+    // Node A's storage: fenced against its own (now-stale/deposed) identity.
+    let storage_a = crate::pending_delivery::open_for_cluster_mode(
+        Some(&database_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((
+            std::sync::Arc::new(PostgresClaimStore::new(db.clone()))
+                as std::sync::Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(node_a.clone()),
+        )),
+        &db,
+    )
+    .await
+    .expect("open node A's fenced pending_delivery storage");
+
+    // Node B's storage: fenced against the identity that actually won the
+    // claim.
+    let storage_b = crate::pending_delivery::open_for_cluster_mode(
+        Some(&database_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((
+            std::sync::Arc::new(PostgresClaimStore::new(db.clone()))
+                as std::sync::Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(node_b.clone()),
+        )),
+        &db,
+    )
+    .await
+    .expect("open node B's fenced pending_delivery storage");
+
+    // Node A's promotion aborts fenced — its own `ensure_claimed` observes
+    // a genuinely different node/epoch now on the row and refuses before
+    // any write.
+    let outcome_a = storage_a.insert_fenced(row_for_a, &stream_id).await;
+    assert!(
+        matches!(outcome_a, Err(PendingStorageError::NotOwner { .. })),
+        "the deposed node's promotion attempt must abort fenced (NotOwner), got {outcome_a:?}"
+    );
+
+    // Node B's promotion succeeds — it is the current, genuine owner.
+    let outcome_b = storage_b
+        .insert_fenced(row_for_b, &stream_id)
+        .await
+        .expect("node B's promotion succeeds");
+    assert_eq!(outcome_b, InsertOutcome::Inserted);
+
+    // Exactly one row landed — the deposed node's attempt never wrote
+    // anything, proving the fence closed the double-promotion window, not
+    // merely raced it.
+    let rows = storage_b.list(&recipient).await.expect("list");
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one promotion attempt's row must land"
+    );
+    let landed_body = match &rows[0].payload {
+        PendingPayload::Transient(message) => message.bodies.values().next().cloned(),
+        PendingPayload::Archived(_) => None,
+    };
+    assert_eq!(
+        landed_body.as_deref(),
+        Some("node B's promotion attempt"),
+        "the landed row must be the current owner's, never the deposed node's"
+    );
+
+    // Cleanup — scoped to this test's own unique stream id/recipient, never
+    // a global cutoff (see the i32-overflow test above for why).
+    for row in rows {
+        let _ = storage_b.delete_row(&row.id).await;
+    }
+    let conn = db.guard().await.expect("guard");
+    let _ = conn
+        .execute(
+            "DELETE FROM clustering_claims WHERE entity = ?",
+            crate::db_params![entity_key],
+        )
+        .await;
 }
 
 // ── Issue #1122: transient MAM failure vs genuine tombstone miss ────

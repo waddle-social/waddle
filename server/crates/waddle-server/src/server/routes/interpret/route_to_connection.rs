@@ -1,188 +1,66 @@
 use super::*;
 use xmpp_parsers::iq::Iq;
 
-/// Upper bound on each actor `ask` issued from the routing hot path — bounds
-/// both mailbox enqueue and the handler reply so a wedged `UserRegistryActor`
-/// or `UserActor` degrades bare-JID selection to the offline/headless path
-/// quickly rather than stalling the interpreter loop. `UserActor` selection
-/// handlers never await I/O, so a real stall is rare; the bound is the
-/// backstop.
-const ACTOR_ROUTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// RFC 6121 §8.5.2.1.1 bare-JID destination selection: the candidate set and
-/// priority ranking come from the actor-authoritative `UserActor` (ADR-0017
-/// Phase 1 Slice 1), filtered by DashMap liveness (ADR-0017 Phase 1 Slice 1
-/// completion — see below).
+/// priority ranking come from the actor-authoritative `UserActor` alone
+/// (ADR-0017 Phase 3 Slice 9 retires the transitional Slice-1 DashMap
+/// -liveness intersection filter).
 ///
-/// # Candidate + ranking source: the authoritative actor
+/// # Candidate + ranking source: the authoritative actor, alone
 ///
-/// Reads BOTH tiers from the SAME actor: tier 1 is the available resources with
-/// their priorities (`GetAvailableResources`), tier 2 — only when no available
-/// non-negative resource exists — is every connected resource (`GetResources`),
-/// reproducing the legacy two-call behaviour for clients that bind but defer
-/// `<presence/>`. There is NO DashMap *fallback* for the candidate set: if the
-/// actor is empty/errors we do not substitute a DashMap lookup.
+/// Tier 1 is the actor's own RFC-ranked `SelectRoutableResources` (available,
+/// non-negative-priority resources, collapsed to the max-priority tie set).
+/// Tier 2 — only when tier 1 selects nothing — is every connected resource
+/// (`GetResources`), reproducing the legacy two-call behaviour for clients
+/// that bind but defer `<presence/>`. There is no DashMap read here at all:
+/// the actor is the sole source, and the Slice-1 liveness intersection
+/// (`is_connected` filter over each tier before/after ranking) is gone.
 ///
-/// # Liveness filter: intersect with the DashMap, then rank
+/// # Self-healing replaces the liveness filter
 ///
-/// Each tier's result is intersected with DashMap membership (`is_connected`).
-/// Slice 2 cut delivery over to the authoritative `UserActor`
-/// (`deliver_peer_to_full` / `deliver_direct_to_full`), but this filter is
-/// deliberately KEPT: the best-effort, owner-gated unregister mirror can leave
-/// a *stale extra* in the actor — a resource whose DashMap entry was already
-/// removed at teardown but whose actor entry the mirror `tell` has not yet
-/// reaped. Such a resource is still presence-available in the actor (teardown
-/// does not flip the shared atomic) and, until the empty-actor reaper runs, its
-/// sender channel may still be open, so the actor would happily queue to a
-/// resource the legacy selection considered gone. Filtering it out here keeps
-/// selection byte-for-byte identical to the legacy DashMap behaviour and keeps
-/// the offline/headless pass reachable when a bare JID has no live resource
-/// (council review on PR #1177).
-///
-/// The intersection is SOUND and introduces no false-negative: Slice 0 made
-/// registration authoritative (a live resource is in the actor *and* the
-/// DashMap before its own bind returns, with rollback on mirror failure), so
-/// for live resources `DashMap ⊆ actor`. Intersecting the actor's per-tier
-/// result with DashMap membership therefore yields exactly the DashMap live
-/// set. Crucially, tier 1 takes the RFC max-priority collapse *after* the
-/// liveness filter (over `GetAvailableResources`, not the actor's pre-collapsed
-/// `SelectRoutableResources`), so a stale extra holding a unique top priority is
-/// dropped before the max is computed — it can neither mask a live
-/// lower-priority resource nor promote other lower-priority resources above it.
-/// The result is byte-for-byte identical to the legacy DashMap selection, with
-/// the candidate/ranking source moved to the actor. A later slice retires this
-/// filter — once teardown flips the shared ownership atomic (or the empty-actor
-/// reaper eagerly reaps stale extras) selection can return to the actor-side
-/// `SelectRoutableResources` without it.
+/// The liveness filter existed to protect against a *stale extra*: a resource
+/// whose DashMap entry was removed at teardown but whose actor entry a
+/// lagging best-effort unregister `tell` had not yet reaped. Selecting it
+/// would have hand it to delivery, which would find the entry stale.
+/// Now that delivery (`deliver_peer_to_full` / `deliver_direct_to_full`,
+/// Slice 2) already evicts a closed-channel entry on first touch
+/// (`BroadcastOutcome::DroppedClosed` → `try_deliver`'s `remove_resource`)
+/// and routes to the detached XEP-0198 buffer, a stale extra self-heals at
+/// delivery time instead of being filtered out at selection time — the
+/// eviction the Slice-1 filter existed to pre-empt now happens naturally on
+/// the very next send attempt. The one gap self-healing does NOT close by
+/// itself is a bare-JID delivery whose *entire* selected set turns out
+/// stale: with the filter, that case selected empty and fell through to the
+/// offline/headless recipient pass; without it, `route_to_connection` must
+/// explicitly detect "nothing actually landed" after the delivery loop runs
+/// and run the headless pass itself — see the disposition tracking in
+/// [`route_to_connection`] below.
 ///
 /// On any actor error (registry / user-actor busy, wedged, or state-lost) the
 /// selection degrades to empty, so the caller runs the offline/headless
 /// recipient pass (archive + inbox projection): the message is persisted, not
 /// lost, and the recipient catches up via MAM. `deps.user_registry` is `None`
 /// only in unit-test deps that do not exercise live bare-JID delivery.
-async fn select_bare_jid_live_targets(
-    registry: &waddle_xmpp::registry::ConnectionRegistry,
-    deps: &Deps<'_>,
-    bare: &BareJid,
-) -> Vec<jid::FullJid> {
+async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<jid::FullJid> {
     let Some(user_registry) = deps.user_registry else {
         return Vec::new();
     };
-
-    // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
-    // this `UserActor` is resolved here for selection and then re-resolved by
-    // `deliver_one_via_actor` per target — a second `GetUser` for the same bare
-    // JID on the DM path. A future refactor could return this `ActorRef`
-    // alongside the targets so delivery reuses it. Deferred (see the matching
-    // note in `routing.rs::deliver_one_via_actor`).
-    let user_actor = match user_registry
-        .ask(waddle_xmpp::registry::GetUser {
-            bare_jid: bare.clone(),
-        })
-        .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-        .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-        .await
-    {
-        Ok(Some(actor)) => actor,
-        Ok(None) => return Vec::new(),
-        Err(error) => {
-            warn!(
-                bare_jid = %bare,
-                %error,
-                "route_to_connection: GetUser failed; degrading bare-JID \
-                 selection to the offline/headless path"
-            );
-            return Vec::new();
-        }
-    };
-
-    // Tier 1: RFC 6121 §8.5.2.1.1 — available, non-negative, max-priority ties.
-    // We read the available resources WITH their priorities
-    // (`GetAvailableResources`), intersect with DashMap liveness, and THEN
-    // collapse to the max priority — the ranking is computed over the *live*
-    // set, not pre-collapsed inside the actor. This is what makes the result
-    // byte-for-byte identical to the legacy DashMap `select_routable_resources`
-    // even in the stale-extra window: a stale extra holding a unique top
-    // priority is dropped by the liveness filter BEFORE the max is taken, so it
-    // can neither mask a live lower-priority resource nor promote other
-    // lower-priority resources above it (council review on PR #1177). Using the
-    // actor's own pre-collapsed `SelectRoutableResources` here would reintroduce
-    // that distortion, so it stays deliberately avoided as long as the liveness
-    // filter is kept. It can return once a later phase retires the filter (once
-    // teardown flips the shared ownership atomic / the empty-actor reaper reaps
-    // stale extras eagerly).
-    let available: Vec<(jid::FullJid, i8)> = match user_actor
-        .ask(waddle_xmpp::registry::user_actor::GetAvailableResources)
-        .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-        .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-        .await
-    {
-        Ok(resources) => resources,
-        Err(error) => {
-            warn!(
-                bare_jid = %bare,
-                %error,
-                "route_to_connection: GetAvailableResources failed; \
-                 degrading bare-JID selection to the offline/headless path"
-            );
-            return Vec::new();
-        }
-    };
-    let deliverable: Vec<(jid::FullJid, i8)> = available
-        .into_iter()
-        .filter(|(jid, _)| registry.is_connected(jid))
-        .filter(|(_, priority)| *priority >= 0)
-        .collect();
-    if let Some(max_priority) = deliverable.iter().map(|(_, priority)| *priority).max() {
-        return deliverable
-            .into_iter()
-            .filter(|(_, priority)| *priority == max_priority)
-            .map(|(jid, _)| jid)
-            .collect();
+    let routable =
+        waddle_xmpp::registry::select_routable_resources_for_user(user_registry, bare).await;
+    if !routable.is_empty() {
+        return routable;
     }
-
     // Tier 2: no presence-available (non-negative) resource — fall back to
     // every connected resource (matching the legacy `get_resources_for_user`
-    // behaviour), still from the SAME authoritative actor and filtered by the
-    // same DashMap liveness gate. This fires both for clients that bind but
-    // defer `<presence/>` (the intended case) and, as a deliberate legacy
+    // behaviour). This fires both for clients that bind but defer
+    // `<presence/>` (the intended case) and, as a deliberate legacy
     // divergence from strict RFC 6121 §8.5.2.1.1, for a user whose only
     // resources advertise negative priority — those are delivered rather than
     // treated as offline, preserving pre-cutover behaviour.
-    match user_actor
-        .ask(waddle_xmpp::registry::user_actor::GetResources)
-        .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-        .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-        .await
-    {
-        Ok(resources) => filter_deliverable(registry, resources),
-        Err(error) => {
-            warn!(
-                bare_jid = %bare,
-                %error,
-                "route_to_connection: GetResources failed; degrading bare-JID \
-                 selection to the offline/headless path"
-            );
-            Vec::new()
-        }
-    }
-}
-
-/// Keep only the actor-selected resources that are still live in the DashMap
-/// (the delivery source in this slice), dropping stale extras a lagging
-/// unregister mirror has not yet reaped. See `select_bare_jid_live_targets`.
-fn filter_deliverable(
-    registry: &waddle_xmpp::registry::ConnectionRegistry,
-    resources: Vec<jid::FullJid>,
-) -> Vec<jid::FullJid> {
-    resources
-        .into_iter()
-        .filter(|jid| registry.is_connected(jid))
-        .collect()
+    waddle_xmpp::registry::get_resources_for_user(user_registry, bare).await
 }
 
 pub(super) async fn route_to_connection(
-    registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     jid: Jid,
     stanza: Box<Stanza>,
@@ -326,20 +204,18 @@ pub(super) async fn route_to_connection(
                 // presence until after bind, and the legacy direct-route path
                 // delivered without consulting presence).
                 //
-                // ADR-0017 Phase 1 Slice 1: the candidate set + RFC priority
-                // ranking are now read from the actor-authoritative `UserActor`
-                // (BOTH tiers, tier-1 `GetAvailableResources` with a post-filter
-                // max-priority collapse, then tier-2 `GetResources`, from the
-                // SAME actor — no DashMap *fallback* for candidates), then
-                // intersected with DashMap liveness because delivery still reads
-                // the DashMap in this slice. Tier 1 uses `GetAvailableResources`
-                // rather than the actor's pre-collapsed `SelectRoutableResources`
-                // precisely so the max is taken *after* the liveness filter (see
-                // `select_bare_jid_live_targets`). Slice 0's authoritative
-                // registration makes this intersection provably equal to the
-                // legacy DashMap live set (no false-negative). See
-                // docs/adrs/0017-phase1-completion-authoritative-registration.md.
-                let live_targets = select_bare_jid_live_targets(registry, deps, &bare).await;
+                // ADR-0017 Phase 3 Slice 9: the candidate set + RFC priority
+                // ranking are read from the actor-authoritative `UserActor`
+                // alone (tier-1 `SelectRoutableResources`, then tier-2
+                // `GetResources`) — the transitional Slice-1 DashMap-liveness
+                // intersection is retired. A stale extra self-heals via
+                // `TrySendPeer`/`TrySendDirect` → `DroppedClosed` eviction at
+                // delivery time instead of being filtered out here; see
+                // `select_bare_jid_live_targets`'s doc comment. The headless
+                // -persistence gate below covers the residual case where
+                // self-healing alone would otherwise lose the message: every
+                // selected target turning out stale.
+                let live_targets = select_bare_jid_live_targets(deps, &bare).await;
                 if live_targets.is_empty() && detached_targets.is_empty() {
                     if bare.domain().as_str() != deps.local_domain {
                         debug!(
@@ -486,14 +362,33 @@ pub(super) async fn route_to_connection(
                             }
                         }
                     }
+                    // ADR-0017 Phase 3 Slice 9 headless-persistence gate: with
+                    // the Slice-1 DashMap-liveness filter retired, a target
+                    // selected as "live" can still turn out stale (self-heals
+                    // via `DroppedClosed` eviction — see
+                    // `select_bare_jid_live_targets`'s doc comment). Track
+                    // whether ANYTHING in this delivery set actually landed
+                    // (a live channel or the detached replay buffer); if
+                    // nothing did, the message would otherwise be silently
+                    // lost, so fall back to the same offline/headless
+                    // recipient pass the "both empty at selection" branch
+                    // above already runs.
+                    let mut any_landed = false;
                     for full in live_targets {
-                        deliver_peer_to_full(
+                        let disposition = deliver_peer_to_full(
                             deps.user_registry,
                             deps.sm_session_registry,
                             &full,
                             &stanza,
                         )
                         .await;
+                        if matches!(
+                            disposition,
+                            FullJidDeliveryOutcome::Delivered
+                                | FullJidDeliveryOutcome::QueuedDetached
+                        ) {
+                            any_landed = true;
+                        }
                     }
                     if let Some(sm) = deps.sm_session_registry {
                         for full in detached_targets {
@@ -538,6 +433,7 @@ pub(super) async fn route_to_connection(
                                 .await
                             {
                                 Ok(true) => {
+                                    any_landed = true;
                                     debug!(
                                         jid = %full,
                                         "RouteToConnection: bare-JID stanza queued \
@@ -560,6 +456,27 @@ pub(super) async fn route_to_connection(
                                     );
                                 }
                             }
+                        }
+                    }
+                    if !any_landed {
+                        if bare.domain().as_str() != deps.local_domain {
+                            debug!(
+                                bare_jid = %bare,
+                                local_domain = %deps.local_domain,
+                                "RouteToConnection: cross-domain bare JID; every \
+                                 selected target turned out stale and none is \
+                                 local, dropping (s2s out of scope)"
+                            );
+                        } else {
+                            debug!(
+                                bare_jid = %bare,
+                                "RouteToConnection: every selected/detached target \
+                                 turned out stale (self-healed via DroppedClosed \
+                                 eviction); running the headless recipient pass so \
+                                 the message is not silently lost"
+                            );
+                            run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1)
+                                .await;
                         }
                     }
                 }

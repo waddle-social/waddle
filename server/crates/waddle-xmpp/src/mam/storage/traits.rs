@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use jid::BareJid;
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 
+use crate::muc::RoomClaimFenceContext;
+
 use super::MamStorageError;
 
 /// Trait for MAM message storage backends.
@@ -29,6 +31,44 @@ pub trait MamStorage: Send + Sync {
         archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError>;
+
+    /// Fenced variant of [`Self::store_message`] for the MUC groupchat
+    /// archive write path (ADR-0017 Phase 3 Slice 7 FIX 1,
+    /// council-adjudicated): the two-part demotion protocol's guaranteed
+    /// backstop (element 7) runs the `SELECT ... FOR SHARE` fencing check
+    /// INSIDE the same transaction as the archive insert itself, closing
+    /// the residual race window between `dispatch_to_room`'s own
+    /// standalone pre-fan-out check
+    /// ([`crate::muc::MucDurableStore::check_fenced_fanout`]) and the
+    /// later archive write — a steal landing in that narrow gap could
+    /// otherwise still commit a phantom archived row under a claim this
+    /// node no longer holds.
+    ///
+    /// `fence` carries the SAME typed `(Entity, ClaimEpoch, node_id)`
+    /// context [`crate::muc::MucDurableStore::current_claim_fence`]
+    /// resolves from `dispatch_to_room`'s own fencing mechanism — threaded
+    /// through rather than re-derived, so both fencing checks (the
+    /// standalone pre-fan-out one and this write-adjacent one) agree by
+    /// construction.
+    ///
+    /// Default impl ignores `fence` and falls back to [`Self::store_message`]
+    /// — correct for every implementation with no clustering/fencing
+    /// concept (the portable, single-node backend, and the in-memory test
+    /// double). A cluster-aware implementation overrides this to run the
+    /// fencing check and the insert in one transaction, mirroring
+    /// `pending_delivery::storage::PendingDeliveryStorage::insert_fenced`'s
+    /// identical pattern one table over. On a failed fence, returns
+    /// [`MamStorageError::NotOwner`] and the write never touches
+    /// `mam_messages`.
+    async fn store_message_fenced(
+        &self,
+        archive_jid: &BareJid,
+        message: &ArchivedMessage,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<String, MamStorageError> {
+        let _ = fence;
+        self.store_message(archive_jid, message).await
+    }
 
     /// Query messages from the archive.
     ///

@@ -13,6 +13,8 @@
 
 use crate::config::ClusteringConfig;
 use crate::db::{Database, DatabaseDriver};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Peer-allowlist store. Public: the multi-process cluster harness
@@ -22,6 +24,11 @@ use tokio_util::sync::CancellationToken;
 pub mod allowlist;
 #[cfg(feature = "clustering")]
 mod behaviour;
+/// Postgres-authoritative entity ownership claims (ADR-0017 Phase 3 Slice
+/// 1). Public for the same reason as [`allowlist`]/[`lease`]: the harness
+/// provisions schema via the production path.
+#[cfg(feature = "clustering")]
+pub mod claims;
 /// Remote XML-text serde codec for stanzas/elements crossing the kameo
 /// boundary. Public: the Slice 5 relay actors' message types embed these
 /// wrappers, and downstream phases (cross-node routing) build on them.
@@ -29,19 +36,58 @@ mod behaviour;
 pub mod codec;
 #[cfg(feature = "clustering")]
 mod dns;
+/// Graceful per-entity claim drain + rollout-aware acquire placement
+/// (ADR-0017 Phase 3 Slice 10). `pub(crate)` (not `pub`): every caller
+/// (`self_fence::run_node_lease`, `server::session_janitors`'s orphan
+/// reaper) lives inside this crate; the multi-process harness drives drain
+/// behavior through the production shutdown path, not this module directly.
+#[cfg(feature = "clustering")]
+pub(crate) mod drain;
 #[cfg(feature = "clustering")]
 mod identity;
+/// Postgres-authoritative, epoch-fenced XEP-0397 ISR token storage
+/// (ADR-0017 Phase 3 Slice 8). Public for the same reason as
+/// [`allowlist`]/[`claims`]/[`lease`]: the harness provisions schema via
+/// the production path.
+#[cfg(feature = "clustering")]
+pub mod isr;
 /// Keypair-slot lease store. Public for the same reason as [`allowlist`]:
 /// the harness provisions schema via the production path.
 #[cfg(feature = "clustering")]
 pub mod lease;
+/// Real `LocallyClaimedEntities` backed by the SM session registry
+/// (ADR-0017 Phase 3 Slice 5, carried debt (b)). Public for the same reason
+/// as [`self_fence`]: the harness wires/drives it directly in the
+/// claim-scoped-hydration and deposed-owner scenarios.
 #[cfg(feature = "clustering")]
-mod metrics;
+pub mod local_claims;
+/// `pub(crate)` (ADR-0017 Phase 3 Slice 10): `server::session_janitors`'s
+/// Q6 SM-drain path records into the same `claims_released_on_drain`/
+/// `claims_abandoned_on_drain` counters this module's own per-entity drain
+/// uses, so both mechanisms feed one shared observability surface.
+#[cfg(feature = "clustering")]
+pub(crate) mod metrics;
 /// Per-node supervised relay actor + client handle. Public: the multi-process
 /// cluster harness drives `RelayHandle` cross-node, and Phase 4's routing
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+/// The `RemoteResumeAsker` implementation over `RelayHandle` (ADR-0017
+/// Phase 3 Slice 6) — the resuming node's side of the cross-node XEP-0198
+/// resume live-steal handshake. Public so `server/http.rs` can construct it.
+#[cfg(feature = "clustering")]
+pub mod resume_asker;
+/// The `RelayActor`-side bridge to the live `ConnectionRegistry` (ADR-0017
+/// Phase 3 Slice 6). Public for the same reason as [`local_claims`]: the
+/// harness wires/drives it directly in the cross-node live-steal handshake
+/// scenario.
+#[cfg(feature = "clustering")]
+pub mod resume_bridge;
+/// Self-fencing, isolation detection, and re-registration hysteresis
+/// (ADR-0017 Phase 3 Slice 2). Public for the same reason as
+/// [`claims`]/[`lease`]: the harness drives the node-lease loop directly.
+#[cfg(feature = "clustering")]
+pub mod self_fence;
 /// Owned swarm bring-up. Public so the multi-process cluster harness can run
 /// a swarm inside the test process (kameo's `init_global` is a process
 /// singleton, so multi-node behaviour is only testable across processes —
@@ -92,6 +138,44 @@ pub(crate) fn allowlist_table_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Shared client-facing HTTP readiness signal for the clustering control
+/// plane (ADR-0017 element 4, Phase 3 Slice 2): flipped to not-ready the
+/// instant a node self-fences (node-lease heartbeat CAS returns zero rows,
+/// or Postgres is unreachable past the lease deadline) and back to ready
+/// only once the node has re-registered under a fresh `node_id`/
+/// `node_epoch` and satisfied the re-acquisition hysteresis gate. Cloning
+/// shares the same underlying flag (cheap `Arc` clone).
+///
+/// Unconditionally compiled (no `clustering` feature gate) so `AppState`
+/// and the `/ready`/`/readyz` handlers can hold one field regardless of
+/// build: a non-clustering deployment (or a `clustering`-feature build with
+/// `clustering.enabled = false`) never flips it, so it stays ready forever
+/// — today's behavior, unchanged.
+#[derive(Clone)]
+pub struct ClusteringReadiness(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl ClusteringReadiness {
+    pub fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        )))
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn set_ready(&self, ready: bool) {
+        self.0.store(ready, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Default for ClusteringReadiness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Startup failures for the clustering subsystem. The human-facing `Display`
 /// text is surfaced as the server-startup diagnostic.
 #[derive(Debug, thiserror::Error)]
@@ -117,6 +201,38 @@ pub enum ClusteringError {
     #[cfg(feature = "clustering")]
     #[error(transparent)]
     Swarm(#[from] swarm::SwarmError),
+
+    /// The node-lease's initial registration (ADR-0017 Phase 3 Slice 2)
+    /// failed. Fails startup rather than starting a node-lease loop that can
+    /// never renew.
+    #[cfg(feature = "clustering")]
+    #[error("clustering node-lease registration failed: {0}")]
+    NodeLease(waddle_xmpp::ownership::ClaimError),
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 8 (council-adjudicated): the durable MUC
+    /// room store's own startup init (`ensure_schema`) failed. Fails
+    /// clustering startup entirely rather than continuing with entity
+    /// claims live but MUC room durability silently unprotected — a
+    /// `RoomActor` claim can move between nodes without this store, which
+    /// is exactly the unprotected-deposal hazard element 7 exists to close
+    /// (config/affiliations/subject would silently reset to defaults on
+    /// every steal), not a degraded-but-safe mode. Previously logged and
+    /// treated as non-fatal; corrected here to match the co-location
+    /// discipline every other clustering-durability store already enforces
+    /// at startup (`sm_persistence::open_for_cluster_mode`,
+    /// `pending_delivery::open_for_cluster_mode`).
+    #[cfg(feature = "clustering")]
+    #[error("clustering MUC durable store initialization failed: {0}")]
+    MucDurableStoreInit(waddle_xmpp::XmppError),
+
+    /// ADR-0017 Phase 3 Slice 8: the Postgres ISR token store's own startup
+    /// init (`ensure_schema`) failed. Fails clustering startup entirely
+    /// rather than continuing with ISR advertised but its backing schema
+    /// missing — mirrors [`Self::MucDurableStoreInit`]'s identical
+    /// co-location-discipline rationale one store over.
+    #[cfg(feature = "clustering")]
+    #[error("clustering ISR token store initialization failed: {0}")]
+    IsrTokenStoreInit(waddle_xmpp::isr::IsrTokenStoreError),
 }
 
 /// Derive the clustering subsystem's own cancellation scope from the
@@ -134,19 +250,285 @@ fn clustering_scope_token(parent: &CancellationToken) -> CancellationToken {
     parent.child_token()
 }
 
+/// Handles the clustering subsystem hands back to the caller of
+/// [`start_if_enabled`] for use by code outside `clustering` itself
+/// (ADR-0017 Phase 3 Slice 4 follow-up plumbing note).
+///
+/// Both fields are `None` whenever clustering is disabled, this binary
+/// lacks the `clustering` Cargo feature, or (defensively) the subsystem
+/// otherwise produced no live handles — callers must treat `None` as "no
+/// Postgres-fenced claim machinery is available; use the portable,
+/// single-node path instead," never as an error.
+///
+/// Unconditionally compiled (no `clustering` feature gate): both field
+/// types ([`waddle_xmpp::ownership::ClaimStore`],
+/// [`waddle_xmpp::ownership::SharedNodeIdentity`]) are themselves
+/// unconditionally compiled, so ordinary non-clustering builds can still
+/// name this type (e.g. on `AppState`) without conditional compilation
+/// leaking into shared struct definitions.
+#[derive(Clone, Default)]
+pub struct ClusteringHandles {
+    /// The same `ClaimStore` backing this node's entity-ownership claims —
+    /// **not** a second, independent store. Constructed by cloning the
+    /// same underlying `Database` the node-lease loop uses, so both views
+    /// observe the same `clustering_claims` rows.
+    pub claim_store: Option<Arc<dyn waddle_xmpp::ownership::ClaimStore>>,
+    /// Live view of this node's current claim identity — the same shared
+    /// handle `self_fence::run_node_lease` updates on every
+    /// re-registration. See [`waddle_xmpp::ownership::SharedNodeIdentity`].
+    pub node_identity: Option<waddle_xmpp::ownership::SharedNodeIdentity>,
+    /// ADR-0017 Phase 3 Slice 5 (carried debt (b)): the real
+    /// `LocallyClaimedEntities` handed to `run_node_lease`, constructed
+    /// empty (the SM session registry does not exist yet at
+    /// `start_if_enabled` time — it needs `ClusteringHandles` itself) and
+    /// completed by `server/http.rs::create_sm_session_registry` calling
+    /// [`local_claims::SmSessionLocalClaims::wire`] once the registry is
+    /// built. The one field on this otherwise-unconditionally-compiled
+    /// struct that IS feature-gated: its type
+    /// (`local_claims::SmSessionLocalClaims`) only exists behind
+    /// `clustering`, since it implements the also-feature-gated
+    /// `self_fence::LocallyClaimedEntities` trait. `None` whenever
+    /// clustering is disabled, mirroring `claim_store`/`node_identity`.
+    #[cfg(feature = "clustering")]
+    pub local_claims: Option<Arc<local_claims::SmSessionLocalClaims>>,
+    /// ADR-0017 Phase 3 Slice 7: the `RoomActor`-backed
+    /// `LocallyClaimedEntities` counterpart of `local_claims`, constructed
+    /// empty here (the MUC room registry does not exist yet at this point
+    /// in startup — it is spawned earlier, in `server/mod.rs`, mirroring
+    /// `local_claims`'s own construction-order note) and wired later by
+    /// `server/mod.rs` calling `RoomRegistry::wire_clustering_claims` /
+    /// `RoomLocalClaims::wire` once the registry handle is available. Also
+    /// the same `Arc` `RelayActor` answers `Demote` asks through (the
+    /// two-part demotion protocol's part (a) receiving side). `None`
+    /// under the same conditions `local_claims` is `None`.
+    #[cfg(feature = "clustering")]
+    pub room_local_claims: Option<Arc<local_claims::RoomLocalClaims>>,
+    /// ADR-0017 Phase 3 Slice 7: the durable MUC room ownership store —
+    /// the SAME `Arc` `server/mod.rs` hands to
+    /// `RoomRegistry::wire_clustering_claims` (never a second, independent
+    /// store) and the one `dispatch_to_room`'s fenced pre-fan-out backstop
+    /// reads directly. `None` under the exact same conditions
+    /// `local_claims` is `None` (clustering disabled, non-Postgres, a
+    /// build without the `clustering` feature, or — defensively — this
+    /// store's own `ensure_schema` failing at startup, logged but
+    /// non-fatal to the rest of clustering).
+    #[cfg(feature = "clustering")]
+    pub muc_durable_store: Option<Arc<dyn waddle_xmpp::muc::MucDurableStore>>,
+    /// ADR-0017 Phase 3 Slice 8: the Postgres-authoritative, epoch-fenced
+    /// XEP-0397 ISR token store. `isr_token_store()` below is the single
+    /// accessor every reader (the WebSocket ISR-enable/resume handlers, the
+    /// stream-features/disco advertisement gate, `session_janitors.rs`'s
+    /// orphan-reaper TTL sweep) goes through — council-adjudicated FIX 6
+    /// removed the dead second copy this doc comment used to reference
+    /// (`ProtocolServices::isr_token_store`, a field that was written at
+    /// construction time but never read; every real reader already went
+    /// through this accessor). `None` under the exact same conditions
+    /// `muc_durable_store` is `None` (clustering disabled, non-Postgres, a
+    /// build without the `clustering` feature, or this store's own
+    /// `ensure_schema` failing at startup — which, per
+    /// [`ClusteringError::IsrTokenStoreInit`], is fatal to clustering
+    /// startup, so in practice a live `ClusteringHandles` with clustering
+    /// enabled always has this populated).
+    #[cfg(feature = "clustering")]
+    pub isr_token_store: Option<Arc<dyn waddle_xmpp::isr::IsrTokenStore>>,
+    /// ADR-0017 Phase 3 Slice 5: a `NodeLeaseStore` handle for the orphan
+    /// reaper janitor (`server::session_janitors::spawn_orphan_reaper_janitor`),
+    /// which runs on its own periodic cadence outside `run_node_lease`'s
+    /// closure and therefore needs its own handle onto the same
+    /// `clustering_nodes`/`clustering_claims` tables — wraps the same
+    /// `Database` clone as `claim_store`/the node-lease loop's own store,
+    /// never a second independent one. Feature-gated for the same reason
+    /// as `local_claims`: `NodeLeaseStore` only exists behind `clustering`.
+    #[cfg(feature = "clustering")]
+    pub node_lease: Option<Arc<dyn claims::NodeLeaseStore>>,
+    /// The configured node-lease TTL (ADR-0017 element 4/Q6) — the orphan
+    /// reaper janitor needs this same value to bind into its `expire` calls
+    /// and has no other route to `ClusteringNodeLeaseConfig` (it runs off
+    /// `WebSocketState`, which does not otherwise carry `ServerConfig`).
+    #[cfg(feature = "clustering")]
+    pub lease_ttl: Option<std::time::Duration>,
+    /// This node's own `pod_template_hash` (ADR-0017 Phase 3 Slice 10, Q5)
+    /// — the same value passed to `NodeLeaseStore::register`. The orphan
+    /// reaper janitor needs this alongside `node_lease` to compute the
+    /// rollout-aware acquire-backoff delay
+    /// (`clustering::drain::rollout_backoff_delay`) before each
+    /// `steal_stale(OwnerStale)` attempt; it has no other route to
+    /// `ClusteringConfig`, mirroring `lease_ttl`'s identical rationale.
+    #[cfg(feature = "clustering")]
+    pub pod_template_hash: Option<String>,
+    /// ADR-0017 Phase 3 Slice 6: the cross-node resume live-handshake's
+    /// bridge to this node's own `ConnectionRegistry` — the SAME `Arc` the
+    /// swarm's `RelayActor` answers `RelayResumeSteal` asks through, not a
+    /// second, independent bridge. Wired by
+    /// `server/http.rs::create_sm_session_registry` once the connection
+    /// registry exists (construction-order chicken-and-egg, mirroring
+    /// `local_claims`). Feature-gated for the same reason as `local_claims`.
+    #[cfg(feature = "clustering")]
+    pub resume_bridge: Option<Arc<resume_bridge::ResumeStealBridge>>,
+    /// This node's clustering-scope cancellation token (the same child
+    /// token every clustering task races against — see
+    /// `clustering_scope_token`'s doc comment). Exposed so a caller outside
+    /// `clustering` (the cross-node resume asker,
+    /// `server/http.rs::create_sm_session_registry`) can construct a
+    /// `relay::RelayHandle` with the correct cancellation scope (ADR-0017
+    /// Phase 3 Slice 6's `RelayHandle` cancellation-safety paydown).
+    #[cfg(feature = "clustering")]
+    pub stop_token: Option<CancellationToken>,
+    /// The resolved `ClusteringResumeHandshakeConfig::timeout` (ADR-0017
+    /// Phase 3 Slice 6) — the cross-node resume path's held-response retry
+    /// budget. Carried here (rather than threading `ServerConfig` itself)
+    /// mirroring `lease_ttl`'s identical rationale: the SM session registry
+    /// and its resume path run off `WebSocketState`, which does not
+    /// otherwise carry `ClusteringConfig`.
+    #[cfg(feature = "clustering")]
+    pub resume_handshake_timeout: Option<std::time::Duration>,
+}
+
+impl ClusteringHandles {
+    /// `Some((claim_store, node_identity))` only when both handles are
+    /// present; `None` otherwise. Convenience for callers (e.g.
+    /// `sm_persistence::open_for_cluster_mode`) that only ever want the
+    /// pair together — a `ClaimStore` with no live identity to bind into
+    /// its CAS calls (or vice versa) is not a usable combination.
+    pub fn claim_pair(
+        &self,
+    ) -> Option<(
+        Arc<dyn waddle_xmpp::ownership::ClaimStore>,
+        waddle_xmpp::ownership::SharedNodeIdentity,
+    )> {
+        match (&self.claim_store, &self.node_identity) {
+            (Some(store), Some(identity)) => Some((Arc::clone(store), identity.clone())),
+            _ => None,
+        }
+    }
+
+    /// The resolved resume-handshake timeout (ADR-0017 Phase 3 Slice 6),
+    /// `None` under the exact same conditions `claim_pair` is `None`
+    /// (clustering disabled, non-Postgres, or a build without the
+    /// `clustering` feature). Unconditionally compiled, like `claim_pair`,
+    /// so `stream_management.rs` (outside the `clustering` feature gate)
+    /// can read it without conditional compilation.
+    pub fn resume_handshake_timeout(&self) -> Option<std::time::Duration> {
+        #[cfg(feature = "clustering")]
+        {
+            self.resume_handshake_timeout
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            None
+        }
+    }
+
+    /// The Postgres-authoritative ISR token store (ADR-0017 Phase 3 Slice
+    /// 8), `None` under the exact same conditions `claim_pair` is `None`.
+    /// Unconditionally compiled, like `claim_pair`/`resume_handshake_timeout`,
+    /// so the WebSocket layer (outside the `clustering` feature gate) can
+    /// read it without conditional compilation. **This is also the single
+    /// source of truth for "is XEP-0397 available" (Q8's `clustering.enabled
+    /// && Postgres` gate)** — stream-features/disco advertisement and the
+    /// `<isr-enable/>`/ISR-resume handlers all key off `.is_some()` here,
+    /// never a separate config check, so the advertised capability and the
+    /// actually-wired behavior can never drift apart.
+    pub fn isr_token_store(&self) -> Option<Arc<dyn waddle_xmpp::isr::IsrTokenStore>> {
+        #[cfg(feature = "clustering")]
+        {
+            self.isr_token_store.clone()
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            None
+        }
+    }
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): hard-kill the
+    /// locally-claimed `RoomActor` for `room_jid`, mirroring the Demote
+    /// relay ask's exact receiving-side call
+    /// (`RelayActor`'s `Demote` handler calling
+    /// `room_local_claims.demote(&entity)`). Every mutation-handler call
+    /// site that observes `RoomMutationError::NotOwner`/an equivalent
+    /// per-message `NotOwner` variant calls this so the deposed actor
+    /// genuinely stops serving (hard `ActorRef::kill()`), instead of only
+    /// bouncing the one request that discovered the ownership loss and
+    /// leaving the actor to keep answering (and re-discovering the same
+    /// staleness) for every subsequent ask.
+    ///
+    /// A no-op when clustering is disabled, this binary lacks the
+    /// `clustering` Cargo feature, or `room_local_claims` was never wired
+    /// (defensive — `NotOwner` can only ever be produced when a durable
+    /// store, and therefore `room_local_claims`, is configured).
+    pub async fn demote_room_actor(&self, room_jid: &jid::BareJid) {
+        #[cfg(feature = "clustering")]
+        {
+            use self_fence::LocallyClaimedEntities as _;
+            let Some(room_local_claims) = &self.room_local_claims else {
+                return;
+            };
+            let entity = waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            );
+            room_local_claims.demote(&entity).await;
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            let _ = room_jid;
+        }
+    }
+}
+
+/// The clustering subsystem's node-lease task join handle (ADR-0017 Phase 3
+/// Slice 10), returned alongside [`ClusteringHandles`] rather than as one of
+/// its fields: `JoinHandle` is neither `Clone` nor meaningfully `Default`,
+/// and `ClusteringHandles` derives both for its many other call sites (it
+/// is cloned onto `AppState`, `WebSocketState`, and every janitor). This
+/// lets `server/mod.rs` await this node's per-entity graceful drain
+/// (`self_fence::run_node_lease`'s own exit, which runs the drain sequence
+/// on its way out) actually completing before process exit — "in parallel
+/// with connection drain but completing before process exit," per element
+/// 4's drain sequence text — rather than a fire-and-forget background task
+/// racing shutdown with no ordering guarantee at all.
+pub struct ClusteringShutdown(Option<tokio::task::JoinHandle<()>>);
+
+impl ClusteringShutdown {
+    /// Await the node-lease loop's own exit, bounded by `budget` so a
+    /// wedged drain task cannot hang process shutdown forever — a timeout
+    /// here is logged and the process proceeds to exit anyway: any
+    /// un-released claims are simply fenced-safe and reclaimed later by
+    /// another node's orphan reaper (`claims_abandoned_on_drain` already
+    /// counts them). A `None` inner handle (clustering disabled, or a
+    /// build without the `clustering` feature) returns immediately.
+    pub async fn await_drain(self, budget: Duration) {
+        let Some(handle) = self.0 else {
+            return;
+        };
+        if tokio::time::timeout(budget, handle).await.is_err() {
+            tracing::warn!(
+                budget_ms = budget.as_millis() as u64,
+                "clustering: node-lease drain did not complete within the shutdown budget; \
+                 proceeding with process exit (fenced-safe: un-released claims are simply \
+                 reclaimed later)"
+            );
+        }
+    }
+}
+
 /// Conditionally start the clustering swarm subsystem.
 ///
-/// Returns `Ok(())` immediately, doing nothing, when clustering is disabled —
-/// the default single-replica path, unchanged. When enabled it validates the
-/// Postgres control-plane prerequisite and, on a `clustering`-feature build,
-/// brings up the owned libp2p swarm (later slices).
+/// Returns `Ok((ClusteringHandles::default(), ClusteringShutdown(None)))`
+/// immediately, doing nothing, when clustering is disabled — the default
+/// single-replica path, unchanged. When enabled it validates the Postgres
+/// control-plane prerequisite and, on a `clustering`-feature build, brings
+/// up the owned libp2p swarm (later slices) and returns live handles onto
+/// the same `ClaimStore`/node-identity the node-lease loop itself uses,
+/// plus the node-lease task's own join handle (Slice 10).
 pub async fn start_if_enabled(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: &CancellationToken,
-) -> Result<(), ClusteringError> {
+    readiness: ClusteringReadiness,
+) -> Result<(ClusteringHandles, ClusteringShutdown), ClusteringError> {
     if !config.enabled {
-        return Ok(());
+        return Ok((ClusteringHandles::default(), ClusteringShutdown(None)));
     }
 
     let driver = db.driver();
@@ -156,7 +538,7 @@ pub async fn start_if_enabled(
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (db, stop_token, driver);
+        let _ = (db, stop_token, driver, readiness);
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -166,13 +548,39 @@ pub async fn start_if_enabled(
             return Err(ClusteringError::RequiresPostgres { driver });
         }
         // Every clustering task (swarm event loop, lease heartbeat, relay
-        // supervisor, allowlist/DNS timers) is driven off this child, never
-        // the raw process-wide `stop_token` — see `clustering_scope_token`.
+        // supervisor, allowlist/DNS timers, and — from Phase 3 Slice 2 — the
+        // node-lease/self-fence loop) is driven off this child, never the
+        // raw process-wide `stop_token` — see `clustering_scope_token`.
         let clustering_stop = clustering_scope_token(stop_token);
+        // ADR-0017 Phase 3 Slice 6: constructed empty (the `ConnectionRegistry`
+        // doesn't exist yet at this point in startup) and wired to it later by
+        // `server/http.rs::create_sm_session_registry` — the same
+        // construction-order chicken-and-egg fix `local_claims` already
+        // applies. The swarm's `RelayActor` answers `RelayResumeSteal` asks
+        // through this exact `Arc`.
+        let resume_bridge = resume_bridge::ResumeStealBridge::new();
+        // ADR-0017 Phase 3 Slice 7: constructed empty for the same
+        // construction-order reason as `resume_bridge` — the MUC room
+        // registry doesn't exist yet at this point in startup (it is
+        // spawned before `start_if_enabled` runs, in `server/mod.rs`) —
+        // and wired later via `RoomRegistry::wire_clustering_claims`'s
+        // caller in `server/mod.rs`. The swarm's `RelayActor` answers
+        // `Demote` asks (the two-part demotion protocol's part (a))
+        // through this exact `Arc`.
+        let room_local_claims = local_claims::RoomLocalClaims::new();
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
-        let handle = swarm::spawn(config, db, clustering_stop).await?;
+        let handle = swarm::spawn(
+            config,
+            db,
+            clustering_stop.clone(),
+            swarm::RelayBridges {
+                resume_bridge: Arc::clone(&resume_bridge),
+                room_local_claims: Arc::clone(&room_local_claims),
+            },
+        )
+        .await?;
         tracing::info!(
             local_peer_id = %handle.local_peer_id,
             node_id = %handle.node_id,
@@ -180,8 +588,151 @@ pub async fn start_if_enabled(
             request_timeout_ms = config.messaging.request_timeout.as_millis() as u64,
             "ADR-0017 Phase 2: clustering swarm started (node discovery only)"
         );
-        Ok(())
+
+        // ADR-0017 Phase 3 Slice 2: the entity-ownership node lease is a
+        // *different* lease from the keypair-slot lease `swarm::spawn` just
+        // heartbeat-started above — this one guards this node's
+        // `clustering_claims` ownership, not its libp2p identity (Q5's "no
+        // coupling" precedent). Register once, up front (fail startup on a
+        // genuine registration failure, exactly like the keypair-slot
+        // acquire above), then hand the loop off to the background task.
+        let node_lease = claims::PostgresClaimStore::new(db.clone());
+        let node_identity = waddle_xmpp::ownership::NodeIdentity::new(
+            handle.node_id.as_str().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        // FIX 6: read through the typed `ClusteringConfig::pod_template_hash`
+        // (parsed once in `config.rs`'s `from_vars` pipeline, like every
+        // sibling var) rather than a raw `std::env::var` at this call site.
+        let pod_template_hash = config.pod_template_hash.clone();
+        register_node_lease(&node_lease, &node_identity, pod_template_hash.clone()).await?;
+
+        // ADR-0017 Phase 3 Slice 4 follow-up plumbing: hand back a
+        // `ClaimStore` view onto the same `clustering_claims` rows the
+        // node-lease loop guards, plus a live handle onto the identity it
+        // keeps current across re-registrations — so a caller outside
+        // `clustering` (the Postgres-fenced `SmPersistenceStorage`) can
+        // bind the *current* node identity into its own claim
+        // acquire/fence calls instead of capturing a stale one at
+        // construction time. `claim_store_handle` wraps the same `db`
+        // clone as `node_lease` — not a second, independent store.
+        let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(node_identity.clone());
+        // ADR-0017 Phase 3 Slice 5 (carried debt (b)): construct the real
+        // `LocallyClaimedEntities` empty now, hand the same `Arc` to both
+        // `run_node_lease` (below) and the returned handles — the SM
+        // session registry is wired into it later, once
+        // `server/http.rs::create_sm_session_registry` builds it (see
+        // `ClusteringHandles::local_claims`'s doc comment for the full
+        // construction-order rationale).
+        let local_claims = local_claims::SmSessionLocalClaims::new();
+        // ADR-0017 Phase 3 Slice 7: `NodeLeaseRunConfig` takes exactly one
+        // `Arc<dyn LocallyClaimedEntities>` handle — `CombinedLocalClaims`
+        // dispatches across both concrete implementors by `entity_type`
+        // (see its own doc comment) rather than either one widening to
+        // know about the other's entities.
+        let combined_local_claims = local_claims::CombinedLocalClaims::new(
+            Arc::clone(&local_claims),
+            Arc::clone(&room_local_claims),
+        );
+        let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
+            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        // ADR-0017 Phase 3 Slice 7: the durable MUC room store. Built here
+        // (not deferred to `server/mod.rs`) because it only needs `db`/
+        // `live_identity`/`clustering_stop` — all already in scope — unlike
+        // `room_local_claims` above, which genuinely must wait for the room
+        // registry to exist.
+        //
+        // FIX 8 (council-adjudicated): a failure to initialize is FATAL to
+        // clustering startup, not logged-and-continue. Claims live without
+        // this store means a `RoomActor` ownership move silently resets
+        // config/affiliations/subject to defaults — an unprotected
+        // deposal, not a degraded-but-safe fallback. Mirrors the co-location
+        // discipline `sm_persistence`/`pending_delivery`'s
+        // `open_for_cluster_mode` already enforce at startup for their own
+        // durability stores.
+        let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(
+            crate::muc_durable::PostgresMucRoomStore::open(
+                db.clone(),
+                live_identity.clone(),
+                clustering_stop.clone(),
+            )
+            .await
+            .map_err(ClusteringError::MucDurableStoreInit)?,
+        );
+        // ADR-0017 Phase 3 Slice 8: the Postgres ISR token store. Built here
+        // for the same reason `muc_durable_store` is — it only needs `db`,
+        // already in scope — and, per FIX 8's precedent, a schema-init
+        // failure is fatal to clustering startup rather than leaving ISR
+        // silently unadvertised-but-half-wired.
+        let isr_token_store: Arc<dyn waddle_xmpp::isr::IsrTokenStore> = {
+            use waddle_xmpp::isr::IsrTokenStore as _;
+            let store = isr::PostgresIsrTokenStore::new(db.clone());
+            store
+                .ensure_schema()
+                .await
+                .map_err(ClusteringError::IsrTokenStoreInit)?;
+            Arc::new(store)
+        };
+        let handles = ClusteringHandles {
+            claim_store: Some(claim_store_handle),
+            node_identity: Some(live_identity.clone()),
+            local_claims: Some(Arc::clone(&local_claims)),
+            room_local_claims: Some(Arc::clone(&room_local_claims)),
+            muc_durable_store: Some(muc_durable_store),
+            isr_token_store: Some(isr_token_store),
+            node_lease: Some(node_lease_handle),
+            lease_ttl: Some(config.node_lease.lease_ttl),
+            pod_template_hash: pod_template_hash.clone(),
+            resume_bridge: Some(resume_bridge),
+            stop_token: Some(clustering_stop.clone()),
+            resume_handshake_timeout: Some(config.resume_handshake.timeout),
+        };
+
+        // ADR-0017 Phase 3 Slice 10: keep the join handle so
+        // `server/mod.rs` can await this node's graceful drain (which this
+        // task runs on its own exit) actually completing before process
+        // exit — see `ClusteringShutdown`'s doc comment.
+        let node_lease_task = tokio::spawn(self_fence::run_node_lease(
+            node_lease,
+            node_identity,
+            clustering_stop,
+            self_fence::NodeLeaseRunConfig {
+                pod_template_hash,
+                lease_config: config.node_lease.clone(),
+                self_fence_config: config.self_fence.clone(),
+                connected_peers: handle.connected_peers.clone(),
+                local_claims: combined_local_claims,
+                readiness,
+                live_identity,
+                // FIX 4(b): the same `ClaimStore` view onto
+                // `clustering_claims` as `claim_store_handle` above —
+                // wraps the same `db` clone, never a second, independent
+                // store.
+                claim_store: Arc::new(claims::PostgresClaimStore::new(db.clone())),
+                claim_release_budget: config.node_lease.claim_release_budget,
+            },
+        ));
+        Ok((handles, ClusteringShutdown(Some(node_lease_task))))
     }
+}
+
+/// Register this node's initial node-lease row, mapping the store's
+/// `ClaimError` into [`ClusteringError`] so a genuine registration failure
+/// fails server startup exactly like the keypair-slot acquire above, rather
+/// than silently starting a node-lease loop that can never renew.
+#[cfg(feature = "clustering")]
+async fn register_node_lease(
+    node_lease: &claims::PostgresClaimStore,
+    identity: &waddle_xmpp::ownership::NodeIdentity,
+    pod_template_hash: Option<String>,
+) -> Result<(), ClusteringError> {
+    use claims::NodeLeaseStore as _;
+    node_lease
+        .register(identity, pod_template_hash)
+        .await
+        .map_err(ClusteringError::NodeLease)
 }
 
 #[cfg(all(test, feature = "clustering"))]

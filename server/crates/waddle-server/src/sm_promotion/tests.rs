@@ -3,11 +3,14 @@ use std::time::Instant;
 
 use chrono::Utc;
 use jid::{BareJid, FullJid};
+use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::QuotaPolicy;
 use waddle_xmpp::protocol::session_state::Blocklist;
-use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::registry::{
+    ConnectionRegistry, OutboundStanza, RegisterUserResource, UserRegistryActor,
+};
 use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
@@ -19,6 +22,38 @@ fn full(s: &str) -> FullJid {
 
 fn bare(s: &str) -> BareJid {
     s.parse().unwrap()
+}
+
+/// A fresh, empty actor-authoritative registry for `promote_session_unacked`
+/// / `promote_displaced_sessions` tests (ADR-0017 Phase 3 Slice 9). Tests
+/// that need a live resource register it through this actor directly (the
+/// same `RegisterUserResource` path production dual-registration uses).
+fn test_user_registry() -> ActorRef<UserRegistryActor> {
+    UserRegistryActor::spawn(UserRegistryActor::new())
+}
+
+/// Register `jid` on BOTH the DashMap `ConnectionRegistry` and the
+/// actor-authoritative `UserRegistryActor`, sharing the SAME
+/// `ConnectionEntry` — mirrors production dual-registration
+/// (`server::dual_registration::mirror_register`) so a later
+/// `registry.update_presence(...)` mutates atomics the actor's cloned entry
+/// also observes. ADR-0017 Phase 3 Slice 9: bare-JID selection now reads
+/// the actor alone, so tests exercising live delivery must register on
+/// both trees, not just the DashMap.
+async fn dual_register(
+    registry: &ConnectionRegistry,
+    user_registry: &ActorRef<UserRegistryActor>,
+    jid: FullJid,
+    sender: tokio::sync::mpsc::Sender<OutboundStanza>,
+) {
+    registry.register(jid.clone(), sender);
+    let entry = registry
+        .get_entry(&jid)
+        .expect("just registered on DashMap");
+    user_registry
+        .ask(RegisterUserResource { jid, entry })
+        .await
+        .expect("register on actor tree");
 }
 
 fn direct_target(
@@ -277,6 +312,7 @@ async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/web"),
@@ -286,6 +322,7 @@ async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -314,6 +351,7 @@ async fn promotes_to_pending_delivery_when_no_alt_resource() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/laptop"),
@@ -323,6 +361,7 @@ async fn promotes_to_pending_delivery_when_no_alt_resource() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -341,6 +380,7 @@ async fn dm_with_mam_payload_is_still_promoted_to_pending_delivery() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/laptop"),
@@ -354,6 +394,7 @@ async fn dm_with_mam_payload_is_still_promoted_to_pending_delivery() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -385,9 +426,10 @@ async fn promotes_to_alt_resource_when_one_is_online() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let alt = full("alice@example.com/web");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    registry.register(alt.clone(), tx);
+    dual_register(&registry, &user_registry, alt.clone(), tx).await;
     registry.update_presence(&alt, true, 1);
 
     let session = detached_session_with_unacked(
@@ -403,6 +445,7 @@ async fn promotes_to_alt_resource_when_one_is_online() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -426,10 +469,11 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
             max_rows: 0,
         }));
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     // Register the sender so the bounce can be delivered.
     let sender = full("bob@example.com/x");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    registry.register(sender.clone(), tx);
+    dual_register(&registry, &user_registry, sender.clone(), tx).await;
     registry.update_presence(&sender, true, 1);
 
     let session = detached_session_with_unacked(
@@ -445,6 +489,7 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -470,6 +515,7 @@ async fn drops_no_store_hint_stanzas_silently() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let mut m =
         xmpp_parsers::message::Message::new(Some("alice@example.com".parse::<jid::Jid>().unwrap()));
     m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().unwrap());
@@ -488,6 +534,7 @@ async fn drops_no_store_hint_stanzas_silently() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -510,10 +557,11 @@ async fn full_jid_target_falls_back_to_bare_jid_fanout() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     // Alice's web resource is online; laptop is detached.
     let alt = full("alice@example.com/web");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    registry.register(alt.clone(), tx);
+    dual_register(&registry, &user_registry, alt.clone(), tx).await;
     registry.update_presence(&alt, true, 1);
 
     // Stanza was originally addressed to alice/laptop (full JID).
@@ -537,6 +585,7 @@ async fn full_jid_target_falls_back_to_bare_jid_fanout() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -558,12 +607,13 @@ async fn bare_jid_target_fans_out_to_all_routable_resources() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let web = full("alice@example.com/web");
     let mobile = full("alice@example.com/mobile");
     let (tx_web, mut rx_web) = tokio::sync::mpsc::channel(8);
     let (tx_mobile, mut rx_mobile) = tokio::sync::mpsc::channel(8);
-    registry.register(web.clone(), tx_web);
-    registry.register(mobile.clone(), tx_mobile);
+    dual_register(&registry, &user_registry, web.clone(), tx_web).await;
+    dual_register(&registry, &user_registry, mobile.clone(), tx_mobile).await;
     registry.update_presence(&web, true, 1);
     registry.update_presence(&mobile, true, 1);
 
@@ -576,6 +626,7 @@ async fn bare_jid_target_fans_out_to_all_routable_resources() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -594,6 +645,7 @@ async fn iq_unacked_promoted_to_alt_resource_when_addressed_resource_online() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let target = full("alice@example.com/laptop");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     registry.register(target.clone(), tx);
@@ -618,6 +670,7 @@ async fn iq_unacked_promoted_to_alt_resource_when_addressed_resource_online() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -642,6 +695,7 @@ async fn iq_unacked_dropped_when_no_resource_online() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let iq_xml = {
         let iq = xmpp_parsers::iq::Iq::Result {
             from: Some("server.example/srv".parse().expect("valid full jid")),
@@ -661,6 +715,7 @@ async fn iq_unacked_dropped_when_no_resource_online() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -677,6 +732,7 @@ async fn skips_unparseable_stanzas() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/laptop"),
@@ -685,6 +741,7 @@ async fn skips_unparseable_stanzas() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -707,6 +764,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let receipt_time =
         chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("valid millis");
     let session = waddle_xmpp::stream_management::DetachedSession {
@@ -738,6 +796,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -765,6 +824,7 @@ async fn storage_failure_records_storage_failed_not_dropped() {
     // the durable SM row for restart-time retry.
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/laptop"),
@@ -778,6 +838,7 @@ async fn storage_failure_records_storage_failed_not_dropped() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -823,6 +884,7 @@ async fn promotion_prefers_existing_self_stamp_time_over_queue_receipt_time() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     // detached_session_with_unacked stamps original_receipt_at with
     // Utc::now() — the (later) redelivery-time T1.
     let session = detached_session_with_unacked(
@@ -834,6 +896,7 @@ async fn promotion_prefers_existing_self_stamp_time_over_queue_receipt_time() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -917,9 +980,11 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let summary = promote_session_unacked(
         &drained[0],
         &registry,
+        &user_registry,
         &pending,
         &Blocklist::empty(),
         "example.com",
@@ -977,12 +1042,14 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     promote_displaced_sessions(
         displaced,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -1050,12 +1117,14 @@ async fn ownership_moved_detach_promotes_displaced_queue_instead_of_dropping_it(
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     promote_displaced_sessions(
         vec![displaced],
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -1111,12 +1180,14 @@ async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry()
     // Promotion fails: pending-delivery backend is down.
     let failing: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     promote_displaced_sessions(
         displaced,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &failing,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -1145,6 +1216,7 @@ async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry()
     let summary = promote_session_unacked(
         &drained[0],
         &registry,
+        &user_registry,
         &recovered,
         &Blocklist::empty(),
         "example.com",
@@ -1210,12 +1282,14 @@ async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking = FailingBlocking;
     promote_displaced_sessions(
         removed,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: &blocking,
             server_domain: "example.com",
@@ -1273,8 +1347,9 @@ async fn fresh_bind_invalidation_delivers_displaced_queue_to_new_session() {
     // The fresh bind registers its connection BEFORE invalidation runs
     // (finalize_sm_after_registry_registration ordering).
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    registry.register(jid.clone(), tx);
+    dual_register(&registry, &user_registry, jid.clone(), tx).await;
     registry.update_presence(&jid, true, 0);
 
     let removed = sm_registry.invalidate_sessions_for_jid(&jid).await.unwrap();
@@ -1288,6 +1363,7 @@ async fn fresh_bind_invalidation_delivers_displaced_queue_to_new_session() {
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -1343,6 +1419,7 @@ async fn promotion_scrubs_stanzas_matching_recent_tombstone() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let session = detached_session_with_unacked(
         "stream-tomb",
         full("alice@example.com/laptop"),
@@ -1360,6 +1437,7 @@ async fn promotion_scrubs_stanzas_matching_recent_tombstone() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -1396,6 +1474,7 @@ async fn tombstone_does_not_scrub_stanza_received_after_its_recording() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     // The helper stamps original_receipt_at = Utc::now(); the tombstone
     // predates it by an hour.
     let session = detached_session_with_unacked(
@@ -1412,6 +1491,7 @@ async fn tombstone_does_not_scrub_stanza_received_after_its_recording() {
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -1446,6 +1526,7 @@ async fn tombstone_scrubs_stanza_whose_receipt_reads_slightly_after_recording() 
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     // Helper stamps original_receipt_at = Utc::now(); the tombstone
     // reads 30s in the past — inside the slack, so this models a
     // receipt stamp skewed up to 30s ahead of the scrubbing clock.
@@ -1463,6 +1544,7 @@ async fn tombstone_scrubs_stanza_whose_receipt_reads_slightly_after_recording() 
     let summary = promote_session_unacked(
         &session,
         &registry,
+        &user_registry,
         &storage,
         &Blocklist::empty(),
         "example.com",
@@ -1535,10 +1617,12 @@ async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_conten
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let recent = sm_registry.recent_tombstones().unwrap();
     let summary = promote_session_unacked(
         &drained[0],
         &registry,
+        &user_registry,
         &pending,
         &Blocklist::empty(),
         "example.com",
@@ -1630,12 +1714,14 @@ async fn mid_batch_retraction_still_scrubs_later_sessions_in_displaced_promotion
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
 
     promote_displaced_sessions(
         sessions,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: &blocking,
             server_domain: "example.com",
@@ -1825,6 +1911,7 @@ async fn retraction_landing_after_tombstone_snapshot_still_scrubs_promoted_rows(
     });
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::clone(&pending_impl) as _;
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
 
     promote_displaced_sessions(
@@ -1832,6 +1919,7 @@ async fn retraction_landing_after_tombstone_snapshot_still_scrubs_promoted_rows(
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -2028,12 +2116,14 @@ async fn partial_storage_failure_retries_only_failed_stanzas_without_duplicates(
     let flaky = Arc::new(FlakyPending::failing_on(2));
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::clone(&flaky) as _;
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     promote_displaced_sessions(
         displaced,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -2085,6 +2175,7 @@ async fn partial_storage_failure_retries_only_failed_stanzas_without_duplicates(
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
             connection_registry: &registry,
+            user_registry: &user_registry,
             pending_storage: &pending,
             blocking_storage: blocking.as_ref(),
             server_domain: "example.com",
@@ -2127,6 +2218,7 @@ async fn capacity_churn_loses_no_messages_across_restart_style_read() {
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
 
     for i in 0..5u32 {
@@ -2144,6 +2236,7 @@ async fn capacity_churn_loses_no_messages_across_restart_style_read() {
             DisplacedPromotionDeps {
                 sm_registry: &sm_registry,
                 connection_registry: &registry,
+                user_registry: &user_registry,
                 pending_storage: &pending,
                 blocking_storage: blocking.as_ref(),
                 server_domain: "example.com",

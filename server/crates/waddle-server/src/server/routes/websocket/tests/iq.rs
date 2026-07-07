@@ -2713,6 +2713,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
         &state.deps.protocol.command_registry,
         std::sync::Arc::clone(&state.deps.app_state),
         std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+        state.deps.protocol.user_registry.clone(),
         std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
         None,
     )
@@ -2843,6 +2844,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
         &state.deps.protocol.command_registry,
         std::sync::Arc::clone(&state.deps.app_state),
         std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+        state.deps.protocol.user_registry.clone(),
         std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
         None,
     )
@@ -2993,6 +2995,7 @@ async fn admin_channels_create_space_bookmark_grants_space_members_channel_view(
         &state.deps.protocol.command_registry,
         std::sync::Arc::clone(&state.deps.app_state),
         std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+        state.deps.protocol.user_registry.clone(),
         std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
         None,
     )

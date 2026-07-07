@@ -352,10 +352,54 @@ async fn handle_muc_join_unlocked(
                     })
                     .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
-                let Some(acquisition) =
-                    get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
-                else {
-                    return vec![];
+                let acquisition = match get_or_create_room_actor(
+                    state,
+                    room_jid,
+                    config,
+                    waddle_id,
+                    channel_id,
+                )
+                .await
+                {
+                    Ok(acquisition) => acquisition,
+                    // ADR-0017 Phase 3 Slice 7 FIX 6 (council-adjudicated):
+                    // another node genuinely, currently owns this room's
+                    // claim — this phase does not wire cross-node MUC
+                    // proxying (Phase 4), so the conformant response is a
+                    // recoverable, retry-able XEP-0045 join bounce, never a
+                    // silent drop.
+                    Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+                        return vec![build_muc_presence_error_xml(
+                            room_jid,
+                            &nick,
+                            sender_jid,
+                            StanzaError::new(
+                                ErrorType::Wait,
+                                DefinedCondition::ResourceConstraint,
+                                "en",
+                                "This room's ownership is currently held by another node; \
+                                 please retry.",
+                            ),
+                        )];
+                    }
+                    Err(error) => {
+                        warn!(
+                            room = %room_jid,
+                            %error,
+                            "Failed to get or create room actor for MUC join"
+                        );
+                        return vec![build_muc_presence_error_xml(
+                            room_jid,
+                            &nick,
+                            sender_jid,
+                            StanzaError::new(
+                                ErrorType::Wait,
+                                DefinedCondition::InternalServerError,
+                                "en",
+                                "Failed to get or create the room.",
+                            ),
+                        )];
+                    }
                 };
                 // #1134: the created-bit is registry-authoritative —
                 // the registry's serialized handler makes exactly one
@@ -519,6 +563,30 @@ async fn handle_muc_join_unlocked(
                         StanzaError::new(error_type, condition, "en", message),
                     )];
                 }
+                // ADR-0017 Phase 3 Slice 7 FIX 4/FIX 6 (council-adjudicated):
+                // this incarnation's durable restore has not (yet) resolved
+                // — a genuine backend failure, not a legitimate empty new
+                // room. Bounce with the same conformant, recoverable
+                // condition the ownership-claim bounce above uses, so the
+                // client retries rather than silently never joining.
+                if matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::RestorePending
+                    )
+                ) {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::ResourceConstraint,
+                            "en",
+                            "This room's durable state has not finished loading; please retry.",
+                        ),
+                    )];
+                }
                 if matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
@@ -548,7 +616,10 @@ async fn handle_muc_join_unlocked(
                         ),
                     )];
                 }
-                // Unreachable for the current JoinWithAffiliation error
+                // FIX 6 / #1111: no remaining error variant may silently
+                // drop the join with no presence reply at all — bounce
+                // typed instead of the previous bare `return vec![]`. This
+                // is unreachable for the current JoinWithAffiliation error
                 // surface (every RoomActorError variant it returns has a
                 // typed arm above, and transport failures take the #1108
                 // retry path) — kept as a typed fail-safe so a future

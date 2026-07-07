@@ -9,6 +9,7 @@
 
 mod claims;
 mod core;
+mod cross_node_resume;
 mod persistence_codec;
 mod resources;
 mod sequence;
@@ -18,6 +19,10 @@ mod trait_impl;
 mod traits;
 
 pub use core::InMemorySmSessionRegistry;
+pub use cross_node_resume::{
+    CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,
+    StealTicket,
+};
 pub use resources::DetachedPresenceState;
 pub use session::{DetachedSession, DetachedUnackedStanza};
 pub use tombstones::RecentTombstoneRecord;

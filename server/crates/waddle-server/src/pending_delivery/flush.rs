@@ -427,7 +427,23 @@ impl ArchiveResolver for MamArchiveResolver {
             // typed error so the caller RELEASES the row (and the
             // rest of the claimed batch) for retry instead of
             // destroying queued mail during a MAM outage.
-            Err(error @ waddle_xmpp::mam::storage::MamStorageError::Database(_)) => {
+            //
+            // `NotOwner`/`ClusterColocationMismatch` (ADR-0017 Phase 3
+            // Slice 7 FIX 1) are defensive-only here: both are only ever
+            // returned by `store_message_fenced` (a write path), never by
+            // this read lookup. Matched exhaustively so a future
+            // `MamStorageError` variant forces this classification to be
+            // revisited; treated as transient (not a poison pill) since
+            // treating a fencing/co-location condition as "permanently
+            // unresolvable" would risk deleting a pending row that could
+            // still resolve once ownership/co-location is restored.
+            Err(
+                error @ (waddle_xmpp::mam::storage::MamStorageError::Database(_)
+                | waddle_xmpp::mam::storage::MamStorageError::NotOwner { .. }
+                | waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch {
+                    ..
+                }),
+            ) => {
                 warn!(
                     error = %error,
                     archive_jid = %archive_bare,

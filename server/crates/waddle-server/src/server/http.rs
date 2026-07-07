@@ -13,8 +13,9 @@ use crate::server::routes::websocket::{
 };
 use crate::server::session_janitors::{
     spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor,
-    spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
-    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
+    spawn_orphan_reaper_janitor, spawn_pending_delivery_claim_janitor,
+    spawn_push_service_publish_job_janitor, spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
+    spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -107,8 +108,38 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     Ok(())
 }
 
+/// ADR-0017 Phase 3 Slice 7 FIX 1 (council-adjudicated): open MAM storage
+/// for cluster mode, mirroring
+/// `pending_delivery::open_for_cluster_mode`'s/`sm_persistence::open_for_cluster_mode`'s
+/// identical co-location-then-construct pattern, one table over. Lives here
+/// (in `waddle-server`, not `waddle-xmpp` where `SqlxMamStorage` itself is
+/// defined) because the co-location mismatch error needs
+/// `crate::db::redact_database_url` — a `waddle-server`-only helper — and
+/// because the clustering global database URL only exists on this side of
+/// the crate boundary.
+///
+/// When clustering is enabled AND the resolved `database_url` is a
+/// Postgres DSN, the co-location invariant is checked BEFORE fencing is
+/// ever attached: the resolved URL must be an EXACT string match for
+/// `global_db.database_url()` (deliberately no DSN normalization, matching
+/// every sibling `open_for_cluster_mode`) — the fencing
+/// `SELECT ... FOR SHARE` `SqlxMamStorage::store_message_fenced` issues
+/// targets `clustering_claims`, which only exists in the clustering global
+/// database. A mismatch fails startup with
+/// [`waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch`]
+/// rather than silently fencing (or, on a build without this check,
+/// silently NOT fencing) against a table that may not exist wherever
+/// `database_url` actually points.
+///
+/// When clustering is disabled, `database_url` is not a
+/// `postgres://`/`postgresql://` DSN, or the clustering subsystem produced
+/// no live claim pair, this is exactly `SqlxMamStorage::open` + `quota` —
+/// no fencing attached, the unfenced path exactly as before.
 pub(crate) async fn create_websocket_mam_storage(
     database_url: Option<String>,
+    clustering_enabled: bool,
+    clustering_claim_pair_live: bool,
+    global_db: &crate::db::Database,
 ) -> Result<Arc<dyn MamStorage>> {
     if !cfg!(test) {
         ensure_mam_database_is_durable(
@@ -117,10 +148,43 @@ pub(crate) async fn create_websocket_mam_storage(
         )?;
     }
     let storage = match database_url.as_deref() {
-        Some(database_url) => SqlxMamStorage::open(database_url).await,
-        None => SqlxMamStorage::open_in_memory().await,
-    }
-    .map_err(|error| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}"))?;
+        Some(database_url) => {
+            let opened = SqlxMamStorage::open(database_url).await.map_err(|error| {
+                anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
+            })?;
+            #[cfg(feature = "clustering")]
+            {
+                let resolved_url = (database_url.starts_with("postgres://")
+                    || database_url.starts_with("postgresql://"))
+                .then_some(database_url);
+                if let (true, true, Some(resolved_url)) =
+                    (clustering_enabled, clustering_claim_pair_live, resolved_url)
+                {
+                    if resolved_url != global_db.database_url() {
+                        return Err(anyhow::anyhow!(
+                            waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
+                                mam_database_url: crate::db::redact_database_url(resolved_url),
+                                global_database_url: crate::db::redact_database_url(
+                                    global_db.database_url()
+                                ),
+                            }
+                        ));
+                    }
+                    opened.with_cluster_fencing(true)
+                } else {
+                    opened
+                }
+            }
+            #[cfg(not(feature = "clustering"))]
+            {
+                let _ = (clustering_enabled, clustering_claim_pair_live, global_db);
+                opened
+            }
+        }
+        None => SqlxMamStorage::open_in_memory().await.map_err(|error| {
+            anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
+        })?,
+    };
 
     Ok(Arc::new(storage))
 }
@@ -226,6 +290,10 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     }
 
     spawn_sm_expiry_janitor(&websocket_state);
+    spawn_orphan_reaper_janitor(
+        &websocket_state,
+        server_config.clustering.orphan_reaper_interval,
+    );
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_notification_outbox_janitor(&websocket_state);
     spawn_push_service_publish_job_janitor(&websocket_state);
@@ -345,6 +413,16 @@ async fn create_websocket_state(
 ) -> Result<Arc<WebSocketState>> {
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
+    // ADR-0017 Phase 3 Slice 6: complete the cross-node resume bridge
+    // `clustering::start_if_enabled` handed the swarm's `RelayActor` empty
+    // (the connection registry didn't exist yet at that point in startup) —
+    // the same construction-order chicken-and-egg fix `local_claims` below
+    // already applies. A no-op when clustering is disabled or this binary
+    // lacks the `clustering` feature (`resume_bridge` is `None`).
+    #[cfg(feature = "clustering")]
+    if let Some(resume_bridge) = &state.clustering_claims.resume_bridge {
+        resume_bridge.wire(Arc::clone(&connection_registry));
+    }
 
     // ADR-0017 Phase 1: spawn the actor-backed per-user registry. It is
     // populated alongside `connection_registry` on the live register/
@@ -454,7 +532,13 @@ async fn create_websocket_state(
         }
     }
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
-    let sm_session_registry = create_sm_session_registry(xmpp_config).await;
+    let sm_session_registry = create_sm_session_registry(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+    )
+    .await;
 
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
@@ -485,6 +569,7 @@ async fn create_websocket_state(
         &websocket_command_registry,
         Arc::clone(&state),
         Arc::clone(&connection_registry),
+        user_registry.clone(),
         Arc::clone(&sm_session_registry),
         sfu_service.clone(),
     )
@@ -587,7 +672,13 @@ async fn create_websocket_state(
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
-    let pending_delivery_storage = create_pending_delivery_storage(xmpp_config).await;
+    let pending_delivery_storage = create_pending_delivery_storage(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+    )
+    .await;
 
     let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
 
@@ -815,6 +906,9 @@ fn sm_max_sessions_from_env() -> usize {
 
 async fn create_sm_session_registry(
     xmpp_config: &XmppConfig,
+    server_config: &ServerConfig,
+    clustering: &crate::clustering::ClusteringHandles,
+    global_db: &crate::db::Database,
 ) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
     let sm_database_url = xmpp_config.sm_database_url.clone();
     if sm_database_url.is_none() {
@@ -825,17 +919,54 @@ async fn create_sm_session_registry(
              these env vars for durable session resumption (issue #209)."
         );
     }
+    // ADR-0017 Phase 3 Slice 4: cluster mode selects the Postgres-fenced
+    // `SmPersistenceStorage`; every other deployment shape (clustering
+    // disabled, non-Postgres, or a build without the `clustering` feature)
+    // keeps today's portable, single-node implementation. All of that
+    // branching — including FIX 4's co-location check against `global_db`,
+    // the same handle `clustering::start_if_enabled` itself received —
+    // lives inside `open_for_cluster_mode` itself.
     let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
-        Arc::new(
-            crate::sm_persistence::DatabaseSmPersistence::open(sm_database_url.as_deref())
-                .await
-                .expect("open SM persistence storage"),
-        );
-    let sm_session_registry =
+        crate::sm_persistence::open_for_cluster_mode(
+            sm_database_url.as_deref(),
+            server_config.clustering.enabled,
+            clustering.claim_pair(),
+            global_db,
+        )
+        .await
+        .expect("open SM persistence storage");
+    let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
         )
         .with_persistence(Arc::clone(&sm_persistence));
+    // ADR-0017 Phase 3 Slice 5: wire the SAME `ClaimStore`/live-identity
+    // pair `clustering::start_if_enabled` constructed (never a second,
+    // independent store) into the session registry's own claim
+    // bookkeeping — without this, `claim_session`/`restore_from_persistence`
+    // silently stay on the single-node `InProcessClaimStore` default even
+    // with clustering enabled and the fenced `SmPersistenceStorage` wired
+    // in above, defeating acquire-then-hydrate entirely. A `None` pair
+    // (clustering disabled, non-Postgres, or a build without the
+    // `clustering` feature) leaves today's single-node default untouched.
+    if let Some((claim_store, node_identity)) = clustering.claim_pair() {
+        sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
+    }
+    // ADR-0017 Phase 3 Slice 6: wire the cross-node resume live-handshake
+    // asker (over `RelayHandle`) alongside the claim store above — both are
+    // `None`/absent under the exact same conditions (clustering disabled,
+    // non-Postgres, or a build without the `clustering` feature), so the
+    // cross-node resume fallback never has anything to ask in those cases
+    // and single-node behavior stays byte-identical.
+    #[cfg(feature = "clustering")]
+    if let Some(stop_token) = &clustering.stop_token {
+        let asker = crate::clustering::resume_asker::SwarmRemoteResumeAsker::new(
+            stop_token.clone(),
+            server_config.clustering.messaging.mailbox_timeout,
+            server_config.clustering.messaging.reply_timeout,
+        );
+        sm_session_registry = sm_session_registry.with_remote_resume_asker(Arc::new(asker));
+    }
     if let Err(error) = sm_session_registry.restore_from_persistence().await {
         warn!(
             error = %error,
@@ -844,11 +975,26 @@ async fn create_sm_session_registry(
              until storage health is restored."
         );
     }
-    Arc::new(sm_session_registry)
+    let sm_session_registry = Arc::new(sm_session_registry);
+    // ADR-0017 Phase 3 Slice 5 (carried debt (b)): complete the
+    // `LocallyClaimedEntities` `clustering::start_if_enabled` handed to
+    // `self_fence::run_node_lease` empty — see
+    // `clustering::local_claims::SmSessionLocalClaims`'s doc comment for
+    // the full construction-order rationale. A no-op when clustering is
+    // disabled or this binary lacks the `clustering` feature
+    // (`clustering.local_claims` is `None`).
+    #[cfg(feature = "clustering")]
+    if let Some(local_claims) = &clustering.local_claims {
+        local_claims.wire(Arc::clone(&sm_session_registry));
+    }
+    sm_session_registry
 }
 
 async fn create_pending_delivery_storage(
     xmpp_config: &XmppConfig,
+    server_config: &ServerConfig,
+    clustering: &crate::clustering::ClusteringHandles,
+    global_db: &crate::db::Database,
 ) -> Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
     if pending_delivery_url.is_none() {
@@ -860,10 +1006,20 @@ async fn create_pending_delivery_storage(
              for durable offline delivery (issue #209)."
         );
     }
+    // ADR-0017 Phase 3 Slice 5 FIX 3: cluster mode attaches claim-fenced
+    // Q6-promotion inserts; every other deployment shape (clustering
+    // disabled, non-Postgres, or a build without the `clustering` feature)
+    // keeps today's portable, unfenced path. All of that branching —
+    // including the co-location check against `global_db` — lives inside
+    // `open_for_cluster_mode` itself, mirroring `create_sm_session_registry`'s
+    // identical `sm_persistence::open_for_cluster_mode` call above.
     Arc::new(
-        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+        crate::pending_delivery::open_for_cluster_mode(
             pending_delivery_url.as_deref(),
             waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+            server_config.clustering.enabled,
+            clustering.claim_pair(),
+            global_db,
         )
         .await
         .expect("open pending_delivery storage"),

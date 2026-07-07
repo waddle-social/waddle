@@ -67,6 +67,12 @@ Primary database wiring is DSN/driver based for sqlx:
 - `WADDLE_DATABASE_URL` (primary DB DSN)
 - `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
 - `WADDLE_XMPP_INBOX_DATABASE_URL` (optional inbox DSN override)
+- `WADDLE_DB_POOL_SIZE` (`database.poolSize`, default: `10`) — main/shared pool
+  connection cap (ADR-0017 element 12).
+- `WADDLE_DB_CONTROL_PLANE_POOL_SIZE` (`database.controlPlanePoolSize`, default: `4`)
+  — dedicated control-plane pool size for node/claim liveness statements
+  (ADR-0017 element 4/12); only opened when `clustering.enabled` is true on a
+  Postgres deployment.
 
 Set DSNs with either:
 

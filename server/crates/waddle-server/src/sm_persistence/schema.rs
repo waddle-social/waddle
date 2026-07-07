@@ -102,6 +102,26 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         "promotion_attempts INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
+    // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork,
+    // mirroring `pending_delivery`'s identical column group (see that
+    // migration's doc comment for the full rationale and the "deferred,
+    // recorded as a deviation" note: nothing populates these yet).
+    // `sm_unacked` already carries `original_receipt_at_ms`, so only these
+    // three are net-new here. `recipient` for this table is the owning
+    // stream itself (`sm_unacked.stream_id`, already part of the primary
+    // key), so the dedup key collapses to `(stream_id, origin_stream_id,
+    // inbound_seq)`.
+    add_column_if_missing(storage, "sm_unacked", "origin_stream_id TEXT").await?;
+    add_column_if_missing(storage, "sm_unacked", &format!("inbound_seq {bigint}")).await?;
+    add_column_if_missing(storage, "sm_unacked", &format!("pair_sequence {bigint}")).await?;
+    storage
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_unacked_dedup \
+         ON sm_unacked (stream_id, origin_stream_id, inbound_seq) \
+         WHERE origin_stream_id IS NOT NULL AND inbound_seq IS NOT NULL",
+            (),
+        )
+        .await?;
     Ok(())
 }
 

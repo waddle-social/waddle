@@ -96,6 +96,7 @@ argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 zeroize = { workspace = true }
+subtle = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }

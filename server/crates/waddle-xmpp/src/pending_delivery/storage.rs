@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use jid::BareJid;
 
+use crate::ownership::Entity;
+
 use super::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId};
 
 /// Errors returned by [`PendingDeliveryStorage`] implementations.
@@ -17,6 +19,40 @@ use super::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId};
 pub enum PendingStorageError {
     #[error("pending_delivery storage error: {0}")]
     Other(String),
+
+    /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): a fenced
+    /// `insert_fenced` call's own `SELECT ... FOR SHARE` fencing check
+    /// (against `clustering_claims`, mirroring
+    /// `SmPersistenceError::NotOwner`/`sm_persistence_fenced`'s identical
+    /// pattern one table over) observed that this node does not hold — or
+    /// never acquired — the origin SM session's ownership claim at the
+    /// epoch it believed was current. The write was rolled back before
+    /// touching `pending_delivery`. Only ever returned by a
+    /// cluster-fenced implementation; the portable, single-node
+    /// implementation has no fencing concept and never returns this.
+    #[error(
+        "fencing check failed: this node does not hold entity '{entity}' at the expected claim epoch"
+    )]
+    NotOwner { entity: Entity },
+
+    /// ADR-0017 Phase 3 Slice 5 FIX 3: clustered fencing for
+    /// `pending_delivery` requires this storage's own database to be
+    /// co-located with the clustering global database (the fencing
+    /// `SELECT ... FOR SHARE` targets `clustering_claims`, which only
+    /// exists there) — mirroring
+    /// `SmPersistenceError::ClusterColocationMismatch`'s identical
+    /// invariant for `PostgresFencedSmPersistence`. Both fields are
+    /// expected to already be credential-redacted by the caller before
+    /// construction.
+    #[error(
+        "clustered pending_delivery fencing must be co-located with the clustering claims \
+         tables: resolved pending_delivery database URL ({pending_delivery_database_url}) does \
+         not match the clustering global database URL ({global_database_url})"
+    )]
+    ClusterColocationMismatch {
+        pending_delivery_database_url: String,
+        global_database_url: String,
+    },
 }
 
 /// Storage contract for `pending_delivery`.
@@ -33,6 +69,33 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// responsible for returning `<service-unavailable/>` per XEP-0160
     /// §3 step 3 (locked Q9b).
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError>;
+
+    /// Fenced variant of [`Self::insert`] for the XEP-0198 §5 Q6 promotion
+    /// write path (ADR-0017 Phase 3 Slice 5 FIX 3, council-adjudicated):
+    /// element 9's locked text requires "promotion executes under the
+    /// row-locked fenced epoch" of the origin SM session
+    /// (`origin_stream_id`) whose unacked queue is being promoted, so two
+    /// nodes double-janitoring the same expired session can never both
+    /// commit the same stanza into `pending_delivery`.
+    ///
+    /// Default impl ignores `origin_stream_id` and falls back to
+    /// [`Self::insert`] — correct for every implementation with no
+    /// clustering/fencing concept (the portable, single-node backend, and
+    /// the in-memory test double). A cluster-aware implementation
+    /// overrides this to run the fencing `SELECT ... FOR SHARE` check
+    /// (against `clustering_claims`) and the insert in one transaction,
+    /// mirroring `sm_persistence_fenced`'s identical pattern one table
+    /// over — see that module's doc comment for the full design. On a
+    /// failed fence, returns [`PendingStorageError::NotOwner`] and the
+    /// write never touches `pending_delivery`.
+    async fn insert_fenced(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        let _ = origin_stream_id;
+        self.insert(row).await
+    }
 
     /// List all rows for `recipient`, FIFO. Includes rows currently
     /// claimed by another session (`flushed_in_session = Some(_)`) so

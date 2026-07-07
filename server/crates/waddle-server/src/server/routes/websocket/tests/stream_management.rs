@@ -43,7 +43,7 @@ fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
 #[tokio::test]
 async fn sm_features_advertise_sm_namespace() {
     // Stream features after successful auth must include <sm/>.
-    let features = build_stream_features_xml(true);
+    let features = build_stream_features_xml(true, false);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children()
@@ -1714,11 +1714,12 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
     let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(16);
-    let bob_owner = state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob_jid.clone(), bob_tx);
+    // ADR-0017 Phase 3 Slice 9: the subscription-ack path enumerates the
+    // requester's (bob's) resources through the actor-authoritative registry,
+    // so bob must be dual-registered exactly as production bind does. Alice is
+    // reached via the available/roster-interested paths (unchanged), so a bare
+    // DashMap register still suffices for her.
+    let bob_owner = super::register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
     let alice_owner = state
         .deps
         .protocol
@@ -2026,11 +2027,10 @@ async fn presence_probe_returns_detached_available_resource_presence() {
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob_jid.clone(), bob_tx);
+    // ADR-0017 Phase 3 Slice 9: the probe path enumerates the requester's
+    // (bob's) resources through the actor-authoritative registry, so bob must
+    // be dual-registered exactly as production bind does.
+    super::register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
@@ -2114,11 +2114,10 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
     let alice_phone: FullJid = "alice@example.com/phone".parse().expect("alice phone");
     let alice_tablet: FullJid = "alice@example.com/tablet".parse().expect("alice tablet");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bob_jid.clone(), bob_tx);
+    // ADR-0017 Phase 3 Slice 9: the probe path enumerates the requester's
+    // (bob's) resources through the actor-authoritative registry, so bob must
+    // be dual-registered exactly as production bind does.
+    super::register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
@@ -2222,11 +2221,12 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
     let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (mallory_tx, mut mallory_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(mallory_jid.clone(), mallory_tx);
+    // ADR-0017 Phase 3 Slice 9: the (unsubscribed) probe path enumerates the
+    // requester's (mallory's) resources through the actor-authoritative
+    // registry to deliver the `unsubscribed` signal, so mallory must be
+    // dual-registered exactly as production bind does. The privacy guarantee
+    // (no detached presence leaked to an unauthorized prober) is unchanged.
+    super::register_test_connection(state.as_ref(), &mallory_jid, mallory_tx).await;
     state
         .deps
         .protocol
@@ -2722,7 +2722,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         )
         .await;
 
-    cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+    let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
     assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
     let detached = state
@@ -2808,7 +2808,7 @@ async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
     conn.sm_state
         .enable("stream-detach-actor".to_string(), true, Some(300));
 
-    cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+    let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
     // DashMap entry removed AND the resumable session stored (detached).
     assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
@@ -2870,7 +2870,7 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
     conn.sm_state
         .enable("stream-close".to_string(), false, Some(300));
 
-    cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+    let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
     assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
     let detached = state
@@ -2913,7 +2913,7 @@ async fn cleanup_shutdown_does_not_unregister_replacement_session() {
     old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
     old_conn.registry_owner = Some(old_owner);
 
-    cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await;
+    let _ = cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await;
 
     assert!(
         state.deps.protocol.connection_registry.is_connected(&jid),
@@ -3191,7 +3191,7 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
     conn.sm_state
         .enable("stream-detach-call".to_string(), true, Some(300));
 
-    cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+    let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
     assert!(
         recorder.snapshot().is_empty(),
@@ -3209,6 +3209,504 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
             .is_some(),
         "occupant slot survives the detach"
     );
+}
+
+/// Council-adjudicated FIX 3: race `attempt_cross_node_resume` against this
+/// node's graceful-shutdown token, Postgres-gated (needs a real
+/// `PostgresClaimStore` foreign claim so `attempt_cross_node_resume`'s
+/// retry loop actually runs, rather than short-circuiting to `NotFound`).
+/// Skipped (not failed) when `WADDLE_TEST_POSTGRES_URL` is unset, mirroring
+/// every other Postgres-gated test in this crate.
+#[cfg(feature = "clustering")]
+mod fix3_shutdown_race {
+    use super::*;
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::clustering::ClusteringHandles;
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::{
+        InMemorySmSessionRegistry, RemoteResumeAskOutcome, RemoteResumeAsker,
+    };
+
+    fn node_identity() -> NodeIdentity {
+        NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// Never resolves — the asker equivalent of a permanently wedged owner.
+    /// Without FIX 3, a resume attempt against this asker would hold this
+    /// connection's own graceful shutdown hostage for the entire
+    /// (here, deliberately generous) handshake budget.
+    struct HangingAsker;
+
+    #[async_trait::async_trait]
+    impl RemoteResumeAsker for HangingAsker {
+        async fn ask_remote_detach(
+            &self,
+            _node_id: &str,
+            _stream_id: &str,
+            _requester_bare_jid: &BareJid,
+        ) -> RemoteResumeAskOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_mid_resume_abandons_the_attempt_without_waiting_out_the_budget() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let db = Database::from_config(
+            "fix3-shutdown-race-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+        let claim_store = PostgresClaimStore::new(db.clone());
+        claim_store
+            .ensure_schema()
+            .await
+            .expect("ensure claims schema");
+        {
+            let conn = db.guard().await.expect("guard");
+            conn.execute("DELETE FROM clustering_claims", ())
+                .await
+                .expect("clean claims");
+            conn.execute("DELETE FROM clustering_nodes", ())
+                .await
+                .expect("clean nodes");
+        }
+
+        // A foreign, live claim: owned by a different node than the one
+        // about to attempt the resume, so `attempt_cross_node_resume`
+        // actually dispatches into branch 2/3 (live handshake) instead of
+        // short-circuiting.
+        let owner = node_identity();
+        let entity = Entity::new(EntityType::SmSession, "stream-shutdown-race".to_string());
+        claim_store
+            .acquire(&entity, &owner)
+            .await
+            .expect("owner claims the entity");
+
+        let resuming_identity = node_identity();
+        let resuming_identity_handle = SharedNodeIdentity::new(resuming_identity.clone());
+        let resuming_claim_store: Arc<dyn ClaimStore> =
+            Arc::new(PostgresClaimStore::new(db.clone()));
+        let sm_session_registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_claim_store(
+                    Arc::clone(&resuming_claim_store),
+                    resuming_identity_handle.clone(),
+                )
+                .with_remote_resume_asker(Arc::new(HangingAsker)),
+        );
+
+        // Deliberately generous: if FIX 3's shutdown race did not work,
+        // this test would need to wait out the whole budget before
+        // observing the (wrong) outcome — this value is what proves the
+        // difference.
+        let handshake_budget = Duration::from_secs(30);
+        let clustering = ClusteringHandles {
+            claim_store: Some(Arc::clone(&resuming_claim_store)),
+            node_identity: Some(resuming_identity_handle),
+            local_claims: None,
+            room_local_claims: None,
+            muc_durable_store: None,
+            isr_token_store: None,
+            node_lease: None,
+            lease_ttl: None,
+            pod_template_hash: None,
+            resume_bridge: None,
+            stop_token: None,
+            resume_handshake_timeout: Some(handshake_budget),
+        };
+
+        let mut state =
+            create_test_websocket_state_with_clustering(clustering, sm_session_registry).await;
+        let graceful = waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(5));
+        Arc::get_mut(&mut state)
+            .expect("sole owner immediately after construction")
+            .deps
+            .shutdown = graceful.handle();
+
+        let jid: FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        let frame = resume_frame_xml("stream-shutdown-race", 0);
+        let state_for_task = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::authenticated(&jid);
+            let started = std::time::Instant::now();
+            let responses =
+                handle_xmpp_frame(&frame, "example.com", state_for_task.as_ref(), &mut conn).await;
+            (started.elapsed(), responses)
+        });
+
+        // Give the spawned resume attempt a moment to actually enter its
+        // held-response retry loop (past the `current_claim`/persistence
+        // reads, into the `HangingAsker` ask) before shutdown fires.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        graceful.trigger_stop();
+
+        let (elapsed, responses) = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("the resume attempt must return promptly once shutdown fires")
+            .expect("task must not panic");
+
+        assert!(
+            elapsed < handshake_budget,
+            "resume attempt took {elapsed:?}, which did not plausibly finish faster than \
+             the {handshake_budget:?} budget — shutdown did not preempt the held resume"
+        );
+        assert!(
+            responses.is_empty(),
+            "an abandoned-on-shutdown resume must send no response of its own — the \
+             connection's own system-shutdown close is the actual signal to the client; \
+             got {responses:?}"
+        );
+    }
+}
+
+/// ADR-0017 Phase 3 deviation 55 (FIX A): a second adversarial convergence
+/// pass found deviation 47's shutdown race (`fix3_shutdown_race`, above)
+/// was unsound past the CAS itself — `tokio::select!` could drop the whole
+/// `attempt_cross_node_resume` future between `steal_for_resume` committing
+/// in Postgres and `hydrate_reclaimed`/`claim_session` completing, stranding
+/// a self-owned, un-hydrated claim. The fix splits the call at its write
+/// boundary (`prepare_cross_node_resume` + `finish_cross_node_steal`) and
+/// only races the read-only `prepare` half; `finish_cross_node_steal` is
+/// never raced once reached. This module proves that end-to-end through
+/// `handle_xmpp_frame`, Postgres-gated (needs a real `PostgresClaimStore` so
+/// `steal_for_resume` genuinely commits, and a real `PostgresFencedSmPersistence`
+/// so `hydrate_reclaimed` has somewhere to read from).
+#[cfg(feature = "clustering")]
+mod fix_a_post_cas_shutdown {
+    use super::*;
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::clustering::ClusteringHandles;
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, NodeIdentity,
+        ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
+    };
+    use waddle_xmpp::stream_management::{
+        DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
+    };
+
+    fn node_identity() -> NodeIdentity {
+        NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// `ClaimStore` test double: delegates every method to a real
+    /// `PostgresClaimStore`, except `ensure_claimed`, which notifies
+    /// `arrived` and then waits on `release_gate` before delegating. In
+    /// this test's flow, `hydrate_reclaimed`'s own internal self-reacquire
+    /// `ensure_claimed` call — issued only AFTER `steal_for_resume` has
+    /// already won — is the sole call this double ever sees, giving the
+    /// test a precise, deterministic window "the CAS has committed, the
+    /// finish sequence is mid-flight" to fire shutdown into.
+    struct GatedEnsureClaimedStore {
+        inner: Arc<dyn ClaimStore>,
+        arrived: Arc<tokio::sync::Notify>,
+        release_gate: Arc<tokio::sync::Notify>,
+        /// Only the FIRST `ensure_claimed` call (`hydrate_reclaimed`'s own
+        /// post-CAS-win self-reacquire) gates — `claim_session`'s own
+        /// subsequent self-reacquire call must pass straight through, or
+        /// this double would need a second `release_gate` notification the
+        /// test never sends.
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ClaimStore for GatedEnsureClaimedStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                self.arrived.notify_one();
+                self.release_gate.notified().await;
+            }
+            self.inner.ensure_claimed(entity, me).await
+        }
+
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+
+        async fn release_many(
+            &self,
+            entities: &[Entity],
+            me: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_firing_mid_finish_does_not_abandon_an_already_won_steal() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let db = Database::from_config(
+            "fix-a-post-cas-shutdown-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+        {
+            let claim_store = PostgresClaimStore::new(db.clone());
+            claim_store
+                .ensure_schema()
+                .await
+                .expect("ensure claims schema");
+            // Provision the SM schema BEFORE cleaning it: under CI's fresh
+            // per-run Postgres this test can be the first to touch
+            // sm_sessions/sm_unacked, and a bare DELETE against a
+            // not-yet-created table fails 42P01 (caught by nixTest on the
+            // Slice 7 push — locally another suite always ran first).
+            let schema_identity = SharedNodeIdentity::new(node_identity());
+            let schema_claims: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+            let _schema_only = PostgresFencedSmPersistence::open(
+                db.clone(),
+                Arc::clone(&schema_claims),
+                schema_identity,
+            )
+            .await
+            .expect("provision sm schema");
+            let conn = db.guard().await.expect("guard");
+            conn.execute("DELETE FROM clustering_claims", ())
+                .await
+                .expect("clean claims");
+            conn.execute("DELETE FROM clustering_nodes", ())
+                .await
+                .expect("clean nodes");
+            conn.execute("DELETE FROM sm_unacked", ())
+                .await
+                .expect("clean sm_unacked");
+            conn.execute("DELETE FROM sm_sessions", ())
+                .await
+                .expect("clean sm_sessions");
+        }
+
+        // Owner node: stores a real detached session via a real
+        // `PostgresFencedSmPersistence`, so the resuming node below reads
+        // a genuine persisted row (branch 1's fast path) rather than
+        // needing a live-handshake asker at all.
+        let owner_identity = SharedNodeIdentity::new(node_identity());
+        let owner_claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+        let owner_persistence = PostgresFencedSmPersistence::open(
+            db.clone(),
+            Arc::clone(&owner_claim_store),
+            owner_identity.clone(),
+        )
+        .await
+        .expect("open owner fenced persistence");
+        let owner_registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(owner_persistence))
+            .with_claim_store(owner_claim_store, owner_identity);
+
+        let jid: FullJid = "alice@example.com/phone".parse().expect("valid full jid");
+        owner_registry
+            .store_session(DetachedSession {
+                stream_id: "stream-post-cas-shutdown".to_string(),
+                user_id: "alice@example.com".to_string(),
+                jid: jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .await
+            .expect("owner stores the detached session");
+
+        // Resuming node: the one wired into the websocket state under
+        // test. Its `ClaimStore` is gated on `ensure_claimed` — the call
+        // `hydrate_reclaimed` issues right after `steal_for_resume` wins.
+        let resuming_identity = node_identity();
+        let resuming_identity_handle = SharedNodeIdentity::new(resuming_identity.clone());
+        let real_claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release_gate = Arc::new(tokio::sync::Notify::new());
+        let gated_claim_store: Arc<dyn ClaimStore> = Arc::new(GatedEnsureClaimedStore {
+            inner: Arc::clone(&real_claim_store),
+            arrived: Arc::clone(&arrived),
+            release_gate: Arc::clone(&release_gate),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let resuming_persistence = PostgresFencedSmPersistence::open(
+            db.clone(),
+            Arc::clone(&gated_claim_store),
+            resuming_identity_handle.clone(),
+        )
+        .await
+        .expect("open resuming fenced persistence");
+        let sm_session_registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(Arc::new(resuming_persistence))
+                .with_claim_store(
+                    Arc::clone(&gated_claim_store),
+                    resuming_identity_handle.clone(),
+                ),
+        );
+
+        // Generous and, crucially, irrelevant to the outcome: branch 1's
+        // persisted-snapshot fast path fires immediately (no remote ask
+        // needed), and once `finish_cross_node_steal` starts it no longer
+        // consults this budget at all (FIX A).
+        let handshake_budget = Duration::from_secs(30);
+        let clustering = ClusteringHandles {
+            claim_store: Some(Arc::clone(&gated_claim_store)),
+            node_identity: Some(resuming_identity_handle),
+            local_claims: None,
+            room_local_claims: None,
+            muc_durable_store: None,
+            isr_token_store: None,
+            node_lease: None,
+            lease_ttl: None,
+            pod_template_hash: None,
+            resume_bridge: None,
+            stop_token: None,
+            resume_handshake_timeout: Some(handshake_budget),
+        };
+
+        let mut state =
+            create_test_websocket_state_with_clustering(clustering, sm_session_registry).await;
+        let graceful = waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(5));
+        Arc::get_mut(&mut state)
+            .expect("sole owner immediately after construction")
+            .deps
+            .shutdown = graceful.handle();
+
+        let frame = resume_frame_xml("stream-post-cas-shutdown", 0);
+        let state_for_task = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::authenticated(&jid);
+            handle_xmpp_frame(&frame, "example.com", state_for_task.as_ref(), &mut conn).await
+        });
+
+        // Wait until the finish sequence is genuinely mid-flight — PAST
+        // `steal_for_resume`'s real Postgres commit, INSIDE
+        // `hydrate_reclaimed`'s self-reacquire — before firing shutdown.
+        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+            .await
+            .expect("hydrate_reclaimed's ensure_claimed must be reached promptly");
+        graceful.trigger_stop();
+        // Give the connection's own select loop a moment to observe the
+        // (now-irrelevant, since `finish_cross_node_steal` is never raced)
+        // cancelled token, proving it has no effect on the in-flight finish.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release_gate.notify_one();
+
+        let responses = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("the resume must complete promptly once the gate is released")
+            .expect("task must not panic");
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "shutdown firing mid-finish must not truncate/abandon the response; got {responses:?}"
+        );
+        let resumed = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(
+            resumed.name(),
+            "resumed",
+            "the already-won steal must complete to a real <resumed/>, not be dropped by the \
+             shutdown token that fired mid-sequence; got {responses:?}"
+        );
+    }
 }
 
 /// XEP-0198 §4 counters are mod 2^32: a resume whose `h` sits just

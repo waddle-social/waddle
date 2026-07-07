@@ -232,6 +232,26 @@ pub(super) fn service_unavailable_error(text: &str) -> StanzaError {
     )
 }
 
+/// ADR-0017 Phase 3 Slice 7: the ownership-gap bounce — "messages arriving
+/// during the ownership gap are bounced with a typed recoverable
+/// `<resource-constraint/>` error, never silently dropped." `type='wait'`
+/// per RFC 6120 §8.3.3.20: recoverable, the sender may retry (the next
+/// `GetOrCreateRoom` on any node re-claims and restores the room). Used by
+/// `dispatch_to_room`'s fenced pre-fan-out backstop AND (FIX 1) the MAM
+/// fenced-archive-write backstop in `groupchat_archive.rs` — both only
+/// ever fire on a `clustering`-feature build with clustering enabled (the
+/// `fence`/`muc_durable_store` context they gate on is `None` otherwise),
+/// but the helper itself is plain data construction with nothing
+/// feature-specific, so it is not itself `#[cfg]`-gated.
+pub(super) fn resource_constraint_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::ResourceConstraint,
+        "en",
+        text,
+    )
+}
+
 pub(super) fn internal_server_error_for_lookup() -> StanzaError {
     StanzaError::new(
         ErrorType::Wait,

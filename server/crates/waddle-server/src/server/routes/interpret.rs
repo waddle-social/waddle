@@ -104,6 +104,14 @@ use waddle_xmpp::muc::room_actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RoomActor, SetSubject,
 };
+// ADR-0017 Phase 3 Slice 7: `DestroyRoom` is used by `dispatch_to_room`'s
+// fenced pre-fan-out backstop, which only exists on `clustering`-feature
+// builds (the check itself is a no-op — `ClusteringHandles::
+// muc_durable_store` is `None` — whenever clustering is disabled, but the
+// import must still be feature-gated to avoid an unused-import warning on
+// a build that lacks the `clustering` feature entirely).
+#[cfg(feature = "clustering")]
+use waddle_xmpp::muc::room_registry_actor::DestroyRoom;
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
@@ -161,7 +169,7 @@ mod room_system_message;
 mod route_to_connection;
 mod routing;
 
-use archive_groupchat_event::archive_groupchat_event;
+use archive_groupchat_event::{archive_groupchat_event, ArchiveGroupchatEventOutcome};
 use archive_lookup::{
     build_carbon_envelope, lookup_archived_message, waddle_id_for_room_jid, ToElementString,
 };
@@ -175,12 +183,13 @@ use direct_retraction::apply_retraction_tombstone;
 use displayed_marker::mark_inbox_read_from_displayed;
 use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
+    resolve_room_claim_fence, ArchiveGroupchatOutcome,
 };
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, remove_framework_envelopes,
-    service_unavailable_error, validate_groupchat_rich_targets,
+    resource_constraint_error, service_unavailable_error, validate_groupchat_rich_targets,
 };
 use offline_delivery::queue_offline_delivery;
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
@@ -204,14 +213,7 @@ pub(crate) async fn broadcast_room_system_message(
     room: BareJid,
     message: Box<Message>,
 ) -> Option<String> {
-    room_system_message::broadcast_room_system_message_event(
-        deps.connection_registry,
-        deps,
-        room,
-        message,
-        0,
-    )
-    .await
+    room_system_message::broadcast_room_system_message_event(deps, room, message, 0).await
 }
 
 /// Execute the side effects described by `events`.
@@ -357,8 +359,18 @@ async fn interpret_with_depth(
     let registry = deps.connection_registry;
     let mut outcome = InterpretOutcome::default();
     let mut archive_id_rewrites: Vec<ArchiveIdRewrite> = Vec::new();
+    // ADR-0017 Phase 3 Slice 7 FIX 1 (council-adjudicated): once the fenced
+    // MAM archive write observes this node has been deposed, every
+    // remaining event in THIS SAME batch (in particular the reflector's
+    // per-occupant `RouteToConnection` fan-out for the same message, which
+    // always follows the archive handler in the locked Q7 chain order) is
+    // suppressed — "the message is NOT archived and NOT fanned out."
+    let mut ownership_lost = false;
 
     for mut event in events {
+        if ownership_lost {
+            continue;
+        }
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
         match event {
             OutboundEvent::SendStanza(stanza) => match stanza.to_element_string() {
@@ -395,9 +407,7 @@ async fn interpret_with_depth(
             // content into logs.
             // -------------------------------------------------------
             OutboundEvent::RouteToConnection { jid, stanza } => {
-                for stanza in
-                    route_to_connection(registry, deps, jid, stanza, recursion_depth).await
-                {
+                for stanza in route_to_connection(deps, jid, stanza, recursion_depth).await {
                     match stanza.to_element_string() {
                         Ok(xml) => outcome.frames.push(xml),
                         Err(err) => {
@@ -514,15 +524,41 @@ async fn interpret_with_depth(
                 message,
                 sender_nickname_generation,
             } => {
-                if let Some(rewrite) =
-                    archive_groupchat_event(deps, room, sender, message, sender_nickname_generation)
-                        .await
+                match archive_groupchat_event(
+                    deps,
+                    room,
+                    sender,
+                    message,
+                    sender_nickname_generation,
+                )
+                .await
                 {
-                    archive_id_rewrites.push(rewrite);
+                    ArchiveGroupchatEventOutcome::Rewrite(Some(rewrite)) => {
+                        archive_id_rewrites.push(rewrite);
+                    }
+                    ArchiveGroupchatEventOutcome::Rewrite(None) => {}
+                    ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {
+                        // FIX 1: not archived, not fanned out — suppress
+                        // every remaining event in this batch (the
+                        // reflector's fan-out for this same message) and
+                        // bounce the sender with the same typed
+                        // recoverable error `dispatch_to_room`'s own
+                        // pre-fan-out check uses.
+                        match Stanza::Message(*bounce).to_element_string() {
+                            Ok(xml) => outcome.frames.push(xml),
+                            Err(error) => {
+                                warn!(
+                                    %error,
+                                    "ArchiveGroupchat: failed to serialize ownership-gap bounce reply"
+                                );
+                            }
+                        }
+                        ownership_lost = true;
+                    }
                 }
             }
             OutboundEvent::ApplyPinChange { room, request } => {
-                apply_pin_change_event(registry, deps, room, request, recursion_depth).await;
+                apply_pin_change_event(deps, room, request, recursion_depth).await;
             }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,
@@ -562,7 +598,6 @@ async fn interpret_with_depth(
                 // synthetic unpin system message so live clients see the
                 // tab update without a separate poll.
                 room_pin::cascade_retraction_to_pin_list(
-                    registry,
                     deps,
                     room,
                     target_message_id,

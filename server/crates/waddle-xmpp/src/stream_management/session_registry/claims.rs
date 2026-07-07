@@ -1,8 +1,16 @@
 use jid::FullJid;
 use tracing::debug;
 
-use super::core::InMemorySmSessionRegistry;
+use crate::ownership::{ClaimError, Entity, EntityType};
+
+use super::core::{InMemorySmSessionRegistry, CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT};
 use super::{DetachedSession, SmClaimCompletion, SmRegistryError};
+
+/// The `ClaimStore` entity naming an SM session's ownership claim (element
+/// 8: `entity_type = sm_session`, `entity = ` the SM-ID/stream id).
+fn sm_session_entity(stream_id: &str) -> Entity {
+    Entity::new(EntityType::SmSession, stream_id.to_string())
+}
 
 impl InMemorySmSessionRegistry {
     /// Remove every expired session and return the detached state in full.
@@ -72,6 +80,37 @@ impl InMemorySmSessionRegistry {
         Some(out)
     }
 
+    /// Purely local, best-effort forgetting of `stream_id`'s claim
+    /// (ADR-0017 Phase 3 Slice 5, carried debt (b): the
+    /// `LocallyClaimedEntities::demote` contract). Removes it from both
+    /// `sessions` and `claimed_sessions` and evicts its cached epoch (and
+    /// the fenced persistence's own epoch cache), WITHOUT calling
+    /// `ClaimStore::release` — the demotion-reconciliation caller already
+    /// knows Postgres reassigned (or is reassigning) this entity elsewhere,
+    /// so a release round-trip here is both unnecessary and, per
+    /// `demote`'s own contract, must not be REQUIRED to succeed while
+    /// Postgres is unreachable (the self-fencing trigger this method
+    /// exists to serve).
+    pub async fn forget_claim_locally(&self, stream_id: &str) {
+        let Ok(stream_lock) = self.stream_lock(stream_id) else {
+            return;
+        };
+        let _stream_guard = stream_lock.lock().await;
+        if let Ok(mut sessions) = self.sessions.write() {
+            sessions.remove(stream_id);
+        }
+        if let Ok(mut claimed) = self.claimed_sessions.write() {
+            claimed.remove(stream_id);
+        }
+        if let Ok(mut epochs) = self.claim_epochs.write() {
+            epochs.remove(stream_id);
+        }
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            storage.evict_claim_cache(&session_id);
+        }
+    }
+
     /// Confirm that a drained session has been fully promoted —
     /// delete its durable row so a subsequent restart doesn't
     /// resurrect it. Best-effort: failures are logged but not
@@ -83,7 +122,17 @@ impl InMemorySmSessionRegistry {
     /// Pair with [`Self::drain_all_for_shutdown`]: drain returns
     /// the sessions, caller promotes each, caller calls
     /// `confirm_drained` per session after successful promotion.
-    pub async fn confirm_drained(&self, stream_id: &str) {
+    ///
+    /// Returns `true` iff the durable row was deleted and this entity's
+    /// `ClaimStore` claim release was attempted — the SM session's own
+    /// "final fenced write, then release" sequence (ADR-0017 Phase 3 Slice
+    /// 10). `false` means the durable row survives for a restart-time
+    /// retry (the claim is deliberately left held, not released) — the
+    /// caller (`session_janitors::spawn_graceful_shutdown_drain`) counts
+    /// this the same way Slice 10's generic per-entity drain counts an
+    /// abandoned entity, feeding the shared `claims_released_on_drain`/
+    /// `claims_abandoned_on_drain` observability.
+    pub async fn confirm_drained(&self, stream_id: &str) -> bool {
         let stream_lock = match self.stream_lock(stream_id) {
             Ok(lock) => lock,
             Err(error) => {
@@ -92,17 +141,30 @@ impl InMemorySmSessionRegistry {
                     error = %error,
                     "graceful-shutdown drain: stream lock lookup failed before durable delete"
                 );
-                return;
+                return false;
             }
         };
         let _stream_guard = stream_lock.lock().await;
-        if let Err(error) = self.persist_delete_session(stream_id).await {
-            debug!(
-                stream_id = %stream_id,
-                error = %error,
-                "graceful-shutdown drain: durable delete failed; \
-                 restart-time expiry filter will catch the orphan"
-            );
+        match self.persist_delete_session(stream_id).await {
+            Ok(()) => {
+                // ADR-0017 Phase 3 Slice 5: the durable row is gone, so the
+                // entity's `ClaimStore` claim must end with it — otherwise
+                // every expired-then-promoted session leaves a permanent
+                // `clustering_claims` row this node can never naturally
+                // release again (nothing else ever revisits a deleted
+                // session's entity).
+                self.release_claim_store_entry(stream_id).await;
+                true
+            }
+            Err(error) => {
+                debug!(
+                    stream_id = %stream_id,
+                    error = %error,
+                    "graceful-shutdown drain: durable delete failed; \
+                     restart-time expiry filter will catch the orphan"
+                );
+                false
+            }
         }
     }
 
@@ -269,65 +331,327 @@ impl InMemorySmSessionRegistry {
         Ok(())
     }
 
+    /// Ensure this node holds `stream_id`'s `ClaimStore` claim at
+    /// `<enable/>` time (ADR-0017 Phase 3 Slice 6, element 8: "claims row
+    /// created at `<enable/>` time"). `ensure_claimed`, not a bare
+    /// `acquire` (deviation 26/Slice 5's own forward note): a fresh
+    /// `<enable/>` for a stream id this node has never seen still gets a
+    /// plain fresh claim (there is no existing row to self-reacquire
+    /// against), but `ensure_claimed`'s self-idempotence is exactly what
+    /// keeps this call from spuriously conflicting with the detach-time
+    /// `acquire_claim_store_entry_for_detach` call for the *same*
+    /// stream-id on this same node later in this session's lifetime — the
+    /// two call sites coexist with no explicit hand-off protocol between
+    /// them precisely because both go through the same idempotent-for-self
+    /// primitive.
+    ///
+    /// Best-effort by design, exactly like
+    /// [`Self::acquire_claim_store_entry_for_detach`]: `stream_id` is a
+    /// freshly minted UUID (element 8), so a genuine collision with
+    /// another node's claim is not expected in practice, and a failure
+    /// here must not fail the `<enable/>` handshake itself — the session
+    /// simply proceeds without a durable claim record until the detach
+    /// -time call retries. Logged at `warn` so a persistently failing
+    /// `ClaimStore` backend stays visible. Called with no stream-shard
+    /// lock held: `stream_id` is freshly minted and cannot yet appear in
+    /// `sessions`/`claimed_sessions`, so there is nothing else to
+    /// coordinate with under that lock.
+    pub async fn ensure_session_claim(&self, stream_id: &str) {
+        let entity = sm_session_entity(stream_id);
+        let identity = self.node_identity.current();
+        if let Err(error) = self.claim_store.ensure_claimed(&entity, &identity).await {
+            tracing::warn!(
+                stream_id = %stream_id,
+                %error,
+                "handle_sm_enable: ClaimStore ensure_claimed failed for a freshly enabled \
+                 session; proceeding without a durable claim record until the detach-time \
+                 retry (best-effort, see this method's doc comment)"
+            );
+        }
+    }
+
     /// Atomically claim a resumable session for a single resume attempt.
     ///
     /// Claimed sessions stay writable by detached fanout so stanzas routed
     /// during the claim-to-registration handoff can be merged into the final
     /// replay batch before the claim is completed.
+    ///
+    /// The injected `ClaimStore` is the **authority** on this entity's
+    /// ownership claim (ADR-0017 Phase 3 Slice 1, Q2 "retrofit, not wrap"):
+    /// a granted [`ClaimStore::acquire`](crate::ownership::ClaimStore::acquire)
+    /// is what makes the in-memory claim below real, and
+    /// [`ClaimError::AlreadyClaimed`] reproduces the pre-Slice-1
+    /// already-claimed outcome (`Ok(None)`, no map mutation) exactly —
+    /// every `ClaimStore` implementation enforces the identical single-node
+    /// "one live claim per entity" invariant the `claimed_sessions` map used
+    /// to enforce by itself. `sessions`/`claimed_sessions` now hold session
+    /// *state* only; they are never consulted to decide whether a claim is
+    /// granted.
     pub async fn claim_session(
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        let Some(session) = sessions.remove(stream_id) else {
+
+        // Peek (not remove): is there a live, unexpired session to claim at
+        // all? A session that doesn't exist, or is already expired, is not
+        // something the pre-Slice-1 semantics would ever have queried a
+        // claim for either — this filters those cases before the store is
+        // even asked, it does not itself decide the claim.
+        let peeked = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.get(stream_id).cloned()
+        };
+        let Some(session) = peeked else {
             return Ok(None);
         };
         if session.is_expired() {
-            // Re-insert instead of dropping: a #1098-hydrated expired
-            // session must stay visible to the janitor's next
-            // `drain_expired` pass (which scans memory only) so its
-            // unacked queue still runs the XEP-0198 §5 promote →
-            // confirm chain. Dropping it here would strand the queue
-            // until the next restart.
-            sessions.insert(stream_id.to_string(), session);
+            // Left untouched in `sessions` (never removed) so the
+            // janitor's next `drain_expired` pass still finds it — a
+            // #1098-hydrated expired session must stay visible for its
+            // unacked queue to run the XEP-0198 §5 promote → confirm
+            // chain.
             return Ok(None);
         }
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if claimed.contains_key(stream_id) {
-            sessions.insert(stream_id.to_string(), session);
+
+        let entity = sm_session_entity(stream_id);
+        // ADR-0017 Phase 3 Slice 5: `ensure_claimed`, not a bare `acquire`.
+        // Under the acquire-then-hydrate/acquire-on-detach invariant this
+        // slice establishes (every entry in `sessions` is backed by a held
+        // `ClaimStore` claim — see `core.rs::restore_from_persistence` and
+        // `trait_impl.rs::store_session`), a resume attempt against a
+        // session THIS node already claimed (the overwhelmingly common case
+        // — the node that hydrated/detached it is usually the one a
+        // resuming client reconnects to) must self-reacquire idempotently
+        // rather than spuriously failing with `AlreadyClaimed` against its
+        // own row. A genuinely different node's claim still correctly fails
+        // here (`ensure_claimed` only self-reacquires for an exact
+        // node/epoch match).
+        let identity = self.node_identity.current();
+        // FIX 5: bounded — this call runs under `stream_id`'s shard lock
+        // (`_stream_guard`, held since the peek above), and that lock is
+        // shared by every other stream id hashing to the same shard (see
+        // `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s doc comment for the
+        // shard-fan-in rationale). A hung `ensure_claimed` call must fail
+        // this resume attempt typed rather than stall every other stream id
+        // sharing this shard indefinitely.
+        let epoch = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.ensure_claimed(&entity, &identity),
+        )
+        .await
+        {
+            Ok(Ok(epoch)) => epoch,
+            Ok(Err(ClaimError::AlreadyClaimed)) => return Ok(None),
+            Ok(Err(other)) => {
+                return Err(SmRegistryError::Internal(format!(
+                    "claim_session: ClaimStore ensure_claimed failed for an entity this \
+                     registry believed was unclaimed: {other}"
+                )));
+            }
+            Err(_timeout) => {
+                return Err(SmRegistryError::Internal(format!(
+                    "claim_session: ClaimStore ensure_claimed timed out after \
+                     {CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT:?} while holding this stream's \
+                     shard lock (FIX 5); resume attempt fails rather than stalling every \
+                     other stream id sharing this lock"
+                )));
+            }
+        };
+
+        // The store granted the claim: perform the matching in-memory move.
+        // `stream_id` is guaranteed still present and unexpired here — this
+        // stream's `tokio::sync::Mutex` guard has been held continuously
+        // since the peek above, and every other mutator of this stream's
+        // map entry takes that same lock first — but the removal is
+        // handled defensively (never `unwrap`/`expect`) rather than assumed,
+        // releasing the just-granted store claim so it cannot leak if that
+        // invariant is ever violated by a future change.
+        let removed = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.remove(stream_id)
+        };
+        let Some(session) = removed else {
+            self.release_claim_store_entry_under(stream_id, epoch).await;
             return Ok(None);
+        };
+        {
+            let mut claimed = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            claimed.insert(stream_id.to_string(), session.clone());
         }
-        claimed.insert(stream_id.to_string(), session.clone());
+        if let Ok(mut epochs) = self.claim_epochs.write() {
+            epochs.insert(stream_id.to_string(), epoch);
+        }
         Ok(Some(session))
     }
 
     /// Release a previously claimed session without consuming it.
+    ///
+    /// **ADR-0017 Phase 3 Slice 5 invariant**: an entry present in
+    /// `sessions` is always backed by a held `ClaimStore` claim (see
+    /// `core.rs::restore_from_persistence` and
+    /// `trait_impl.rs::store_session`, which both acquire the claim before
+    /// inserting). A session whose claim (not resume) attempt is merely
+    /// aborted goes back into `sessions` here **still owned by this node**
+    /// — its `ClaimStore` claim must therefore be KEPT, not released, or a
+    /// concurrent claim-scoped hydration elsewhere (another node's restore
+    /// pass, or the orphan reaper) could observe the entity as unclaimed
+    /// and take it over while this node still holds it in memory, exactly
+    /// the double-ownership hazard acquire-then-hydrate exists to prevent.
+    /// Only when the session is expired (and therefore NOT reinserted —
+    /// left for the janitor's drain_expired/promote/confirm chain, which
+    /// releases the claim itself via [`Self::confirm_drained`]) or was
+    /// absent from `claimed_sessions` altogether does this release the
+    /// store entry: those are the only cases where the entity genuinely
+    /// stops being tracked by this call.
     pub async fn release_claim(&self, stream_id: &str) -> Result<(), SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        let session = claimed.remove(stream_id);
-        if let Some(session) = session {
-            if !session.is_expired() {
-                sessions.insert(stream_id.to_string(), session);
+        let reinserted = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut claimed = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let session = claimed.remove(stream_id);
+            match session {
+                Some(session) if !session.is_expired() => {
+                    sessions.insert(stream_id.to_string(), session);
+                    true
+                }
+                _ => false,
             }
+        };
+        if !reinserted {
+            self.release_claim_store_entry(stream_id).await;
         }
         Ok(())
+    }
+
+    /// Acquire (or self-reacquire) `stream_id`'s `ClaimStore` claim and
+    /// record the granted epoch, for a session newly entering `sessions`
+    /// from a live detach (ADR-0017 Phase 3 Slice 5's acquire-on-detach
+    /// half of the acquire-then-hydrate/acquire-on-detach invariant —
+    /// `core.rs::restore_from_persistence` is the other half, for sessions
+    /// entering `sessions` at startup instead of at detach time).
+    ///
+    /// Best-effort by design: a stream id is a freshly minted UUID per
+    /// session (ADR-0017 element 8), so a genuine collision with another
+    /// node's still-live claim on the exact same id is not expected in
+    /// practice. Refusing to store the just-detached session over a claim
+    /// failure would risk losing its unacked queue entirely — worse than
+    /// proceeding without a durable claim record, which only means this
+    /// specific stream id will not be reachable to a startup restore or the
+    /// orphan reaper on a *different* node until this node's own next
+    /// successful acquire for it (e.g. this node's own restart). Logged at
+    /// `warn` so a persistently failing acquire (e.g. a genuinely wedged
+    /// `ClaimStore` backend) is visible.
+    pub(super) async fn acquire_claim_store_entry_for_detach(&self, stream_id: &str) {
+        let entity = sm_session_entity(stream_id);
+        let identity = self.node_identity.current();
+        // FIX 5: bounded — this call runs under `stream_id`'s shard lock
+        // (`store_session` holds it for the whole function, including this
+        // call), shared by every other stream id hashing to the same shard
+        // (see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s doc comment). Best
+        // effort by design (see this function's doc comment above): a
+        // timeout is logged and treated exactly like any other
+        // `ensure_claimed` failure here — proceed without a durable claim
+        // record rather than block every other stream id sharing this
+        // shard.
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.ensure_claimed(&entity, &identity),
+        )
+        .await
+        {
+            Ok(Ok(epoch)) => {
+                if let Ok(mut epochs) = self.claim_epochs.write() {
+                    epochs.insert(stream_id.to_string(), epoch);
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    %error,
+                    "store_session: ClaimStore ensure_claimed failed for a freshly \
+                     detached session; proceeding without a durable claim record \
+                     (best-effort — see this function's doc comment)"
+                );
+            }
+            Err(_timeout) => {
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                    "store_session: ClaimStore ensure_claimed timed out while holding this \
+                     stream's shard lock (FIX 5); proceeding without a durable claim record \
+                     (best-effort — see this function's doc comment)"
+                );
+            }
+        }
+    }
+
+    /// Release `stream_id`'s `ClaimStore` entry under whatever epoch this
+    /// registry last observed for it (falling back to epoch 0 if none was
+    /// recorded — harmless for the in-process store, and `release`'s own
+    /// contract treats a losing epoch as a no-op rather than an error).
+    /// `pub(super)` because every removal from `claimed_sessions` must
+    /// release its claim, and two of those paths live in `trait_impl`
+    /// (`store_session`'s jid-collision eviction, `take_session`).
+    pub(super) async fn release_claim_store_entry(&self, stream_id: &str) {
+        let epoch = self
+            .claim_epochs
+            .write()
+            .ok()
+            .and_then(|mut epochs| epochs.remove(stream_id))
+            .unwrap_or(crate::ownership::ClaimEpoch(0));
+        self.release_claim_store_entry_under(stream_id, epoch).await;
+    }
+
+    /// Release `stream_id`'s `ClaimStore` entry under an explicitly-known
+    /// epoch (the caller already holds it, so there is nothing to look up
+    /// in `claim_epochs`). Best-effort: a `ClaimStore::release` failure is
+    /// logged, never propagated — `release`'s own contract treats a losing
+    /// epoch as a no-op, and this is the same "claim already gone" case.
+    /// `pub(super)`: `core.rs::restore_from_persistence` (ADR-0017 Phase 3
+    /// Slice 5) also releases an already-known epoch directly (a
+    /// just-claimed, never-hydrated poison-pill row), without going through
+    /// `claim_epochs` first.
+    pub(super) async fn release_claim_store_entry_under(
+        &self,
+        stream_id: &str,
+        epoch: crate::ownership::ClaimEpoch,
+    ) {
+        let entity = sm_session_entity(stream_id);
+        let identity = self.node_identity.current();
+        if let Err(error) = self.claim_store.release(&entity, &identity, epoch).await {
+            debug!(
+                stream_id = %stream_id,
+                error = %error,
+                "ClaimStore release failed (best-effort: release's own contract treats \
+                 a losing epoch as a no-op, not an error)"
+            );
+        }
+        // ADR-0017 Phase 3 Slice 5 debt (a): every claim-ending path evicts
+        // the fenced persistence's per-stream epoch cache (a no-op for the
+        // portable/in-memory persistence, which keeps no such cache — see
+        // `SmPersistenceStorage::evict_claim_cache`'s doc comment).
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            storage.evict_claim_cache(&session_id);
+        }
     }
 
     /// Complete a previously claimed session, returning the claimed copy with
@@ -390,7 +714,9 @@ impl InMemorySmSessionRegistry {
             // stale mod-behind `h` stays ReplayWindowTruncated (a
             // failed resume) rather than HandledCountTooHigh; an
             // ahead-of-window `h` passes it and hits the too-high
-            // branch below.
+            // branch below. (#1099: this replaces a naive
+            // `client_h > outbound_count` check that had a half-window
+            // blind spot at `h == outbound + 2^31`.)
             if !session.is_expired() && !session.can_resume_from(client_h) {
                 let restored = {
                     let mut claimed = self
@@ -400,11 +726,17 @@ impl InMemorySmSessionRegistry {
                     claimed.remove(stream_id)
                 };
                 if let Some(restored) = restored {
-                    let mut sessions = self
-                        .sessions
-                        .write()
-                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                    sessions.insert(stream_id.to_string(), restored.clone());
+                    {
+                        let mut sessions = self
+                            .sessions
+                            .write()
+                            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                        sessions.insert(stream_id.to_string(), restored.clone());
+                    }
+                    // Terminal path (ADR-0017 Phase 3 Slice 1): a failed
+                    // resume the caller closes on — release the claim, same
+                    // as the `HandledCountTooHigh` branch below.
+                    self.release_claim_store_entry(stream_id).await;
                     return Ok(Some(SmClaimCompletion::ReplayWindowTruncated(restored)));
                 }
                 return Ok(None);
@@ -418,11 +750,22 @@ impl InMemorySmSessionRegistry {
                     claimed.remove(stream_id)
                 };
                 if let Some(restored) = restored {
-                    let mut sessions = self
-                        .sessions
-                        .write()
-                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                    sessions.insert(stream_id.to_string(), restored.clone());
+                    {
+                        let mut sessions = self
+                            .sessions
+                            .write()
+                            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                        sessions.insert(stream_id.to_string(), restored.clone());
+                    }
+                    // Terminal path (ADR-0017 Phase 3 Slice 1): the caller
+                    // treats HandledCountTooHigh as a failed resume and closes
+                    // the connection, so this ends the claim — release its
+                    // `ClaimStore` entry (guard scoped above so the release
+                    // awaits after it drops), mirroring the
+                    // `ReplayWindowTruncated` branch. The origin/main merge
+                    // dropped this side effect when it removed the naive
+                    // pre-#1099 resume check it was co-located with.
+                    self.release_claim_store_entry(stream_id).await;
                     return Ok(Some(SmClaimCompletion::HandledCountTooHigh(restored)));
                 }
                 return Ok(None);
@@ -443,6 +786,12 @@ impl InMemorySmSessionRegistry {
                     SmClaimCompletion::Resumed(session)
                 }
             });
+        if outcome.is_some() {
+            // Terminal path (ADR-0017 Phase 3 Slice 1 fix): both
+            // `Resumed` and `Expired` end this claim — release the store
+            // entry so a successful resume does not leak it forever.
+            self.release_claim_store_entry(stream_id).await;
+        }
         Ok(outcome)
     }
 
@@ -476,6 +825,14 @@ impl InMemorySmSessionRegistry {
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
             .remove(stream_id);
+        if removed.is_some() {
+            // ADR-0017 Phase 3 Slice 5: this removal permanently discards
+            // the entity from `sessions` (the caller takes ownership of the
+            // returned session for its own handling) — release the claim
+            // this node held for it rather than leaking a `clustering_claims`
+            // row nothing will ever revisit.
+            self.release_claim_store_entry(stream_id).await;
+        }
         Ok(removed)
     }
 
@@ -519,18 +876,31 @@ impl InMemorySmSessionRegistry {
         for stream_id in &matching_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let mut claimed = self
-                .claimed_sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            if let Some(session) = sessions.remove(stream_id) {
+            let (removed_detached, removed_claimed) = {
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                let mut claimed = self
+                    .claimed_sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                (sessions.remove(stream_id), claimed.remove(stream_id))
+            };
+            // Deliberately NO eager `ClaimStore` release here (the same
+            // release-before-durable-delete hazard `store_session`'s
+            // eviction path closed in the Slice 5 review): the durable row
+            // still exists, so releasing now would let another node's
+            // restore/orphan-reaper hydrate a copy that our caller's later
+            // `confirm_drained` deletes out from under it. The sole
+            // production caller (`invalidate_older_detached_sessions`) runs
+            // every returned session through `promote_displaced_sessions`,
+            // which releases via `confirm_drained` after the durable delete
+            // — or re-inserts for janitor retry with the claim still held.
+            if let Some(session) = removed_detached {
                 removed.push(session);
             }
-            if let Some(session) = claimed.remove(stream_id) {
+            if let Some(session) = removed_claimed {
                 removed.push(session);
             }
         }

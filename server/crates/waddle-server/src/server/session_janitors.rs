@@ -32,6 +32,23 @@ const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
 /// harmless for the child-less `ListUsers`/`UserCount` reads, which reply fast.
 const REAPER_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): TTL for a
+/// `clustering_isr_tokens` row that has never been consumed. A token is
+/// minted per `<isr-enable/>` and only ever reaped by an ordinary
+/// `consume` (match or mismatch); one that's issued and never resumed
+/// (client never reconnects, or the SM session is later expired/reaped by
+/// [`run_orphan_reaper_sweep`] itself) would otherwise sit forever. 24h is
+/// generous relative to any realistic resume window, while still bounding
+/// the table.
+#[cfg(feature = "clustering")]
+const ISR_TOKEN_SWEEP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Upper bound on the ISR token sweep's own DB call (FIX 4) — a wedged
+/// Postgres connection must never hang the orphan-reaper sweep this rides
+/// alongside, mirroring [`REAPER_ASK_TIMEOUT`]'s own bounded-ask discipline.
+#[cfg(feature = "clustering")]
+const ISR_TOKEN_SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -209,6 +226,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 let summary = crate::sm_promotion::promote_session_unacked(
                     &session,
                     &state.deps.protocol.connection_registry,
+                    &state.deps.protocol.user_registry,
                     &state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     state.deps.auth_state.xmpp_domain.as_str(),
@@ -411,6 +429,587 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
             }
         }
     });
+}
+
+/// ADR-0017 Phase 3 Slice 5, element 9 (quoted verbatim): *"any node may
+/// steal such [orphaned] claims (fenced CAS) and then expire or promote
+/// them, after first committing the expire CAS on the owner's `nodes`
+/// row."* A no-op build/runtime configuration (clustering disabled, or this
+/// binary built without the `clustering` Cargo feature) does nothing —
+/// [`run_orphan_reaper_sweep`] itself is feature-gated, and the outer
+/// function here is always callable so its call site in `http.rs` needs no
+/// `#[cfg]` of its own, mirroring the other eight janitor spawns.
+///
+/// `interval` is `ClusteringConfig::orphan_reaper_interval`
+/// (`WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`, default 120s) — ADR-0017
+/// Phase 3 Slice 11 corrigenda (deviation 111) made this cadence env-
+/// overridable, the same way every sibling cluster timer already is, so the
+/// multi-process harness's kill-one hydration capstone does not have to
+/// wait out the full 120s production default in real wall-clock time.
+pub(crate) fn spawn_orphan_reaper_janitor(
+    websocket_state: &Arc<WebSocketState>,
+    interval: std::time::Duration,
+) {
+    #[cfg(feature = "clustering")]
+    {
+        let weak_state = Arc::downgrade(websocket_state);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // Skip the first (immediate) tick, mirroring the other janitors
+            // — no need to sweep before the node-lease loop has even
+            // registered this node.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(state) = weak_state.upgrade() else {
+                    break;
+                };
+                run_orphan_reaper_sweep(&state).await;
+            }
+        });
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = websocket_state;
+        let _ = interval;
+    }
+}
+
+/// One orphan-reaper sweep: scan for `sm_session` claims owned by a stale
+/// node, commit the expire CAS on each stale owner, steal what this node
+/// can, then targeted-hydrate exactly the entities this sweep just won
+/// (FIX 2, council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda) via
+/// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::hydrate_reclaimed`].
+///
+/// **Not `restore_from_persistence`**: that method is a startup-time-only,
+/// unscoped table scan (see its own doc comment) — re-running it here, on a
+/// server that is already serving live traffic, on every successful sweep
+/// would re-scan every row this node already holds on every tick and can
+/// observe a row a live session concurrently completes/re-claims mid-scan
+/// (the **live restore hazard** this fix closes). `hydrate_reclaimed`
+/// instead takes each entity's own stream-shard lock and re-checks
+/// in-memory absence before loading/inserting, so it is safe to call from a
+/// running server — it hydrates exactly (and only) the entities this sweep
+/// just reclaimed, without needing this function to duplicate the
+/// codec/expiry logic `hydrate_reclaimed` already owns.
+#[cfg(feature = "clustering")]
+async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
+    use waddle_xmpp::ownership::{ClaimError, Entity, StalePredicate};
+
+    let clustering = &state.deps.app_state.clustering_claims;
+    let Some((claim_store, identity_handle)) = clustering.claim_pair() else {
+        return;
+    };
+    let Some(node_lease) = clustering.node_lease.clone() else {
+        return;
+    };
+    let Some(lease_ttl) = clustering.lease_ttl else {
+        return;
+    };
+
+    let candidates = match node_lease.list_orphaned_sm_session_claims().await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            warn!(%error, "orphan reaper: list_orphaned_sm_session_claims failed");
+            return;
+        }
+    };
+    if candidates.is_empty() {
+        return;
+    }
+
+    // ADR-0017 Phase 3 Slice 10 (Q5's rollout-aware placement rule): an
+    // old-generation node backs off before racing a matching/newer
+    // -generation node for a just-orphaned claim, so each entity moves
+    // approximately once per deploy instead of up to N times. Resolved
+    // once per sweep (not per candidate) — the current generation cannot
+    // meaningfully change mid-sweep, and this keeps the hot per-candidate
+    // loop below to a single extra comparison, no extra Postgres round
+    // trip per candidate.
+    let backoff_delay = match node_lease.current_generation().await {
+        Ok(current_generation) => crate::clustering::drain::rollout_backoff_delay(
+            clustering.pod_template_hash.as_deref(),
+            current_generation.as_deref(),
+        ),
+        Err(error) => {
+            debug!(%error, "orphan reaper: current_generation lookup failed; proceeding without backoff");
+            std::time::Duration::ZERO
+        }
+    };
+
+    let me = identity_handle.current();
+    let mut reclaimed: Vec<(Entity, waddle_xmpp::ownership::ClaimEpoch)> = Vec::new();
+    for candidate in candidates {
+        // Element 9's ordering requirement: commit the expire CAS on the
+        // dead owner's row FIRST. Idempotent/best-effort — a failure here
+        // just means the steal below is also likely to lose (the owner
+        // row is not yet committed-expired), retried next sweep.
+        if let Err(error) = node_lease.expire(&candidate.owner, lease_ttl).await {
+            debug!(
+                entity_id = %candidate.entity.id,
+                %error,
+                "orphan reaper: expire on the dead owner's row failed; retrying next sweep"
+            );
+            continue;
+        }
+        // ADR-0017 Phase 3 Slice 10: a placement heuristic only — never
+        // affects correctness. `steal_stale`'s own epoch CAS remains the
+        // sole authority over who actually wins; this only decides who
+        // tries first.
+        if !backoff_delay.is_zero() {
+            tokio::time::sleep(backoff_delay).await;
+        }
+        match claim_store
+            .steal_stale(
+                &candidate.entity,
+                candidate.epoch,
+                StalePredicate::OwnerStale,
+                &me,
+            )
+            .await
+        {
+            Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
+            Err(ClaimError::Conflict) => {
+                // Another node (or this same node's own re-registration
+                // reacquisition step, ADR-0017 Phase 3 plan deviation #19)
+                // already reclaimed it, or the "dead" owner actually
+                // renewed concurrently — safe, no-op.
+            }
+            Err(error) => {
+                warn!(
+                    entity_id = %candidate.entity.id,
+                    %error,
+                    "orphan reaper: steal_stale(OwnerStale) failed"
+                );
+            }
+        }
+    }
+    if !reclaimed.is_empty() {
+        let stolen = reclaimed.len();
+        info!(
+            stolen,
+            "orphan reaper: reclaimed orphaned SM-session claims"
+        );
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .hydrate_reclaimed(&reclaimed)
+            .await
+        {
+            Ok(hydrated) => {
+                info!(
+                    stolen,
+                    hydrated, "orphan reaper: targeted hydration of reclaimed claims complete"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    "orphan reaper: hydrate_reclaimed (post-steal targeted hydrate) failed"
+                );
+            }
+        }
+    }
+
+    // Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): a
+    // `clustering_isr_tokens` row is never reaped by the ordinary
+    // `consume` path alone (a token issued but never resumed, or whose SM
+    // session this very sweep just reaped above, leaves an otherwise
+    // -permanent orphan). No cascade hook exists from the SM session
+    // claim's own release/reap paths — the SM session registry
+    // (`waddle-xmpp`) has no reason to depend on ISR (`waddle-server`
+    // -local, Postgres-only) at all, the same crate separation
+    // `ClaimStore`/`IsrTokenStore` already keep — so this rides the same
+    // janitor cadence as a bounded, deadline-armed TTL sweep instead.
+    if let Some(isr_token_store) = clustering.isr_token_store() {
+        match tokio::time::timeout(
+            ISR_TOKEN_SWEEP_TIMEOUT,
+            isr_token_store.sweep_expired(ISR_TOKEN_SWEEP_MAX_AGE),
+        )
+        .await
+        {
+            Ok(Ok(deleted)) if deleted > 0 => {
+                info!(deleted, "orphan reaper: swept expired ISR tokens");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "orphan reaper: ISR token sweep failed");
+            }
+            Err(_timeout) => {
+                warn!(
+                    timeout = ?ISR_TOKEN_SWEEP_TIMEOUT,
+                    "orphan reaper: ISR token sweep timed out"
+                );
+            }
+        }
+    }
+}
+
+/// Postgres-gated end-to-end test for [`run_orphan_reaper_sweep`]
+/// (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated review): seeds
+/// a stale-owner `sm_session` claim plus its durably persisted session,
+/// runs the sweep, and asserts every step of element 9's ordering contract
+/// actually lands — the expire CAS, the steal, and the targeted hydration
+/// — then repeats under two concurrent sweeps to prove the steal is
+/// exactly-once.
+///
+/// Skipped (not failed) when `WADDLE_TEST_POSTGRES_URL` is unset, mirroring
+/// every other Postgres-gated test in this crate (`clustering::claims`,
+/// `clustering::self_fence`, `sm_persistence_fenced::tests`).
+#[cfg(all(test, feature = "clustering"))]
+mod orphan_reaper_sweep_tests {
+    use super::*;
+    use crate::clustering::claims::{
+        clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+    };
+    use crate::clustering::ClusteringHandles;
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use chrono::{TimeZone, Utc};
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenceStorage};
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
+    use xmpp_parsers::presence::Show;
+
+    fn node_identity() -> NodeIdentity {
+        NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    fn sm_entity(id: &str) -> Entity {
+        Entity::new(EntityType::SmSession, id.to_string())
+    }
+
+    fn full(s: &str) -> jid::FullJid {
+        s.parse().expect("valid full JID fixture")
+    }
+
+    /// Deliberately in the past: [`PostgresFencedSmPersistence`] always
+    /// overwrites `detached_at` with the database's own `now()` at write
+    /// time (mirrors `sm_persistence_fenced::tests`'s identical fixture
+    /// helper), so the exact value here is never asserted against.
+    fn stale_caller_supplied_time() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid fixture timestamp")
+    }
+
+    fn fixture_session(stream_id: &str) -> PersistedSession {
+        PersistedSession {
+            stream_id: SmSessionId::new(stream_id),
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/web"),
+            inbound_count: 7,
+            outbound_count: 12,
+            last_acked: 10,
+            replay_gap_through: Some(9),
+            max_resume_time: Some(60),
+            detached_at: stale_caller_supplied_time(),
+            max_resume_duration: Duration::from_secs(60),
+            carbons_enabled: true,
+            roster_interested: true,
+            blocklist_interested: true,
+            presence_available: true,
+            presence_show: Some(Show::Chat),
+            presence_status: Some("at the keyboard".to_string()),
+            presence_priority: 5,
+        }
+    }
+
+    async fn expired_flag(db: &Database, node_id: &str) -> bool {
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT expired FROM clustering_nodes WHERE node_id = ?",
+                crate::db_params![node_id.to_string()],
+            )
+            .await
+            .expect("query expired flag");
+        rows.next()
+            .await
+            .expect("row present")
+            .expect("row present")
+            .get::<bool>(0)
+            .expect("expired column")
+    }
+
+    async fn backdate_heartbeat(db: &Database, node_id: &str) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET heartbeat = now() - interval '1 hour' WHERE node_id = ?",
+            crate::db_params![node_id.to_string()],
+        )
+        .await
+        .expect("backdate heartbeat");
+    }
+
+    /// Seed a persisted SM session row for `stream_id` as its current
+    /// claim-holding `owner` — [`PostgresFencedSmPersistence::upsert_session`]
+    /// fences every write through `assert_fenced` (a `FOR SHARE` probe
+    /// against `clustering_claims` keyed on *this handle's own* node
+    /// identity — see that method's doc comment), so seeding the row
+    /// through the sweeper's own persistence handle (which does not hold
+    /// the claim yet — that is the whole point of this test) would be
+    /// rejected with `NotOwner`. A short-lived, throwaway
+    /// `PostgresFencedSmPersistence` scoped to `owner`'s identity is the
+    /// correct stand-in for "the dead node itself persisted this session
+    /// before it died," mirroring how the real dead node would have
+    /// written it under its own fenced handle.
+    async fn seed_persisted_session_as_owner(db: &Database, owner: &NodeIdentity, stream_id: &str) {
+        let owner_claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+        let owner_fenced = PostgresFencedSmPersistence::open(
+            db.clone(),
+            owner_claim_store,
+            SharedNodeIdentity::new(owner.clone()),
+        )
+        .await
+        .expect("open fenced SM persistence scoped to the claim-holding owner");
+        owner_fenced
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .expect("seed persisted session as its current claim-holding owner");
+    }
+
+    /// Register `dead_owner`, then commit the Expire CAS on it directly
+    /// (after backdating its heartbeat) — establishing the "already
+    /// known-dead" precondition
+    /// [`NodeLeaseStore::list_orphaned_sm_session_claims`]'s scan requires.
+    ///
+    /// That scan's `NOT EXISTS` predicate (mirroring `steal_stale`'s
+    /// `OwnerStale` arm) reads only the **committed** `expired` flag, never
+    /// a raw heartbeat comparison (`clustering::claims`'s own module doc,
+    /// and its
+    /// `steal_stale_ignores_raw_heartbeat_only_committed_expired_flag_matters`
+    /// test) — so a claim whose owner row is merely heartbeat-stale but
+    /// still `expired = false` is invisible to the scan, and the sweep's
+    /// own per-candidate `expire()` call could only ever be a no-op
+    /// reaffirmation of a flag some prior step already flipped. This
+    /// helper *is* that prior step: it calls the exact same
+    /// `NodeLeaseStore::expire` CAS the sweep itself calls, and asserts the
+    /// false→true transition inline — the "expire CAS committed" leg of
+    /// this test.
+    async fn register_and_pre_expire_dead_owner(
+        claim_store: &PostgresClaimStore,
+        db: &Database,
+        dead_owner: &NodeIdentity,
+        lease_ttl: Duration,
+    ) {
+        claim_store
+            .register(dead_owner, None)
+            .await
+            .expect("register dead owner");
+        assert!(
+            !expired_flag(db, &dead_owner.node_id).await,
+            "freshly registered node must start non-expired"
+        );
+        backdate_heartbeat(db, &dead_owner.node_id).await;
+        let committed = claim_store
+            .expire(dead_owner, lease_ttl)
+            .await
+            .expect("expire CAS call");
+        assert!(
+            committed,
+            "expire() must commit true once heartbeat has lapsed past lease_ttl"
+        );
+        assert!(
+            expired_flag(db, &dead_owner.node_id).await,
+            "expire CAS must have transitioned clustering_nodes.expired to true"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_orphan_reaper_sweep_steals_hydrates_and_is_exactly_once_under_concurrency() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let db = Database::from_config(
+            "orphan-reaper-sweep-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+
+        let claim_store = PostgresClaimStore::new(db.clone());
+        claim_store
+            .ensure_schema()
+            .await
+            .expect("ensure claims schema");
+        {
+            let conn = db.guard().await.expect("guard");
+            for stmt in [
+                "DELETE FROM clustering_claims",
+                "DELETE FROM clustering_nodes",
+                "DELETE FROM clustering_steal_intents",
+            ] {
+                conn.execute(stmt, ()).await.expect("clean table");
+            }
+        }
+
+        let lease_ttl = Duration::from_millis(50);
+
+        // The sweeping node's own identity, shared verbatim between
+        // `ClusteringHandles` and the SM-session registry's claim binding —
+        // mirrors `server/http.rs::create_sm_session_registry`'s production
+        // wiring, never two independently-tracked identities for the same
+        // node.
+        let sweeper_identity = node_identity();
+        let sweeper_identity_handle = SharedNodeIdentity::new(sweeper_identity.clone());
+        let sweeper_claim_store: Arc<dyn ClaimStore> =
+            Arc::new(PostgresClaimStore::new(db.clone()));
+        let sweeper_node_lease: Arc<dyn NodeLeaseStore> =
+            Arc::new(PostgresClaimStore::new(db.clone()));
+
+        // Fenced SM persistence, co-located in the same Postgres database
+        // as the claims tables (FIX 4's co-location invariant in
+        // `sm_persistence_fenced.rs`).
+        let fenced = PostgresFencedSmPersistence::open(
+            db.clone(),
+            Arc::clone(&sweeper_claim_store),
+            sweeper_identity_handle.clone(),
+        )
+        .await
+        .expect("open fenced SM persistence");
+        {
+            let conn = db.guard().await.expect("guard");
+            for stmt in ["DELETE FROM sm_unacked", "DELETE FROM sm_sessions"] {
+                conn.execute(stmt, ()).await.expect("clean table");
+            }
+        }
+        let fenced_arc: Arc<dyn SmPersistenceStorage> = Arc::new(fenced);
+
+        let sm_session_registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(Arc::clone(&fenced_arc))
+                .with_claim_store(
+                    Arc::clone(&sweeper_claim_store),
+                    sweeper_identity_handle.clone(),
+                ),
+        );
+
+        let clustering = ClusteringHandles {
+            claim_store: Some(Arc::clone(&sweeper_claim_store)),
+            node_identity: Some(sweeper_identity_handle.clone()),
+            local_claims: None,
+            room_local_claims: None,
+            muc_durable_store: None,
+            isr_token_store: None,
+            node_lease: Some(sweeper_node_lease),
+            lease_ttl: Some(lease_ttl),
+            pod_template_hash: None,
+            resume_bridge: None,
+            stop_token: None,
+            resume_handshake_timeout: None,
+        };
+
+        let state = create_test_websocket_state_with_clustering(
+            clustering,
+            Arc::clone(&sm_session_registry),
+        )
+        .await;
+
+        // ============ Leg 1: single-sweep steal + targeted hydrate ============
+        let dead_owner = node_identity();
+        register_and_pre_expire_dead_owner(&claim_store, &db, &dead_owner, lease_ttl).await;
+
+        let stream_id = "orphan-reaper-stream-1";
+        let entity = sm_entity(stream_id);
+        let orphan_epoch = claim_store
+            .acquire(&entity, &dead_owner)
+            .await
+            .expect("acquire claim under dead owner");
+        seed_persisted_session_as_owner(&db, &dead_owner, stream_id).await;
+
+        run_orphan_reaper_sweep(&state).await;
+
+        assert!(
+            expired_flag(&db, &dead_owner.node_id).await,
+            "dead owner's clustering_nodes row must (still) be committed-expired \
+             after the sweep"
+        );
+        let steal_landed = claim_store
+            .fence(&entity, &sweeper_identity, ClaimEpoch(orphan_epoch.0 + 1))
+            .await
+            .expect("fence call");
+        assert!(
+            steal_landed,
+            "steal must land: the sweeping node must now own the entity at the \
+             bumped epoch"
+        );
+        let hydrated = sm_session_registry
+            .peek_session(stream_id)
+            .await
+            .expect("peek_session call");
+        assert!(
+            hydrated.is_some(),
+            "targeted hydration must land the reclaimed session in memory"
+        );
+
+        // ============ Leg 2: two concurrent sweeps, exactly-once steal ============
+        let dead_owner_2 = node_identity();
+        register_and_pre_expire_dead_owner(&claim_store, &db, &dead_owner_2, lease_ttl).await;
+
+        let stream_id_2 = "orphan-reaper-stream-2";
+        let entity_2 = sm_entity(stream_id_2);
+        let orphan_epoch_2 = claim_store
+            .acquire(&entity_2, &dead_owner_2)
+            .await
+            .expect("acquire claim under dead owner 2");
+        seed_persisted_session_as_owner(&db, &dead_owner_2, stream_id_2).await;
+
+        let state_a = Arc::clone(&state);
+        let state_b = Arc::clone(&state);
+        let task_a = tokio::spawn(async move { run_orphan_reaper_sweep(&state_a).await });
+        let task_b = tokio::spawn(async move { run_orphan_reaper_sweep(&state_b).await });
+        let (result_a, result_b) = tokio::join!(task_a, task_b);
+        result_a.expect("sweep task a must not panic");
+        result_b.expect("sweep task b must not panic");
+
+        assert!(
+            expired_flag(&db, &dead_owner_2.node_id).await,
+            "dead owner 2's clustering_nodes row must be committed-expired"
+        );
+        let steal_landed_exactly_once = claim_store
+            .fence(
+                &entity_2,
+                &sweeper_identity,
+                ClaimEpoch(orphan_epoch_2.0 + 1),
+            )
+            .await
+            .expect("fence call");
+        assert!(
+            steal_landed_exactly_once,
+            "exactly one of the two concurrent sweeps must have won the steal — the \
+             epoch must be bumped by exactly 1, not 2 (a double-steal would fence at \
+             +1 as false, since the epoch would actually be +2)"
+        );
+        let hydrated_2 = sm_session_registry
+            .peek_session(stream_id_2)
+            .await
+            .expect("peek_session call");
+        assert!(
+            hydrated_2.is_some(),
+            "the winning sweep's targeted hydration must land session 2 in memory"
+        );
+
+        // Sanity: exactly the two legs' sessions are in memory — no
+        // duplicate or lost hydration across the concurrent pair.
+        let total = sm_session_registry.session_count().await;
+        assert_eq!(
+            total, 2,
+            "exactly one hydrated session per leg; no duplicates from the \
+             concurrent sweeps"
+        );
+    }
 }
 
 pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSocketState>) {
@@ -787,6 +1386,31 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     });
 }
 
+/// ADR-0017 Phase 3 Slice 10: feed the SM-session Q6 drain's outcomes into
+/// the SAME `claims_released_on_drain`/`claims_abandoned_on_drain` counters
+/// the generic per-entity room drain uses (`clustering::drain::
+/// run_shutdown_drain`) — one shared observability surface for "how much of
+/// this node's owned state made it out cleanly," regardless of which of
+/// the two independent drain mechanisms (SM sessions vs. rooms) actually
+/// drove a given entity. A no-op on a non-`clustering`-feature build: the
+/// Q6 drain itself is unconditionally compiled (it works with or without
+/// clustering, via `InProcessClaimStore`), but the Slice-10 metrics module
+/// only exists behind the `clustering` Cargo feature.
+fn record_sm_drain_outcome(released: bool) {
+    #[cfg(feature = "clustering")]
+    {
+        if released {
+            crate::clustering::metrics::record_claims_released_on_drain(1);
+        } else {
+            crate::clustering::metrics::record_claims_abandoned_on_drain(1);
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = released;
+    }
+}
+
 pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
@@ -805,6 +1429,13 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         let _notify_guard = NotifyOnDrop(drain_notify);
 
         drain_token.cancelled().await;
+        // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
+        // timestamp, fed into the SAME `drain_duration_ms` histogram the
+        // generic per-entity room drain records into (below, once the Q6
+        // portion completes) — one shared observability surface across
+        // both independent drain mechanisms.
+        #[cfg(feature = "clustering")]
+        let sm_drain_started = std::time::Instant::now();
         // Issue #1091: live sessions observe the same stop token, send
         // <system-shutdown/> and detach into the SmSessionRegistry.
         // Wait for every connection guard to drop before the Q6 passes
@@ -848,8 +1479,24 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         loop {
             if std::time::Instant::now() >= drain_deadline {
                 waddle_xmpp::prometheus::increment_sm_drain_timeout();
+                // ADR-0017 Phase 3 Slice 10: whatever this node still
+                // believes it owns at the timeout never even reached
+                // `drain_all_for_shutdown` this pass — abandoned, same as
+                // the generic per-entity drain's own budget-overrun path.
+                let remaining = websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .live_session_ids()
+                    .map(|ids| ids.len())
+                    .unwrap_or(0);
+                if remaining > 0 {
+                    #[cfg(feature = "clustering")]
+                    crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
+                }
                 warn!(
                     total_drained,
+                    remaining,
                     "Graceful shutdown: drain timeout reached. Remaining sessions \
                      keep their durable SM rows and will be retried on next startup \
                      via restore_from_persistence + Q6 expiry."
@@ -900,6 +1547,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                              promotion to preserve fail-closed XEP-0191 policy. \
                              Durable SM row will be retried on next startup."
                         );
+                        record_sm_drain_outcome(false);
                         continue;
                     }
                 };
@@ -913,6 +1561,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 let summary = crate::sm_promotion::promote_session_unacked(
                     &session,
                     &websocket_state.deps.protocol.connection_registry,
+                    &websocket_state.deps.protocol.user_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     &blocklist,
                     websocket_state.deps.auth_state.xmpp_domain.as_str(),
@@ -947,14 +1596,21 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         "Graceful shutdown: promotion had storage failures; \
                          preserving durable SM row for restart-time retry"
                     );
+                    record_sm_drain_outcome(false);
                     continue;
                 }
-                websocket_state
+                let confirmed = websocket_state
                     .deps
                     .protocol
                     .sm_session_registry
                     .confirm_drained(&session.stream_id)
                     .await;
+                // ADR-0017 Phase 3 Slice 10: this session's own "final
+                // fenced write, then release" sequence — `confirm_drained`
+                // deletes the durable row and releases the `ClaimStore`
+                // claim only on success (see that method's own doc
+                // comment).
+                record_sm_drain_outcome(confirmed);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
                 if let Err(error) = websocket_state
@@ -979,6 +1635,10 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         info!(
             total_drained,
             "Graceful shutdown: SM Q6 drain complete (iterative)"
+        );
+        #[cfg(feature = "clustering")]
+        crate::clustering::metrics::record_drain_duration_ms(
+            sm_drain_started.elapsed().as_secs_f64() * 1000.0,
         );
 
         // Drain the OIDC profile-publish tracker before notifying

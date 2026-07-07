@@ -143,6 +143,11 @@ pub(super) async fn register_bound_connection_after_frame(
         );
     conn.registry_owner = Some(owner.clone());
 
+    // Publish the SM stream id + restored presence onto the
+    // freshly-registered entry, owner-gated against a racing same-JID
+    // replacement (#1139 resume-claim clobber fix — see
+    // `publish_stream_id_and_presence`'s doc comment for the full
+    // "run before the authoritative mirror ask" rationale).
     publish_stream_id_and_presence(state, &jid, &owner, conn);
 
     if resumed && conn.pending_subscribes_flushed {

@@ -34,6 +34,7 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
+use crate::ownership::Entity;
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
 
@@ -42,6 +43,54 @@ use crate::Stanza;
 pub enum SmPersistenceError {
     #[error("SM persistence error: {0}")]
     Other(String),
+
+    /// A fenced write's own fencing check (ADR-0017 Phase 3 Slice 4,
+    /// element 4) observed that this node no longer holds — or never
+    /// acquired — the entity's ownership claim at the epoch it believed
+    /// was current: the `SELECT ... FOR SHARE` issued inside the write's
+    /// own transaction returned zero rows. The write was rolled back
+    /// before touching `sm_sessions`/`sm_unacked`. Only ever returned by
+    /// the Postgres-fenced implementation (the portable, single-node
+    /// implementation has no fencing concept and never returns this).
+    ///
+    /// Distinct from [`Self::Other`] so Slice 5/6 callers can react to a
+    /// lost claim (demote the in-memory session, attempt a fresh
+    /// acquire/steal) instead of treating this as an opaque backend
+    /// failure.
+    ///
+    /// `entity` is the typed [`Entity`] the fencing check was performed
+    /// against (FIX 2, typed-payloads hard rule) — never a pre-formatted
+    /// `String` key. [`Entity`] implements `Display` as the same
+    /// `<entity_type_tag>:<id>` encoding the SQL layer uses, so this
+    /// variant's `#[error]` text renders identically to the pre-FIX-2
+    /// bare-`String` form; only the field's *type* changed.
+    #[error(
+        "fencing check failed: this node does not hold entity '{entity}' at the expected claim epoch"
+    )]
+    NotOwner { entity: Entity },
+
+    /// Startup-time misconfiguration (ADR-0017 Phase 3 Slice 4 FIX 4): the
+    /// resolved SM-persistence database URL does not match the clustering
+    /// subsystem's global database URL while clustering is enabled. The
+    /// Postgres-fenced `SmPersistenceStorage`'s fencing `SELECT ... FOR
+    /// SHARE` targets `clustering_claims`, which lives in the clustering
+    /// global database — clustered SM persistence and the claims tables
+    /// must be co-located in the same Postgres database, never two
+    /// independently configured ones (a second, unrelated database might
+    /// not even have a `clustering_claims` table to fence against).
+    ///
+    /// Both fields are expected to already be credential-redacted by the
+    /// caller before construction (this type has no way to redact a DSN
+    /// itself, and must not be trusted to store raw secrets).
+    #[error(
+        "clustered SM persistence must be co-located with the clustering claims tables: \
+         resolved SM database URL ({sm_database_url}) does not match the clustering global \
+         database URL ({global_database_url})"
+    )]
+    ClusterColocationMismatch {
+        sm_database_url: String,
+        global_database_url: String,
+    },
 }
 
 /// A durable record of an XEP-0198 detached session.
@@ -258,6 +307,27 @@ pub trait SmPersistenceStorage: Send + Sync {
     ) -> Result<u32, SmPersistenceError> {
         let _ = stream_id;
         Ok(0)
+    }
+
+    /// Evict any per-`stream_id` claim-epoch cache entry this implementation
+    /// keeps as a fencing side channel (ADR-0017 Phase 3 Slice 4's "Epoch
+    /// side channel" design note; Slice 5 debt (a)).
+    ///
+    /// Called by `InMemorySmSessionRegistry` (`session_registry/claims.rs`)
+    /// every time this node's `ClaimStore` claim for `stream_id` ends —
+    /// `release_claim`/`complete_claim`/`complete_claim_if_resumable`'s
+    /// terminal branches, and `invalidate_sessions_for_jid`'s removal of a
+    /// claimed session — so a cache keyed by stream_id never outlives the
+    /// claim it caches the epoch for. Default no-op: the portable
+    /// (single-node, in-memory) implementation has no such cache (its
+    /// `ClaimStore` is always `InProcessClaimStore`, which is cheap to call
+    /// directly on every write); only the Postgres-fenced implementation
+    /// (`waddle-server`'s `PostgresFencedSmPersistence`) overrides this to
+    /// actually remove the cached cell, so a subsequent fenced write for the
+    /// same stream_id after a fresh claim always re-derives its epoch rather
+    /// than reusing one issued under a claim this node no longer holds.
+    fn evict_claim_cache(&self, stream_id: &SmSessionId) {
+        let _ = stream_id;
     }
 }
 

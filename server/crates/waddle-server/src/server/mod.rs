@@ -185,12 +185,58 @@ pub async fn start_with_config(
     room_registry_gauge::spawn(room_registry_handle.clone(), stop_token.clone());
     let room_registry = room_registry_handle.actor_ref().clone();
 
-    // ADR-0017 Phase 2: conditionally start the owned libp2p swarm subsystem
-    // (node discovery only), gated behind `clustering.enabled` + the
+    // ADR-0017 Phase 2/3: conditionally start the owned libp2p swarm
+    // subsystem (node discovery only) plus the Phase 3 Slice 2 node-lease/
+    // self-fencing loop, gated behind `clustering.enabled` + the
     // `clustering` build feature + the Postgres control plane. A no-op when
-    // disabled — the default single-replica path is byte-for-byte unchanged.
-    crate::clustering::start_if_enabled(&server_config.clustering, db_pool.global(), &stop_token)
-        .await?;
+    // disabled — the default single-replica path is byte-for-byte unchanged,
+    // and `clustering_readiness` simply never flips (stays ready forever).
+    let clustering_readiness = crate::clustering::ClusteringReadiness::new();
+    // ADR-0017 Phase 3 Slice 10: `clustering_shutdown` is awaited after the
+    // HTTP server exits below — see that await's own comment for why this
+    // node's graceful per-entity claim drain must complete before process
+    // exit, not merely race it in the background.
+    let (clustering_handles, clustering_shutdown) = crate::clustering::start_if_enabled(
+        &server_config.clustering,
+        db_pool.global(),
+        &stop_token,
+        clustering_readiness.clone(),
+    )
+    .await?;
+
+    // ADR-0017 Phase 3 Slice 7: wire the real, clustering-backed claim
+    // store/identity/durable store into the room registry spawned above —
+    // construction-order note: the registry is spawned before
+    // `start_if_enabled` runs (it needs no clustering handles to exist),
+    // mirroring `local_claims`/`resume_bridge`'s identical fill-in-later
+    // cell pattern. A `None` claim pair (clustering disabled, non-Postgres,
+    // or a build without the `clustering` feature) leaves the registry's
+    // single-node defaults (`InProcessClaimStore`, no durable store)
+    // untouched — today's behavior, unchanged.
+    #[cfg(feature = "clustering")]
+    if let Some((claim_store, node_identity)) = clustering_handles.claim_pair() {
+        // ADR-0017 Phase 3 Slice 10: rollout-aware acquire placement for
+        // the room re-election path — `None` (no backoff) whenever the
+        // node-lease handle itself is unavailable, mirroring every other
+        // `clustering_handles.*` optional-field fallback in this block.
+        let rollout_backoff = clustering_handles.node_lease.clone().map(|node_lease| {
+            Arc::new(crate::clustering::drain::PostgresRolloutBackoff::new(
+                node_lease,
+                clustering_handles.pod_template_hash.clone(),
+            )) as Arc<dyn waddle_xmpp::ownership::RolloutBackoff>
+        });
+        room_registry_handle
+            .wire_clustering_claims(
+                claim_store,
+                node_identity,
+                clustering_handles.muc_durable_store.clone(),
+                rollout_backoff,
+            )
+            .await;
+        if let Some(room_local_claims) = &clustering_handles.room_local_claims {
+            room_local_claims.wire(room_registry_handle.clone());
+        }
+    }
 
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
@@ -212,9 +258,21 @@ pub async fn start_with_config(
         occupant_id_secret: server_config.occupant_id_secret.clone(),
         permission_actor: permission_actor.clone(),
         server_owner_jids,
+        clustering_readiness,
+        clustering_claims: clustering_handles,
     }));
-    let websocket_mam_storage =
-        create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;
+    // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
+    // the clustering global database and enable fenced groupchat-archive
+    // writes when clustering is live, mirroring the
+    // `sm_persistence`/`pending_delivery` `open_for_cluster_mode` gating
+    // already established for their own durability stores.
+    let websocket_mam_storage = create_websocket_mam_storage(
+        xmpp_config.mam_database_url.clone(),
+        server_config.clustering.enabled,
+        state.clustering_claims.claim_pair().is_some(),
+        db_pool.global(),
+    )
+    .await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
@@ -281,6 +339,23 @@ pub async fn start_with_config(
         Ok(Err(e)) => Err(e),
         Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
     };
+    // ADR-0017 Phase 3 Slice 10: the clustering node-lease loop runs its
+    // own per-entity graceful drain (mark draining, seal + batch-release
+    // owned `RoomActor` claims) on this same `stop_token` firing, in
+    // parallel with the HTTP/SM drain just awaited above — but element 4's
+    // drain sequence requires it "completing before process exit," not
+    // merely racing shutdown in the background. A small fixed margin atop
+    // the configured budget covers this await's own task-exit/logging
+    // overhead beyond the drain loop's own internal budget bound; a no-op
+    // (returns immediately) when clustering is disabled.
+    const CLUSTERING_DRAIN_AWAIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+    clustering_shutdown
+        .await_drain(
+            server_config.clustering.node_lease.claim_release_budget
+                + CLUSTERING_DRAIN_AWAIT_MARGIN,
+        )
+        .await;
+
     // Tear down the shutdown lifecycle task so we don't dangle.
     // If HTTP exited on its own (error path) before any signal
     // arrived, `shutdown_handle.await` would block on

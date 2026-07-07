@@ -8,12 +8,21 @@ data:
   WADDLE_MODE: {{ .Values.config.mode | quote }}
   WADDLE_BASE_URL: {{ .Values.config.baseUrl | quote }}
   WADDLE_DB_DRIVER: {{ .Values.database.driver | quote }}
+  WADDLE_DB_POOL_SIZE: {{ .Values.database.poolSize | toString | quote }}
+  WADDLE_DB_CONTROL_PLANE_POOL_SIZE: {{ .Values.database.controlPlanePoolSize | toString | quote }}
   WADDLE_XMPP_ENABLED: {{ .Values.xmpp.enabled | toString | quote }}
   WADDLE_XMPP_DOMAIN: {{ .Values.xmpp.domain | quote }}
   WADDLE_NATIVE_AUTH_ENABLED: {{ .Values.xmpp.nativeAuthEnabled | toString | quote }}
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
   WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
   WADDLE_DRAIN_TIMEOUT_SECS: {{ .Values.config.drainTimeoutSeconds | toString | quote }}
+  {{- /*
+    ADR-0017 Phase 3 Slice 10: wired unconditionally, mirroring
+    WADDLE_CLUSTERING_POD_TEMPLATE_HASH's identical precedent in
+    deployment.yaml — harmless while clustering.enabled stays hard-locked
+    false (Phase 0 guard), and ships ahead of Phase 4's chart unlock.
+  */}}
+  WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS: {{ mul (int .Values.clustering.claimReleaseBudgetSeconds) 1000 | toString | quote }}
   WADDLE_SERVER_OWNER_LOCALPARTS: {{ join "," .Values.config.serverOwnerLocalparts | quote }}
   RUST_LOG: {{ .Values.config.rustLog | quote }}
   {{- if .Values.config.corsOrigins }}

@@ -315,11 +315,32 @@ enum ActorSendFailure {
     MaybeEnqueued,
 }
 
+/// Disposition of a single-resource actor delivery attempt. Two callers rely
+/// on this:
+///
+/// - `route_to_connection`'s full-JID path (#1130) needs to distinguish
+///   `Unavailable` (confirmed offline, no detached session to hold the
+///   stanza) from `Dropped` (an ambiguous/transient failure) so it knows
+///   when to synthesize a fallback IQ reply to the sender.
+/// - `route_to_connection`'s bare-JID headless-persistence gate (ADR-0017
+///   Phase 3 Slice 9) needs to know whether ANY target in a delivery set
+///   actually landed somewhere durable (`Delivered` or `QueuedDetached`) —
+///   self-healing via `DroppedClosed` eviction means a target selected as
+///   "live" can still turn out not to land by the time delivery runs, and if
+///   every target fails to land, the message must not be silently lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FullJidDeliveryOutcome {
+    /// Delivered onto a live resource's channel.
     Delivered,
+    /// Routed to the detached XEP-0198 replay buffer.
     QueuedDetached,
+    /// Confirmed offline: no live channel and no detached session to fall
+    /// back to.
     Unavailable,
+    /// Dropped for an ambiguous/transient reason: full channel, a storage
+    /// error while recording to detached, or a terminal ask failure
+    /// classified `MaybeEnqueued` (never routed to detached, to avoid
+    /// double-delivery).
     Dropped,
 }
 
@@ -376,7 +397,10 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 /// send, so one wedged/zombie recipient can no longer stall global dispatch,
 /// issue #699; `try_deliver` already bumps the Prometheus dropped-full
 /// counter); `NotConnected`/`DroppedClosed` routes to the detached XEP-0198
-/// replay buffer.
+/// replay buffer — this is the self-healing eviction path ADR-0017 Phase 3
+/// Slice 9 relies on in place of the retired DashMap-liveness intersection
+/// filter: a stale actor entry is caught and evicted the moment delivery
+/// touches it, exactly like the DashMap path already did.
 ///
 /// A terminal ask failure is classified by [`classify_send_error`]:
 /// provably-never-enqueued failures (`ActorNotRunning`, `MailboxFull`,

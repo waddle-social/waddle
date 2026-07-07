@@ -108,7 +108,14 @@ pub(super) async fn queue_offline_delivery(
                     }
                 }
                 Err(bare) => {
-                    for full in deps.connection_registry.get_resources_for_user(&bare) {
+                    let resources = match deps.user_registry {
+                        Some(user_registry) => {
+                            waddle_xmpp::registry::get_resources_for_user(user_registry, &bare)
+                                .await
+                        }
+                        None => Vec::new(),
+                    };
+                    for full in resources {
                         if matches!(
                             deps.connection_registry
                                 .send_to(&full, bounce_stanza.clone())

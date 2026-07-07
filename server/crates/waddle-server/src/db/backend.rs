@@ -34,7 +34,11 @@ impl std::str::FromStr for DatabaseDriver {
 
 #[async_trait]
 trait DatabaseAdapter: Send + Sync {
-    async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError>;
+    async fn connect(
+        &self,
+        database_url: &str,
+        pool_size: u32,
+    ) -> Result<DatabaseBackend, DatabaseError>;
 }
 
 #[derive(Debug, Default)]
@@ -42,7 +46,11 @@ pub struct SqlxSqliteAdapter;
 
 #[async_trait]
 impl DatabaseAdapter for SqlxSqliteAdapter {
-    async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError> {
+    async fn connect(
+        &self,
+        database_url: &str,
+        pool_size: u32,
+    ) -> Result<DatabaseBackend, DatabaseError> {
         // WAL mode allows concurrent readers + one writer, but two
         // pooled connections that both want the writer slot can race —
         // SQLite returns SQLITE_BUSY/LOCKED. `busy_timeout` lets the
@@ -57,7 +65,7 @@ impl DatabaseAdapter for SqlxSqliteAdapter {
             .busy_timeout(std::time::Duration::from_secs(5))
             .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
-            .max_connections(10)
+            .max_connections(pool_size)
             .connect_with(connect_options)
             .await?;
         Ok(DatabaseBackend::Sqlite(pool))
@@ -69,22 +77,31 @@ pub struct SqlxPostgresAdapter;
 
 #[async_trait]
 impl DatabaseAdapter for SqlxPostgresAdapter {
-    async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError> {
+    async fn connect(
+        &self,
+        database_url: &str,
+        pool_size: u32,
+    ) -> Result<DatabaseBackend, DatabaseError> {
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(pool_size)
             .connect(database_url)
             .await?;
         Ok(DatabaseBackend::Postgres(pool))
     }
 }
 
+/// Connect a backend pool sized by `pool_size` (ADR-0017 element 12:
+/// `DatabaseConfig::pool_size`/`ControlPlanePoolConfig::size` both funnel
+/// through this one connect path — no separate connection-management type
+/// for the control-plane pool).
 pub(super) async fn connect_backend(
     driver: DatabaseDriver,
     database_url: &str,
+    pool_size: u32,
 ) -> Result<DatabaseBackend, DatabaseError> {
     match driver {
-        DatabaseDriver::Sqlite => SqlxSqliteAdapter.connect(database_url).await,
-        DatabaseDriver::Postgres => SqlxPostgresAdapter.connect(database_url).await,
+        DatabaseDriver::Sqlite => SqlxSqliteAdapter.connect(database_url, pool_size).await,
+        DatabaseDriver::Postgres => SqlxPostgresAdapter.connect(database_url, pool_size).await,
     }
 }
 

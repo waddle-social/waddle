@@ -29,6 +29,7 @@ mod types;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use kameo::actor::ActorRef;
 use tracing::{debug, instrument};
 use waddle_xmpp::pending_delivery::flush::{
     build_replay_stanza, MaterializedPayload, ReplayReason,
@@ -39,12 +40,12 @@ use waddle_xmpp::protocol::dm_routing::{
     classify_dm_intake, DmRouting, LiveDecision, OnlineResources, PendingDecision,
 };
 use waddle_xmpp::protocol::session_state::Blocklist;
-use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
+use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
 use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
-use pending::{insert_pending, promote_as_transient};
+use pending::{insert_pending, promote_as_transient, DeliveryHandles};
 use stanza::{parse_stanza, promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionSummary};
 
@@ -70,12 +71,13 @@ const TOMBSTONE_CLOCK_SKEW_SLACK: chrono::Duration = chrono::Duration::seconds(6
 /// `scrubbed` in the summary) instead of resurrecting retracted
 /// content into `pending_delivery`.
 #[instrument(
-    skip(session, registry, pending_storage, blocklist, recent_tombstones),
+    skip(session, registry, user_registry, pending_storage, blocklist, recent_tombstones),
     fields(stream_id = %session.stream_id, jid = %session.jid)
 )]
 pub async fn promote_session_unacked(
     session: &DetachedSession,
     registry: &ConnectionRegistry,
+    user_registry: &ActorRef<UserRegistryActor>,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     blocklist: &Blocklist,
     server_domain: &str,
@@ -88,7 +90,7 @@ pub async fn promote_session_unacked(
     // classifier. Empty in the common SM-expiry case (otherwise
     // the session wouldn't have been detached in the first place,
     // unless other resources joined after detach).
-    let online = build_online_resources(registry, &recipient_bare);
+    let online = build_online_resources(registry, user_registry, &recipient_bare).await;
 
     // Round-2 review R2: select the sequences a recently applied
     // tombstone matches, using the same shared matcher as the
@@ -149,9 +151,11 @@ pub async fn promote_session_unacked(
                     online: &online,
                     blocklist,
                     registry,
+                    user_registry,
                     pending_storage,
                     original_receipt_fallback: entry.original_receipt_at,
                     server_domain,
+                    origin_stream_id: &session.stream_id,
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
@@ -189,6 +193,7 @@ pub async fn promote_session_unacked(
 pub struct DisplacedPromotionDeps<'a> {
     pub sm_registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     pub connection_registry: &'a ConnectionRegistry,
+    pub user_registry: &'a ActorRef<UserRegistryActor>,
     pub pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
     pub blocking_storage: &'a dyn waddle_xmpp::xep::xep0191::BlockingStorage,
     pub server_domain: &'a str,
@@ -413,6 +418,7 @@ pub async fn promote_displaced_sessions(
         let summary = promote_session_unacked(
             &session,
             deps.connection_registry,
+            deps.user_registry,
             deps.pending_storage,
             &blocklist,
             deps.server_domain,
@@ -505,9 +511,15 @@ struct PromotionContext<'a> {
     online: &'a OnlineResources,
     blocklist: &'a Blocklist,
     registry: &'a ConnectionRegistry,
+    user_registry: &'a ActorRef<UserRegistryActor>,
     pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
     server_domain: &'a str,
+    /// The SM session whose unacked queue is being promoted (ADR-0017
+    /// Phase 3 Slice 5 FIX 3) — threaded down into
+    /// `pending::insert_pending`'s `insert_fenced` call so a cluster-fenced
+    /// storage can fence the write against this exact claim.
+    origin_stream_id: &'a str,
 }
 
 /// Promote a single typed [`xmpp_parsers::message::Message`] per the
@@ -545,7 +557,8 @@ async fn promote_one(
     // `next()` which silently lost deliveries on multi-resource
     // users).
     if !matches!(routing.live, LiveDecision::None) {
-        let targets = collect_live_targets(&routing, &message, ctx.registry);
+        let targets =
+            collect_live_targets(&routing, &message, ctx.registry, ctx.user_registry).await;
         if !targets.is_empty() {
             let delayed = build_replay_stanza(
                 MaterializedPayload::Transient(Box::new(message.clone())),
@@ -620,7 +633,11 @@ async fn promote_one(
                             recipient_bare,
                             ctx.pending_storage,
                             ctx.original_receipt_fallback,
-                            ctx.registry,
+                            DeliveryHandles {
+                                registry: ctx.registry,
+                                user_registry: ctx.user_registry,
+                            },
+                            ctx.origin_stream_id,
                         )
                         .await;
                     }
@@ -645,7 +662,11 @@ async fn promote_one(
         ctx.pending_storage,
         ctx.original_receipt_fallback,
         &message,
-        ctx.registry,
+        DeliveryHandles {
+            registry: ctx.registry,
+            user_registry: ctx.user_registry,
+        },
+        ctx.origin_stream_id,
     )
     .await
 }

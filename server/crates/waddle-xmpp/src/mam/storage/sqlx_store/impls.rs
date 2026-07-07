@@ -9,6 +9,7 @@ use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 
 use crate::mam::storage::query_semantics::{finalize_result, uses_backward_pagination};
 use crate::mam::storage::{MamStorage, MamStorageError};
+use crate::muc::RoomClaimFenceContext;
 
 use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
 use super::query::{
@@ -27,6 +28,19 @@ impl MamStorage for SqlxMamStorage {
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError> {
         super::write::store_message(&self.backend, archive_jid, message).await
+    }
+
+    #[instrument(skip(self, message, fence), fields(archive = %archive_jid))]
+    async fn store_message_fenced(
+        &self,
+        archive_jid: &BareJid,
+        message: &ArchivedMessage,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<String, MamStorageError> {
+        if !self.fencing_enabled {
+            return self.store_message(archive_jid, message).await;
+        }
+        super::write::store_message_fenced(&self.backend, archive_jid, message, fence).await
     }
 
     #[instrument(skip(self), fields(archive = %archive_jid))]
