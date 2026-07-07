@@ -2189,7 +2189,8 @@ async fn run_group_dm_rename(
             config: group_dm_record_config(&record),
         })
         .await
-        .map_err(send_err("room_registry ask GetOrCreateRoom"))?;
+        .map_err(send_err("room_registry ask GetOrCreateRoom"))?
+        .actor_ref;
     hydrate_group_dm_member_affiliations(state, &actor, &channel_id).await?;
     let snapshot = actor
         .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
@@ -4247,7 +4248,8 @@ mod sfu_eviction_tests {
                 },
             })
             .await
-            .expect("room actor");
+            .expect("room actor")
+            .actor_ref;
         let bob: FullJid = "bob@localhost/web".parse().expect("bob jid");
         actor
             .ask(JoinWithAffiliation {

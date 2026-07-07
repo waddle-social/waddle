@@ -65,8 +65,16 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 }
             }
             JoinAffiliationGrant::CreatorOwner => {
-                self.room
-                    .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
+                // #1134 defense-in-depth on top of the registry's
+                // created-bit: XEP-0045 §10.1.1 gives Owner to the
+                // creator only, so the grant applies only while no
+                // owner exists. If two racing first-joins both claim
+                // creatorship, the actor's serialized mailbox makes
+                // exactly one of them the owner.
+                if !self.room.has_owner() {
+                    self.room
+                        .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
+                }
             }
         }
 

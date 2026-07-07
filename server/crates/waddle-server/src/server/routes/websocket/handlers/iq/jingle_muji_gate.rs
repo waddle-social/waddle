@@ -236,7 +236,8 @@ mod tests {
                 room_jid: room.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
         actor
             .ask(Join {
                 nick: nick.to_string(),

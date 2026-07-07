@@ -256,12 +256,19 @@ async fn handle_muc_join_unlocked(
                     })
                     .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
-                let Some(actor) =
+                let Some(acquisition) =
                     get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
                 else {
                     return vec![];
                 };
-                (actor, managed_channel.is_none())
+                // #1134: the created-bit is registry-authoritative —
+                // the registry's serialized handler makes exactly one
+                // racing first-join the creator. Inferring it from "no
+                // actor existed when we looked" gave Owner to every
+                // racer.
+                let created = acquisition.creation
+                    == waddle_xmpp::muc::room_registry_actor::RoomCreation::Created;
+                (acquisition.actor_ref, managed_channel.is_none() && created)
             }
         };
 

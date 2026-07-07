@@ -111,6 +111,74 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
     );
 }
 
+/// #1134 / XEP-0045 §10.1.1: only the room creator receives Owner. The
+/// second user to join an unmanaged room must not be granted Owner —
+/// the created-bit comes from the registry, not from call-site
+/// inference.
+#[tokio::test]
+async fn second_joiner_of_unmanaged_room_is_not_owner() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_server_owner_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "creator-owner@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+
+    let alice_responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+    let alice_presence = Element::from_str(&alice_responses[0]).expect("alice presence");
+    let alice_item = alice_presence
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .and_then(|x| x.get_child("item", "http://jabber.org/protocol/muc#user"))
+        .expect("alice muc item");
+    assert_eq!(
+        alice_item.attr("affiliation"),
+        Some("owner"),
+        "the creator gets Owner (XEP-0045 §10.1.1)"
+    );
+
+    let bob_responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    let bob_self = bob_responses
+        .iter()
+        .filter_map(|xml| Element::from_str(xml).ok())
+        .find(|el| {
+            el.name() == "presence"
+                && el
+                    .get_child("x", "http://jabber.org/protocol/muc#user")
+                    .is_some_and(|x| {
+                        x.children()
+                            .any(|c| c.name() == "status" && c.attr("code") == Some("110"))
+                    })
+        })
+        .expect("bob self presence");
+    let bob_item = bob_self
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .and_then(|x| x.get_child("item", "http://jabber.org/protocol/muc#user"))
+        .expect("bob muc item");
+    assert_ne!(
+        bob_item.attr("affiliation"),
+        Some("owner"),
+        "a later joiner is not the creator and must not be Owner (#1134)"
+    );
+}
+
 #[tokio::test]
 async fn muc_join_responses_use_client_namespace() {
     let state = create_test_websocket_state().await;
@@ -516,7 +584,8 @@ async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row
         "chat".to_string(),
     )
     .await
-    .expect("room actor");
+    .expect("room actor")
+    .actor_ref;
 
     let denied = handle_muc_join(
         state.as_ref(),

@@ -36,7 +36,8 @@ use super::affiliation::DurableMembershipSource;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom,
-    IsMucJid, ListRooms, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    IsMucJid, ListRooms, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor,
+    RoomRegistryError,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -276,13 +277,15 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Get an existing room or create one if absent.
+        /// Get an existing room or create one if absent. The reply's
+        /// [`RoomAcquisition::creation`] bit is authoritative for the
+        /// XEP-0045 §10.1.1 creator Owner grant (#1134).
         get_or_create_room(
             room_jid: BareJid,
             waddle_id: String,
             channel_id: String,
             config: RoomConfig
-        ) -> ActorRef<RoomActor>,
+        ) -> RoomAcquisition,
         "get_or_create_room",
         GetOrCreateRoom { room_jid, waddle_id, channel_id, config }
     );
@@ -300,8 +303,10 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Create an instant room per XEP-0045.
-        create_instant_room(room_jid: BareJid) -> ActorRef<RoomActor>,
+        /// Create an instant room per XEP-0045. The reply's
+        /// [`RoomAcquisition::creation`] bit is authoritative for the
+        /// XEP-0045 §10.1.1 creator Owner grant (#1134).
+        create_instant_room(room_jid: BareJid) -> RoomAcquisition,
         "create_instant_room",
         CreateInstantRoom { room_jid }
     );

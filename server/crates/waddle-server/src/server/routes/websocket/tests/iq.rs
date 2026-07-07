@@ -182,7 +182,8 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
         "private".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(JoinWithAffiliation {
             sender_jid: bound_jid.clone(),
@@ -4651,7 +4652,8 @@ async fn create_members_only_room_with_member(
         "default".to_string(),
     )
     .await
-    .expect("room actor");
+    .expect("room actor")
+    .actor_ref;
     actor
         .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
             sender_jid: member_jid.clone(),

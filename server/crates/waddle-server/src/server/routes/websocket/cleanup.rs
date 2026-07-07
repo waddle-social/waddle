@@ -3,6 +3,7 @@ use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::{LeaveOutcome, SealGuard};
+use waddle_xmpp::muc::room_registry_actor::RoomAcquisition;
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -650,18 +651,23 @@ pub(crate) async fn get_room_actor(
     }
 }
 
+/// Get or create the room via the registry. The returned
+/// [`RoomAcquisition`] carries the registry-authoritative created-bit
+/// (#1134): only the caller that observes `RoomCreation::Created`
+/// actually created the room and may grant itself the XEP-0045
+/// §10.1.1 creator Owner.
 pub(crate) async fn get_or_create_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
     config: RoomConfig,
     waddle_id: String,
     channel_id: String,
-) -> Option<ActorRef<RoomActor>> {
+) -> Option<RoomAcquisition> {
     match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .get_or_create_room(room_jid.clone(), waddle_id, channel_id, config)
         .await
     {
-        Ok(actor) => Some(actor),
+        Ok(acquisition) => Some(acquisition),
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to get or create room actor");
             None
@@ -741,7 +747,8 @@ mod eviction_tests {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
 
         let alice = full_jid("alice@example.com/r1");
         room_actor
@@ -854,7 +861,8 @@ mod eviction_tests {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
 
         let alice = full_jid("alice@example.com/r1");
         let bob = full_jid("bob@example.com/r1");

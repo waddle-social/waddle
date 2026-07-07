@@ -1315,6 +1315,58 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
     );
 }
 
+/// #1134 defense-in-depth: XEP-0045 §10.1.1 — only the room creator
+/// gets Owner. Even if two racing first-joins both arrive claiming
+/// `CreatorOwner` (both call sites believed they created the room),
+/// the room actor grants Owner only while no owner exists yet; the
+/// loser joins with no affiliation of their own.
+#[tokio::test]
+async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
+    // Instant rooms (the only rooms whose join carries CreatorOwner)
+    // are open and non-persistent — see CreateInstantRoom.
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: false,
+        persistent: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+
+    let alice_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::CreatorOwner,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("creator join");
+    assert_eq!(
+        alice_outcome.new_occupant_affiliation,
+        Affiliation::Owner,
+        "the first creator-join gets Owner (XEP-0045 §10.1.1)"
+    );
+
+    let bob_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob,
+            nick: "bob".to_string(),
+            affiliation_grant: JoinAffiliationGrant::CreatorOwner,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("racing second creator-join");
+    assert_ne!(
+        bob_outcome.new_occupant_affiliation,
+        Affiliation::Owner,
+        "a second racing 'creator' join must NOT also get Owner \
+         (XEP-0045 §10.1.1: only the creator; #1134)"
+    );
+}
+
 /// #1110 counterpart: an explicit grant (here a XEP-0045 §9.1 ban)
 /// is in-memory only, so it MUST keep blocking dormancy after every
 /// occupant leaves — otherwise the ban would evaporate on eviction.

@@ -1743,7 +1743,8 @@ mod room_dormancy_tests {
                 config: RoomConfig::default(),
             })
             .await
-            .expect("respawn room");
+            .expect("respawn room")
+            .actor_ref;
         respawned
             .ask(JoinWithAffiliation {
                 sender_jid: alice.clone(),

@@ -1354,7 +1354,8 @@ async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
         "personal-mention".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(ChangeAffiliation {
             jid: recipient.clone(),
@@ -1441,7 +1442,8 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
         "occupant-id-mention".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(ChangeAffiliation {
             jid: recipient.clone(),
@@ -1529,7 +1531,8 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
             message_id.to_string(),
         )
         .await
-        .expect("create room");
+        .expect("create room")
+        .actor_ref;
         room_actor
             .ask(ChangeAffiliation {
                 jid: recipient.clone(),
@@ -1638,7 +1641,8 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         "groupchat-recovery".to_string(),
     )
     .await
-    .expect("create recovery room");
+    .expect("create recovery room")
+    .actor_ref;
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "groupchat-recovery-archive",
         jid::Jid::from(room_jid.clone()),
@@ -1751,7 +1755,8 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
             message_id.to_string(),
         )
         .await
-        .expect("create room");
+        .expect("create room")
+        .actor_ref;
         room_actor
             .ask(ChangeAffiliation {
                 jid: recipient.clone(),
@@ -1860,7 +1865,8 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
         "current-channel-uri".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(ChangeAffiliation {
             jid: recipient,
@@ -1942,7 +1948,8 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         "active-channel".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(ChangeAffiliation {
             jid: bob_bare.clone(),
@@ -2054,7 +2061,8 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
         "active-channel-live-not-durable".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
@@ -2144,7 +2152,8 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         "active-channel-always".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(ChangeAffiliation {
             jid: bob_bare.clone(),
@@ -3426,7 +3435,8 @@ async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
         "general".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(JoinWithAffiliation {
             sender_jid: sender_jid.clone(),
@@ -3502,7 +3512,8 @@ async fn handle_message_groupchat_extension_envelope_preserves_non_occupant_erro
         "general".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(JoinWithAffiliation {
             sender_jid: bob_jid,
@@ -4118,7 +4129,8 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
         channel_id.to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(JoinWithAffiliation {
             sender_jid: sender_jid.clone(),
@@ -4210,7 +4222,8 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
         "preview-pipeline".to_string(),
     )
     .await
-    .expect("create room");
+    .expect("create room")
+    .actor_ref;
     room_actor
         .ask(JoinWithAffiliation {
             sender_jid: sender_jid.clone(),

@@ -125,7 +125,8 @@ async fn test_get_or_create_room_idempotent() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("first get_or_create");
+        .expect("first get_or_create")
+        .actor_ref;
 
     let second: ActorRef<RoomActor> = registry
         .ask(GetOrCreateRoom {
@@ -135,7 +136,8 @@ async fn test_get_or_create_room_idempotent() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("second get_or_create");
+        .expect("second get_or_create")
+        .actor_ref;
 
     assert_eq!(first.id(), second.id());
 
@@ -173,6 +175,52 @@ async fn test_destroy_room() {
     assert!(!exists);
 }
 
+/// #1134: the "did this call create the room?" bit must come from the
+/// registry's serialized handler — exactly one caller observes
+/// `Created`, so exactly one racing first-join can grant itself the
+/// XEP-0045 §10.1.1 creator Owner. Inferring the bit at the call site
+/// ("no actor existed when I looked") let both racers claim it.
+#[tokio::test]
+async fn get_or_create_reports_created_exactly_once() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("first-join-race");
+
+    let first: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("first get_or_create");
+    assert_eq!(
+        first.creation,
+        RoomCreation::Created,
+        "the call that spawned the room reports Created"
+    );
+
+    let second: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("second get_or_create");
+    assert_eq!(
+        second.creation,
+        RoomCreation::Existing,
+        "every later call reports Existing — only one creator (#1134)"
+    );
+    assert_eq!(
+        second.actor_ref.id(),
+        first.actor_ref.id(),
+        "both calls resolve the same room actor"
+    );
+}
+
 /// #1108: the janitor's IsDormant → destroy sequence is a TOCTOU.
 /// A join that lands between the dormancy probe and the destroy must
 /// make the guarded destroy refuse — the revision it carries is stale
@@ -196,7 +244,8 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("create room");
+        .expect("create room")
+        .actor_ref;
 
     // Janitor half 1: probe dormancy, capturing the revision.
     let probe = actor.ask(IsDormant).await.expect("dormancy probe");
@@ -293,7 +342,8 @@ async fn sealed_room_refuses_late_join_with_retryable_error() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("create room");
+        .expect("create room")
+        .actor_ref;
     let probe = stale_ref.ask(IsDormant).await.expect("probe");
     assert!(probe.dormant);
 
@@ -405,7 +455,8 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("first get_or_create");
+        .expect("first get_or_create")
+        .actor_ref;
     first.kill();
     tokio::task::yield_now().await;
 
@@ -439,7 +490,8 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("recreate room after explicit destroy");
+        .expect("recreate room after explicit destroy")
+        .actor_ref;
     assert!(recreated.is_alive());
 }
 
@@ -515,7 +567,8 @@ async fn respawned_room_reports_durable_members_as_recipients_without_any_join()
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     let snapshot = room_actor
         .ask(GetRoomSnapshot {
@@ -561,7 +614,8 @@ async fn hydration_does_not_clobber_richer_runtime_affiliations() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     room_actor
         .ask(ChangeAffiliation {
@@ -621,7 +675,8 @@ async fn runtime_outcast_demotion_excludes_hydrated_durable_member() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     room_actor
         .ask(ChangeAffiliation {
@@ -679,7 +734,8 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     // Only the sender rejoins after the "restart".
     let sender: FullJid = "sender@example.com/web".parse().expect("valid full JID");

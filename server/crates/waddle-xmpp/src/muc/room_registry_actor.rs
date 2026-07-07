@@ -159,6 +159,27 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
     }
 }
 
+/// Whether a get-or-create request spawned the room or found it
+/// already registered (#1134). The registry actor's serialized
+/// mailbox guarantees exactly one caller per room lifetime observes
+/// [`RoomCreation::Created`] — that caller is the XEP-0045 §10.1.1
+/// room creator and the only one entitled to the creator Owner grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomCreation {
+    /// This request spawned the room actor: the caller created the room.
+    Created,
+    /// The room actor already existed.
+    Existing,
+}
+
+/// Reply to [`GetOrCreateRoom`] / [`CreateInstantRoom`]: the room
+/// actor plus the authoritative created-bit (#1134).
+#[derive(Clone, kameo::Reply)]
+pub struct RoomAcquisition {
+    pub actor_ref: ActorRef<RoomActor>,
+    pub creation: RoomCreation,
+}
+
 /// Get an existing room or create one if it does not exist.
 pub struct GetOrCreateRoom {
     pub room_jid: BareJid,
@@ -168,7 +189,7 @@ pub struct GetOrCreateRoom {
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
+    type Reply = Result<RoomAcquisition, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -177,14 +198,21 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
     ) -> Self::Reply {
         if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
             debug!(room = %msg.room_jid, "Room already exists");
-            return Ok(actor_ref);
+            return Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Existing,
+            });
         }
 
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
         self.poisoned_rooms.remove(&msg.room_jid);
-        Ok(self
+        let actor_ref = self
             .spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config)
-            .await)
+            .await;
+        Ok(RoomAcquisition {
+            actor_ref,
+            creation: RoomCreation::Created,
+        })
     }
 }
 
@@ -194,7 +222,7 @@ pub struct CreateInstantRoom {
 }
 
 impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
+    type Reply = Result<RoomAcquisition, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -202,7 +230,10 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
-            return Ok(actor_ref);
+            return Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Existing,
+            });
         }
 
         let room_local = msg
@@ -220,9 +251,13 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
         };
 
         self.poisoned_rooms.remove(&msg.room_jid);
-        Ok(self
+        let actor_ref = self
             .spawn_room(msg.room_jid, waddle_id, channel_id, config)
-            .await)
+            .await;
+        Ok(RoomAcquisition {
+            actor_ref,
+            creation: RoomCreation::Created,
+        })
     }
 }
 
