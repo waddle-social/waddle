@@ -49,6 +49,13 @@ const ISR_TOKEN_SWEEP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(feature = "clustering")]
 const ISR_TOKEN_SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Per-sweep cap for the stale-node watchdog that runs before the orphaned
+/// SM-session claim scan. This bounds the raw-heartbeat discovery pass; each
+/// candidate still has to pass `NodeLeaseStore::expire`'s CAS before any
+/// claim can be stolen.
+#[cfg(feature = "clustering")]
+const STALE_NODE_WATCHDOG_CANDIDATE_LIMIT: usize = 64;
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -475,9 +482,42 @@ pub(crate) fn spawn_orphan_reaper_janitor(
     }
 }
 
-/// One orphan-reaper sweep: scan for `sm_session` claims owned by a stale
-/// node, commit the expire CAS on each stale owner, steal what this node
-/// can, then targeted-hydrate exactly the entities this sweep just won
+#[cfg(feature = "clustering")]
+async fn orphan_reaper_self_lease_is_fresh(
+    node_lease: &dyn crate::clustering::claims::NodeLeaseStore,
+    me: &waddle_xmpp::ownership::NodeIdentity,
+    lease_ttl: Duration,
+    phase: &'static str,
+) -> bool {
+    match node_lease.is_fresh(me, lease_ttl).await {
+        Ok(true) => true,
+        Ok(false) => {
+            debug!(
+                node_id = %me.node_id,
+                node_epoch = %me.node_epoch,
+                phase,
+                "orphan reaper: skipping sweep because this node's own lease is not fresh"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                node_id = %me.node_id,
+                node_epoch = %me.node_epoch,
+                phase,
+                %error,
+                "orphan reaper: failed to prove this node's own lease freshness; skipping sweep"
+            );
+            false
+        }
+    }
+}
+
+/// One orphan-reaper sweep: first run the bounded stale-node watchdog that
+/// commits `expired = true` through `NodeLeaseStore::expire` for
+/// heartbeat-stale nodes, then scan for `sm_session` claims owned by a
+/// committed-stale node, steal what this node can, and targeted-hydrate
+/// exactly the entities this sweep just won
 /// (FIX 2, council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda) via
 /// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::hydrate_reclaimed`].
 ///
@@ -494,10 +534,10 @@ pub(crate) fn spawn_orphan_reaper_janitor(
 /// codec/expiry logic `hydrate_reclaimed` already owns.
 #[cfg(feature = "clustering")]
 async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
-    use waddle_xmpp::ownership::{ClaimError, Entity, StalePredicate};
+    use waddle_xmpp::ownership::{ClaimError, Entity};
 
     let clustering = &state.deps.app_state.clustering_claims;
-    let Some((claim_store, identity_handle)) = clustering.claim_pair() else {
+    let Some((_claim_store, identity_handle)) = clustering.claim_pair() else {
         return;
     };
     let Some(node_lease) = clustering.node_lease.clone() else {
@@ -506,6 +546,77 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
     let Some(lease_ttl) = clustering.lease_ttl else {
         return;
     };
+
+    let me = identity_handle.current();
+    if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "start").await {
+        return;
+    }
+
+    match node_lease
+        .list_heartbeat_stale_nodes(lease_ttl, STALE_NODE_WATCHDOG_CANDIDATE_LIMIT)
+        .await
+    {
+        Ok(stale_nodes) => {
+            let candidate_count = stale_nodes.len();
+            let mut expired_nodes = 0usize;
+            let mut renewed_nodes = 0usize;
+            let mut failed_nodes = 0usize;
+            for stale_node in stale_nodes {
+                if stale_node == me {
+                    debug!(
+                        node_id = %me.node_id,
+                        node_epoch = %me.node_epoch,
+                        "orphan reaper: stale-node watchdog found this node's own heartbeat stale; aborting sweep"
+                    );
+                    return;
+                }
+                match node_lease.expire(&stale_node, lease_ttl).await {
+                    Ok(true) => expired_nodes += 1,
+                    Ok(false) => renewed_nodes += 1,
+                    Err(error) => {
+                        failed_nodes += 1;
+                        warn!(
+                            node_id = %stale_node.node_id,
+                            node_epoch = %stale_node.node_epoch,
+                            %error,
+                            "orphan reaper: stale-node watchdog expire failed; retrying next sweep"
+                        );
+                    }
+                }
+            }
+            if expired_nodes > 0 {
+                info!(
+                    expired_nodes,
+                    candidate_count,
+                    limit = STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
+                    "orphan reaper: stale-node watchdog committed expired nodes"
+                );
+            }
+            if renewed_nodes > 0 {
+                debug!(
+                    renewed_nodes,
+                    candidate_count,
+                    "orphan reaper: stale-node watchdog candidates renewed before expire"
+                );
+            }
+            if failed_nodes > 0 {
+                warn!(
+                    failed_nodes,
+                    candidate_count,
+                    "orphan reaper: stale-node watchdog failed to expire some candidates"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(%error, "orphan reaper: stale-node watchdog candidate scan failed");
+        }
+    }
+
+    if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "post-watchdog")
+        .await
+    {
+        return;
+    }
 
     let candidates = match node_lease.list_orphaned_sm_session_claims().await {
         Ok(candidates) => candidates,
@@ -537,9 +648,13 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         }
     };
 
-    let me = identity_handle.current();
     let mut reclaimed: Vec<(Entity, waddle_xmpp::ownership::ClaimEpoch)> = Vec::new();
     for candidate in candidates {
+        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-candidate")
+            .await
+        {
+            return;
+        }
         // Element 9's ordering requirement: commit the expire CAS on the
         // dead owner's row FIRST. Idempotent/best-effort — a failure here
         // just means the steal below is also likely to lose (the owner
@@ -553,19 +668,19 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
             continue;
         }
         // ADR-0017 Phase 3 Slice 10: a placement heuristic only — never
-        // affects correctness. `steal_stale`'s own epoch CAS remains the
-        // sole authority over who actually wins; this only decides who
-        // tries first.
+        // affects correctness. The reaper-specific stale-owner epoch CAS
+        // remains the sole authority over who actually wins; this only
+        // decides who tries first.
         if !backoff_delay.is_zero() {
             tokio::time::sleep(backoff_delay).await;
         }
-        match claim_store
-            .steal_stale(
-                &candidate.entity,
-                candidate.epoch,
-                StalePredicate::OwnerStale,
-                &me,
-            )
+        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-steal")
+            .await
+        {
+            return;
+        }
+        match node_lease
+            .steal_orphaned_sm_session_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
             .await
         {
             Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
@@ -579,7 +694,7 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
                 warn!(
                     entity_id = %candidate.entity.id,
                     %error,
-                    "orphan reaper: steal_stale(OwnerStale) failed"
+                    "orphan reaper: steal_orphaned_sm_session_claim failed"
                 );
             }
         }
@@ -777,29 +892,14 @@ mod orphan_reaper_sweep_tests {
             .expect("seed persisted session as its current claim-holding owner");
     }
 
-    /// Register `dead_owner`, then commit the Expire CAS on it directly
-    /// (after backdating its heartbeat) — establishing the "already
-    /// known-dead" precondition
-    /// [`NodeLeaseStore::list_orphaned_sm_session_claims`]'s scan requires.
-    ///
-    /// That scan's `NOT EXISTS` predicate (mirroring `steal_stale`'s
-    /// `OwnerStale` arm) reads only the **committed** `expired` flag, never
-    /// a raw heartbeat comparison (`clustering::claims`'s own module doc,
-    /// and its
-    /// `steal_stale_ignores_raw_heartbeat_only_committed_expired_flag_matters`
-    /// test) — so a claim whose owner row is merely heartbeat-stale but
-    /// still `expired = false` is invisible to the scan, and the sweep's
-    /// own per-candidate `expire()` call could only ever be a no-op
-    /// reaffirmation of a flag some prior step already flipped. This
-    /// helper *is* that prior step: it calls the exact same
-    /// `NodeLeaseStore::expire` CAS the sweep itself calls, and asserts the
-    /// false→true transition inline — the "expire CAS committed" leg of
-    /// this test.
-    async fn register_and_pre_expire_dead_owner(
+    /// Register `dead_owner`, then backdate its heartbeat while leaving
+    /// `expired = false`. The sweep's stale-node watchdog must discover
+    /// this row, commit `NodeLeaseStore::expire`, and only then make its
+    /// SM-session claims visible to `list_orphaned_sm_session_claims`.
+    async fn register_and_backdate_dead_owner(
         claim_store: &PostgresClaimStore,
         db: &Database,
         dead_owner: &NodeIdentity,
-        lease_ttl: Duration,
     ) {
         claim_store
             .register(dead_owner, None)
@@ -810,17 +910,9 @@ mod orphan_reaper_sweep_tests {
             "freshly registered node must start non-expired"
         );
         backdate_heartbeat(db, &dead_owner.node_id).await;
-        let committed = claim_store
-            .expire(dead_owner, lease_ttl)
-            .await
-            .expect("expire CAS call");
         assert!(
-            committed,
-            "expire() must commit true once heartbeat has lapsed past lease_ttl"
-        );
-        assert!(
-            expired_flag(db, &dead_owner.node_id).await,
-            "expire CAS must have transitioned clustering_nodes.expired to true"
+            !expired_flag(db, &dead_owner.node_id).await,
+            "the fixture must leave expiry for run_orphan_reaper_sweep's watchdog"
         );
     }
 
@@ -855,7 +947,7 @@ mod orphan_reaper_sweep_tests {
             }
         }
 
-        let lease_ttl = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(30);
 
         // The sweeping node's own identity, shared verbatim between
         // `ClusteringHandles` and the SM-session registry's claim binding —
@@ -868,6 +960,10 @@ mod orphan_reaper_sweep_tests {
             Arc::new(PostgresClaimStore::new(db.clone()));
         let sweeper_node_lease: Arc<dyn NodeLeaseStore> =
             Arc::new(PostgresClaimStore::new(db.clone()));
+        claim_store
+            .register(&sweeper_identity, None)
+            .await
+            .expect("register the sweeping node's own lease row");
 
         // Fenced SM persistence, co-located in the same Postgres database
         // as the claims tables (FIX 4's co-location invariant in
@@ -919,7 +1015,7 @@ mod orphan_reaper_sweep_tests {
 
         // ============ Leg 1: single-sweep steal + targeted hydrate ============
         let dead_owner = node_identity();
-        register_and_pre_expire_dead_owner(&claim_store, &db, &dead_owner, lease_ttl).await;
+        register_and_backdate_dead_owner(&claim_store, &db, &dead_owner).await;
 
         let stream_id = "orphan-reaper-stream-1";
         let entity = sm_entity(stream_id);
@@ -933,8 +1029,7 @@ mod orphan_reaper_sweep_tests {
 
         assert!(
             expired_flag(&db, &dead_owner.node_id).await,
-            "dead owner's clustering_nodes row must (still) be committed-expired \
-             after the sweep"
+            "the stale-node watchdog must commit dead owner's clustering_nodes row expired"
         );
         let steal_landed = claim_store
             .fence(&entity, &sweeper_identity, ClaimEpoch(orphan_epoch.0 + 1))
@@ -956,7 +1051,7 @@ mod orphan_reaper_sweep_tests {
 
         // ============ Leg 2: two concurrent sweeps, exactly-once steal ============
         let dead_owner_2 = node_identity();
-        register_and_pre_expire_dead_owner(&claim_store, &db, &dead_owner_2, lease_ttl).await;
+        register_and_backdate_dead_owner(&claim_store, &db, &dead_owner_2).await;
 
         let stream_id_2 = "orphan-reaper-stream-2";
         let entity_2 = sm_entity(stream_id_2);
@@ -1008,6 +1103,58 @@ mod orphan_reaper_sweep_tests {
             total, 2,
             "exactly one hydrated session per leg; no duplicates from the \
              concurrent sweeps"
+        );
+
+        // ============ Leg 3: a heartbeat-stale sweeper cannot steal or hydrate ============
+        {
+            let conn = db.guard().await.expect("guard");
+            conn.execute(
+                "UPDATE clustering_nodes \
+                 SET heartbeat = now() - interval '1 hour', expired = false \
+                 WHERE node_id = ?",
+                crate::db_params![sweeper_identity.node_id.clone()],
+            )
+            .await
+            .expect("backdate sweeper heartbeat");
+        }
+
+        let dead_owner_3 = node_identity();
+        register_and_backdate_dead_owner(&claim_store, &db, &dead_owner_3).await;
+        let stream_id_3 = "orphan-reaper-stream-stale-sweeper";
+        let entity_3 = sm_entity(stream_id_3);
+        let orphan_epoch_3 = claim_store
+            .acquire(&entity_3, &dead_owner_3)
+            .await
+            .expect("acquire claim under dead owner 3");
+        seed_persisted_session_as_owner(&db, &dead_owner_3, stream_id_3).await;
+
+        run_orphan_reaper_sweep(&state).await;
+
+        assert!(
+            claim_store
+                .fence(&entity_3, &dead_owner_3, orphan_epoch_3)
+                .await
+                .expect("fence dead-owner claim after heartbeat-stale sweeper"),
+            "a heartbeat-stale sweeping node must not steal the orphaned claim"
+        );
+        assert!(
+            !claim_store
+                .fence(
+                    &entity_3,
+                    &sweeper_identity,
+                    ClaimEpoch(orphan_epoch_3.0 + 1)
+                )
+                .await
+                .expect("fence heartbeat-stale sweeper after failed steal"),
+            "the heartbeat-stale sweeping node must not own the bumped claim epoch"
+        );
+        let not_hydrated = sm_session_registry
+            .peek_session(stream_id_3)
+            .await
+            .expect("peek_session call");
+        assert!(
+            not_hydrated.is_none(),
+            "a heartbeat-stale sweeping node must not hydrate a session it could not steal"
         );
     }
 }

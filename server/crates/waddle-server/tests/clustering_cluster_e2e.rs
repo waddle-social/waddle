@@ -40,8 +40,8 @@
 //! connectivity primitives); the Slice 5 multi-process kill-one
 //! claim-scoped hydration capstone
 //! (`orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`,
-//! deviation 106); and the Slice 7/deviation-70 MUC foreign-owned-room
-//! join-bounce wire shape
+//! upgraded in Phase 4 Slice 1a to exercise the real stale-node watchdog);
+//! and the Slice 7/deviation-70 MUC foreign-owned-room join-bounce wire shape
 //! (`muc_join_bounces_when_room_claim_is_held_by_another_node`).
 //!
 //! Deferred as a manual go/no-go measurement (dominated by kademlia's
@@ -652,8 +652,8 @@ async fn cluster_exit_criteria_end_to_end() {
 /// from an earlier scenario in the same shared Postgres instance are
 /// otherwise invisible garbage that can pollute `count_other_live_nodes`:
 /// `lone_survivor_and_isolation_fencing` needs a truthful "other live node"
-/// count, and nothing expires these rows on its own within a single test
-/// run (`NodeLeaseStore::expire` has no production caller this slice).
+/// count before any survivor janitor has had time to run the stale-node
+/// watchdog.
 async fn reset_node_lease_tables(db: &Database) {
     use waddle_xmpp::ownership::ClaimStore as _;
     let store = PostgresClaimStore::new(db.clone());
@@ -720,23 +720,39 @@ async fn node_expired_flag(db: &Database, node_id: &str) -> Option<bool> {
         .map(|row| row.get::<bool>(0).expect("expired column"))
 }
 
-/// Read `clustering_nodes.node_epoch` for `node_id` directly — needed to
-/// reconstruct a full `NodeIdentity` for a subprocess this harness only
-/// ever learns the `node_id` half of (the node-id file never publishes the
-/// internally-minted `node_epoch`).
-async fn node_epoch_for(db: &Database, node_id: &str) -> Option<String> {
+async fn seed_detached_sm_session_row(
+    db: &Database,
+    stream_id: &str,
+    user_id: &str,
+    full_jid: &str,
+) {
     let conn = db.guard().await.expect("guard");
-    let mut rows = conn
-        .query(
-            "SELECT node_epoch FROM clustering_nodes WHERE node_id = ?",
-            waddle_server::db_params![node_id.to_string()],
+    conn.execute(
+        r#"
+        INSERT INTO sm_sessions (
+            stream_id, user_id, full_jid, inbound_count, outbound_count,
+            last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
+            carbons_enabled, roster_interested, blocklist_interested,
+            presence_available, presence_priority
+        ) VALUES (
+            ?, ?, ?, 0, 0, 0, 60,
+            CAST(EXTRACT(EPOCH FROM now()) * 1000 AS BIGINT),
+            60000, 0, 0, 0, 1, 0
         )
-        .await
-        .expect("query node_epoch");
-    rows.next()
-        .await
-        .expect("row")
-        .map(|row| row.get::<String>(0).expect("node_epoch column"))
+        ON CONFLICT (stream_id) DO UPDATE SET
+            user_id = EXCLUDED.user_id,
+            full_jid = EXCLUDED.full_jid,
+            detached_at_ms = EXCLUDED.detached_at_ms,
+            max_resume_duration_ms = EXCLUDED.max_resume_duration_ms
+        "#,
+        waddle_server::db_params![
+            stream_id.to_string(),
+            user_id.to_string(),
+            full_jid.to_string(),
+        ],
+    )
+    .await
+    .expect("seed detached sm_sessions row");
 }
 
 /// Read `(node_id, claim_epoch)` for a `clustering_claims` row keyed by its
@@ -817,13 +833,11 @@ async fn lone_survivor_and_isolation_fencing() {
 
         // Hard-kill B (SIGKILL via `Drop`) — an unclean death, exactly the
         // shape `cluster_exit_criteria_end_to_end`'s own rolling-restart leg
-        // uses. Nothing calls `NodeLeaseStore::expire` on B's row this
-        // slice (no production caller yet), so B's `clustering_nodes` row
-        // stays "live" from A's point of view for a while — the harder
-        // version of the carve-out, since A initially observes 1 other
-        // live row (dropping to 0 once B's heartbeat goes stale under the
-        // freshness filter; both values are < 2, so the carve-out holds
-        // across the whole window either way).
+        // uses. A initially observes 1 other live row; once B's heartbeat
+        // goes stale it stops counting under the freshness filter, and a
+        // survivor janitor may also commit `expired = true`. Both states
+        // are below the N=2 isolation carve-out, so the carve-out holds
+        // across the whole window either way.
         drop(server_b);
 
         // Poll across several node-lease heartbeat/isolation-interval
@@ -1034,44 +1048,15 @@ async fn cross_node_resume_live_steal_handshake() {
 /// `sm_session` claim, never re-touching the survivor's own already-claimed
 /// session.
 ///
-/// **Deviation 106 (harness limitation, documented not fabricated)**: the
-/// orphan reaper's `list_orphaned_sm_session_claims` candidate scan, and
-/// `steal_stale(OwnerStale)`'s own CAS predicate, both read ONLY the
-/// dead owner's *committed* `clustering_nodes.expired` flag — never a raw
-/// heartbeat comparison (`clustering::claims`'s own module doc; the
-/// Postgres-gated
-/// `steal_stale_ignores_raw_heartbeat_only_committed_expired_flag_matters`
-/// unit test enforces this directly). Auditing every production caller of
-/// `NodeLeaseStore::expire` turns up exactly two: (a) the orphan reaper's
-/// own per-*already-surfaced-candidate* reaffirmation (a no-op on a row
-/// that isn't a candidate yet — circular for a row that ISN'T already
-/// flagged), and (b) `self_fence::expire_bounded`, called only on a node's
-/// OWN just-superseded identity during ITS OWN graceful re-registration
-/// after self-fencing. No production code path ever commits
-/// `expired = true` on ANOTHER, silently (unclean-SIGKILL) dead node's row
-/// — there is no "stale-node watchdog" sweep. This means a bare `SIGKILL`
-/// alone never makes the dead node's `sm_session` claims reaper-visible in
-/// production today (their real-world recovery path is almost always a
-/// client's own XEP-0198 resume attempt hitting the Slice 6 cross-node
-/// live-steal handshake instead, which authorizes via `ResumeIdentityProof`
-/// and never touches the `expired` flag at all — the orphan reaper is the
-/// backstop for sessions that are never resumed). Committing that one flag
-/// for a genuinely-dead peer is squarely a production-code change (a
-/// watchdog caller of `NodeLeaseStore::expire`), which this slice's HARD
-/// RULES forbid making speculatively — flagged here, not silently patched.
-/// The existing single-process `session_janitors::orphan_reaper_sweep_tests`
-/// already established the accepted harness convention for this exact gap:
-/// its own `register_and_pre_expire_dead_owner` helper commits the expire
-/// CAS directly, through the SAME public `ClaimStore::expire` method the
-/// reaper itself calls, rather than fabricating a nonexistent production
-/// caller. This test mirrors that precedent (also mirroring this file's own
-/// `deposed_owner_with_live_socket_room_actor_scenario`, which seeds
-/// `report_steal_intent` directly for the identical reason: "no production
-/// reporter call site exists"). Everything downstream of that one seeded
-/// fact — the candidate scan, the steal CAS, and the targeted
-/// `hydrate_reclaimed` hydration — runs for real, inside the survivor's own
-/// unmodified production janitor loop and logic. ADR-0017 Phase 3 Slice 11
-/// corrigenda (deviation 111, FIX C): the loop's *cadence* is now env-
+/// Phase 4 Slice 1a closes the earlier carried risk directly: the survivor's
+/// real orphan-reaper sweep first runs a bounded stale-node watchdog that
+/// discovers heartbeat-stale, non-expired node rows and feeds each candidate
+/// through `NodeLeaseStore::expire`. Only after that committed-expired flag
+/// lands does `list_orphaned_sm_session_claims` surface the dead node's SM
+/// claim for the ordinary `steal_stale(OwnerStale)` CAS. This test therefore
+/// no longer seeds `expired = true`; it waits for B's production janitor to
+/// flip A's row and reclaim A's claim. ADR-0017 Phase 3 Slice 11 corrigenda
+/// (deviation 111, FIX C): the loop's *cadence* is now env-
 /// overridable (`WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`, wired through
 /// `ClusteringConfig::orphan_reaper_interval`), and `spawn_cluster_server`
 /// sets it to 500ms for every subprocess this harness spawns — a minimal,
@@ -1083,9 +1068,6 @@ async fn cross_node_resume_live_steal_handshake() {
 /// override, not the 120s production default.
 #[tokio::test(flavor = "multi_thread")]
 async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() {
-    use waddle_server::clustering::claims::NodeLeaseStore as _;
-    use waddle_xmpp::ownership::NodeIdentity;
-
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!(
             "skipping orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions: \
@@ -1104,9 +1086,8 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     const USERNAME: &str = "admin";
     // The node-lease TTL this harness configures every subprocess with
     // (`spawn_cluster_server`'s `WADDLE_CLUSTERING_NODE_LEASE_TTL_MS`) —
-    // reused verbatim for the direct `expire()` CAS below so its own
-    // heartbeat-staleness gate lines up with the real subprocess config,
-    // not an arbitrarily different value.
+    // reused below so the wait for heartbeat staleness lines up with the
+    // real subprocess config, not an arbitrarily different value.
     const NODE_LEASE_TTL: Duration = Duration::from_millis(1200);
 
     let port_a = free_tcp_port();
@@ -1193,9 +1174,20 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
         "B must own its own freshly-enabled claim"
     );
 
-    let node_a_epoch = node_epoch_for(&db, &node_a)
-        .await
-        .expect("A's clustering_nodes row must exist before the kill");
+    assert_eq!(
+        node_expired_flag(&db, &node_a).await,
+        Some(false),
+        "A's clustering_nodes row must start non-expired before the kill"
+    );
+
+    // Phase 4 Slice 1a hardening: the orphan reaper must only reclaim
+    // hydratable detached SM sessions, not claim-only live sessions created by
+    // `<enable resume='true'/>`. Seed the durable detached row explicitly so
+    // this capstone still exercises the production reaper path that steals and
+    // hydrates a real orphan, while the claim remains owned by node A until
+    // node B's janitor wins the CAS.
+    let full_jid_a = format!("{USERNAME}@{DOMAIN}/{resource_a}");
+    seed_detached_sm_session_row(&db, &stream_a, USERNAME, &full_jid_a).await;
 
     // Hard-kill A (SIGKILL via `Drop`, exactly like `lone_survivor_and_
     // isolation_fencing`'s own unclean-death leg) — client A's socket goes
@@ -1203,41 +1195,20 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     drop(server_a);
 
     // Let A's heartbeat genuinely lapse past the configured node-lease TTL
-    // before committing the deviation-106 precondition step below — the
-    // production `expire()` CAS itself is gated on real heartbeat
-    // staleness (`heartbeat < now() - lease_ttl`), so this sleep is not
-    // cosmetic.
+    // before waiting for B's real stale-node watchdog. The production
+    // `expire()` CAS itself is gated on heartbeat staleness
+    // (`heartbeat < now() - lease_ttl`), so this sleep is not cosmetic.
     tokio::time::sleep(NODE_LEASE_TTL * 2).await;
 
-    // Deviation 106's one seeded precondition: commit the expire CAS on
-    // A's row through the exact same public `ClaimStore::expire` method
-    // the production orphan reaper itself calls — see this test's own doc
-    // comment for why no production caller does this for an unclean
-    // SIGKILL today.
-    let claim_store_for_expire = PostgresClaimStore::new(db.clone());
-    let identity_a = NodeIdentity::new(node_a.clone(), node_a_epoch);
-    let committed = claim_store_for_expire
-        .expire(&identity_a, NODE_LEASE_TTL)
-        .await
-        .expect("expire CAS call against A's row");
-    assert!(
-        committed,
-        "A's heartbeat must have genuinely lapsed past the node-lease TTL by now"
-    );
-    assert_eq!(
-        node_expired_flag(&db, &node_a).await,
-        Some(true),
-        "A's clustering_nodes row must show committed expired=true"
-    );
-
-    // From here on, everything is the REAL, unmodified survivor's own
-    // production `spawn_orphan_reaper_janitor` loop, on its real ~120s
-    // cadence — poll Postgres for its effect rather than driving it
-    // directly (it is crate-private; this harness cannot call it).
+    // From here on, everything is B's real production
+    // `spawn_orphan_reaper_janitor` loop: the stale-node watchdog flips A's
+    // node row, then the committed-expired orphan scan steals A's claim.
+    // Poll Postgres for its effect rather than driving it directly (the
+    // sweep is crate-private; this harness cannot call it).
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some((owner, _epoch)) = sm_session_claim_owner(&db, &stream_a).await {
-            if owner == node_b {
+            if owner == node_b && node_expired_flag(&db, &node_a).await == Some(true) {
                 break;
             }
         }

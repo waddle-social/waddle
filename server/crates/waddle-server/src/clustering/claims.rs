@@ -582,13 +582,27 @@ impl ClaimStore for PostgresClaimStore {
                 // unsatisfied, or claim gone) — draining is simply another
                 // reason folded into that same catch-all, not a new error
                 // variant.
+                //
+                // ADR-0017 Phase 4 Slice 1a hardening: the stealer row must
+                // also exist under the same node epoch and be non-expired. A
+                // missing, expired, or draining local lease must not be able
+                // to acquire a new claim merely because it won this CAS after
+                // another node's watchdog expired it.
                 let affected = conn
                     .execute(
                         r#"
-                        WITH consumed AS (
+                        WITH live_stealer AS (
+                            SELECT 1 FROM clustering_nodes
+                            WHERE node_id = ?
+                              AND node_epoch = ?
+                              AND NOT expired
+                              AND NOT draining
+                        ),
+                        consumed AS (
                             DELETE FROM clustering_steal_intents
                             WHERE entity = ?
                               AND created_at < now() - (? || ' milliseconds')::interval
+                              AND EXISTS (SELECT 1 FROM live_stealer)
                               AND EXISTS (
                                   SELECT 1 FROM clustering_claims
                                   WHERE entity = ? AND claim_epoch = ?
@@ -600,12 +614,11 @@ impl ClaimStore for PostgresClaimStore {
                         WHERE entity = ?
                           AND claim_epoch = ?
                           AND EXISTS (SELECT 1 FROM consumed)
-                          AND NOT EXISTS (
-                            SELECT 1 FROM clustering_nodes
-                            WHERE node_id = ? AND node_epoch = ? AND draining
-                          )
+                          AND EXISTS (SELECT 1 FROM live_stealer)
                         "#,
                         crate::db_params![
+                            me.node_id.clone(),
+                            me.node_epoch.clone(),
                             entity_key(entity),
                             intent_ttl.as_millis().to_string(),
                             entity_key(entity),
@@ -615,8 +628,6 @@ impl ClaimStore for PostgresClaimStore {
                             next_epoch,
                             entity_key(entity),
                             observed.0,
-                            me.node_id.clone(),
-                            me.node_epoch.clone(),
                         ],
                     )
                     .await
@@ -653,6 +664,11 @@ impl ClaimStore for PostgresClaimStore {
                 // acquisition from this node's point of view. Zero rows
                 // affected already means `ClaimError::Conflict` under this
                 // method's pre-existing catch-all contract.
+                //
+                // ADR-0017 Phase 4 Slice 1a hardening: this is now a positive
+                // live-stealer predicate, not just "not draining". A node
+                // whose own row is missing or committed expired is not allowed
+                // to win orphaned claims under its dead identity.
                 let affected = conn
                     .execute(
                         r#"
@@ -666,9 +682,12 @@ impl ClaimStore for PostgresClaimStore {
                               AND NOT n.expired
                               AND n.node_epoch = clustering_claims.node_epoch
                           )
-                          AND NOT EXISTS (
+                          AND EXISTS (
                             SELECT 1 FROM clustering_nodes
-                            WHERE node_id = ? AND node_epoch = ? AND draining
+                            WHERE node_id = ?
+                              AND node_epoch = ?
+                              AND NOT expired
+                              AND NOT draining
                           )
                         "#,
                         crate::db_params![
@@ -919,6 +938,34 @@ pub trait NodeLeaseStore: Send + Sync {
     /// subsequent `steal_stale` may proceed — `false` if the row is fresh.
     async fn expire(&self, owner: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError>;
 
+    /// Bounded advisory scan for non-expired nodes whose raw heartbeat has
+    /// lapsed past `lease_ttl`.
+    ///
+    /// This method deliberately does **not** mark rows expired. It is only a
+    /// watchdog candidate list: callers must feed each returned identity
+    /// through [`Self::expire`], whose CAS remains the sole authoritative
+    /// transition from heartbeat-stale to committed `expired = true`.
+    ///
+    /// The default supports test/no-op lease stores; production
+    /// [`PostgresClaimStore`] overrides it.
+    async fn list_heartbeat_stale_nodes(
+        &self,
+        _lease_ttl: Duration,
+        _limit: usize,
+    ) -> Result<Vec<NodeIdentity>, ClaimError> {
+        Ok(Vec::new())
+    }
+
+    /// Read-only self-liveness proof for background workers that are about to
+    /// acquire new ownership. Mirrors [`Self::heartbeat`]'s freshness
+    /// predicate without mutating the heartbeat: same node id, same epoch,
+    /// not expired, not draining, and heartbeat still inside `lease_ttl`.
+    ///
+    /// The default supports fakes/no-op stores that have no lease table.
+    async fn is_fresh(&self, _me: &NodeIdentity, _lease_ttl: Duration) -> Result<bool, ClaimError> {
+        Ok(true)
+    }
+
     /// Mark this node draining (Slice 10: stop acquiring new claims, keep
     /// serving already-owned ones). Best-effort, idempotent.
     async fn mark_draining(&self, me: &NodeIdentity) -> Result<(), ClaimError>;
@@ -1090,6 +1137,21 @@ pub trait NodeLeaseStore: Send + Sync {
         &self,
     ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError>;
 
+    /// Reaper-only stale-owner steal for detached SM-session claims. Unlike
+    /// [`ClaimStore::steal_stale`]'s generic owner-stale CAS, this binds the
+    /// stealer's own heartbeat freshness into the same SQL statement because
+    /// the orphan reaper has the node `lease_ttl` available and must not win
+    /// new work after its local lease has lapsed.
+    async fn steal_orphaned_sm_session_claim(
+        &self,
+        _entity: &Entity,
+        _observed: ClaimEpoch,
+        _me: &NodeIdentity,
+        _lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        Err(ClaimError::Conflict)
+    }
+
     /// The current deployment generation's `pod_template_hash` (ADR-0017
     /// Phase 3 Slice 10, Q5's operational definition): the hash stamped on
     /// the non-expired `clustering_nodes` row with the greatest
@@ -1215,6 +1277,62 @@ impl NodeLeaseStore for PostgresClaimStore {
             Some(row) => row.get::<bool>(0).map_err(db_err),
             None => Ok(true),
         }
+    }
+
+    async fn list_heartbeat_stale_nodes(
+        &self,
+        lease_ttl: Duration,
+        limit: usize,
+    ) -> Result<Vec<NodeIdentity>, ClaimError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT node_id, node_epoch
+                FROM clustering_nodes
+                WHERE NOT expired
+                  AND heartbeat < now() - (? || ' milliseconds')::interval
+                ORDER BY heartbeat ASC, node_id ASC, node_epoch ASC
+                LIMIT ?
+                "#,
+                crate::db_params![lease_ttl.as_millis().to_string(), limit],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(db_err)? {
+            let node_id: String = row.get(0).map_err(db_err)?;
+            let node_epoch: String = row.get(1).map_err(db_err)?;
+            out.push(NodeIdentity::new(node_id, node_epoch));
+        }
+        Ok(out)
+    }
+
+    async fn is_fresh(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT 1 FROM clustering_nodes
+                WHERE node_id = ?
+                  AND node_epoch = ?
+                  AND NOT expired
+                  AND NOT draining
+                  AND heartbeat >= now() - (? || ' milliseconds')::interval
+                "#,
+                crate::db_params![
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    lease_ttl.as_millis().to_string(),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        Ok(rows.next().await.map_err(db_err)?.is_some())
     }
 
     async fn mark_draining(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
@@ -1437,6 +1555,12 @@ impl NodeLeaseStore for PostgresClaimStore {
         // a correlated subquery) — read-only and unlocked here: this is a
         // candidate scan, never itself the authority (see this method's
         // trait doc comment).
+        //
+        // ADR-0017 Phase 4 Slice 1a: orphan reaping may only surface detached
+        // SM sessions that already have a durable `sm_sessions` row. `<enable
+        // resume='true'/>` creates the claim while the socket is still live;
+        // stealing such claim-only rows would leave this node owning an
+        // unhydratable session and break later XEP-0198 resume/ISR paths.
         let mut rows = conn
             .query(
                 r#"
@@ -1449,8 +1573,15 @@ impl NodeLeaseStore for PostgresClaimStore {
                       AND NOT n.expired
                       AND n.node_epoch = clustering_claims.node_epoch
                   )
+                  AND EXISTS (
+                    SELECT 1 FROM sm_sessions s
+                    WHERE clustering_claims.entity = (? || ':' || s.stream_id)
+                  )
                 "#,
-                crate::db_params![EntityType::SmSession.as_db_str().to_string()],
+                crate::db_params![
+                    EntityType::SmSession.as_db_str().to_string(),
+                    EntityType::SmSession.as_db_str().to_string(),
+                ],
             )
             .await
             .map_err(db_err)?;
@@ -1478,6 +1609,64 @@ impl NodeLeaseStore for PostgresClaimStore {
             });
         }
         Ok(out)
+    }
+
+    async fn steal_orphaned_sm_session_claim(
+        &self,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        me: &NodeIdentity,
+        lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let next_epoch = observed.0 + 1;
+        let affected = conn
+            .execute(
+                r#"
+                UPDATE clustering_claims
+                SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                WHERE entity = ?
+                  AND entity_type = ?
+                  AND claim_epoch = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes n
+                    WHERE n.node_id = clustering_claims.node_id
+                      AND NOT n.expired
+                      AND n.node_epoch = clustering_claims.node_epoch
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM sm_sessions s
+                    WHERE clustering_claims.entity = (? || ':' || s.stream_id)
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM clustering_nodes
+                    WHERE node_id = ?
+                      AND node_epoch = ?
+                      AND NOT expired
+                      AND NOT draining
+                      AND heartbeat >= now() - (? || ' milliseconds')::interval
+                  )
+                "#,
+                crate::db_params![
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    next_epoch,
+                    entity_key(entity),
+                    EntityType::SmSession.as_db_str().to_string(),
+                    observed.0,
+                    EntityType::SmSession.as_db_str().to_string(),
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    lease_ttl.as_millis().to_string(),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        if affected == 1 {
+            Ok(ClaimEpoch(next_epoch))
+        } else {
+            Err(ClaimError::Conflict)
+        }
     }
 
     async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
@@ -1530,6 +1719,8 @@ pub(crate) fn clustering_control_plane_table_lock() -> &'static tokio::sync::Mut
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabaseDriver};
+    use std::sync::Arc;
+    use waddle_xmpp::ownership::SharedNodeIdentity;
 
     fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
@@ -1553,7 +1744,20 @@ mod tests {
         .expect("open test postgres");
         let store = PostgresClaimStore::new(db.clone());
         store.ensure_schema().await.expect("ensure schema");
+        crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
+            db.clone(),
+            Arc::new(PostgresClaimStore::new(db.clone())),
+            SharedNodeIdentity::new(node_identity()),
+        )
+        .await
+        .expect("ensure SM persistence schema");
         let conn = db.guard().await.expect("guard");
+        conn.execute("DELETE FROM sm_unacked", ())
+            .await
+            .expect("clean sm_unacked");
+        conn.execute("DELETE FROM sm_sessions", ())
+            .await
+            .expect("clean sm_sessions");
         conn.execute("DELETE FROM clustering_claims", ())
             .await
             .expect("clean claims");
@@ -1594,6 +1798,42 @@ mod tests {
         )
         .await
         .expect("seed node");
+    }
+
+    async fn backdate_heartbeat(db: &Database, identity: &NodeIdentity) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            r#"
+            UPDATE clustering_nodes
+            SET heartbeat = now() - interval '1 hour'
+            WHERE node_id = ? AND node_epoch = ?
+            "#,
+            crate::db_params![identity.node_id.clone(), identity.node_epoch.clone()],
+        )
+        .await
+        .expect("backdate heartbeat");
+    }
+
+    async fn seed_sm_session_row(db: &Database, stream_id: &str) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            r#"
+            INSERT INTO sm_sessions (
+                stream_id, user_id, full_jid, inbound_count, outbound_count,
+                last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
+                carbons_enabled, roster_interested, blocklist_interested,
+                presence_available, presence_priority
+            ) VALUES (?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+            ON CONFLICT (stream_id) DO NOTHING
+            "#,
+            crate::db_params![
+                stream_id.to_string(),
+                "alice".to_string(),
+                "alice@example.com/web".to_string(),
+            ],
+        )
+        .await
+        .expect("seed sm_sessions row");
     }
 
     #[tokio::test]
@@ -1825,6 +2065,7 @@ mod tests {
         seed_node(&store.db, &owner, false).await;
 
         let stealer = node_identity();
+        seed_node(&store.db, &stealer, false).await;
         let conflict = store
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &stealer)
             .await
@@ -1867,6 +2108,7 @@ mod tests {
         let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
 
         let stealer = node_identity();
+        seed_node(&store.db, &stealer, false).await;
         let epoch1 = store
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &stealer)
             .await
@@ -1885,6 +2127,7 @@ mod tests {
         store.acquire(&entity, &owner).await.expect("acquire");
 
         let stealer = node_identity();
+        seed_node(&store.db, &stealer, false).await;
         let err = store
             .steal_stale(
                 &entity,
@@ -2180,6 +2423,7 @@ mod tests {
 
         // Race a steal against the locked row on a separate connection.
         let stealer = node_identity();
+        seed_node(&store.db, &stealer, false).await;
         let store_db = store.db.clone();
         let entity_clone = entity.clone();
         let steal_task = tokio::spawn(async move {
@@ -2323,6 +2567,141 @@ mod tests {
             .expire(&stranger, NODE_LEASE_TTL)
             .await
             .expect("expire call succeeds"));
+    }
+
+    #[tokio::test]
+    async fn list_heartbeat_stale_nodes_is_bounded_and_defers_authority_to_expire() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let fresh = node_identity();
+        let stale_a = node_identity();
+        let stale_b = node_identity();
+        let stale_c = node_identity();
+        let already_expired = node_identity();
+
+        for identity in [&fresh, &stale_a, &stale_b, &stale_c] {
+            store.register(identity, None).await.expect("register node");
+        }
+        seed_node(&store.db, &already_expired, true).await;
+
+        for identity in [&stale_a, &stale_b, &stale_c, &already_expired] {
+            backdate_heartbeat(&store.db, identity).await;
+        }
+
+        let bounded = store
+            .list_heartbeat_stale_nodes(NODE_LEASE_TTL, 2)
+            .await
+            .expect("list heartbeat-stale nodes with bound");
+        assert_eq!(
+            bounded.len(),
+            2,
+            "the watchdog candidate scan must respect its per-sweep bound"
+        );
+
+        let candidates = store
+            .list_heartbeat_stale_nodes(NODE_LEASE_TTL, 10)
+            .await
+            .expect("list all heartbeat-stale candidates");
+        assert!(
+            candidates.contains(&stale_a)
+                && candidates.contains(&stale_b)
+                && candidates.contains(&stale_c),
+            "non-expired heartbeat-stale rows must be listed as watchdog candidates"
+        );
+        assert!(
+            !candidates.contains(&fresh),
+            "fresh heartbeat rows must not be listed"
+        );
+        assert!(
+            !candidates.contains(&already_expired),
+            "already-expired rows must not be listed"
+        );
+
+        assert!(
+            store
+                .expire(&stale_a, NODE_LEASE_TTL)
+                .await
+                .expect("expire stale candidate"),
+            "expire remains the authoritative false-to-true transition"
+        );
+        let after_expire = store
+            .list_heartbeat_stale_nodes(NODE_LEASE_TTL, 10)
+            .await
+            .expect("list heartbeat-stale candidates after expire");
+        assert!(
+            !after_expire.contains(&stale_a),
+            "a node committed expired by expire() must disappear from the candidate list"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_lease_is_fresh_requires_matching_fresh_non_draining_row() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let fresh = node_identity();
+        store
+            .register(&fresh, None)
+            .await
+            .expect("register fresh node");
+        assert!(
+            store
+                .is_fresh(&fresh, NODE_LEASE_TTL)
+                .await
+                .expect("freshness query"),
+            "a newly registered node must be fresh"
+        );
+
+        let wrong_epoch =
+            NodeIdentity::new(fresh.node_id.clone(), uuid::Uuid::new_v4().to_string());
+        assert!(
+            !store
+                .is_fresh(&wrong_epoch, NODE_LEASE_TTL)
+                .await
+                .expect("wrong-epoch freshness query"),
+            "the node epoch must match"
+        );
+
+        let stale = node_identity();
+        store
+            .register(&stale, None)
+            .await
+            .expect("register stale node");
+        backdate_heartbeat(&store.db, &stale).await;
+        assert!(
+            !store
+                .is_fresh(&stale, NODE_LEASE_TTL)
+                .await
+                .expect("heartbeat-stale freshness query"),
+            "a heartbeat-stale node must not be fresh before another sweep commits expired"
+        );
+
+        let expired = node_identity();
+        seed_node(&store.db, &expired, true).await;
+        assert!(
+            !store
+                .is_fresh(&expired, NODE_LEASE_TTL)
+                .await
+                .expect("expired freshness query"),
+            "a committed-expired node must not be fresh"
+        );
+
+        let draining = node_identity();
+        store
+            .register(&draining, None)
+            .await
+            .expect("register draining node");
+        store.mark_draining(&draining).await.expect("mark draining");
+        assert!(
+            !store
+                .is_fresh(&draining, NODE_LEASE_TTL)
+                .await
+                .expect("draining freshness query"),
+            "a draining node must not acquire new orphaned work"
+        );
     }
 
     // FIX 7(b): the ADR-named interleaving race, made genuinely concurrent
@@ -2486,9 +2865,9 @@ mod tests {
             "freshly registered, not-expired row counts as live"
         );
 
-        // The dead peer's process is gone; nobody calls `expire` on its
-        // row (no production caller this slice), but its heartbeat simply
-        // stops advancing.
+        // The dead peer's process is gone and its heartbeat simply stops
+        // advancing. This advisory count must stop treating that row as
+        // live even before a separate watchdog sweep commits `expired`.
         tokio::time::sleep(Duration::from_millis(350)).await;
         assert_eq!(
             store
@@ -2672,9 +3051,106 @@ mod tests {
         // can still win it.
         let other = node_identity();
         store
+            .register(&other, None)
+            .await
+            .expect("register non-draining stealer");
+        store
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &other)
             .await
             .expect("a non-draining node can still steal the dead owner's claim");
+    }
+
+    #[tokio::test]
+    async fn steal_stale_owner_stale_requires_a_live_stealer_lease() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let dead_owner = node_identity();
+        let entity = room_entity("orphaned-live-stealer@muc.example.com");
+        let epoch0 = store.acquire(&entity, &dead_owner).await.expect("acquire");
+        seed_node(&store.db, &dead_owner, true).await;
+
+        let missing_stealer = node_identity();
+        let missing = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::OwnerStale,
+                &missing_stealer,
+            )
+            .await
+            .expect_err("a missing stealer lease row must not win a dead owner's claim");
+        assert!(matches!(missing, ClaimError::Conflict));
+
+        let expired_stealer = node_identity();
+        seed_node(&store.db, &expired_stealer, true).await;
+        let expired = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::OwnerStale,
+                &expired_stealer,
+            )
+            .await
+            .expect_err("an expired stealer lease row must not win a dead owner's claim");
+        assert!(matches!(expired, ClaimError::Conflict));
+
+        let live_stealer = node_identity();
+        seed_node(&store.db, &live_stealer, false).await;
+        let epoch1 = store
+            .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &live_stealer)
+            .await
+            .expect("a live stealer can still reclaim the dead owner's claim");
+        assert_eq!(epoch1, ClaimEpoch(epoch0.0 + 1));
+    }
+
+    #[tokio::test]
+    async fn steal_orphaned_sm_session_claim_requires_heartbeat_fresh_stealer_in_cas() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let dead_owner = node_identity();
+        let entity = sm_entity("orphaned-sm-heartbeat-fresh-stealer");
+        let epoch0 = store.acquire(&entity, &dead_owner).await.expect("acquire");
+        seed_node(&store.db, &dead_owner, true).await;
+
+        let live_stealer = node_identity();
+        store
+            .register(&live_stealer, None)
+            .await
+            .expect("register live stealer");
+        let claim_only = store
+            .steal_orphaned_sm_session_claim(&entity, epoch0, &live_stealer, NODE_LEASE_TTL)
+            .await
+            .expect_err("a claim-only SM session must not win the reaper CAS");
+        assert!(matches!(claim_only, ClaimError::Conflict));
+
+        seed_sm_session_row(&store.db, &entity.id).await;
+
+        let heartbeat_stale_stealer = node_identity();
+        store
+            .register(&heartbeat_stale_stealer, None)
+            .await
+            .expect("register heartbeat-stale stealer");
+        backdate_heartbeat(&store.db, &heartbeat_stale_stealer).await;
+        let stale = store
+            .steal_orphaned_sm_session_claim(
+                &entity,
+                epoch0,
+                &heartbeat_stale_stealer,
+                NODE_LEASE_TTL,
+            )
+            .await
+            .expect_err("a heartbeat-stale-but-not-expired stealer must not win the reaper CAS");
+        assert!(matches!(stale, ClaimError::Conflict));
+
+        let epoch1 = store
+            .steal_orphaned_sm_session_claim(&entity, epoch0, &live_stealer, NODE_LEASE_TTL)
+            .await
+            .expect("a heartbeat-fresh stealer can reclaim the orphaned SM session claim");
+        assert_eq!(epoch1, ClaimEpoch(epoch0.0 + 1));
     }
 
     // --- ADR-0017 Phase 3 Slice 10: current_generation (Q5's mechanism) --
@@ -2905,6 +3381,10 @@ mod tests {
 
         let stealer = node_identity();
         store
+            .register(&stealer, None)
+            .await
+            .expect("register live stealer");
+        store
             .report_steal_intent(&entity, &stealer)
             .await
             .expect("report intent");
@@ -2975,6 +3455,10 @@ mod tests {
 
         let stealer = node_identity();
         store
+            .register(&stealer, None)
+            .await
+            .expect("register live stealer");
+        store
             .report_steal_intent(&entity, &stealer)
             .await
             .expect("report intent");
@@ -2992,6 +3476,82 @@ mod tests {
             .await
             .expect("an uncleared, aged-out intent makes the entity stealable");
         assert_eq!(epoch1, ClaimEpoch(1));
+    }
+
+    #[tokio::test]
+    async fn steal_intent_expired_requires_live_stealer_without_burning_intents() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = user_actor_entity("room-live-intent-stealer");
+        let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
+        seed_node(&store.db, &owner, false).await;
+
+        let missing_stealer = node_identity();
+        store
+            .report_steal_intent(&entity, &missing_stealer)
+            .await
+            .expect("report intent");
+        let intent_ttl = std::time::Duration::from_millis(50);
+        tokio::time::sleep(intent_ttl * 2).await;
+
+        let missing = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &missing_stealer,
+            )
+            .await
+            .expect_err("a missing stealer lease row must not win via steal-intent");
+        assert!(matches!(missing, ClaimError::Conflict));
+        assert_eq!(
+            store
+                .owner_steal_intents(&owner)
+                .await
+                .expect("owner_steal_intents after missing stealer"),
+            vec![(entity.clone(), epoch0)],
+            "a missing stealer must not consume the aged intent it failed to use"
+        );
+
+        let expired_stealer = node_identity();
+        seed_node(&store.db, &expired_stealer, true).await;
+        let expired = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &expired_stealer,
+            )
+            .await
+            .expect_err("an expired stealer lease row must not win via steal-intent");
+        assert!(matches!(expired, ClaimError::Conflict));
+        assert_eq!(
+            store
+                .owner_steal_intents(&owner)
+                .await
+                .expect("owner_steal_intents after expired stealer"),
+            vec![(entity.clone(), epoch0)],
+            "an expired stealer must not consume the aged intent it failed to use"
+        );
+
+        let live_stealer = node_identity();
+        store
+            .register(&live_stealer, None)
+            .await
+            .expect("register live stealer");
+        let epoch1 = store
+            .steal_stale(
+                &entity,
+                epoch0,
+                StalePredicate::StealIntentExpired { intent_ttl },
+                &live_stealer,
+            )
+            .await
+            .expect("a live stealer can consume and win the aged intent");
+        assert_eq!(epoch1, ClaimEpoch(epoch0.0 + 1));
     }
 
     #[tokio::test]
@@ -3101,6 +3661,10 @@ mod tests {
         // The stale-epoch caller loses its CAS AND must not consume the
         // intent.
         let stale_caller = node_identity();
+        store
+            .register(&stale_caller, None)
+            .await
+            .expect("register stale-epoch caller");
         let err = store
             .steal_stale(
                 &entity,
@@ -3123,6 +3687,10 @@ mod tests {
 
         // A correctly-epoched stealer still wins on the surviving intent.
         let real_stealer = node_identity();
+        store
+            .register(&real_stealer, None)
+            .await
+            .expect("register real stealer");
         let epoch2 = store
             .steal_stale(
                 &entity,
@@ -3205,6 +3773,10 @@ mod tests {
         // If the refresh had not landed, the first report would already be
         // stale enough to steal by now; it must not be.
         let stealer = node_identity();
+        store
+            .register(&stealer, None)
+            .await
+            .expect("register live stealer");
         let err = store
             .steal_stale(
                 &entity,
@@ -3263,6 +3835,14 @@ mod tests {
 
         let mut owner = node_identity();
         let mut stealer = node_identity();
+        store
+            .register(&owner, None)
+            .await
+            .expect("register initial owner");
+        store
+            .register(&stealer, None)
+            .await
+            .expect("register initial stealer");
         let entity = user_actor_entity("stress-veto-race");
         let mut epoch = store.acquire(&entity, &owner).await.expect("acquire");
 
@@ -3387,9 +3967,9 @@ mod tests {
     #[tokio::test]
     async fn list_orphaned_sm_session_claims_scopes_to_sm_session_and_stale_owners() {
         // ADR-0017 Phase 3 Slice 5, element 9: the orphan-reaper scan finds
-        // `sm_session` claims owned by a stale node, ignores fresh owners,
-        // and never surfaces a `UserActor`/`RoomActor` claim even under the
-        // exact same stale owner.
+        // detached `sm_session` claims owned by a stale node, ignores fresh
+        // owners, and never surfaces a `UserActor`/`RoomActor` claim even
+        // under the exact same stale owner.
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
@@ -3398,6 +3978,7 @@ mod tests {
         let fresh_owner = node_identity();
         seed_node(&store.db, &fresh_owner, false).await;
         let fresh_entity = sm_entity("fresh-owner-stream");
+        seed_sm_session_row(&store.db, &fresh_entity.id).await;
         store
             .acquire(&fresh_entity, &fresh_owner)
             .await
@@ -3410,6 +3991,12 @@ mod tests {
             .acquire(&orphaned_entity, &stale_owner)
             .await
             .expect("acquire under stale owner");
+        seed_sm_session_row(&store.db, &orphaned_entity.id).await;
+        let claim_only_entity = sm_entity("claim-only-stream");
+        store
+            .acquire(&claim_only_entity, &stale_owner)
+            .await
+            .expect("acquire claim-only SM session under stale owner");
         let non_sm_entity = Entity::new(EntityType::UserActor, "orphaned-user-actor".to_string());
         store
             .acquire(&non_sm_entity, &stale_owner)
@@ -3424,7 +4011,8 @@ mod tests {
             candidates.len(),
             1,
             "exactly one candidate: the sm_session claim under the stale owner, \
-             excluding the fresh-owner claim and the non-sm_session claim"
+             excluding the fresh-owner claim, the claim-only live SM session, \
+             and the non-sm_session claim"
         );
         assert_eq!(candidates[0].entity, orphaned_entity);
         assert_eq!(candidates[0].epoch, orphaned_epoch);
