@@ -4592,3 +4592,84 @@ async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
         "a role change that keeps the occupant must not end their call session"
     );
 }
+
+/// Round-3 concurrency review: MUC occupancy is keyed by FULL JID, so
+/// a detached session's invalidation cleanup must NOT evict the JID
+/// from its rooms while a live same-JID replacement session exists —
+/// the replacement shares the occupancy and would be kicked out of
+/// every room it just (re)joined.
+#[tokio::test]
+async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() {
+    use super::cleanup::cleanup_invalidated_detached_session;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "replacement-race-channel@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+
+    // A live replacement session holds the registry slot for the SAME
+    // full JID (fresh bind after the old session detached).
+    let (repl_tx, _repl_rx) = mpsc::channel::<OutboundStanza>(4);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), repl_tx);
+
+    // The stale detached session (a stream id the registry no longer
+    // holds) gets invalidated.
+    let detached = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: "stale-stream".to_string(),
+        user_id: "alice@example.com".to_string(),
+        jid: alice.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    cleanup_invalidated_detached_session(state.as_ref(), detached.clone(), None).await;
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.find_nick_by_real_jid(&alice),
+        Some("alice"),
+        "the live replacement's room occupancy must survive the stale \
+         detached session's invalidation cleanup"
+    );
+
+    // Companion: with no live entry for the JID, the invalidation DOES
+    // evict the occupancy.
+    state.deps.protocol.connection_registry.unregister(&alice);
+    cleanup_invalidated_detached_session(state.as_ref(), detached, None).await;
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.find_nick_by_real_jid(&alice).is_none(),
+        "with no live replacement the invalidated session's occupancy \
+         must be cleaned up"
+    );
+}

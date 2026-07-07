@@ -94,12 +94,15 @@ async fn try_send_to_does_not_unregister_replacement_entry() {
     );
 }
 
-/// Round-2 concurrency review on #1105: after the owner-gated
-/// unregister, a replacement connection for the same full JID may
-/// already have registered (and broadcast its own available). The
-/// terminated-session unavailable must be suppressed when a live
-/// replacement exists, or subscribers end on a stale unavailable for a
-/// JID that is online.
+/// Round-2 concurrency review on #1105, sharpened by the round-3
+/// review: the terminated-session unavailable is suppressed ONLY when
+/// the replacement connection is already PRESENCE-AVAILABLE (its
+/// available superseded ours; a late unavailable would pin subscribers
+/// on a stale offline). A replacement that is merely registered has
+/// broadcast nothing yet — if it never sends presence, subscribers
+/// would keep the dropped session's stale available forever — so the
+/// unavailable must still go out; the replacement's future available
+/// lands after it and wins in every interleaving.
 #[tokio::test]
 async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live() {
     let state = create_test_websocket_state().await;
@@ -134,8 +137,8 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
         "expected unavailable from the dropped resource, got {frame}"
     );
 
-    // Replacement registered for the SAME full JID: the broadcast must
-    // be suppressed entirely.
+    // Replacement registered for the SAME full JID but NOT yet
+    // available: the unavailable must still be broadcast.
     let (repl_tx, _repl_rx) = mpsc::channel::<OutboundStanza>(8);
     state
         .deps
@@ -144,11 +147,30 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
         .register(dropped.clone(), repl_tx);
     super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
         .await;
+    let received = tokio::time::timeout(std::time::Duration::from_millis(500), sib_rx.recv())
+        .await
+        .expect("a registered-but-silent replacement must not suppress the unavailable")
+        .expect("channel open");
+    let frame = stanza_to_xml(&received.stanza);
+    assert!(
+        frame.contains("unavailable") && frame.contains("alice@example.com/web"),
+        "expected unavailable despite the silent replacement, got {frame}"
+    );
+
+    // Replacement goes presence-available: NOW the broadcast must be
+    // suppressed entirely.
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&dropped, true, 0);
+    super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
+        .await;
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(300), sib_rx.recv())
             .await
             .is_err(),
-        "no unavailable may be broadcast while a replacement connection is live"
+        "no unavailable may be broadcast while an available replacement is live"
     );
 
     // And a session that never sent available broadcasts nothing.

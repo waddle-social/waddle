@@ -392,7 +392,22 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .protocol
                     .caps_resolver
                     .drop_resource(&session.jid);
-                routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
+                // MUC occupancy is keyed by FULL JID: a live same-JID
+                // replacement session (fresh bind after this expired
+                // session detached) shares the room occupancies, so
+                // evicting them here would kick the replacement out of
+                // its rooms. Skip room cleanup whenever any live
+                // registry entry exists for the JID (same guard as
+                // cleanup_invalidated_detached_session).
+                if state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_entry(&session.jid)
+                    .is_none()
+                {
+                    routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
+                }
             }
         }
     });

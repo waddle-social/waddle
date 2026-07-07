@@ -536,12 +536,16 @@ pub(super) async fn cleanup_connection_shutdown(
 /// Gated twice. `was_presence_available` comes from the entry the caller
 /// just owned and removed — a bound-but-silent resource advertised
 /// nothing, so there is nothing to retract. And a fresh registry lookup
-/// must find NO live replacement for this full JID: the owner-gated
-/// unregister only protects the map slot, not ordering against a
-/// replacement's presence — broadcasting after the newcomer's available
-/// would leave subscribers on a stale unavailable for a JID that is
-/// online (round-2 concurrency review). The replacement broadcasts its
-/// own presence, so suppressing here is always safe.
+/// must find no PRESENCE-AVAILABLE replacement for this full JID: the
+/// owner-gated unregister only protects the map slot, not ordering
+/// against a replacement's presence — broadcasting after the newcomer's
+/// available would leave subscribers on a stale unavailable for a JID
+/// that is online (round-2 concurrency review). A replacement that is
+/// merely REGISTERED has broadcast nothing yet, so suppression would be
+/// wrong there: if it never sends presence, subscribers keep the
+/// dropped session's stale available forever. Broadcasting is correct
+/// in every interleaving of that case — the replacement's future
+/// available lands after our unavailable and wins (round-3 review).
 pub(crate) async fn broadcast_unavailable_if_no_replacement(
     state: &WebSocketState,
     jid: &FullJid,
@@ -555,11 +559,11 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
         .protocol
         .connection_registry
         .get_entry(jid)
-        .is_some()
+        .is_some_and(|entry| entry.is_presence_available())
     {
         debug!(
             jid = %jid,
-            "Suppressed terminated-session unavailable: replacement connection is live"
+            "Suppressed terminated-session unavailable: an available replacement connection is live"
         );
         return;
     }
@@ -680,11 +684,31 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .caps_resolver
             .drop_resource(&detached.jid);
     }
-    if detached.presence_available && !replacement_is_current_owner {
-        handlers::presence::broadcast_unavailable_for_terminated_session(state, &detached.jid)
-            .await;
+    // Same replacement re-check as the unclean-disconnect path: a
+    // third same-JID session may have registered (and gone available)
+    // between the replacement-owner check above and now — a stale
+    // unavailable against its live available would pin subscribers on
+    // offline for an online JID.
+    broadcast_unavailable_if_no_replacement(
+        state,
+        &detached.jid,
+        detached.presence_available && !replacement_is_current_owner,
+    )
+    .await;
+    // MUC occupancy is keyed by FULL JID, so a live same-JID
+    // replacement session shares the room occupancies this stale
+    // detached session would evict — kicking the replacement out of
+    // every room it is joined to. Skip room cleanup whenever any live
+    // registry entry exists for the JID.
+    if state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&detached.jid)
+        .is_none()
+    {
+        cleanup_muc_presence(state, &detached.jid).await;
     }
-    cleanup_muc_presence(state, &detached.jid).await;
 }
 
 pub(crate) async fn get_room_actor(
