@@ -90,6 +90,103 @@ describe("channel activity", () => {
     }
   });
 
+  test("catch-up re-emissions record missed mentions exactly once and never notify", async () => {
+    let onActivity: ((event: RoomActivityEvent) => void) | null = null;
+    const actionError = ref("");
+    const scope = effectScope();
+    let cleanupDocument: (() => void) | null = null;
+
+    try {
+      cleanupDocument = installHiddenDocument();
+      const messaging = scope.run(() =>
+        useChannelMessages(
+          ref(session()),
+          ref({
+            ...handlerStubs(),
+            setActivityHandler(handler: (event: RoomActivityEvent) => void) {
+              onActivity = handler;
+            },
+          } as never),
+          ref("team"),
+          ref("general"),
+          ref({ id: "general", name: "General", jid: "general@conference.example.com" }),
+          String,
+          actionError,
+          () => {
+            actionError.value = "";
+          },
+        )
+      );
+      if (!messaging) throw new Error("channel messages composable did not initialize");
+      await nextTick();
+
+      const missedMention: RoomActivityEvent = {
+        roomJid: "random@conference.example.com",
+        nick: "bob",
+        body: "missed @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-missed",
+        fromArchive: true,
+      };
+      // A mention missed while disconnected has no other path to the
+      // badge (the server inbox tracks unread only) — it must record.
+      onActivity?.(missedMention);
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 1,
+      });
+      // ...but a replayed banner is spam: archive decodes never notify.
+      expect(messaging.pendingNotificationActivities.value).toHaveLength(0);
+
+      // A second re-emission of the same stanza-id cannot inflate.
+      onActivity?.(missedMention);
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 1,
+      });
+
+      // Live-then-archive: the live copy records (and notifies), the
+      // catch-up twin sharing the stanza-id dedupes.
+      onActivity?.({
+        roomJid: "random@conference.example.com",
+        nick: "bob",
+        body: "live @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-live",
+      });
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 2,
+      });
+      expect(messaging.pendingNotificationActivities.value).toHaveLength(1);
+      onActivity?.({
+        roomJid: "random@conference.example.com",
+        nick: "bob",
+        body: "live @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-live",
+        fromArchive: true,
+      });
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 2,
+      });
+      expect(messaging.pendingNotificationActivities.value).toHaveLength(1);
+
+      // An unstamped archive row cannot be deduplicated against its live
+      // twin — it must not risk inflating the count.
+      onActivity?.({
+        roomJid: "random@conference.example.com",
+        nick: "bob",
+        body: "unstamped @alice",
+        mentions: ["xmpp:alice@example.com"],
+        fromArchive: true,
+      });
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 2,
+      });
+    } finally {
+      cleanupDocument?.();
+      scope.stop();
+    }
+  });
+
   test("counts current-room hidden personal mentions by bare JID, not localpart", async () => {
     let onMessage: ((message: LiveRoomMessage) => void) | null = null;
     const actionError = ref("");
@@ -144,6 +241,93 @@ describe("channel activity", () => {
       expect(notificationActivity?.nick).toBe("bob");
       expect(notificationActivity?.body).toBe("right alice");
       expect(notificationActivity?.mentions).toEqual(["xmpp:alice@example.com"]);
+    } finally {
+      scope.stop();
+      cleanupDocument?.();
+    }
+  });
+
+  test("archive re-emissions never re-badge a mention seen live with the tab visible", async () => {
+    let onMessage: ((message: LiveRoomMessage) => void) | null = null;
+    let onActivity: ((event: RoomActivityEvent) => void) | null = null;
+    const actionError = ref("");
+    const scope = effectScope();
+    let cleanupDocument: (() => void) | null = null;
+
+    try {
+      const messaging = scope.run(() =>
+        useChannelMessages(
+          ref(session()),
+          ref({
+            ...handlerStubs(),
+            setMessageHandler(handler: (message: LiveRoomMessage) => void) {
+              onMessage = handler;
+            },
+            setActivityHandler(handler: (event: RoomActivityEvent) => void) {
+              onActivity = handler;
+            },
+          } as never),
+          ref("team"),
+          ref("general"),
+          ref({ id: "general", name: "General", jid: "general@conference.example.com" }),
+          String,
+          actionError,
+          () => {
+            actionError.value = "";
+          },
+        )
+      );
+      if (!messaging) throw new Error("channel messages composable did not initialize");
+      await nextTick();
+
+      // Tab visible: the mention renders in the open channel — seen, no
+      // badge, but it must be ACCOUNTED for later re-emissions.
+      onMessage?.(roomMessage({
+        id: "m-seen",
+        body: "hi @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-seen",
+      }));
+      expect(messaging.mentionedChannelCounts.value).toEqual({});
+
+      cleanupDocument = installHiddenDocument();
+
+      // Catch-up re-emission of the SAME stanza after a server restart,
+      // tab now hidden — via the focused-room route...
+      onMessage?.(roomMessage({
+        id: "m-seen",
+        body: "hi @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-seen",
+        createdAtSource: "archive",
+      }));
+      expect(messaging.mentionedChannelCounts.value).toEqual({});
+      expect(messaging.pendingNotificationActivities.value).toHaveLength(0);
+
+      // ...and via the activity route (user switched rooms meanwhile).
+      onActivity?.({
+        roomJid: "general@conference.example.com",
+        nick: "bob",
+        body: "hi @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-seen",
+        fromArchive: true,
+      });
+      expect(messaging.mentionedChannelCounts.value).toEqual({});
+
+      // A genuinely-missed focused-room mention (archive-only, never seen
+      // live) still records exactly once, without a banner.
+      onMessage?.(roomMessage({
+        id: "m-missed",
+        body: "missed @alice",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-missed",
+        createdAtSource: "archive",
+      }));
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "general@conference.example.com": 1,
+      });
+      expect(messaging.pendingNotificationActivities.value).toHaveLength(0);
     } finally {
       scope.stop();
       cleanupDocument?.();

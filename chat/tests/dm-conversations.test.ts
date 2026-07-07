@@ -306,6 +306,42 @@ describe("useDirectMessageConversations", () => {
     expect(composable.conversations.value[0].unreadCount).toBe(0);
   });
 
+  test("receiveIncomingDm does not increment unread for archive-decoded catch-up re-emissions", () => {
+    // MAM reconnect catch-up re-emits archive rows through the same
+    // directMessage event; a message already counted live before the
+    // reconnect must not be counted a second time. Genuinely-missed
+    // messages are accounted by the server inbox hydrate instead.
+    const { composable } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({ createdAt: "2026-01-02T00:00:00Z" }));
+    expect(composable.conversations.value[0].unreadCount).toBe(1);
+    composable.receiveIncomingDm(makeDmMessage({
+      id: "msg-1-archive-copy",
+      body: "hello again",
+      createdAt: "2026-01-02T00:00:01Z",
+      createdAtSource: "archive",
+    }));
+    expect(composable.conversations.value[0].unreadCount).toBe(1);
+    // Preview/ordering still converge on the re-emitted content.
+    expect(composable.conversations.value[0].lastMessageBody).toBe("hello again");
+  });
+
+  test("an archive re-emission of an older message does not roll the preview back", () => {
+    const { composable } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({
+      id: "msg-new",
+      body: "newest live",
+      createdAt: "2026-01-02T00:00:10Z",
+    }));
+    composable.receiveIncomingDm(makeDmMessage({
+      id: "msg-old-archive-copy",
+      body: "older archive copy",
+      createdAt: "2026-01-02T00:00:00Z",
+      createdAtSource: "archive",
+    }));
+    expect(composable.conversations.value[0].lastMessageBody).toBe("newest live");
+    expect(composable.conversations.value[0].lastMessageAt).toBe("2026-01-02T00:00:10Z");
+  });
+
   test("openDm does not auto-mark-read on its own", async () => {
     // Auto-mark-read responsibility lives in useChatReadReceipts (gated on
     // viewport + window focus); openDm only sets the active peer.

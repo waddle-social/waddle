@@ -30,7 +30,6 @@ The server implements [Cloudflare's Ecdysis pattern](https://blog.cloudflare.com
 ### State loss on restart
 In-memory state is **not** transferred across restarts:
 - MUC room presence and rosters
-- ISR token store (XEP-0397)
 - Stream Management sessions (XEP-0198)
 - Connection registry
 - PubSub/PEP storage

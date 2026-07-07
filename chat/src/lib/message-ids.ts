@@ -56,18 +56,25 @@ export function findMessageIndexById<T extends MessageIdCarrier>(
   if (!normalized) return -1;
 
   let aliasIndex = -1;
+  let aliasAmbiguous = false;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i]!;
     if (predicate && !predicate(message)) continue;
+    // Primary ids win over alias ambiguity, so the scan must complete
+    // before the ambiguity verdict: bailing out on the second alias
+    // claimant would hide a later row whose PRIMARY id matches (e.g. a
+    // redelivered copy reconciling into its own row while two other rows
+    // share the candidate as a reused origin-id alias) — the caller would
+    // then append a duplicate instead of merging.
     if (message.id === normalized) return i;
     if (!message.wireIds?.includes(normalized)) continue;
     if (aliasIndex < 0) {
       aliasIndex = i;
       continue;
     }
-    if (messages[aliasIndex]!.id !== message.id) return -1;
+    if (messages[aliasIndex]!.id !== message.id) aliasAmbiguous = true;
   }
-  return aliasIndex;
+  return aliasAmbiguous ? -1 : aliasIndex;
 }
 
 export function findMessageById<T extends MessageIdCarrier>(

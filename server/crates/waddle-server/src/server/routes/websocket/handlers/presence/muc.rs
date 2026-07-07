@@ -587,9 +587,43 @@ async fn handle_muc_join_unlocked(
                         ),
                     )];
                 }
-                // FIX 6: no remaining error variant may silently drop the
-                // join with no presence reply at all — bounce typed
-                // instead of the previous bare `return vec![]`.
+                if matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::RoomFull
+                    )
+                ) {
+                    // XEP-0045 §7.2.9: the room has reached its maximum
+                    // number of occupants — deny access with a presence
+                    // error of type "wait" carrying <service-unavailable/>.
+                    // Returning an empty reply here left the client
+                    // stalled forever waiting for self-presence (#1111).
+                    warn!(
+                        room = %room_jid,
+                        nick = %nick,
+                        sender = %sender_jid,
+                        "MUC join refused: room is full"
+                    );
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::ServiceUnavailable,
+                            "en",
+                            "The room has reached its maximum number of occupants.",
+                        ),
+                    )];
+                }
+                // FIX 6 / #1111: no remaining error variant may silently
+                // drop the join with no presence reply at all — bounce
+                // typed instead of the previous bare `return vec![]`. This
+                // is unreachable for the current JoinWithAffiliation error
+                // surface (every RoomActorError variant it returns has a
+                // typed arm above, and transport failures take the #1108
+                // retry path) — kept as a typed fail-safe so a future
+                // variant can never stall the client with an empty reply.
                 warn!(room = %room_jid, nick = %nick, error = ?error, "Failed to join MUC room");
                 return vec![build_muc_presence_error_xml(
                     room_jid,
@@ -599,7 +633,7 @@ async fn handle_muc_join_unlocked(
                         ErrorType::Wait,
                         DefinedCondition::InternalServerError,
                         "en",
-                        "Failed to join the room.",
+                        "Failed to join the room; please retry.",
                     ),
                 )];
             }

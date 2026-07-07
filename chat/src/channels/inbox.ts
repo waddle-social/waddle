@@ -164,7 +164,9 @@ export function useChannelInbox(
     const startRevision = localMutationRevision;
     try {
       const inbox = await client.fetchInbox();
-      if (requestId !== hydrateRequestId || client !== xmppClient.value) return false;
+      // Superseded is success, not failure — see the DM-side twin in
+      // `dms/conversations.ts` for the retry-churn rationale.
+      if (requestId !== hydrateRequestId || client !== xmppClient.value) return true;
 
       let next = applyEntries(createInboxState(), inbox.conversations);
       next = applyReadClearBarriers(next);

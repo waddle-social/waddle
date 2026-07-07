@@ -1143,3 +1143,368 @@ fn xep_0166_session_terminate_typed_helper_round_trips() {
     let reason = reparsed.reason.expect("reason preserved");
     assert!(matches!(reason.reason, Reason::Cancel));
 }
+
+// ── #1131 survivor / unknown-session terminate ───────────────────────
+
+fn first_result_ack(events: &[OutboundEvent]) -> Option<&Iq> {
+    events.iter().find_map(|event| {
+        let OutboundEvent::SendStanza(stanza) = event else {
+            return None;
+        };
+        let Stanza::Iq(reply) = stanza.as_ref() else {
+            return None;
+        };
+        matches!(reply.as_ref(), Iq::Result { .. }).then_some(reply.as_ref())
+    })
+}
+
+fn first_stanza_error(
+    events: &[OutboundEvent],
+) -> Option<&xmpp_parsers::stanza_error::StanzaError> {
+    events.iter().find_map(|event| {
+        let OutboundEvent::SendStanza(stanza) = event else {
+            return None;
+        };
+        let Stanza::Iq(reply) = stanza.as_ref() else {
+            return None;
+        };
+        let Iq::Error { error, .. } = reply.as_ref() else {
+            return None;
+        };
+        Some(error)
+    })
+}
+
+#[test]
+fn xep_0166_survivor_terminate_after_peer_swept_acks_and_cleans_up() {
+    // #1131: Bob's client crashed; the LiveKit webhook (or the
+    // reconciler) already removed his registration. Alice's hangup
+    // must NOT be `<forbidden/>` — the server unregisters her,
+    // revokes her JTIs, and acks the terminate per XEP-0166 §6.7 on
+    // the departed peer's behalf.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-survivor").expect("valid call id");
+    let alice_identity = Identity::from_jid(alice.clone());
+    let bob_identity = Identity::from_jid(bob.clone());
+
+    let invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-survivor",
+    );
+    assert!(has_route_to(
+        &handler.handle(&invite, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+    let accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-survivor",
+    );
+    assert!(has_route_to(
+        &handler.handle(&accept, &ctx(&bob)),
+        "alice@waddle.test/desktop"
+    ));
+    // The accept minted Alice's join token; she now holds a live JTI.
+    assert_eq!(sfu.issued_count(&call, &alice_identity), 1);
+
+    // Peer crash: the webhook's registry cleanup removed Bob.
+    sfu.note_participant_left(&call, &bob_identity);
+    assert!(!sfu.has_call_participant(&call, &bob_identity));
+    assert!(sfu.has_call_participant(&call, &alice_identity));
+
+    // Survivor hangup.
+    let terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-survivor",
+    );
+    let events = handler.handle(&terminate, &ctx(&alice));
+
+    assert_eq!(
+        first_error_condition(&events),
+        None,
+        "survivor terminate must not error (#1131): {events:?}"
+    );
+    let ack = first_result_ack(&events).expect("server must ack the survivor terminate");
+    assert_eq!(ack.id(), terminate.id(), "ack answers the terminate IQ");
+    assert!(
+        matches!(ack, Iq::Result { payload: None, .. }),
+        "XEP-0166 §6.7 termination ack is an EMPTY IQ result"
+    );
+    assert_eq!(
+        sfu.participant_count(&call),
+        0,
+        "survivor terminate must unregister the remaining party"
+    );
+    assert_eq!(
+        sfu.issued_count(&call, &alice_identity),
+        0,
+        "survivor terminate must revoke the survivor's JTIs"
+    );
+}
+
+#[test]
+fn xep_0166_unknown_session_terminate_returns_item_not_found_unknown_session() {
+    // #1131 / XEP-0166 error table: a terminate for a sid with no
+    // live session anywhere gets `<item-not-found/>` plus the
+    // application-specific `<unknown-session/>` — never
+    // `<forbidden/>`, and no state is touched (idempotent).
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+
+    let terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-never-existed",
+    );
+    let events = handler.handle(&terminate, &ctx(&alice));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::ItemNotFound),
+        "unknown session terminate must be item-not-found: {events:?}"
+    );
+    let error = first_stanza_error(&events).expect("stanza error present");
+    let unknown = error
+        .other
+        .as_ref()
+        .expect("application-specific condition present");
+    assert_eq!(unknown.name(), "unknown-session");
+    assert_eq!(unknown.ns(), "urn:xmpp:jingle:errors:1");
+}
+
+#[test]
+fn xep_0166_terminate_glare_second_terminate_is_not_forbidden() {
+    // #1131: both parties hang up at once. The first terminate tears
+    // the session down; the second must be answered with the
+    // idempotent unknown-session shape, not `<forbidden/>`.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-glare").expect("valid call id");
+
+    let invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-glare",
+    );
+    assert!(has_route_to(
+        &handler.handle(&invite, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let alice_terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-glare",
+    );
+    let first = handler.handle(&alice_terminate, &ctx(&alice));
+    assert!(
+        has_route_to(&first, "bob@waddle.test/phone"),
+        "live terminate forwards to the peer: {first:?}"
+    );
+    assert_eq!(sfu.participant_count(&call), 0);
+
+    let bob_terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-glare",
+    );
+    let second = handler.handle(&bob_terminate, &ctx(&bob));
+    assert_ne!(
+        first_error_condition(&second),
+        Some(DefinedCondition::Forbidden),
+        "terminate glare must not be forbidden (#1131): {second:?}"
+    );
+    assert_eq!(
+        first_error_condition(&second),
+        Some(DefinedCondition::ItemNotFound),
+        "glare loser gets the idempotent unknown-session shape: {second:?}"
+    );
+    assert_eq!(
+        sfu.participant_count(&call),
+        0,
+        "no state change (idempotent)"
+    );
+}
+
+#[test]
+fn xep_0166_duplicate_terminate_is_idempotent() {
+    // #1131: a client retrying its own terminate (lost ack) must not
+    // see `<forbidden/>` on the retry.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-dup").expect("valid call id");
+
+    let invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-dup",
+    );
+    assert!(has_route_to(
+        &handler.handle(&invite, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-dup",
+    );
+    let first = handler.handle(&terminate, &ctx(&alice));
+    assert!(has_route_to(&first, "bob@waddle.test/phone"));
+    assert_eq!(sfu.participant_count(&call), 0);
+
+    let retry = handler.handle(&terminate, &ctx(&alice));
+    assert_ne!(
+        first_error_condition(&retry),
+        Some(DefinedCondition::Forbidden),
+        "duplicate terminate must not be forbidden: {retry:?}"
+    );
+    assert_eq!(
+        first_error_condition(&retry),
+        Some(DefinedCondition::ItemNotFound),
+        "duplicate terminate resolves to unknown-session: {retry:?}"
+    );
+}
+
+// ── #1142 one JWT per negotiation stanza ─────────────────────────────
+
+fn video_content_with_waddle_transport() -> Content {
+    let mut content = Content::new(Creator::Initiator, ContentId("video".into()));
+    let description = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "video")
+        .build();
+    content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+        xmpp_parsers::jingle_rtp::Description::try_from(description).expect("rtp desc"),
+    ));
+    let transport = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build();
+    content.transport = Some(Transport::Unknown(transport));
+    content
+}
+
+fn two_content_initiate(from: &str, to: &str, sid: &str) -> Iq {
+    let mut jingle = Jingle::new(Action::SessionInitiate, SessionId(sid.into()));
+    jingle.initiator = Some(from.parse().expect("valid initiator JID"));
+    jingle.contents.push(audio_content_with_waddle_transport());
+    jingle.contents.push(video_content_with_waddle_transport());
+    Iq::Set {
+        from: Some(from.parse().expect("valid from JID")),
+        to: Some(to.parse().expect("valid to JID")),
+        id: format!("jingle-{sid}"),
+        payload: jingle.into(),
+    }
+}
+
+fn forwarded_content_tokens(events: &[OutboundEvent]) -> Vec<String> {
+    use waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport;
+    let forwarded = events
+        .iter()
+        .find_map(|event| {
+            let OutboundEvent::RouteToConnection { stanza, .. } = event else {
+                return None;
+            };
+            let Stanza::Iq(iq) = stanza.as_ref() else {
+                return None;
+            };
+            let Iq::Set { payload, .. } = iq.as_ref() else {
+                return None;
+            };
+            Jingle::try_from(payload.clone()).ok()
+        })
+        .expect("forwarded jingle stanza present");
+    forwarded
+        .contents
+        .iter()
+        .map(|content| {
+            let Some(Transport::Unknown(elem)) = &content.transport else {
+                panic!("content missing Waddle transport");
+            };
+            match WaddleLiveKitTransport::try_from(elem).expect("transport parses") {
+                WaddleLiveKitTransport::Issued(issued) => issued.token.as_str().to_string(),
+                WaddleLiveKitTransport::Request => panic!("server must issue the transport"),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn xep_0166_multi_content_stanza_mints_one_shared_token() {
+    // #1142: an audio+video session-initiate must mint exactly ONE
+    // join token (one JTI) for the peer and stamp the same issued
+    // transport into every `<content/>` — per the LiveKit model of
+    // one identity/credential per participant.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-two-content").expect("call id");
+    let bob_identity = Identity::from_jid(bob);
+
+    let invite = two_content_initiate(
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-two-content",
+    );
+    let events = handler.handle(&invite, &ctx(&alice));
+
+    let tokens = forwarded_content_tokens(&events);
+    assert_eq!(tokens.len(), 2, "both contents carry an issued transport");
+    assert_eq!(
+        tokens[0], tokens[1],
+        "audio and video contents must share ONE token (#1142)"
+    );
+    assert_eq!(
+        sfu.issued_count(&call, &bob_identity),
+        1,
+        "exactly one JTI minted per negotiation stanza"
+    );
+}
+
+#[test]
+fn xep_0166_multi_content_renegotiations_do_not_burn_jti_budget() {
+    // #1142: repeated two-content renegotiations of the same call
+    // must consume one JTI each, not one per content — otherwise the
+    // 16-slot per-participant FIFO evicts still-live JTIs which then
+    // can never be revoked on hangup.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-renegotiate").expect("call id");
+    let bob_identity = Identity::from_jid(bob);
+
+    for round in 1..=3usize {
+        let invite = two_content_initiate(
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/phone",
+            "dm-renegotiate",
+        );
+        let events = handler.handle(&invite, &ctx(&alice));
+        assert!(
+            has_route_to(&events, "bob@waddle.test/phone"),
+            "renegotiation {round} forwards: {events:?}"
+        );
+        assert_eq!(
+            sfu.issued_count(&call, &bob_identity),
+            round,
+            "each two-content stanza mints exactly one JTI"
+        );
+    }
+}

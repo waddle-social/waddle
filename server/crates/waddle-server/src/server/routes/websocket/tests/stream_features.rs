@@ -67,6 +67,22 @@ async fn isr_feature_absent_when_unauthenticated_even_if_available() {
         .any(|child| child.name() == "isr" && child.ns() == waddle_xmpp::isr::ISR_NS));
 }
 
+#[tokio::test]
+async fn features_do_not_advertise_legacy_isr_namespace() {
+    // Issue #1169 / ADR-0017 Phase 3 Slice 8: the old, non-conformant
+    // `urn:xmpp:isr:0` IQ-token scheme was retired. Pin that it can never
+    // reappear, in either the unavailable or available (new-ISR-enabled)
+    // gate state.
+    for isr_available in [false, true] {
+        let features = build_stream_features_xml(true, isr_available);
+        let el = Element::from_str(&features).expect("features xml");
+        assert!(
+            !el.children().any(|child| child.ns() == "urn:xmpp:isr:0"),
+            "stream features must not advertise legacy urn:xmpp:isr:0"
+        );
+    }
+}
+
 #[test]
 fn session_init_failure_uses_standalone_stream_error_plus_websocket_close() {
     let stream_error = build_internal_server_error_stream_error(

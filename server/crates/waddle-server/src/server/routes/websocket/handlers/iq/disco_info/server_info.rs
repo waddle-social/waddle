@@ -46,7 +46,7 @@ pub(super) async fn handle_server_disco_info<'a>(
     // rich-message XEPs (corrections, retractions, reactions,
     // references, stanza-ids, etc.) declared there stay discoverable
     // here without drift between the two lists. Server-instance
-    // additions (Spaces, jabber:iq:search, ISR) are appended below,
+    // additions (Spaces, jabber:iq:search) are appended below,
     // and dynamic extension namespaces extend further still.
     let identities = vec![Identity::server(Some("Waddle"))];
     let mut features = waddle_xmpp::disco::info::server_features();

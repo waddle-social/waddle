@@ -262,11 +262,14 @@ export function useDirectMessageConversations(
     );
     try {
       const inbox = await currentClient.fetchInbox();
+      // Superseded is success, not failure: a newer hydrate (or session)
+      // owns the inbox now — reporting `false` would make retry chains
+      // re-fetch and supersede each other in a loop.
       if (
         requestId !== inboxRequestId
         || currentClient !== xmppClient.value
         || currentSessionJid !== (session.value?.jid ?? null)
-      ) return false;
+      ) return true;
 
       const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
       mergeInboxConversations(directConversations);
@@ -320,23 +323,32 @@ export function useDirectMessageConversations(
     const existing = ensureConversation(bare);
     const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
     const isActiveConversation = activePeerJid.value === bare;
+    // Archive-decoded arrivals are MAM catch-up re-emissions: the message
+    // may already have been counted live before a reconnect, and
+    // genuinely-missed messages are accounted by the server inbox
+    // (hydrateFromInbox runs on every session-ready). Only live arrivals
+    // increment locally.
     const shouldIncrementUnread = !isSelfMessage
       && !isActiveConversation
+      && msg.createdAtSource !== "archive"
       && !wasUnreadAccountedByInbox(bare, msg);
 
-    conversations.value = sortByRecent(conversations.value.map((c) => (
-      c.peerJid === bare
-        ? {
-            ...c,
-            peerUsername: existing.peerUsername || peerUsername(bare),
-            lastMessageBody: msg.body,
-            lastMessageAt: msg.createdAt,
-            unreadCount: shouldIncrementUnread ? c.unreadCount + 1 : c.unreadCount,
-            presenceShow: presenceByJid.value[bare] ?? c.presenceShow,
-            presenceIdleSince: presenceIdleByJid.value[bare] ?? c.presenceIdleSince,
-          }
-        : c
-    )));
+    conversations.value = sortByRecent(conversations.value.map((c) => {
+      if (c.peerJid !== bare) return c;
+      // Monotonic preview: an archive re-emission of an OLDER message
+      // (MAM catch-up after a reconnect) must not roll the preview or the
+      // recency ordering back behind a newer live arrival.
+      const isNewestMessage =
+        conversationTimestamp(msg.createdAt) >= conversationTimestamp(c.lastMessageAt);
+      return {
+        ...c,
+        peerUsername: existing.peerUsername || peerUsername(bare),
+        ...(isNewestMessage ? { lastMessageBody: msg.body, lastMessageAt: msg.createdAt } : {}),
+        unreadCount: shouldIncrementUnread ? c.unreadCount + 1 : c.unreadCount,
+        presenceShow: presenceByJid.value[bare] ?? c.presenceShow,
+        presenceIdleSince: presenceIdleByJid.value[bare] ?? c.presenceIdleSince,
+      };
+    }));
   }
 
   function updatePresence(event: PresenceUpdateEvent) {

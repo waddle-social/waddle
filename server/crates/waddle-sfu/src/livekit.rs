@@ -46,11 +46,35 @@ const ADMIN_CONCURRENCY: usize = 32;
 /// keeps reconciliation to genuinely stale entries.
 pub const RECONCILE_GRACE_SECONDS: i64 = 120;
 
+/// Number of consecutive reconciliation passes a participant must be
+/// observed absent from LiveKit before being swept (#1127). One
+/// not-found observation is a weak signal: a LiveKit pod restart makes
+/// a single pass report every room as gone while clients silently
+/// reconnect and media keeps flowing. Requiring absence across two
+/// consecutive passes turns the sweep into "confirmed gone for a full
+/// reconcile interval" while still reaping genuinely departed
+/// participants within ~2 passes.
+pub(crate) const RECONCILE_ABSENT_PASSES: u32 = 2;
+
 /// Shared registry of in-call participants. Held in an `Arc` so the
 /// spawned admin teardown future can re-check membership before
 /// firing `DeleteRoom`, closing the race where a fresh joiner
 /// re-creates the call between local-clear and the remote evict.
 type CallRegistry = Arc<DashMap<CallId, HashSet<Identity>>>;
+
+/// Result of [`LiveKitSfu::clear_local_state`].
+#[derive(Debug, Clone, Copy)]
+struct ClearOutcome {
+    /// `identity` was actually registered against the call.
+    was_present: bool,
+    /// The call entry was removed because it was empty at the moment
+    /// of the atomic conditional removal — i.e. we (and nobody
+    /// concurrent) hold no participant for it any more. Only this
+    /// flag may gate a `DeleteRoom` (#1129).
+    emptied: bool,
+    /// Participants still registered after the clear.
+    remaining: usize,
+}
 
 pub struct LiveKitSfu {
     config: SfuConfig,
@@ -72,6 +96,15 @@ pub struct LiveKitSfu {
     /// written in `register_call_participant`, removed in
     /// `clear_local_state`.
     registered_at: DashMap<(CallId, Identity), DateTime<Utc>>,
+    /// Consecutive reconciliation passes each `(call, identity)` has
+    /// been observed absent from LiveKit's `ListParticipants` (#1127).
+    /// A participant is only swept once the streak reaches
+    /// [`RECONCILE_ABSENT_PASSES`]; the streak resets when the
+    /// participant is observed connected, when the pass for its call
+    /// fails (absence unconfirmed), and on (re-)registration. Entries
+    /// are removed in `clear_local_state` so the map cannot outgrow
+    /// the registry.
+    absent_streak: DashMap<(CallId, Identity), u32>,
     /// Map of revoked JWT identifiers to the `exp` of the token they
     /// belonged to. Entries are swept lazily once `Utc::now() > exp`:
     /// a revoked token past its expiry cannot be replayed regardless
@@ -142,6 +175,7 @@ impl LiveKitSfu {
             calls: Arc::new(DashMap::new()),
             issued: DashMap::new(),
             registered_at: DashMap::new(),
+            absent_streak: DashMap::new(),
             revoked: DashMap::new(),
             admin,
             runtime: Handle::try_current().ok(),
@@ -169,9 +203,14 @@ impl LiveKitSfu {
     }
 
     /// Number of currently-tracked issued JTIs for `(call, identity)`.
-    /// Exposed for tests to pin the per-participant FIFO bound.
-    #[cfg(test)]
-    pub(crate) fn issued_count(&self, call_id: &CallId, identity: &Identity) -> usize {
+    /// Exposed for test inspection (this crate's FIFO-bound tests and
+    /// the `waddle-xmpp` XEP-0166 suite's one-JTI-per-stanza pin,
+    /// #1142); production code never branches on it. `#[doc(hidden)]`
+    /// signals it is not a stable public surface (it must be `pub`, not
+    /// `pub(crate)`, only because the consumer lives in another crate's
+    /// integration tests).
+    #[doc(hidden)]
+    pub fn issued_count(&self, call_id: &CallId, identity: &Identity) -> usize {
         self.issued
             .get(&(call_id.clone(), identity.clone()))
             .map(|e| e.len())
@@ -187,18 +226,25 @@ impl LiveKitSfu {
     }
 
     /// Drop `identity` from the in-memory registry and revoke every
-    /// JWT it ever held. Returns `(was_present, remaining_after)` so
-    /// the caller can distinguish "this participant just left the
-    /// last seat" from "we never knew about this participant at all"
-    /// — both look like `remaining == 0` but only the first warrants
-    /// a `DeleteRoom` admin call.
-    fn clear_local_state(&self, call_id: &CallId, identity: &Identity) -> (bool, usize) {
-        let (was_present, remaining) = match self.calls.get_mut(call_id) {
-            Some(mut entry) => {
-                let was_present = entry.remove(identity);
-                (was_present, entry.len())
-            }
-            None => (false, 0),
+    /// JWT it ever held. Returns the [`ClearOutcome`] the caller uses
+    /// to distinguish "this participant just left the last seat"
+    /// (warrants a `DeleteRoom` admin call) from "we never knew about
+    /// this participant at all" and from "others remain".
+    ///
+    /// #1129: the call entry is dropped via an atomic
+    /// `remove_if(|_, set| set.is_empty())` rather than an
+    /// unconditional `remove`. Between releasing the per-entry guard
+    /// (after removing `identity`) and the entry removal, a concurrent
+    /// joiner may have registered into the same call; the conditional
+    /// remove observes that registration under the shard lock and
+    /// keeps the entry, so the joiner is neither evicted from the
+    /// registry nor exposed to the spawned `DeleteRoom` (the caller
+    /// derives its emptiness decision from `emptied`, which is `false`
+    /// in that case).
+    fn clear_local_state(&self, call_id: &CallId, identity: &Identity) -> ClearOutcome {
+        let was_present = match self.calls.get_mut(call_id) {
+            Some(mut entry) => entry.remove(identity),
+            None => false,
         };
 
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
@@ -208,13 +254,27 @@ impl LiveKitSfu {
         }
         self.registered_at
             .remove(&(call_id.clone(), identity.clone()));
+        self.absent_streak
+            .remove(&(call_id.clone(), identity.clone()));
         self.sweep_expired_revoked(Utc::now());
 
-        if remaining == 0 {
-            self.calls.remove(call_id);
-        }
+        // Atomic conditional removal: only drop the call entry if it
+        // is *still* empty at removal time (see doc comment above).
+        let emptied = self
+            .calls
+            .remove_if(call_id, |_, participants| participants.is_empty())
+            .is_some();
+        let remaining = if emptied {
+            0
+        } else {
+            self.calls.get(call_id).map(|e| e.len()).unwrap_or(0)
+        };
 
-        (was_present, remaining)
+        ClearOutcome {
+            was_present,
+            emptied,
+            remaining,
+        }
     }
 
     /// Fire-and-forget the LiveKit admin REST calls that mirror a
@@ -300,7 +360,19 @@ impl LiveKitSfu {
     ///
     /// A `ListParticipants` failure for a given call (network/5xx) is
     /// logged and that call is skipped this pass — absence cannot be
-    /// confirmed, so nothing is swept. The next pass retries.
+    /// confirmed, so nothing is swept and the call's absence streaks
+    /// are reset. The next pass retries.
+    ///
+    /// #1127: a single absent observation never sweeps. Each pass a
+    /// (grace-aged) participant is absent from `ListParticipants`
+    /// bumps its absence streak; the sweep fires only once the streak
+    /// reaches [`RECONCILE_ABSENT_PASSES`] — i.e. the participant was
+    /// gone across two consecutive passes a full reconcile interval
+    /// apart. A LiveKit pod restart therefore cannot mass-terminate
+    /// live calls: the first post-restart pass (rooms not found ⇒
+    /// empty participant lists) only marks streaks, clients silently
+    /// rejoin, and the second pass observes them connected and clears
+    /// the streaks.
     async fn reconcile_active_calls_inner(&self, grace: ChronoDuration) -> Vec<(CallId, Identity)> {
         let now = Utc::now();
         // Snapshot the registry into owned values up front so no
@@ -321,6 +393,13 @@ impl LiveKitSfu {
                         error = %err,
                         "SFU reconcile: ListParticipants failed; skipping this call this pass"
                     );
+                    // Absence cannot be confirmed this pass, so the
+                    // streaks accumulated so far are no longer
+                    // "consecutive" — reset them (#1127) rather than
+                    // let a failed pass count towards the sweep.
+                    for identity in registered {
+                        self.absent_streak.remove(&(call_id.clone(), identity));
+                    }
                     continue;
                 }
             };
@@ -328,15 +407,20 @@ impl LiveKitSfu {
                 live.iter().map(Identity::as_livekit_identity).collect();
 
             for identity in registered {
+                let key = (call_id.clone(), identity.clone());
                 if live_set.contains(&identity.as_livekit_identity()) {
-                    continue; // genuinely connected — not a ghost
+                    // Genuinely connected — not a ghost. Clear any
+                    // absence streak from a transient not-found
+                    // observation (e.g. a LiveKit restart).
+                    self.absent_streak.remove(&key);
+                    continue;
                 }
-                // Absent from LiveKit. Only sweep once past the grace
-                // window; a freshly-registered participant may simply
-                // not have finished connecting yet.
+                // Absent from LiveKit. Only count the observation once
+                // past the grace window; a freshly-registered
+                // participant may simply not have finished connecting.
                 let aged_out = self
                     .registered_at
-                    .get(&(call_id.clone(), identity.clone()))
+                    .get(&key)
                     .map(|entry| now - *entry.value() >= grace)
                     // No timestamp recorded (e.g. an entry registered
                     // before this field existed) → treat as eligible.
@@ -344,8 +428,30 @@ impl LiveKitSfu {
                 if !aged_out {
                     continue;
                 }
-                let (was_present, _) = self.clear_local_state(&call_id, &identity);
-                if was_present {
+                // #1127: require the absence to persist across
+                // RECONCILE_ABSENT_PASSES consecutive passes before
+                // sweeping. Room-not-found (empty list) right after a
+                // LiveKit restart is indistinguishable from a real
+                // departure on one observation — the second pass
+                // disambiguates, because reconnected clients are
+                // reported again while genuinely departed ones stay
+                // absent.
+                let streak = {
+                    let mut entry = self.absent_streak.entry(key.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                if streak < RECONCILE_ABSENT_PASSES {
+                    tracing::debug!(
+                        call_id = %call_id,
+                        identity = %identity.as_livekit_identity(),
+                        streak,
+                        "SFU reconcile: participant absent; awaiting a confirming pass"
+                    );
+                    continue;
+                }
+                let outcome = self.clear_local_state(&call_id, &identity);
+                if outcome.was_present {
                     tracing::info!(
                         call_id = %call_id,
                         identity = %identity.as_livekit_identity(),
@@ -417,9 +523,14 @@ impl SfuService for LiveKitSfu {
             .insert(identity.clone());
         // Stamp (or refresh) the registration time so the
         // reconciliation backstop's grace window is measured from the
-        // most recent (re)join, not a stale earlier attempt.
+        // most recent (re)join, not a stale earlier attempt. A
+        // (re-)registration also resets the absence streak (#1127):
+        // any prior not-seen observations belong to the previous
+        // connection attempt.
         self.registered_at
             .insert((call_id.clone(), identity.clone()), Utc::now());
+        self.absent_streak
+            .remove(&(call_id.clone(), identity.clone()));
     }
 
     fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool {
@@ -429,9 +540,13 @@ impl SfuService for LiveKitSfu {
     }
 
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
-        let (was_present, remaining) = self.clear_local_state(call_id, identity);
+        let ClearOutcome {
+            was_present,
+            emptied,
+            remaining,
+        } = self.clear_local_state(call_id, identity);
 
-        let state = if was_present && remaining == 0 {
+        let state = if was_present && emptied {
             CallState::Ended
         } else {
             // `Active { remaining }` covers two cases that look the
@@ -448,10 +563,12 @@ impl SfuService for LiveKitSfu {
         // Schedule the LiveKit-side evict. `RemoveParticipant` always
         // runs (LiveKit may know about the participant even when our
         // local registry has lost track — federation, stale state).
-        // `DeleteRoom` only fires when we know we just emptied a
-        // call we previously tracked, and the spawn re-checks the
-        // registry inside the future to close the rejoin race.
-        let we_just_emptied = was_present && remaining == 0;
+        // `DeleteRoom` only fires when the atomic conditional removal
+        // confirmed we just emptied a call we previously tracked
+        // (#1129 — a concurrent joiner keeps `emptied == false`), and
+        // the spawn re-checks the registry inside the future to close
+        // the rejoin race.
+        let we_just_emptied = was_present && emptied;
         self.schedule_remote_teardown(call_id.clone(), identity.clone(), we_just_emptied);
 
         state
@@ -741,7 +858,11 @@ mod tests {
         }
 
         fn fail_list(&self) {
-            *self.list_errors.lock().expect("recording lock") = true;
+            self.set_list_failing(true);
+        }
+
+        fn set_list_failing(&self, failing: bool) {
+            *self.list_errors.lock().expect("recording lock") = failing;
         }
     }
 
@@ -971,9 +1092,10 @@ mod tests {
     async fn reconcile_sweeps_ghost_absent_from_livekit() {
         // Alice + Bob registered; LiveKit reports only Alice connected
         // (Bob's participant_left webhook was lost). With a zero grace
-        // window Bob must be swept and returned for presence cleanup;
-        // Alice must remain. No admin remove/delete is fired — the
-        // ghost is already gone from LiveKit.
+        // window Bob must be swept — after TWO consecutive absent
+        // passes (#1127) — and returned for presence cleanup; Alice
+        // must remain. No admin remove/delete is fired — the ghost is
+        // already gone from LiveKit.
         let admin = Arc::new(RecordingAdmin::default());
         let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
         let call = CallId::new("general@muc.waddle.social").unwrap();
@@ -982,6 +1104,16 @@ mod tests {
         sfu.register_call_participant(&call, &alice);
         sfu.register_call_participant(&call, &bob);
         admin.set_live(&call, vec![alice.clone()]);
+
+        let first_pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+        assert!(
+            first_pass.is_empty(),
+            "one absent observation must not sweep (#1127): {first_pass:?}"
+        );
+        assert!(
+            sfu.has_call_participant(&call, &bob),
+            "Bob must survive the first absent pass"
+        );
 
         let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
@@ -1055,5 +1187,182 @@ mod tests {
             "a call whose participant list could not be fetched must not be swept"
         );
         assert_eq!(sfu.participant_count(&call), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
+        // #1127: a LiveKit pod restart makes one pass report every
+        // room as not-found (empty participant list). Clients silently
+        // rejoin before the next pass. Nothing may be swept.
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call_a = CallId::new("standup@muc.waddle.social").unwrap();
+        let call_b = CallId::new("alice@waddle.social::dm-1").unwrap();
+        let alice = fixture_identity("alice");
+        let bob = fixture_identity("bob");
+        sfu.register_call_participant(&call_a, &alice);
+        sfu.register_call_participant(&call_b, &bob);
+
+        // Pass 1: restart — LiveKit knows no rooms (both list empty).
+        let pass1 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+        assert!(pass1.is_empty(), "restart pass must not sweep: {pass1:?}");
+        assert_eq!(sfu.participant_count(&call_a), 1);
+        assert_eq!(sfu.participant_count(&call_b), 1);
+
+        // Clients reconnected before pass 2.
+        admin.set_live(&call_a, vec![alice.clone()]);
+        admin.set_live(&call_b, vec![bob.clone()]);
+        let pass2 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+        assert!(pass2.is_empty(), "reconnected clients must not be swept");
+
+        // Pass 3: streaks were reset by the connected observation, so
+        // a later single absent blip still does not sweep.
+        admin.set_live(&call_a, vec![]);
+        let pass3 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+        assert!(
+            pass3.is_empty(),
+            "streak must have been reset by the connected pass: {pass3:?}"
+        );
+        assert!(sfu.has_call_participant(&call_a, &alice));
+    }
+
+    #[tokio::test]
+    async fn reconcile_failed_pass_resets_absence_streak() {
+        // #1127 AC: the absence tracker resets on a failed pass — two
+        // absent observations separated by a ListParticipants failure
+        // are not "consecutive".
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("room@muc.waddle.social").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        admin.set_live(&call, vec![]);
+
+        // Absent pass 1 → streak 1.
+        assert!(sfu
+            .reconcile_active_calls(ChronoDuration::zero())
+            .await
+            .is_empty());
+        // Failed pass → streak reset.
+        admin.set_list_failing(true);
+        assert!(sfu
+            .reconcile_active_calls(ChronoDuration::zero())
+            .await
+            .is_empty());
+        admin.set_list_failing(false);
+        // Absent pass again → streak restarts at 1, still no sweep.
+        let third = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+        assert!(
+            third.is_empty(),
+            "failed pass must reset the streak: {third:?}"
+        );
+        assert_eq!(sfu.participant_count(&call), 1);
+        // Second CONSECUTIVE absent pass → swept.
+        let fourth = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+        assert_eq!(fourth, vec![(call.clone(), alice)]);
+        assert_eq!(sfu.participant_count(&call), 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_streak_resets_on_reregistration() {
+        // A participant re-registering (fresh session-initiate /
+        // rejoin) invalidates absence observed against the previous
+        // attempt.
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("room@muc.waddle.social").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        admin.set_live(&call, vec![]);
+
+        assert!(sfu
+            .reconcile_active_calls(ChronoDuration::zero())
+            .await
+            .is_empty());
+        // Rejoin between passes.
+        sfu.register_call_participant(&call, &alice);
+        // This absent pass is the FIRST of the new registration.
+        assert!(
+            sfu.reconcile_active_calls(ChronoDuration::zero())
+                .await
+                .is_empty(),
+            "re-registration must reset the absence streak"
+        );
+        assert_eq!(sfu.participant_count(&call), 1);
+    }
+
+    // -------- #1129 teardown/join race --------
+
+    #[test]
+    fn concurrent_join_during_teardown_is_never_clobbered() {
+        // #1129: `clear_local_state` used to compute `remaining == 0`
+        // under the entry guard, drop it, then unconditionally remove
+        // the call entry — deleting a joiner who registered in the
+        // window. The atomic `remove_if` closes that: after BOTH an
+        // unregister(alice) and a register(bob) have completed, bob
+        // must always be present in the registry, whatever the
+        // interleaving. Run many racing iterations to exercise the
+        // window.
+        let sfu = Arc::new(
+            LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test (no runtime)"),
+        );
+        let alice = fixture_identity("alice");
+        let bob = fixture_identity("bob");
+
+        for i in 0..200 {
+            let call = CallId::new(format!("race-{i}")).unwrap();
+            sfu.register_call_participant(&call, &alice);
+
+            let leaver = {
+                let sfu = Arc::clone(&sfu);
+                let call = call.clone();
+                let alice = alice.clone();
+                std::thread::spawn(move || {
+                    let _ = sfu.unregister_call_participant(&call, &alice);
+                })
+            };
+            sfu.register_call_participant(&call, &bob);
+            leaver.join().expect("leaver thread");
+
+            assert!(
+                sfu.has_call_participant(&call, &bob),
+                "iteration {i}: concurrent joiner was clobbered by teardown (#1129)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
+        // #1129 second half: when the joiner wins the race, the
+        // unregister must report the call as still active (not Ended)
+        // so no DeleteRoom is scheduled against the fresh joiner.
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-joiner-race").unwrap();
+        let alice = fixture_identity("alice");
+        let bob = fixture_identity("bob");
+
+        sfu.register_call_participant(&call, &alice);
+        // Simulate the joiner landing inside alice's teardown window:
+        // remove alice from the set (step 1 of clear_local_state),
+        // register bob, then run the full unregister — the conditional
+        // removal must observe bob and keep the entry.
+        sfu.calls
+            .get_mut(&call)
+            .expect("entry exists")
+            .remove(&alice);
+        sfu.register_call_participant(&call, &bob);
+
+        let state = sfu.unregister_call_participant(&call, &alice);
+        assert!(
+            matches!(state, CallState::Active { remaining: 1 }),
+            "joiner present at conditional-remove time must keep the call active; got {state:?}"
+        );
+        drain_admin_tasks().await;
+        assert!(
+            admin.delete_snapshot().is_empty(),
+            "DeleteRoom must not fire while the fresh joiner is registered"
+        );
+        assert!(sfu.has_call_participant(&call, &bob));
     }
 }

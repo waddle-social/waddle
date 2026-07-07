@@ -2459,6 +2459,10 @@ export class BrowserXmppClient {
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted) return;
+      // Deliberately no archive-cursor advance here: a live stanza-id
+      // cannot prove delivery continuity (MUC gap during a kick/rejoin,
+      // SM replay-window eviction), so catch-up re-fetches from the last
+      // archive-CONFIRMED cursor and filters via `seenIds` instead.
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.events.emit("activity", roomActivityEventFromMessage(converted)); return; }
       this.events.emit("message", converted); return;

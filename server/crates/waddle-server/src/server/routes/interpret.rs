@@ -199,7 +199,7 @@ use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
 use routing::{
     deliver_direct_to_full, deliver_peer_to_full, run_fanout_recipient_pass,
-    run_headless_recipient_pass, DeliveryDisposition, FanoutPassResult,
+    run_headless_recipient_pass, FanoutPassResult, FullJidDeliveryOutcome,
 };
 
 pub use deps::{Deps, InterpretOutcome, TimerCommand};
@@ -407,7 +407,17 @@ async fn interpret_with_depth(
             // content into logs.
             // -------------------------------------------------------
             OutboundEvent::RouteToConnection { jid, stanza } => {
-                route_to_connection(deps, jid, stanza, recursion_depth).await;
+                for stanza in route_to_connection(deps, jid, stanza, recursion_depth).await {
+                    match stanza.to_element_string() {
+                        Ok(xml) => outcome.frames.push(xml),
+                        Err(err) => {
+                            error!(
+                                error = %err,
+                                "failed to serialize route fallback stanza; dropping frame"
+                            );
+                        }
+                    }
+                }
             }
             OutboundEvent::DispatchToRoom { room, message } => {
                 // #229 PR18 — MUC cutover. Replaces the legacy

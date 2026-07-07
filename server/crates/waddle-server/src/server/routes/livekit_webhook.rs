@@ -37,7 +37,7 @@ use waddle_sfu::{
 };
 
 use super::muc_muji_clear::clear_muji_presence_for_departure;
-use super::websocket::WebSocketState;
+use super::websocket::{note_participant_left_by_call_id, WebSocketState};
 
 /// Upper bound on remembered event ids for delivery deduplication.
 /// LiveKit retries up to 5 times per delivery; a small LRU is enough
@@ -261,21 +261,37 @@ async fn process_participant_left_for_identity(
         );
         return;
     };
-    let Ok(room_jid) = room_name.parse::<BareJid>() else {
+    if let Ok(room_jid) = room_name.parse::<BareJid>() {
+        clear_muji_presence_for_departure(state, &room_jid, &full_jid).await;
+        return;
+    }
+
+    let Ok(call_id) = CallId::new(room_name.to_owned()) else {
         warn!(
             room = %room_name,
             identity = %identity,
-            "LiveKit room name is not a valid MUC bare JID; skipping cleanup",
+            "LiveKit room name is neither a MUC bare JID nor a valid raw call id; skipping cleanup",
         );
         return;
     };
 
-    clear_muji_presence_for_departure(state, &room_jid, &full_jid).await;
+    debug!(
+        room = %room_name,
+        identity = %identity,
+        "LiveKit room name is not a MUC bare JID; clearing SFU registry by raw call id",
+    );
+    note_participant_left_by_call_id(state, &call_id, &full_jid);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::websocket::handlers::iq::handle_iq;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state_with_calls, create_test_websocket_state_with_sfu, RecordingSfu,
+    };
+    use waddle_sfu::{Identity, MediaCapabilities};
+    use waddle_xmpp::protocol::ConnectionPhase;
 
     #[test]
     fn seen_event_ids_deduplicates_repeat_observations() {
@@ -313,5 +329,99 @@ mod tests {
         // The oldest entry should now be evicted, so re-observing it
         // returns "fresh".
         assert!(seen.observe(Some("EV_0")));
+    }
+
+    #[tokio::test]
+    async fn participant_left_scoped_1to1_call_id_cleans_sfu_registry() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let call_id = "alice@example.com::dm-1128";
+        let departed = "bob@example.com/phone";
+
+        process_participant_left_for_identity(state.as_ref(), call_id, departed).await;
+
+        let notes = recorder.note_snapshot();
+        assert_eq!(
+            notes.len(),
+            1,
+            "participant-left must use local-only SFU cleanup"
+        );
+        assert_eq!(notes[0].0.as_str(), call_id);
+        assert_eq!(notes[0].1.as_livekit_identity(), departed);
+        assert!(
+            recorder.snapshot().is_empty(),
+            "participant-left webhook must not call the admin-evict unregister path"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_left_scoped_1to1_revokes_jti_and_survivor_terminate_succeeds() {
+        let state = create_test_websocket_state_with_calls().await;
+        let sfu = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call-enabled fixture has SFU")
+            .clone();
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice full jid");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob full jid");
+        let call_id = CallId::new("alice@example.com::dm-1128").expect("scoped call id");
+        let alice_identity = Identity::from_jid(alice.clone());
+        let bob_identity = Identity::from_jid(bob.clone());
+        let bob_token = sfu
+            .issue_join_token(
+                &call_id,
+                &bob_identity,
+                MediaCapabilities::full_participant(),
+            )
+            .expect("bob token");
+        sfu.register_call_participant(&call_id, &alice_identity);
+        sfu.register_call_participant(&call_id, &bob_identity);
+
+        process_participant_left_for_identity(state.as_ref(), call_id.as_str(), bob.as_str()).await;
+
+        assert!(
+            !sfu.has_call_participant(&call_id, &bob_identity),
+            "participant-left must remove the crashed peer from the 1:1 call registry"
+        );
+        assert!(
+            sfu.is_revoked(&bob_token.jti),
+            "participant-left must revoke the crashed peer's issued join token"
+        );
+        assert!(
+            sfu.has_call_participant(&call_id, &alice_identity),
+            "survivor must remain registered until their own terminate"
+        );
+
+        let terminate = r#"<iq xmlns='jabber:client' id='term-1128' type='set' to='bob@example.com/phone'>
+            <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate' sid='dm-1128'>
+                <reason><success/></reason>
+            </jingle>
+        </iq>"#;
+        let responses = handle_iq(
+            terminate,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ConnectionPhase::ready(alice.clone(), false),
+        )
+        .await;
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "survivor terminate should be acked: {responses:?}"
+        );
+        let reply = responses[0].as_str();
+        assert!(
+            reply.contains(r#"type='result'"#) && reply.contains(r#"id='term-1128'"#),
+            "survivor terminate should return an empty IQ result, got: {reply}"
+        );
+        assert!(
+            !sfu.has_call_participant(&call_id, &alice_identity),
+            "survivor terminate must unregister the remaining participant"
+        );
     }
 }
