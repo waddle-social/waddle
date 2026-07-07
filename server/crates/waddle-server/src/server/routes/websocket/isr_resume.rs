@@ -365,29 +365,12 @@ pub(super) async fn handle_isr_resume_authenticate(
     // element 10's second failure path.
     let bare_jid = detached.jid.to_bare();
 
-    if resume.h > detached.outbound_count {
-        warn!(
-            stream_id = %resume.previd,
-            client_h = resume.h,
-            send_count = detached.outbound_count,
-            "ISR resume: resumption impossible (handled count exceeds server's outbound count)"
-        );
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .release_claim(&resume.previd)
-            .await
-        {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after handled-count mismatch");
-        }
-        let failed = SmFailed::resume_failed("unexpected-request", detached.inbound_count);
-        return vec![sasl2_success(
-            &bare_jid,
-            inst_resume_failed_element(&failed),
-        )];
-    }
-
+    // Order mirrors `handle_sm_resume` (#1099): the replay-window check runs
+    // FIRST, so a stale mod-behind `h` is classified as a truncated replay
+    // window (recoverable) rather than falsely tripping the too-high branch;
+    // and the too-high test uses the exact mod-2^32 `handled_count_exceeds_outbound`
+    // rather than the naive `h > outbound_count`, which had a half-window
+    // blind spot at `h == outbound + 2^31`.
     if !detached.can_resume_from(resume.h) {
         warn!(
             stream_id = %resume.previd,
@@ -404,6 +387,29 @@ pub(super) async fn handle_isr_resume_authenticate(
             warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after replay-window truncation");
         }
         let failed = SmFailed::resume_failed("resource-constraint", detached.inbound_count);
+        return vec![sasl2_success(
+            &bare_jid,
+            inst_resume_failed_element(&failed),
+        )];
+    }
+
+    if detached.handled_count_exceeds_outbound(resume.h) {
+        warn!(
+            stream_id = %resume.previd,
+            client_h = resume.h,
+            send_count = detached.outbound_count,
+            "ISR resume: resumption impossible (handled count exceeds server's outbound count)"
+        );
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .release_claim(&resume.previd)
+            .await
+        {
+            warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after handled-count mismatch");
+        }
+        let failed = SmFailed::resume_failed("unexpected-request", detached.inbound_count);
         return vec![sasl2_success(
             &bare_jid,
             inst_resume_failed_element(&failed),
