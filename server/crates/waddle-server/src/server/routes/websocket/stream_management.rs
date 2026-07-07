@@ -76,6 +76,7 @@ pub(super) struct SmCtx<'a> {
     pub(super) presence_show: &'a mut Option<xmpp_parsers::presence::Show>,
     pub(super) presence_status: &'a mut Option<String>,
     pub(super) presence_priority: &'a mut i8,
+    pub(super) presence_payloads: &'a mut Vec<minidom::Element>,
     pub(super) pending_resume_stream_id: &'a mut Option<String>,
     pub(super) pending_resume_h: &'a mut Option<u32>,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
@@ -255,6 +256,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         presence_show,
         presence_status,
         presence_priority,
+        presence_payloads,
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
@@ -392,6 +394,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *presence_show = detached.presence_show.clone();
     *presence_status = detached.presence_status.clone();
     *presence_priority = detached.presence_priority;
+    *presence_payloads = detached.presence_payloads.clone();
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);

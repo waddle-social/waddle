@@ -3034,3 +3034,161 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
         "the acked pre-wrap stanza must not be replayed: {responses:?}"
     );
 }
+
+/// Conformance review follow-up to #1103: resuming must carry the
+/// detached session's presence extension payloads back onto the live
+/// registry entry. RFC 6121 §4.3.2 requires probe responses to
+/// reproduce the full last presence stanza; before this fix a resume
+/// silently stripped the XEP-0319 idle stamp (and caps) even though
+/// the client sent no new presence.
+#[tokio::test]
+async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let idle = waddle_xmpp::xep::xep0319::build_idle_element(
+        chrono::DateTime::parse_from_rfc3339("2026-07-07T00:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
+    );
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-idle".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: true,
+            presence_show: Some(xmpp_parsers::presence::Show::Away),
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: vec![idle.clone()],
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-idle", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let presence_state = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(&jid)
+        .expect("live presence state after resume");
+    assert!(
+        presence_state.payloads.contains(&idle),
+        "the XEP-0319 idle payload must survive resume onto the live \
+         registry entry, got {:?}",
+        presence_state.payloads
+    );
+}
+
+/// Conformance review follow-up to #1104: an XEP-0198 resume is the
+/// SAME session (§5) — the once-per-session pending-subscribe claim
+/// must survive it. Before this fix the fresh ConnectionEntry's CAS
+/// re-armed, so the first auto-away flip after a resume re-prompted
+/// the user with the still-unanswered subscribe.
+#[tokio::test]
+async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-claimed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            // Available at detach ⇒ the initial available presence
+            // already happened ⇒ the claim was consumed pre-detach.
+            presence_available: true,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-claimed", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry after resume");
+    assert!(
+        !entry.claim_pending_subscribes_flush(),
+        "the once-per-session claim must already be consumed on the \
+         resumed entry — a presence flip after resume must not \
+         re-deliver pending subscribes"
+    );
+}

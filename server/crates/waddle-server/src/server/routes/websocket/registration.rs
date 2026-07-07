@@ -118,12 +118,27 @@ pub(super) async fn register_bound_connection_after_frame(
                     .map(str::to_string),
                 conn.presence_status.clone(),
                 conn.presence_priority,
-                // XEP-0198 resume restores show/status/priority; extension
-                // payloads (idle, caps, ...) are not carried in SM session
-                // state yet (deferred), so a probe during a detached window
-                // omits them until the next live update.
-                Vec::new(),
+                // XEP-0198 resume restores the full last presence,
+                // extension payloads included (XEP-0115 caps, XEP-0319
+                // idle) — RFC 6121 §4.3.2 requires probe responses to
+                // reproduce the complete stanza, and the client sends no
+                // new presence after <resumed/> (#1103 follow-up).
+                conn.presence_payloads.clone(),
             );
+        if resumed {
+            // XEP-0198 §5: a resumed stream is the SAME session. The
+            // resource being available at detach means its initial
+            // available presence already happened and the pending-
+            // subscribe delivery already fired (RFC 6121 §3.1.3), so
+            // consume the fresh entry's once-per-session claim — a
+            // presence flip after resume must not re-prompt (#1104
+            // follow-up). Subscribes that arrived during the detached
+            // window were fanned out to the detached session and reach
+            // the client via SM replay instead.
+            if let Some(entry) = state.deps.protocol.connection_registry.get_entry(&jid) {
+                let _ = entry.claim_pending_subscribes_flush();
+            }
+        }
     }
 
     // ADR-0017 Phase 1 completion: registration into the actor tree is

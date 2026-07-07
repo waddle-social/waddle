@@ -368,6 +368,10 @@ pub(super) struct WsConnState {
     pub(super) presence_show: Option<xmpp_parsers::presence::Show>,
     pub(super) presence_status: Option<String>,
     pub(super) presence_priority: i8,
+    /// Presence extension payloads (XEP-0115 caps, XEP-0319 idle, ...)
+    /// restored from XEP-0198 detached state so re-registration
+    /// republishes the full last presence per RFC 6121 §4.3.2 (#1103).
+    pub(super) presence_payloads: Vec<minidom::Element>,
     /// SM stream id restored by `<resume/>` but not yet removed from the
     /// detached registry. The main loop clears it after live routing is
     /// registered, closing the take-before-register fanout gap.
@@ -430,6 +434,7 @@ impl WsConnState {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
             pending_resume_stream_id: None,
             pending_resume_h: None,
             registry_owner: None,
