@@ -75,14 +75,28 @@ pub(crate) fn note_participant_left_from_webhook(
     room_jid: &BareJid,
     jid: &FullJid,
 ) {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
-    };
     let Ok(call_id) = CallId::new(room_jid.to_string()) else {
         return;
     };
+    note_participant_left_by_call_id(state, &call_id, jid);
+}
+
+/// Raw-`CallId` variant of [`note_participant_left_from_webhook`] for
+/// call ids that are NOT MUC room JIDs (#1128): 1:1 scoped ids
+/// (`<initiator-bare>::<sid>`) deliberately fail the `BareJid` parse,
+/// but their SFU registry entries and un-revoked JTIs still must be
+/// cleaned when LiveKit reports the participant gone — otherwise a
+/// crashed 1:1 peer lingers until reconciliation.
+pub(crate) fn note_participant_left_by_call_id(
+    state: &WebSocketState,
+    call_id: &CallId,
+    jid: &FullJid,
+) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
     let identity = Identity::from_jid(jid.clone());
-    sfu.note_participant_left(&call_id, &identity);
+    sfu.note_participant_left(call_id, &identity);
 }
 
 #[cfg(test)]

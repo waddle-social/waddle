@@ -14,6 +14,15 @@ use crate::call::{CallId, Identity, MediaCapabilities};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 
+/// Backdate `nbf` by this much when minting LiveKit JWTs so a
+/// LiveKit pod whose wall clock is slightly ahead of ours does not
+/// reject a freshly-minted token with `token not yet valid`. Matches
+/// the slack LiveKit's own server SDKs apply. Shared by the join
+/// tokens minted here and the admin tokens in [`crate::admin`]
+/// (#1140 — join tokens previously set `nbf = now` exactly, causing
+/// intermittent not-yet-valid rejections under small clock skew).
+pub(crate) const JWT_CLOCK_SKEW: Duration = Duration::seconds(30);
+
 /// JWT identifier (RFC 7519 §4.1.7). A fresh UUID is minted per
 /// token so the SFU can track and revoke individual issuances even
 /// when the same (call, identity) pair gets multiple tokens.
@@ -158,7 +167,11 @@ pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuEr
         iss: inputs.api_key.as_str().to_string(),
         sub: inputs.identity.as_livekit_identity(),
         iat: now.timestamp(),
-        nbf: now.timestamp(),
+        // Backdated for clock skew (#1140): the token becomes valid
+        // slightly "in the past" from our perspective so a LiveKit
+        // pod running a few seconds ahead still accepts it. The
+        // lifetime end (`exp`) is unchanged.
+        nbf: (now - JWT_CLOCK_SKEW).timestamp(),
         exp: expires_at.timestamp(),
         jti: jti.as_str().to_string(),
         video: VideoGrant::from_capabilities(inputs.call_id, inputs.capabilities),
@@ -247,7 +260,9 @@ mod tests {
         assert_eq!(claims.iss, api_key.as_str());
         assert_eq!(claims.sub, identity.as_livekit_identity());
         assert!(claims.exp > claims.iat);
-        assert_eq!(claims.iat, claims.nbf);
+        // #1140: nbf is backdated by the shared clock-skew constant,
+        // matching the admin-token behaviour.
+        assert_eq!(claims.nbf, claims.iat - JWT_CLOCK_SKEW.num_seconds());
         assert_eq!(claims.jti, token.jti.as_str());
         assert!(!claims.jti.is_empty());
         assert!(claims.video.room_join);
@@ -255,6 +270,45 @@ mod tests {
         assert!(claims.video.can_publish);
         assert!(claims.video.can_subscribe);
         assert!(claims.video.can_publish_data);
+    }
+
+    #[test]
+    fn join_token_nbf_is_backdated_for_clock_skew() {
+        // #1140: a LiveKit pod whose clock runs slightly behind ours
+        // must still accept a fresh join token. `nbf` is backdated by
+        // the shared skew constant; `iat`/`exp` (the actual lifetime)
+        // are unchanged, so the TTL is not silently extended.
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
+        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
+            .expect("valid ws url");
+        let call_id = CallId::new("call-skew").expect("valid call id");
+        let identity = fixture_identity();
+
+        let before = Utc::now().timestamp();
+        let token = mint_join_token(fixture_inputs(
+            &api_key, &secret, &ws_url, &call_id, &identity,
+        ))
+        .expect("mint should succeed");
+        let after = Utc::now().timestamp();
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_nbf = true;
+        validation.leeway = 0;
+        let key = DecodingKey::from_secret(secret.as_bytes());
+        let decoded = decode::<DecodedClaims>(token.jwt.as_str(), &key, &validation)
+            .expect("token with zero leeway decodes — nbf is already in the past");
+        let claims = decoded.claims;
+
+        let skew = JWT_CLOCK_SKEW.num_seconds();
+        assert_eq!(claims.nbf, claims.iat - skew, "nbf backdated by the skew");
+        assert!(claims.iat >= before && claims.iat <= after, "iat stays now");
+        assert_eq!(
+            claims.exp - claims.iat,
+            3600,
+            "token lifetime (iat→exp) is unchanged by the backdate"
+        );
     }
 
     #[test]
