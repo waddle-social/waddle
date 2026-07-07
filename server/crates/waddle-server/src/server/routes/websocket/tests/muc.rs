@@ -233,12 +233,12 @@ async fn muc_join_full_room_returns_service_unavailable() {
     );
     assert!(
         error_presence
-            .get_child("x", "http://jabber.org/protocol/muc")
+            .get_child("x", xmpp_parsers::ns::MUC)
             .is_some(),
         "join-failure presence echoes <x xmlns='http://jabber.org/protocol/muc'/>: {responses:?}"
     );
     let error = error_presence
-        .get_child("error", "jabber:client")
+        .get_child("error", waddle_xmpp::parser::ns::JABBER_CLIENT)
         .expect("typed error element");
     assert_eq!(
         error.attr("type"),
@@ -252,7 +252,7 @@ async fn muc_join_full_room_returns_service_unavailable() {
     );
     assert!(
         error
-            .get_child("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .get_child("service-unavailable", waddle_xmpp::parser::ns::STANZAS)
             .is_some(),
         "XEP-0045 §7.2.9 max-users refusal uses <service-unavailable/>: {responses:?}"
     );
