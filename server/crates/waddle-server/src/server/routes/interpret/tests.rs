@@ -1542,10 +1542,62 @@ async fn route_to_connection_offline_full_jid_call_iq_returns_service_unavailabl
         error.defined_condition,
         DefinedCondition::ServiceUnavailable
     );
-    assert!(
-        payload.is_none(),
-        "error does not need to echo the original payload"
+    // RFC 6120 §8.3.1: the error echoes the original request payload so
+    // the sender can correlate which stanza failed.
+    let echoed = payload.expect("service-unavailable echoes the original payload");
+    assert_eq!(echoed.name(), "jingle");
+    assert_eq!(echoed.attr("sid"), Some("offline-sid"));
+}
+
+#[tokio::test]
+async fn route_to_connection_offline_full_jid_session_terminate_is_acked() {
+    // #1130 + #1131 interaction: a session-terminate forwarded to a peer
+    // whose resource is already gone is a *successful* hangup — the caller
+    // must get an empty <iq type='result'/> ack, never <service-unavailable/>.
+    use waddle_xmpp::registry::UserRegistryActor;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+    let terminate = Iq::Set {
+        from: Some(jid::Jid::from(alice.clone())),
+        to: Some(jid::Jid::from(bob.clone())),
+        id: "term-offline-1".to_string(),
+        payload: jingle_payload_for_route_test("session-terminate", "offline-sid"),
+    };
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: jid::Jid::from(bob.clone()),
+        stanza: Box::new(Stanza::Iq(Box::new(terminate))),
+    }];
+
+    let outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "an undeliverable session-terminate should be acked, not dropped: {:?}",
+        outcome.frames
     );
+    let iq = Iq::try_from(Element::from_str(&outcome.frames[0]).expect("parseable IQ"))
+        .expect("typed IQ");
+    let Iq::Result {
+        from,
+        to,
+        id,
+        payload,
+    } = iq
+    else {
+        panic!("expected empty IQ result ack, got {iq:?}");
+    };
+    assert_eq!(id, "term-offline-1");
+    assert_eq!(from, Some(jid::Jid::from(bob)));
+    assert_eq!(to, Some(jid::Jid::from(alice)));
+    assert!(payload.is_none(), "terminate ack carries no payload");
 }
 
 #[tokio::test]

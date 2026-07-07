@@ -205,7 +205,11 @@ impl LiveKitSfu {
     /// Number of currently-tracked issued JTIs for `(call, identity)`.
     /// Exposed for test inspection (this crate's FIFO-bound tests and
     /// the `waddle-xmpp` XEP-0166 suite's one-JTI-per-stanza pin,
-    /// #1142); production code never branches on it.
+    /// #1142); production code never branches on it. `#[doc(hidden)]`
+    /// signals it is not a stable public surface (it must be `pub`, not
+    /// `pub(crate)`, only because the consumer lives in another crate's
+    /// integration tests).
+    #[doc(hidden)]
     pub fn issued_count(&self, call_id: &CallId, identity: &Identity) -> usize {
         self.issued
             .get(&(call_id.clone(), identity.clone()))

@@ -289,7 +289,7 @@ pub(super) async fn route_to_connection(
                 )
                 .await;
                 if delivery == FullJidDeliveryOutcome::Unavailable {
-                    service_unavailable_for_undeliverable_iq(stanza.as_ref())
+                    fallback_reply_for_undeliverable_iq(stanza.as_ref())
                         .into_iter()
                         .collect()
                 } else {
@@ -569,16 +569,50 @@ pub(super) async fn route_to_connection(
     }
 }
 
-fn service_unavailable_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
+/// Synthesize the reply for a full-JID **request** IQ (`get`/`set`) that
+/// could not be delivered because the addressed resource is confirmed
+/// offline (#1130). Returns `None` for `result`/`error` IQs (nothing
+/// expects a reply) and for non-IQ stanzas.
+///
+/// A Jingle `session-terminate` is special-cased: hanging up on a peer
+/// who is already gone is *success*, not failure. When the terminate
+/// handler tore the call down (both sides unregistered, JTIs revoked)
+/// and then forwarded the terminate to a peer whose XMPP resource had
+/// already vanished, bouncing `<service-unavailable/>` back would make
+/// the caller's completed hangup look failed. We ack it with an empty
+/// `<iq type='result'/>` instead. Every other undeliverable request IQ
+/// gets a typed `cancel`/`<service-unavailable/>` that echoes the
+/// original request payload per RFC 6120 §8.3.1.
+fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
     let Stanza::Iq(iq) = stanza else {
         return None;
     };
-    let (from, to, id) = match iq.as_ref() {
-        Iq::Get { from, to, id, .. } | Iq::Set { from, to, id, .. } => {
-            (from.clone(), to.clone(), id.clone())
+    let (from, to, id, payload) = match iq.as_ref() {
+        Iq::Get {
+            from,
+            to,
+            id,
+            payload,
+            ..
         }
+        | Iq::Set {
+            from,
+            to,
+            id,
+            payload,
+            ..
+        } => (from.clone(), to.clone(), id.clone(), payload.clone()),
         Iq::Result { .. } | Iq::Error { .. } => return None,
     };
+    if is_jingle_session_terminate(&payload) {
+        // The server already completed the teardown; ack the hangup.
+        return Some(Stanza::Iq(Box::new(Iq::Result {
+            from: to,
+            to: from,
+            id,
+            payload: None,
+        })));
+    }
     let error = StanzaError::new(
         ErrorType::Cancel,
         DefinedCondition::ServiceUnavailable,
@@ -590,8 +624,16 @@ fn service_unavailable_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
         to: from,
         id,
         error,
-        payload: None,
+        // RFC 6120 §8.3.1: echo the offending request so the sender can
+        // correlate which stanza failed.
+        payload: Some(payload),
     })))
+}
+
+/// Whether an IQ request payload is a Jingle `session-terminate` action.
+fn is_jingle_session_terminate(payload: &minidom::Element) -> bool {
+    payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+        && payload.attr("action") == Some("session-terminate")
 }
 
 /// #1106: queue the PROCESSED (recipient-stamped) stanza into the
