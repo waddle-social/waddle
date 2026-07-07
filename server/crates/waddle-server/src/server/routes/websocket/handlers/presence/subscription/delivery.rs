@@ -105,10 +105,11 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
                 .map(|state| state.priority)
                 .unwrap_or(0),
         );
-        // Carry the XEP-0319 idle stamp (same as the `_to_jid` probe path) so a
-        // subscription-approval push shows the idle age, not a bare away dot.
-        if let Some(since) = presence_state.as_ref().and_then(|state| state.idle_since) {
-            waddle_xmpp::xep::xep0319::add_idle(&mut presence, since);
+        // Relay the resource's own stored extension payloads (XEP-0115 caps,
+        // XEP-0319 idle, anything else) verbatim so a subscription-approval
+        // push carries the contact's real advertisements (issue #1101).
+        if let Some(stored) = &presence_state {
+            presence.payloads.extend(stored.payloads.iter().cloned());
         }
         let stanza = Stanza::Presence(presence);
         send_stanza_to_available_user_resources_and_detached_available(
@@ -143,10 +144,10 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
                 .map(|state| state.priority)
                 .unwrap_or(0),
         );
-        // Carry the XEP-0319 idle stamp so a probing contact sees the idle age,
-        // not just a bare away dot.
-        if let Some(since) = presence_state.as_ref().and_then(|state| state.idle_since) {
-            waddle_xmpp::xep::xep0319::add_idle(&mut presence, since);
+        // Relay the resource's own stored extension payloads (XEP-0115 caps,
+        // XEP-0319 idle, anything else) verbatim (issue #1101).
+        if let Some(stored) = &presence_state {
+            presence.payloads.extend(stored.payloads.iter().cloned());
         }
         presence.to = Some(to.clone());
         send_presence_stanza_to_jid(state, to, Stanza::Presence(presence), "current presence")
@@ -239,10 +240,15 @@ async fn send_presence_stanza_to_jid(
     }
 }
 
-pub async fn broadcast_unavailable_for_expired_detached_session(
-    state: &WebSocketState,
-    from: &FullJid,
-) {
+/// RFC 6121 §4.5.2: broadcast a server-generated
+/// `<presence type='unavailable'/>` from `from` to the user's presence
+/// subscribers (and to the user's own sibling resources) when a
+/// presence-available session ends without the client retracting its
+/// presence itself. Used by both terminal session paths: SM-detached
+/// session expiry/invalidation and the unclean disconnect of a non-SM
+/// session (issue #1105). Callers gate on the session having actually
+/// been presence-available.
+pub async fn broadcast_unavailable_for_terminated_session(state: &WebSocketState, from: &FullJid) {
     let Some(storage) = roster_storage(state).await else {
         return;
     };
@@ -331,7 +337,7 @@ async fn presence_state_for_available_resource(
             show: state.show.as_deref().and_then(show_from_name),
             status: state.status,
             priority: state.priority,
-            idle_since: state.idle_since,
+            payloads: state.payloads,
         });
     }
     match state
@@ -341,12 +347,11 @@ async fn presence_state_for_available_resource(
         .detached_presence_state(resource)
         .await
     {
-        Ok(Some((show, status, priority))) => Some(PresenceStateSnapshot {
-            show,
-            status,
-            priority,
-            // Detached (XEP-0198) presence state does not yet persist idle.
-            idle_since: None,
+        Ok(Some(detached)) => Some(PresenceStateSnapshot {
+            show: detached.show,
+            status: detached.status,
+            priority: detached.priority,
+            payloads: detached.payloads,
         }),
         Ok(None) => None,
         Err(error) => {
@@ -360,9 +365,10 @@ struct PresenceStateSnapshot {
     show: Option<xmpp_parsers::presence::Show>,
     status: Option<String>,
     priority: i8,
-    /// XEP-0319 idle instant for a probing contact's rebuilt presence. Only
-    /// the live registry persists it; the detached (XEP-0198) path has none yet.
-    idle_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// The resource's original presence extension payloads (XEP-0115 caps,
+    /// XEP-0319 idle, anything else), relayed verbatim (issues #1101/#1103)
+    /// from either the live registry or the detached (XEP-0198) session.
+    payloads: Vec<Element>,
 }
 
 async fn send_stanza_to_available_user_resources_and_detached_available(

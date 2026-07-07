@@ -125,7 +125,8 @@ async fn test_get_or_create_room_idempotent() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("first get_or_create");
+        .expect("first get_or_create")
+        .actor_ref;
 
     let second: ActorRef<RoomActor> = registry
         .ask(GetOrCreateRoom {
@@ -135,7 +136,8 @@ async fn test_get_or_create_room_idempotent() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("second get_or_create");
+        .expect("second get_or_create")
+        .actor_ref;
 
     assert_eq!(first.id(), second.id());
 
@@ -171,6 +173,209 @@ async fn test_destroy_room() {
         .await
         .expect("exists");
     assert!(!exists);
+}
+
+/// #1134: the "did this call create the room?" bit must come from the
+/// registry's serialized handler — exactly one caller observes
+/// `Created`, so exactly one racing first-join can grant itself the
+/// XEP-0045 §10.1.1 creator Owner. Inferring the bit at the call site
+/// ("no actor existed when I looked") let both racers claim it.
+#[tokio::test]
+async fn get_or_create_reports_created_exactly_once() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("first-join-race");
+
+    let first: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("first get_or_create");
+    assert_eq!(
+        first.creation,
+        RoomCreation::Created,
+        "the call that spawned the room reports Created"
+    );
+
+    let second: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("second get_or_create");
+    assert_eq!(
+        second.creation,
+        RoomCreation::Existing,
+        "every later call reports Existing — only one creator (#1134)"
+    );
+    assert_eq!(
+        second.actor_ref.id(),
+        first.actor_ref.id(),
+        "both calls resolve the same room actor"
+    );
+}
+
+/// #1108: the janitor's IsDormant → destroy sequence is a TOCTOU.
+/// A join that lands between the dormancy probe and the destroy must
+/// make the guarded destroy refuse — the revision it carries is stale
+/// and the seal re-check runs inside the room actor's own mailbox,
+/// serialized against the join.
+#[tokio::test]
+async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
+    use crate::muc::room_actor::{
+        IsDormant, JoinAffiliationGrant, JoinWithAffiliation, LeaveByRealJid, OccupantCount,
+        SealGuard,
+    };
+    use crate::types::Affiliation;
+
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("toctou");
+    let actor: ActorRef<RoomActor> = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room")
+        .actor_ref;
+
+    // Janitor half 1: probe dormancy, capturing the revision.
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert!(probe.dormant, "fresh empty room is dormant");
+
+    // The race: a join lands between the probe and the destroy.
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("full jid");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("interleaved join");
+
+    // Janitor half 2: guarded destroy with the stale revision → refused.
+    let destroyed: bool = registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy ask");
+    assert!(
+        !destroyed,
+        "a join after the dormancy probe must refuse the guarded destroy \
+         — destroying here orphans the freshly-admitted occupant (#1108)"
+    );
+    assert!(
+        registry
+            .ask(RoomExists {
+                room_jid: jid.clone()
+            })
+            .await
+            .expect("exists"),
+        "the room stays registered"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("count"),
+        1,
+        "the interleaved occupant is intact"
+    );
+
+    // After the occupant leaves, a fresh probe + matching revision
+    // destroys the actually-dormant room.
+    actor
+        .ask(LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    let probe = actor.ask(IsDormant).await.expect("second probe");
+    assert!(probe.dormant, "room is dormant again after the leave");
+    let destroyed: bool = registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy ask");
+    assert!(destroyed, "an actually-dormant room is destroyed");
+    assert!(
+        !registry
+            .ask(RoomExists { room_jid: jid })
+            .await
+            .expect("exists"),
+        "the room is gone from the registry"
+    );
+}
+
+/// #1108 second half: a caller that grabbed the ActorRef before the
+/// guarded destroy and sends its join afterwards must get a typed,
+/// retryable refusal (the sealed actor never silently admits an
+/// occupant into a destroyed room), so the join handler can re-run
+/// the registry lookup and respawn the room.
+#[tokio::test]
+async fn sealed_room_refuses_late_join_with_retryable_error() {
+    use crate::muc::room_actor::{
+        IsDormant, JoinAffiliationGrant, JoinWithAffiliation, RoomActorError, SealGuard,
+    };
+    use crate::types::Affiliation;
+
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("sealed");
+    let stale_ref: ActorRef<RoomActor> = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room")
+        .actor_ref;
+    let probe = stale_ref.ask(IsDormant).await.expect("probe");
+    assert!(probe.dormant);
+
+    let destroyed: bool = registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy ask");
+    assert!(destroyed);
+
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("full jid");
+    let result = stale_ref
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ),
+        "a sealed room actor refuses late joins with the typed retryable \
+         error instead of admitting an occupant into a destroyed room; \
+         got: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -250,7 +455,8 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("first get_or_create");
+        .expect("first get_or_create")
+        .actor_ref;
     first.kill();
     tokio::task::yield_now().await;
 
@@ -284,7 +490,8 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("recreate room after explicit destroy");
+        .expect("recreate room after explicit destroy")
+        .actor_ref;
     assert!(recreated.is_alive());
 }
 
@@ -360,7 +567,8 @@ async fn respawned_room_reports_durable_members_as_recipients_without_any_join()
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     let snapshot = room_actor
         .ask(GetRoomSnapshot {
@@ -406,7 +614,8 @@ async fn hydration_does_not_clobber_richer_runtime_affiliations() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     room_actor
         .ask(ChangeAffiliation {
@@ -466,7 +675,8 @@ async fn runtime_outcast_demotion_excludes_hydrated_durable_member() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     room_actor
         .ask(ChangeAffiliation {
@@ -503,7 +713,7 @@ async fn runtime_outcast_demotion_excludes_hydrated_durable_member() {
 ///    candidate the interpreter persists.
 #[tokio::test]
 async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
-    use crate::muc::room_actor::JoinWithAffiliation;
+    use crate::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use crate::protocol::event::OutboundEvent;
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::room::inbox::MucInboxHandler;
@@ -524,7 +734,8 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
             config: RoomConfig::default(),
         })
         .await
-        .expect("get_or_create");
+        .expect("get_or_create")
+        .actor_ref;
 
     // Only the sender rejoins after the "restart".
     let sender: FullJid = "sender@example.com/web".parse().expect("valid full JID");
@@ -532,7 +743,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         .ask(JoinWithAffiliation {
             sender_jid: sender.clone(),
             nick: "sender".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -721,7 +932,8 @@ mod ownership_claims_tests {
                 config: RoomConfig::default(),
             })
             .await
-            .expect("get_or_create_room");
+            .expect("get_or_create_room")
+            .actor_ref;
         assert!(
             claim_store
                 .current_claim(&entity)
@@ -1110,7 +1322,8 @@ mod ownership_claims_tests {
                 config: RoomConfig::default(),
             })
             .await
-            .expect("get_or_create_room");
+            .expect("get_or_create_room")
+            .actor_ref;
 
         let config = actor_ref.ask(GetConfig).await.expect("ask");
         assert_eq!(config.name, "restored");
@@ -1124,4 +1337,70 @@ mod ownership_claims_tests {
             .expect("ask");
         assert_eq!(affiliation, Affiliation::Owner);
     }
+}
+
+/// gpt-5.5 review follow-up to #1108: when the registry's seal ask
+/// times out but the seal lands anyway, the sealed actor stays
+/// registered and every join gets RoomSealed. ReapSealedRoom purges
+/// exactly that state so the join retry respawns a fresh room.
+#[tokio::test]
+async fn reap_sealed_room_purges_a_sealed_but_registered_actor() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("stuck");
+    let acquisition: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig {
+                persistent: false,
+                ..RoomConfig::default()
+            },
+        })
+        .await
+        .expect("create");
+    // Seal directly, simulating a SealIfInactive that ran after the
+    // registry's DestroyRoomIfInactive ask had already timed out.
+    let sealed = acquisition
+        .actor_ref
+        .ask(crate::muc::room_actor::SealIfInactive {
+            expected_occupancy_revision: 0,
+            guard: crate::muc::room_actor::SealGuard::EmptyNonPersistent,
+        })
+        .await
+        .expect("seal");
+    assert!(sealed, "fresh empty instant room must seal");
+
+    let reaped: bool = registry
+        .ask(ReapSealedRoom {
+            room_jid: jid.clone(),
+        })
+        .await
+        .expect("reap");
+    assert!(reaped, "the sealed actor must be purged from the registry");
+
+    // A subsequent get-or-create must respawn: the caller is the
+    // creator again, and the new actor accepts joins.
+    let fresh: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig {
+                persistent: false,
+                ..RoomConfig::default()
+            },
+        })
+        .await
+        .expect("recreate");
+    assert_eq!(fresh.creation, RoomCreation::Created);
+
+    // Reaping a live (unsealed) room must refuse.
+    let not_reaped: bool = registry
+        .ask(ReapSealedRoom {
+            room_jid: jid.clone(),
+        })
+        .await
+        .expect("reap live");
+    assert!(!not_reaped, "an unsealed room must never be reaped");
 }

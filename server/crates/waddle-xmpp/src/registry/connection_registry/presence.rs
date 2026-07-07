@@ -21,14 +21,88 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Update full presence state (show/status/priority/idle) for a connected resource.
+    /// Owner-gated [`Self::update_presence`]: performs the same writes, but
+    /// only while the registry entry still belongs to `owner` (`Arc::ptr_eq`
+    /// on the carbons handle, as in `entry_if_owner`). The check and the
+    /// writes happen under the same entry guard, so a same-JID replacement
+    /// registering concurrently cannot slip between them. Returns false when
+    /// the entry is absent or owned by a replacement.
+    pub fn update_presence_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        available: bool,
+        priority: i8,
+    ) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+            return false;
+        }
+        entry
+            .value()
+            .presence_available
+            .store(available, Ordering::Relaxed);
+        entry
+            .value()
+            .presence_priority
+            .store(priority, Ordering::Relaxed);
+        true
+    }
+
+    /// Owner-gated [`Self::update_presence_state`]: writes the JID-keyed
+    /// presence state only while the connections entry still belongs to
+    /// `owner`. The ownership check holds the connections entry guard across
+    /// the `presence_states` write, so a same-JID replacement's
+    /// `register_*` (which needs the connections write lock for this key)
+    /// cannot interleave between check and write; the replacement's own
+    /// registration and subsequent presence writes are therefore ordered
+    /// after ours and supersede them (last-writer-wins in the correct
+    /// direction). Returns false when the entry is absent or superseded.
+    pub fn update_presence_state_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        show: Option<String>,
+        status: Option<String>,
+        priority: i8,
+        payloads: Vec<minidom::Element>,
+    ) -> bool {
+        // Keep the connections entry guard alive across the
+        // presence_states insert: a same-JID replacement's `register_*`
+        // needs this key's connections write lock, so it cannot land
+        // between the ownership check and the write below. (Lock order
+        // connections → presence_states is used nowhere in reverse, so
+        // this cannot deadlock.)
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+            return false;
+        }
+        self.presence_states.insert(
+            jid.clone(),
+            PresenceState {
+                show,
+                status,
+                priority,
+                payloads,
+            },
+        );
+        true
+    }
+
+    /// Update full presence state (show/status/priority/payloads) for a
+    /// connected resource. XEP-0319 idle rides in `payloads` verbatim, like
+    /// every other presence extension (issue #1101).
     pub fn update_presence_state(
         &self,
         jid: &FullJid,
         show: Option<String>,
         status: Option<String>,
         priority: i8,
-        idle_since: Option<chrono::DateTime<Utc>>,
+        payloads: Vec<minidom::Element>,
     ) {
         self.presence_states.insert(
             jid.clone(),
@@ -36,7 +110,7 @@ impl ConnectionRegistry {
                 show,
                 status,
                 priority,
-                idle_since,
+                payloads,
             },
         );
     }
@@ -49,6 +123,25 @@ impl ConnectionRegistry {
     /// Clear the stored presence state for a resource (e.g. on unavailable presence).
     pub fn clear_presence_state(&self, jid: &FullJid) {
         self.presence_states.remove(jid);
+    }
+
+    /// Owner-gated [`Self::clear_presence_state`]: removes the JID-keyed
+    /// presence state only while the connections entry still belongs to
+    /// `owner` (`Arc::ptr_eq` on the carbons handle, as in `entry_if_owner`).
+    /// The connections entry guard is held across the removal, so a same-JID
+    /// replacement registering concurrently cannot interleave between check
+    /// and clear (same lock-order argument as
+    /// [`Self::update_presence_state_if_owner`]). Returns false when the
+    /// entry is absent or owned by a replacement.
+    pub fn clear_presence_state_if_owner(&self, jid: &FullJid, owner: &Arc<AtomicBool>) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+            return false;
+        }
+        self.presence_states.remove(jid);
+        true
     }
 
     /// Record last offline activity for a bare JID.

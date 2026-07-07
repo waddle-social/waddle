@@ -694,31 +694,17 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         if let Some(client_h) = client_h {
-            if !session.is_expired() && client_h > session.outbound_count {
-                let restored = {
-                    let mut claimed = self
-                        .claimed_sessions
-                        .write()
-                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                    claimed.remove(stream_id)
-                };
-                if let Some(restored) = restored {
-                    {
-                        let mut sessions = self
-                            .sessions
-                            .write()
-                            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                        sessions.insert(stream_id.to_string(), restored.clone());
-                    }
-                    // Terminal path (ADR-0017 Phase 3 Slice 1 fix): the
-                    // claim ends here just as surely as a `Resumed`/
-                    // `Expired` completion — the store entry must be
-                    // released or it leaks forever.
-                    self.release_claim_store_entry(stream_id).await;
-                    return Ok(Some(SmClaimCompletion::HandledCountTooHigh(restored)));
-                }
-                return Ok(None);
-            }
+            // Ordering matters, mirroring the websocket resume path:
+            // `handled_count_exceeds_outbound` is an exact mod-2^32
+            // window from last_acked that also classifies the
+            // regressed half-space as "outside the window".
+            // `can_resume_from` rejects a regressed `h` first, so a
+            // stale mod-behind `h` stays ReplayWindowTruncated (a
+            // failed resume) rather than HandledCountTooHigh; an
+            // ahead-of-window `h` passes it and hits the too-high
+            // branch below. (#1099: this replaces a naive
+            // `client_h > outbound_count` check that had a half-window
+            // blind spot at `h == outbound + 2^31`.)
             if !session.is_expired() && !session.can_resume_from(client_h) {
                 let restored = {
                     let mut claimed = self
@@ -735,10 +721,40 @@ impl InMemorySmSessionRegistry {
                             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                         sessions.insert(stream_id.to_string(), restored.clone());
                     }
-                    // Terminal path (ADR-0017 Phase 3 Slice 1 fix): same
-                    // leak as `HandledCountTooHigh` above.
+                    // Terminal path (ADR-0017 Phase 3 Slice 1): a failed
+                    // resume the caller closes on — release the claim, same
+                    // as the `HandledCountTooHigh` branch below.
                     self.release_claim_store_entry(stream_id).await;
                     return Ok(Some(SmClaimCompletion::ReplayWindowTruncated(restored)));
+                }
+                return Ok(None);
+            }
+            if !session.is_expired() && session.handled_count_exceeds_outbound(client_h) {
+                let restored = {
+                    let mut claimed = self
+                        .claimed_sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    claimed.remove(stream_id)
+                };
+                if let Some(restored) = restored {
+                    {
+                        let mut sessions = self
+                            .sessions
+                            .write()
+                            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                        sessions.insert(stream_id.to_string(), restored.clone());
+                    }
+                    // Terminal path (ADR-0017 Phase 3 Slice 1): the caller
+                    // treats HandledCountTooHigh as a failed resume and closes
+                    // the connection, so this ends the claim — release its
+                    // `ClaimStore` entry (guard scoped above so the release
+                    // awaits after it drops), mirroring the
+                    // `ReplayWindowTruncated` branch. The origin/main merge
+                    // dropped this side effect when it removed the naive
+                    // pre-#1099 resume check it was co-located with.
+                    self.release_claim_store_entry(stream_id).await;
+                    return Ok(Some(SmClaimCompletion::HandledCountTooHigh(restored)));
                 }
                 return Ok(None);
             }

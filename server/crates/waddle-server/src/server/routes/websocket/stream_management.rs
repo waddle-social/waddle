@@ -76,6 +76,8 @@ pub(super) struct SmCtx<'a> {
     pub(super) presence_show: &'a mut Option<xmpp_parsers::presence::Show>,
     pub(super) presence_status: &'a mut Option<String>,
     pub(super) presence_priority: &'a mut i8,
+    pub(super) presence_payloads: &'a mut Vec<minidom::Element>,
+    pub(super) pending_subscribes_flushed: &'a mut bool,
     pub(super) pending_resume_stream_id: &'a mut Option<String>,
     pub(super) pending_resume_h: &'a mut Option<u32>,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
@@ -98,10 +100,7 @@ pub(super) async fn handle_sm_stanza(
     match sm {
         SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase).await,
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
-        SmStanza::Ack(ack) => {
-            apply_sm_ack(state, ctx.sm_state, ack.h).await;
-            vec![]
-        }
+        SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
@@ -111,7 +110,8 @@ pub(super) async fn handle_sm_stanza(
 /// Apply a client `<a h='N'/>` ack: advance the SM counters, drop the
 /// acked prefix of the unacked queue, and range-delete every
 /// `pending_delivery` row this XEP-0198 session claimed whose
-/// recorded outbound counter is <= `h`.
+/// recorded outbound counter lies in the newly-acknowledged mod-2^32
+/// window `(last_acked, h]`.
 ///
 /// Locked Q7b SM-ack lifecycle (issue #209): the range-delete is what
 /// actually frees rows from the durable queue — the flush path no
@@ -126,7 +126,7 @@ pub(super) async fn handle_sm_stanza(
 ///
 /// Greptile review on PR #358: this MUST run inline so it executes
 /// after any preceding `record_pushed_at` for the same connection.
-/// Spawning would let a quick ack arrive and run delete_acked_through
+/// Spawning would let a quick ack arrive and run delete_acked_in_window
 /// against a row whose outbound_sequence is still NULL (because the
 /// record_pushed_at task hadn't completed), silently skipping the
 /// delete.
@@ -134,11 +134,60 @@ pub(super) async fn handle_sm_stanza(
 /// Shared by the `<a/>` frame handler and the mid-batch drain in
 /// [`super::batch_write`] (issue #1089) so both paths honour the same
 /// ack lifecycle.
+///
+/// Issue #1099 / XEP-0198 §4: `h` is validated wrap-aware (mod 2^32)
+/// against the live `outbound_count` BEFORE anything is acknowledged.
+/// A bogus-high `h` previously purged the whole replay queue and
+/// range-deleted the session's claimed `pending_delivery` rows,
+/// silently destroying undelivered messages. On violation nothing is
+/// purged; the returned frames are the `<handled-count-too-high/>`
+/// undefined-condition stream error plus the RFC 7395 close frame
+/// (mirroring the resume path), and the connection phase is set to
+/// Closing so the loop terminates the stream.
 pub(super) async fn apply_sm_ack(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
+    phase: &mut ConnectionPhase,
     h: u32,
-) {
+) -> Vec<String> {
+    // Ordering matters: the regress check MUST run before the exceeds
+    // check. `ack_exceeds_outbound` is an exact mod-2^32 window from
+    // last_acked, which classifies the regressed half-space as
+    // "outside the window" too — a stale mod-behind `h` must stay an
+    // ignored no-op rather than be reclassified as too-high.
+    if sm_state.ack_regresses_last_acked(h) {
+        // Stale or garbage `h` behind the confirmed window: ignore it
+        // entirely. Acknowledging would corrupt last_acked, and the
+        // numeric range-delete below would wipe every pending row.
+        warn!(
+            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            client_h = h,
+            last_acked = sm_state.last_acked,
+            "SM ack ignored: handled count regressed behind last_acked"
+        );
+        return vec![];
+    }
+    if sm_state.ack_exceeds_outbound(h) {
+        let send_count = sm_state.outbound_count;
+        info!(
+            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            client_h = h,
+            send_count,
+            "SM ack rejected: handled count too high"
+        );
+        *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+        return vec![
+            build_handled_count_too_high_stream_error(h, send_count),
+            websocket_stream_close_xml(),
+        ];
+    }
+    // Capture the PRE-acknowledge floor: the newly-acknowledged rows
+    // are exactly the mod-2^32 window (last_acked, h], and the delete
+    // below must be wrap-aware — a numeric `<= h` delete on a
+    // wrap-spanning ack would strand the pre-wrap rows near u32::MAX
+    // claimed, to be released later by the claim-expiry janitor as
+    // duplicates (review F4).
+    let acked_from_exclusive = sm_state.last_acked;
     sm_state.acknowledge(h);
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
@@ -146,7 +195,7 @@ pub(super) async fn apply_sm_ack(
             .deps
             .protocol
             .pending_delivery_storage
-            .delete_acked_through(&session_id, h)
+            .delete_acked_in_window(&session_id, acked_from_exclusive, h)
             .await
         {
             Ok(removed) if removed > 0 => {
@@ -163,12 +212,13 @@ pub(super) async fn apply_sm_ack(
                     session = %session_id,
                     h,
                     error = %error,
-                    "pending_delivery delete_acked_through failed; rows \
+                    "pending_delivery delete_acked_in_window failed; rows \
                      will be retried on next session via release_claim"
                 );
             }
         }
     }
+    vec![]
 }
 
 async fn handle_sm_enable(
@@ -421,6 +471,8 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         presence_show,
         presence_status,
         presence_priority,
+        presence_payloads,
+        pending_subscribes_flushed,
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
@@ -579,29 +631,14 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
 
     let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
-    if resume.h > detached.outbound_count {
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .release_claim(&resume.previd)
-            .await
-        {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release invalid SM resume claim");
-        }
-        *phase = ConnectionPhase::closing(None);
-        info!(
-            stream_id = %resume.previd,
-            client_h = resume.h,
-            send_count = detached.outbound_count,
-            "SM resume rejected: handled count too high"
-        );
-        return vec![
-            build_handled_count_too_high_stream_error(resume.h, detached.outbound_count),
-            websocket_stream_close_xml(),
-        ];
-    }
-
+    // Ordering matters, mirroring the live ack path:
+    // `handled_count_exceeds_outbound` is an exact mod-2^32 window
+    // from last_acked, which classifies the regressed half-space as
+    // "outside the window" too. `can_resume_from` rejects a regressed
+    // `h` first, so a stale mod-behind `h` stays a failed resume
+    // (`<failed/>`, client starts a fresh session) rather than being
+    // reclassified as a handled-count-too-high stream error; an
+    // ahead-of-window `h` passes it and hits the too-high error below.
     if !detached.can_resume_from(resume.h) {
         warn!(
             stream_id = %resume.previd,
@@ -621,6 +658,29 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         }
         return vec![
             SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
+        ];
+    }
+
+    if detached.handled_count_exceeds_outbound(resume.h) {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .release_claim(&resume.previd)
+            .await
+        {
+            warn!(stream_id = %resume.previd, error = %error, "Failed to release invalid SM resume claim");
+        }
+        *phase = ConnectionPhase::closing(None);
+        info!(
+            stream_id = %resume.previd,
+            client_h = resume.h,
+            send_count = detached.outbound_count,
+            "SM resume rejected: handled count too high"
+        );
+        return vec![
+            build_handled_count_too_high_stream_error(resume.h, detached.outbound_count),
+            websocket_stream_close_xml(),
         ];
     }
 
@@ -663,6 +723,8 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *presence_show = detached.presence_show.clone();
     *presence_status = detached.presence_status.clone();
     *presence_priority = detached.presence_priority;
+    *presence_payloads = detached.presence_payloads.clone();
+    *pending_subscribes_flushed = detached.pending_subscribes_flushed;
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);

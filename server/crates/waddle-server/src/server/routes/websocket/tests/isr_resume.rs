@@ -126,6 +126,8 @@ fn seeded_detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -563,6 +565,8 @@ async fn handle_isr_resume_authenticate_is_a_noop_failure_without_clustering() {
         presence_show: &mut conn.presence_show,
         presence_status: &mut conn.presence_status,
         presence_priority: &mut conn.presence_priority,
+        presence_payloads: &mut conn.presence_payloads,
+        pending_subscribes_flushed: &mut conn.pending_subscribes_flushed,
         pending_resume_stream_id: &mut conn.pending_resume_stream_id,
         pending_resume_h: &mut conn.pending_resume_h,
         suppress_sm_record_next_batch: &mut conn.suppress_sm_record_next_batch,

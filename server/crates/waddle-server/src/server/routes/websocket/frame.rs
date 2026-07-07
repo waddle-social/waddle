@@ -43,6 +43,8 @@ async fn handle_xmpp_frame_impl(
         presence_show,
         presence_status,
         presence_priority,
+        presence_payloads,
+        pending_subscribes_flushed,
         roster_interested,
         blocklist_interested,
         pending_resume_stream_id,
@@ -50,6 +52,7 @@ async fn handle_xmpp_frame_impl(
         suppress_sm_record_next_batch,
         state_machine,
         stream_open_sent,
+        registry_owner,
         ..
     } = conn;
     let muc_domain = state.deps.service_domains.muc.clone();
@@ -67,6 +70,8 @@ async fn handle_xmpp_frame_impl(
                 presence_show,
                 presence_status,
                 presence_priority,
+                presence_payloads,
+                pending_subscribes_flushed,
                 pending_resume_stream_id,
                 pending_resume_h,
                 suppress_sm_record_next_batch,
@@ -175,6 +180,8 @@ async fn handle_xmpp_frame_impl(
                 presence_show,
                 presence_status,
                 presence_priority,
+                presence_payloads,
+                pending_subscribes_flushed,
                 pending_resume_stream_id,
                 pending_resume_h,
                 suppress_sm_record_next_batch,
@@ -269,6 +276,7 @@ async fn handle_xmpp_frame_impl(
                             state,
                             phase,
                             authenticated_session,
+                            registry_owner.as_ref(),
                         )
                         .await
                     }

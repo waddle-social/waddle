@@ -191,6 +191,14 @@ pub struct ConnectionEntry {
     /// Q7d) so subsequent presence updates do not re-flush an already-
     /// drained `pending_delivery` queue (issue #209).
     pub offline_flushed: Arc<AtomicBool>,
+    /// Whether this stream has already received the queued inbound
+    /// subscription requests for its bare JID. RFC 6121 §3.1.3: pending
+    /// inbound `<presence type='subscribe'/>` stanzas are delivered on the
+    /// resource's INITIAL available presence — not on every subsequent
+    /// presence update within the session (issue #1104: auto-away flips
+    /// must not re-prompt the user). Claimed once per connection via
+    /// [`ConnectionEntry::claim_pending_subscribes_flush`].
+    pub pending_subscribes_flushed: Arc<AtomicBool>,
     /// Per-connection XEP-0198 SM session id, set when the client
     /// enables SM (or resumes onto this connection). `None` while SM
     /// is disabled. Used directly by the offline-flush path for
@@ -252,6 +260,7 @@ impl ConnectionEntry {
             roster_interested: Arc::new(AtomicBool::new(false)),
             blocklist_interested: Arc::new(AtomicBool::new(false)),
             offline_flushed: Arc::new(AtomicBool::new(false)),
+            pending_subscribes_flushed: Arc::new(AtomicBool::new(false)),
             sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
@@ -306,6 +315,17 @@ impl ConnectionEntry {
     /// (locked Q7c) only fires once per fresh session.
     pub fn claim_offline_flush(&self) -> bool {
         self.offline_flushed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Atomically check-and-set the pending-inbound-subscribes flag.
+    /// Returns `true` exactly once per connection (the first call),
+    /// `false` on every subsequent call. RFC 6121 §3.1.3: the queued
+    /// inbound subscription requests are delivered on the session's
+    /// initial available presence only (issue #1104).
+    pub fn claim_pending_subscribes_flush(&self) -> bool {
+        self.pending_subscribes_flushed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }

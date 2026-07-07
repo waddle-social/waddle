@@ -78,6 +78,8 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -141,6 +143,43 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
         session.can_resume_from(1),
         "resume can proceed once the client's h covers the evicted sequence"
     );
+}
+
+/// XEP-0198 §4 too-high detection on the detached/resume path must be
+/// the same exact mod-2^32 window as the live ack path, measured from
+/// `last_acked`: `sequence_gt` is false at exactly distance 2^31, so
+/// `h == outbound_count + 0x8000_0000` used to pass as valid and
+/// corrupt the restored counters on resume.
+#[test]
+fn handled_count_exceeds_outbound_is_an_exact_window_from_last_acked() {
+    let mut session = make_test_session_with_unacked("stream-window", Vec::new());
+    session.outbound_count = 2;
+    session.last_acked = 2;
+
+    assert!(
+        !session.handled_count_exceeds_outbound(2),
+        "h == outbound is a valid full ack"
+    );
+    assert!(
+        session.handled_count_exceeds_outbound(2u32.wrapping_add(0x7fff_ffff)),
+        "h just below the half-space boundary is too high"
+    );
+    assert!(
+        session.handled_count_exceeds_outbound(2u32.wrapping_add(0x8000_0000)),
+        "h at exactly distance 2^31 is too high (the sequence_gt corner)"
+    );
+    assert!(
+        session.handled_count_exceeds_outbound(2u32.wrapping_add(0x8000_0001)),
+        "the regressed half-space measures outside the exact window \
+         (the resume path classifies it as a failed resume via \
+         can_resume_from running first)"
+    );
+
+    // Wrap-awareness: outbound wrapped to 2, client acked u32::MAX - 1.
+    session.last_acked = u32::MAX - 1;
+    assert!(!session.handled_count_exceeds_outbound(u32::MAX));
+    assert!(!session.handled_count_exceeds_outbound(2));
+    assert!(session.handled_count_exceeds_outbound(3));
 }
 
 #[tokio::test]
@@ -677,7 +716,16 @@ async fn complete_claim_releases_when_handoff_creates_replay_gap() {
 
 #[tokio::test]
 async fn complete_claim_releases_when_client_handled_count_is_too_high() {
-    let registry = InMemorySmSessionRegistry::new();
+    // The HandledCountTooHigh terminal path ends the claim (the caller
+    // closes the connection on it), so it must release the ClaimStore
+    // entry — the origin/main merge dropped this side effect when it
+    // removed the naive pre-#1099 resume check it was co-located with.
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::local();
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(crate::ownership::NodeIdentity::local()),
+    );
     let mut session = make_test_session_with_unacked("stream-h-too-high", Vec::new());
     session.outbound_count = 2;
     session.last_acked = 0;
@@ -708,6 +756,17 @@ async fn complete_claim_releases_when_client_handled_count_is_too_high() {
         .expect("peek restored session")
         .expect("invalid claim is restored to detached pool");
     assert_eq!(restored.outbound_count, 2);
+
+    // The terminal HandledCountTooHigh completion released the claim: the
+    // entity is claimable again (a leak would leave it AlreadyClaimed).
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "stream-h-too-high".to_string(),
+    );
+    store
+        .acquire(&entity, &me)
+        .await
+        .expect("claim released on HandledCountTooHigh — entity re-acquirable");
 }
 
 #[tokio::test]
@@ -871,6 +930,8 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         presence_show: Some(Show::Chat),
         presence_status: Some("online".to_string()),
         presence_priority: 3,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -1037,6 +1098,95 @@ async fn store_session_returns_jid_collision_eviction_and_preserves_rows_until_c
         storage.get_session(&old_id).await.unwrap().is_none(),
         "confirm_drained erases the displaced session's durable rows"
     );
+}
+
+#[tokio::test]
+async fn store_session_does_not_clobber_in_flight_resume_claim_for_same_stream() {
+    // Issue #1139: race between a new connection resuming a stream and
+    // the OLD connection's detach. The new connection claims the
+    // session (`claim_session` moves it sessions → claimed_sessions),
+    // then the old connection's detach calls `store_session` for the
+    // SAME stream id + JID. The claimed entry must survive so the
+    // in-flight XEP-0198 §5 resume completes with <resumed/> instead
+    // of failing <failed item-not-found/>.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "alice@example.com/web".parse().unwrap();
+    registry
+        .store_session(realistic_test_session_for_jid("stream-race", jid.clone()))
+        .await
+        .unwrap();
+
+    // New connection claims the session for resume.
+    let claimed = registry.claim_session("stream-race").await.unwrap();
+    assert!(claimed.is_some(), "session must be claimable");
+
+    // Old connection detaches late, storing the same stream id + JID.
+    let displaced = registry
+        .store_session(realistic_test_session_for_jid("stream-race", jid.clone()))
+        .await
+        .unwrap();
+    assert!(
+        displaced.is_empty(),
+        "a late store for a stream mid-handoff must not displace the claim"
+    );
+
+    // The claiming connection still owns the handoff: complete_claim
+    // must succeed (resume does NOT fail item-not-found).
+    let outcome = registry.complete_claim("stream-race").await.unwrap();
+    assert!(
+        matches!(outcome, Some(SmClaimCompletion::Resumed(_))),
+        "in-flight resume claim was clobbered by store_session: {outcome:?}"
+    );
+
+    // No stale detached duplicate may shadow the completed resume.
+    assert!(
+        registry
+            .peek_session("stream-race")
+            .await
+            .unwrap()
+            .is_none(),
+        "late store must not leave a stale detached duplicate behind"
+    );
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-race");
+    assert!(
+        storage.get_session(&stream_id).await.unwrap().is_none(),
+        "late store must not resurrect durable rows the completed claim erased"
+    );
+}
+
+#[tokio::test]
+async fn store_session_still_evicts_claimed_entries_for_same_jid_other_stream() {
+    // Companion to the #1139 fix: a claimed entry for the SAME JID but
+    // a DIFFERENT stream id is a superseded identity and must still be
+    // evicted, returned via the displaced bookkeeping for XEP-0198 §5
+    // promotion, with its durable rows preserved until confirm_drained.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "alice@example.com/web".parse().unwrap();
+    registry
+        .store_session(realistic_test_session_for_jid("stream-old", jid.clone()))
+        .await
+        .unwrap();
+    let claimed = registry.claim_session("stream-old").await.unwrap();
+    assert!(claimed.is_some());
+
+    let displaced = registry
+        .store_session(realistic_test_session_for_jid("stream-new", jid.clone()))
+        .await
+        .unwrap();
+    assert_eq!(displaced.len(), 1);
+    assert_eq!(displaced[0].stream_id, "stream-old");
+
+    // The claim is gone: the superseded stream can no longer resume.
+    let outcome = registry.complete_claim("stream-old").await.unwrap();
+    assert!(outcome.is_none(), "superseded claim must be evicted");
+
+    // Durable rows survive until the caller confirms promotion.
+    let old_id = crate::pending_delivery::SmSessionId::new("stream-old");
+    assert!(storage.get_session(&old_id).await.unwrap().is_some());
+    registry.confirm_drained("stream-old").await;
+    assert!(storage.get_session(&old_id).await.unwrap().is_none());
 }
 
 #[tokio::test]

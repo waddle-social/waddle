@@ -212,14 +212,35 @@ where
                     // Applied ahead of any frames already parked in
                     // `deferred_inbound`. Safe ONLY because ack
                     // application is order-independent here: `h` is
-                    // cumulative/monotone, and `delete_acked_through`
-                    // removes rows keyed sequence <= h — outbound
-                    // stanzas a deferred frame produces later get
-                    // sequences > h and are untouched. If ack handling
-                    // ever grows a side effect that is not keyed on
-                    // sequence <= h, it must move to the deferred
-                    // queue instead of running inline.
-                    apply_sm_ack(state, &mut conn.sm_state, h).await;
+                    // cumulative/monotone, and `delete_acked_in_window`
+                    // removes rows keyed on the newly-acked window
+                    // (last_acked, h] — outbound stanzas a deferred
+                    // frame produces later get sequences past h and are
+                    // untouched. If ack handling ever grows a side
+                    // effect that is not keyed on the acked window, it
+                    // must move to the deferred queue instead of
+                    // running inline.
+                    // Issue #1099: a handled-count-too-high `h` makes
+                    // apply_sm_ack return the stream error + close
+                    // frames and flip the phase to Closing instead of
+                    // purging the replay queue. Write them and end the
+                    // batch — the connection is terminating.
+                    let responses =
+                        apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    for response in responses {
+                        if !send_ws_message(
+                            sender,
+                            Message::Text(response.into()),
+                            "Failed to send SM ack stream error",
+                        )
+                        .await
+                        {
+                            return DrainSignal::TransportClosed;
+                        }
+                    }
+                    if conn.phase.is_closing() {
+                        return DrainSignal::TransportClosed;
+                    }
                 } else {
                     conn.deferred_inbound.push_back(text);
                 }

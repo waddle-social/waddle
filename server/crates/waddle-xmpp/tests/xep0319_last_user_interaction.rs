@@ -142,3 +142,68 @@ fn xep0319_idle_carrier_trait_exposes_since() {
     assert!(!plain.is_idle());
     assert_eq!(plain.idle_since(), None);
 }
+
+#[tokio::test]
+async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
+    // Issue #1103: a probe response for a XEP-0198 detached (awaiting
+    // resume) resource must still carry the client's advertised
+    // `<idle xmlns='urn:xmpp:idle:1' since='…'/>`. The registry therefore
+    // stores the resource's presence extension payloads on the detached
+    // session and returns them from the detached presence-state reads.
+    use std::time::Instant;
+    use waddle_xmpp::stream_management::{
+        DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
+    };
+
+    let registry = InMemorySmSessionRegistry::new();
+    let jid: jid::FullJid = "juliet@capulet.com/balcony".parse().expect("full jid");
+    let idle_element = build_idle_element(test_time());
+    registry
+        .store_session(DetachedSession {
+            stream_id: "xep0319-detached".to_string(),
+            user_id: "juliet@capulet.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: Instant::now(),
+            carbons_enabled: false,
+            roster_interested: true,
+            blocklist_interested: false,
+            presence_available: true,
+            presence_show: Some(xmpp_parsers::presence::Show::Away),
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: vec![idle_element.clone()],
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store detached session");
+
+    let state = registry
+        .detached_presence_state(&jid)
+        .await
+        .expect("registry read")
+        .expect("detached presence state present");
+    assert_eq!(
+        state.payloads,
+        vec![idle_element.clone()],
+        "detached presence state must return the stored XEP-0319 idle payload verbatim"
+    );
+
+    let all_states = registry
+        .available_detached_presence_states_for_user(&jid.to_bare())
+        .await
+        .expect("registry read");
+    assert_eq!(all_states.len(), 1);
+    assert_eq!(all_states[0].resource, jid);
+    let idle = parse_idle_element(&all_states[0].payloads[0]).expect("payload is a valid idle");
+    assert_eq!(
+        idle.since,
+        test_time(),
+        "the idle instant round-trips through the detached snapshot unchanged"
+    );
+}

@@ -1,5 +1,78 @@
 use super::muc::{build_muc_join_presence_xml, MucJoinPresence};
 use super::*;
+use crate::server::routes::websocket::tests::create_test_websocket_state;
+use tokio::sync::mpsc;
+use waddle_xmpp::registry::OutboundStanza;
+
+fn presence_from_xml(xml: &str) -> xmpp_parsers::presence::Presence {
+    xmpp_parsers::presence::Presence::try_from(xml.parse::<Element>().expect("valid xml"))
+        .expect("presence")
+}
+
+/// Issue #1208: a superseded same-full-JID connection processing a late
+/// available presence must not stamp its stale presence onto the
+/// replacement's registry entry, and must not consume the replacement's
+/// once-per-session pending-subscribe / offline-flush claims.
+#[tokio::test]
+async fn superseded_connection_presence_does_not_touch_replacement_registry_state() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().unwrap();
+    let registry = &state.deps.protocol.connection_registry;
+
+    // Connection A registers, then a same-JID replacement B supersedes it.
+    let (tx_a, _rx_a) = mpsc::channel::<OutboundStanza>(4);
+    let stale_owner = registry.register(jid.clone(), tx_a);
+    let (tx_b, _rx_b) = mpsc::channel::<OutboundStanza>(4);
+    let live_owner = registry.register(jid.clone(), tx_b);
+
+    // B publishes its own presence.
+    assert!(registry.update_presence_if_owner(&jid, &live_owner, true, 3));
+    assert!(registry.update_presence_state_if_owner(
+        &jid,
+        &live_owner,
+        Some("dnd".to_string()),
+        Some("busy".to_string()),
+        3,
+        Vec::new(),
+    ));
+
+    // A's late available frame is processed with A's stale owner token.
+    let stale_presence = presence_from_xml(
+        "<presence xmlns='jabber:client'><show>xa</show>\
+         <status>stale</status><priority>7</priority></presence>",
+    );
+    super::regular::handle_regular_presence_update(
+        state.as_ref(),
+        &jid,
+        Some(&stale_owner),
+        stale_presence,
+    )
+    .await;
+
+    // B's presence entry and state survive untouched.
+    let entry = registry.get_entry(&jid).expect("replacement entry");
+    assert_eq!(
+        entry.presence_priority(),
+        3,
+        "a superseded connection must not overwrite the replacement's priority"
+    );
+    let presence_state = registry
+        .get_presence_state(&jid)
+        .expect("replacement presence state");
+    assert_eq!(presence_state.show.as_deref(), Some("dnd"));
+    assert_eq!(presence_state.status.as_deref(), Some("busy"));
+    assert_eq!(presence_state.priority, 3);
+
+    // B's once-per-session claims are still unconsumed.
+    assert!(
+        entry.claim_pending_subscribes_flush(),
+        "a superseded connection must not consume the replacement's pending-subscribe claim"
+    );
+    assert!(
+        entry.claim_offline_flush(),
+        "a superseded connection must not consume the replacement's offline-flush claim"
+    );
+}
 
 #[test]
 fn muc_join_presence_carries_authority_in_xep_0045_payload_only() {

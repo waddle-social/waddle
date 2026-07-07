@@ -28,8 +28,9 @@ pub use admin_handlers::{
     GetAdminContext, IsOwner,
 };
 pub use occupancy_handlers::{
-    ClearMujiPresence, InCallPresenceUpdateOutcome, JoinWithAffiliation, LeaveByRealJid,
-    MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
+    ClearMujiPresence, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
+    LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData,
+    ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome, SyncResolverAffiliation,
     UpsertInCallState, UpsertMujiPresence,
 };
 pub use snapshot_handlers::{
@@ -115,6 +116,11 @@ pub struct LeaveOutcome {
     /// destruction; persistent rooms must NOT be evicted from memory
     /// without a re-hydration path.
     pub is_persistent: bool,
+    /// The room's admission counter at leave time (#1108). The
+    /// empty-room eviction path passes it to the registry's guarded
+    /// destroy; a join admitted after this leave bumps the counter and
+    /// makes the destroy refuse instead of orphaning the new occupant.
+    pub occupancy_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +268,20 @@ pub struct RoomActor {
     room: MucRoom,
     config_revision: u64,
     admission_revision: u64,
+    /// Monotonically increasing counter bumped on every successful
+    /// admission (#1108). The dormancy probe ([`IsDormant`]) returns
+    /// it and the registry's guarded destroy
+    /// ([`super::room_registry_actor::DestroyRoomIfInactive`]) refuses
+    /// when it moved — a join that landed after the janitor's probe
+    /// makes the probe's revision stale, closing the probe→destroy
+    /// TOCTOU that orphaned freshly-admitted occupants.
+    occupancy_revision: u64,
+    /// Set by [`SealIfInactive`] immediately before the registry
+    /// removes this actor from its map (#1108). A sealed actor refuses
+    /// further admissions with [`RoomActorError::RoomSealed`] so a
+    /// caller holding a stale `ActorRef` retries through the registry
+    /// (which respawns the room) instead of joining a destroyed room.
+    sealed: bool,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
     /// Durable membership hydrated from the deployment's membership
     /// source at spawn (#1135). Kept separate from
@@ -325,6 +345,23 @@ pub enum RoomActorError {
     JoinForbidden { members_only: bool },
     #[error("join admission snapshot is stale")]
     StaleAdmissionRevision,
+    /// #1108: this room actor was sealed by the registry's guarded
+    /// destroy and is about to be dropped. Retryable — the caller must
+    /// re-run the registry lookup, which respawns the room.
+    #[error("room actor is sealed pending destruction")]
+    RoomSealed,
+    /// #1107: the joining FULL JID already occupies this room under a
+    /// different nick. Waddle locks nicknames to identity, so per
+    /// XEP-0045 §7.6 this maps to the typed stanza error
+    /// `<error type='cancel'><not-acceptable/></error>` instead of
+    /// admitting a second (ghost) occupancy or performing a nick change.
+    #[error(
+        "occupant already joined as '{current_nick}', refusing second nick '{requested_nick}'"
+    )]
+    OccupantAlreadyJoinedUnderDifferentNick {
+        current_nick: String,
+        requested_nick: String,
+    },
     /// XEP-0045 §7.4: sender is not an occupant of this room. Maps to
     /// the typed stanza error `<error type='cancel'><not-acceptable/></error>`.
     #[error("sender '{0}' is not an occupant of this room")]
@@ -361,6 +398,8 @@ impl RoomActor {
             room,
             config_revision: 0,
             admission_revision: 0,
+            occupancy_revision: 0,
+            sealed: false,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
             membership_source: None,
@@ -755,6 +794,9 @@ impl kameo::message::Message<Join> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        if self.sealed {
+            return Err(RoomActorError::RoomSealed);
+        }
         if self.room.is_full() {
             return Err(RoomActorError::RoomFull);
         }
@@ -769,6 +811,7 @@ impl kameo::message::Message<Join> for RoomActor {
             is_remote: false,
             home_server: None,
         });
+        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
         Ok(())
     }
 }
@@ -1197,21 +1240,118 @@ impl kameo::message::Message<OccupantCount> for RoomActor {
 }
 
 /// Ask whether this room is fully dormant — no occupants, no
-/// subject, no pins, and no in-memory affiliations. The dormancy
-/// janitor uses this to decide whether the persistent-room
-/// `RoomActor` is safe to reap. See [`super::MucRoom::is_dormant`]
-/// for the exact predicate.
+/// subject, no pins, and no explicit in-memory affiliation grants.
+/// The dormancy janitor uses this to decide whether the
+/// persistent-room `RoomActor` is safe to reap. See
+/// [`super::MucRoom::is_dormant`] for the exact predicate.
+///
+/// The reply carries the admission [`occupancy
+/// revision`](DormancyStatus::occupancy_revision) so the follow-up
+/// guarded destroy can detect a join that raced the probe (#1108).
 pub struct IsDormant;
 
+/// Reply to [`IsDormant`]: the dormancy verdict plus the occupancy
+/// revision it was computed at.
+#[derive(Debug, Clone, Copy, kameo::Reply)]
+pub struct DormancyStatus {
+    pub dormant: bool,
+    /// The room's admission counter at probe time. Pass it to
+    /// [`super::room_registry_actor::DestroyRoomIfInactive`]; the
+    /// destroy refuses when any admission moved the counter since.
+    pub occupancy_revision: u64,
+}
+
 impl kameo::message::Message<IsDormant> for RoomActor {
-    type Reply = bool;
+    type Reply = DormancyStatus;
 
     async fn handle(
         &mut self,
         _msg: IsDormant,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room.is_dormant()
+        DormancyStatus {
+            // A sealed actor is dormant by definition: the seal already
+            // certified inactivity and refuses every admission since.
+            // Without this, an EmptyNonPersistent seal whose registry
+            // reply timed out (explicit creator-Owner grant keeps
+            // `is_dormant()` false) would never be re-confirmed by the
+            // janitor — a permanently unjoinable registered room.
+            dormant: self.sealed || self.room.is_dormant(),
+            occupancy_revision: self.occupancy_revision,
+        }
+    }
+}
+
+/// Whether this actor was sealed for destruction (#1108). Used by the
+/// registry's [`super::room_registry_actor::ReapSealedRoom`] to purge
+/// a sealed actor left registered by a timed-out guarded destroy.
+pub struct IsSealed;
+
+impl kameo::message::Message<IsSealed> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        _msg: IsSealed,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.sealed
+    }
+}
+
+/// The inactivity predicate a guarded destroy checks before sealing
+/// the room actor (#1108).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealGuard {
+    /// [`super::MucRoom::is_dormant`]: nothing in memory would be lost
+    /// on eviction. Used by the room dormancy janitor for persistent
+    /// rooms.
+    Dormant,
+    /// Zero occupants and `persistent == false` — the last-leave
+    /// eviction of instant rooms (XEP-0045 §10.1.3), which may still
+    /// hold a subject or the creator's Owner grant.
+    EmptyNonPersistent,
+}
+
+/// Seal this room actor for destruction if it is still inactive at the
+/// expected occupancy revision (#1108).
+///
+/// Sent by the registry from inside its serialized
+/// `DestroyRoomIfInactive` handler. Because the room actor's mailbox
+/// serializes this against `JoinWithAffiliation`/`Join`, the check is
+/// race-free: a join processed after the janitor's probe either bumped
+/// the revision or is queued behind this message and will be refused
+/// by the `sealed` gate. Idempotent — an already-sealed actor confirms
+/// again so a previously timed-out destroy can converge.
+pub struct SealIfInactive {
+    pub expected_occupancy_revision: u64,
+    pub guard: SealGuard,
+}
+
+impl kameo::message::Message<SealIfInactive> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: SealIfInactive,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.sealed {
+            return true;
+        }
+        if self.occupancy_revision != msg.expected_occupancy_revision {
+            return false;
+        }
+        let inactive = match msg.guard {
+            SealGuard::Dormant => self.room.is_dormant(),
+            SealGuard::EmptyNonPersistent => {
+                self.room.occupants.is_empty() && !self.room.config.persistent
+            }
+        };
+        if inactive {
+            self.sealed = true;
+        }
+        inactive
     }
 }
 

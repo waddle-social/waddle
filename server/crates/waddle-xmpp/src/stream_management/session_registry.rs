@@ -23,6 +23,7 @@ pub use cross_node_resume::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,
     StealTicket,
 };
+pub use resources::DetachedPresenceState;
 pub use session::{DetachedSession, DetachedUnackedStanza};
 pub use tombstones::RecentTombstoneRecord;
 pub use traits::{SmClaimCompletion, SmRegistryError, SmSessionRegistry};

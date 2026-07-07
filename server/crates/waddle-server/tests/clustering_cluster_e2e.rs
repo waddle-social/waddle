@@ -1071,7 +1071,8 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             RoomConfig::default(),
         )
         .await
-        .expect("get_or_create_room genuinely claims and spawns the room");
+        .expect("get_or_create_room genuinely claims and spawns the room")
+        .actor_ref;
 
     // Confirm genuinely wedged before proceeding: a bounded health-ask
     // must fail to complete (the actor's mailbox loop is stuck processing

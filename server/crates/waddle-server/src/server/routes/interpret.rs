@@ -101,8 +101,8 @@ use waddle_xmpp::mam::{
     RichMessageId, RichText, STANZA_ID_NS,
 };
 use waddle_xmpp::muc::room_actor::{
-    ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation,
-    RoomActor, SetSubject,
+    ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
+    JoinWithAffiliation, RoomActor, SetSubject,
 };
 // ADR-0017 Phase 3 Slice 7: `DestroyRoom` is used by `dispatch_to_room`'s
 // fenced pre-fan-out backstop, which only exists on `clustering`-feature

@@ -88,6 +88,20 @@ pub struct DetachedSession {
     pub presence_status: Option<String>,
     /// Last advertised priority while available.
     pub presence_priority: i8,
+    /// The resource's presence extension payloads (XEP-0115 caps,
+    /// XEP-0319 idle, anything else) as last broadcast while available,
+    /// relayed verbatim by probe/subscription delivery for detached
+    /// resources (issue #1103). In-memory only: the durable persisted
+    /// shape does not carry payloads, so sessions rehydrated after a
+    /// process restart report bare show/status/priority.
+    pub presence_payloads: Vec<minidom::Element>,
+    /// Whether the once-per-session pending-subscribe flush (RFC 6121
+    /// §3.1.3, issue #1104) was already consumed before detach. Resume
+    /// restores this onto the fresh connection so the claim is only
+    /// re-consumed when the detached session had actually consumed it —
+    /// NOT inferred from `presence_available`, which goes stale when
+    /// the session flips unavailable after its initial available.
+    pub pending_subscribes_flushed: bool,
 }
 
 impl DetachedSession {
@@ -127,8 +141,35 @@ impl DetachedSession {
             .collect()
     }
 
+    /// Whether a resume `h` claims more stanzas handled than this
+    /// stream ever sent (XEP-0198 §4 handled-count-too-high). Judged
+    /// as an EXACT mod-2^32 window measured from `last_acked`,
+    /// matching the live ack path's
+    /// `StreamManagementState::ack_exceeds_outbound`: a valid `h` sits
+    /// inside `[last_acked, outbound_count]`, so an `h` a few stanzas
+    /// behind a freshly wrapped `outbound_count` is valid while the
+    /// half-space comparison's blind spot at exactly distance 2^31
+    /// (`h == outbound_count + 0x8000_0000`) is rejected. The
+    /// regressed half-space also measures "outside the window";
+    /// resume callers run [`Self::can_resume_from`] FIRST so a
+    /// mod-behind `h` is a failed resume, not a stream error.
+    pub fn handled_count_exceeds_outbound(&self, client_h: u32) -> bool {
+        client_h.wrapping_sub(self.last_acked) > self.outbound_count.wrapping_sub(self.last_acked)
+    }
+
     /// Whether this detached session can satisfy XEP-0198 replay for `client_h`.
+    ///
+    /// Two lower bounds, both mod 2^32: `client_h` must not sit below a
+    /// queue-eviction gap, and it must not regress behind `last_acked` —
+    /// stanzas at or below the acked watermark were purged from the
+    /// replay queue when the ack landed, so a resume claiming less than
+    /// the client already confirmed cannot be replayed (and its `h`
+    /// would numerically range-delete every pending row; round-2
+    /// concurrency review on #1099).
     pub fn can_resume_from(&self, client_h: u32) -> bool {
+        if sequence_gt(self.last_acked, client_h) {
+            return false;
+        }
         self.replay_gap_through
             .is_none_or(|gap| !sequence_gt(gap, client_h))
     }

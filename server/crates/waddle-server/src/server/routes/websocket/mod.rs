@@ -92,6 +92,7 @@ mod transport_xml;
 
 pub mod handlers;
 
+pub(crate) use cleanup::broadcast_unavailable_if_no_replacement;
 pub use cleanup::cleanup_muc_presence_for_jid;
 pub use connection::router;
 pub use state::{

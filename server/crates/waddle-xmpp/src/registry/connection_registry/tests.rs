@@ -460,30 +460,34 @@ fn test_presence_state_tracking() {
     // No state initially
     assert!(registry.get_presence_state(&jid).is_none());
 
-    // Store presence state, including an XEP-0319 idle stamp.
-    let idle_since = "2024-06-01T12:00:00Z"
-        .parse::<chrono::DateTime<chrono::Utc>>()
-        .expect("valid xs:dateTime");
+    // Store presence state, including the resource's extension payloads
+    // (relayed verbatim on probe/subscription delivery — issue #1101).
+    let idle_payload = minidom::Element::builder("idle", "urn:xmpp:idle:1")
+        .attr(
+            minidom::rxml::xml_ncname!("since").to_owned(),
+            "2024-06-01T12:00:00Z",
+        )
+        .build();
     registry.update_presence_state(
         &jid,
         Some("away".to_string()),
         Some("Gone fishing".to_string()),
         5,
-        Some(idle_since),
+        vec![idle_payload.clone()],
     );
 
     let state = registry.get_presence_state(&jid).expect("should exist");
     assert_eq!(state.show.as_deref(), Some("away"));
     assert_eq!(state.status.as_deref(), Some("Gone fishing"));
     assert_eq!(state.priority, 5);
-    assert_eq!(state.idle_since, Some(idle_since));
+    assert_eq!(state.payloads, vec![idle_payload]);
 
-    // Update with different values — and no idle (return from idle).
-    registry.update_presence_state(&jid, None, None, 0, None);
+    // Update with different values — and no payloads (return from idle).
+    registry.update_presence_state(&jid, None, None, 0, Vec::new());
     let state = registry.get_presence_state(&jid).expect("should exist");
     assert!(state.show.is_none());
     assert!(state.status.is_none());
-    assert!(state.idle_since.is_none());
+    assert!(state.payloads.is_empty());
     assert_eq!(state.priority, 0);
 
     // Clean up on unregister
@@ -677,4 +681,137 @@ fn unregister_if_sm_stream_id_spares_a_replacement_session() {
         "a matching stream id removes the entry"
     );
     assert!(!registry.is_connected(&jid));
+}
+
+/// Owner-gated presence publication (registration race): after A
+/// registers but before it publishes its restored presence, a same-JID
+/// replacement can take the slot. A's publication runs with a stale
+/// owner token and must be refused in the same call that would perform
+/// the write — a check-then-write across separate calls reintroduces
+/// the window.
+#[test]
+fn update_presence_if_owner_refuses_stale_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    let (tx_a, _rx_a) = mpsc::channel(4);
+    let stale_owner = registry.register(jid.clone(), tx_a);
+
+    // Replacement supersedes A and publishes its own availability.
+    let (tx_b, _rx_b) = mpsc::channel(4);
+    let live_owner = registry.register(jid.clone(), tx_b);
+    assert!(registry.update_presence_if_owner(&jid, &live_owner, true, 3));
+
+    // A's delayed publication must be refused and must not overwrite
+    // the replacement's availability/priority.
+    assert!(
+        !registry.update_presence_if_owner(&jid, &stale_owner, true, 9),
+        "a stale owner must not update presence"
+    );
+    let entry = registry.get_entry(&jid).expect("replacement entry");
+    assert_eq!(
+        entry.presence_priority(),
+        3,
+        "the replacement's priority must survive the stale-owner write"
+    );
+}
+
+/// Same race for the JID-keyed presence-state map: the ownership check
+/// and the `presence_states` write must happen inside one owner-gated
+/// method call.
+#[test]
+fn update_presence_state_if_owner_refuses_stale_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    let (tx_a, _rx_a) = mpsc::channel(4);
+    let stale_owner = registry.register(jid.clone(), tx_a);
+
+    let (tx_b, _rx_b) = mpsc::channel(4);
+    let live_owner = registry.register(jid.clone(), tx_b);
+
+    // The live owner's write lands.
+    assert!(registry.update_presence_state_if_owner(
+        &jid,
+        &live_owner,
+        Some("dnd".to_string()),
+        Some("busy".to_string()),
+        3,
+        Vec::new(),
+    ));
+
+    // A's stale-owner write must be refused and leave the state intact.
+    assert!(
+        !registry.update_presence_state_if_owner(
+            &jid,
+            &stale_owner,
+            Some("chat".to_string()),
+            Some("a-status".to_string()),
+            9,
+            Vec::new(),
+        ),
+        "a stale owner must not write presence state"
+    );
+    let state = registry
+        .get_presence_state(&jid)
+        .expect("replacement presence state");
+    assert_eq!(state.show.as_deref(), Some("dnd"));
+    assert_eq!(state.status.as_deref(), Some("busy"));
+    assert_eq!(state.priority, 3);
+}
+
+/// Same race for the unavailable path: a superseded connection's late
+/// `<presence type='unavailable'/>` must not clear the replacement's
+/// JID-keyed presence state. The ownership check and the
+/// `presence_states` removal happen inside one owner-gated call.
+#[test]
+fn clear_presence_state_if_owner_refuses_stale_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    let (tx_a, _rx_a) = mpsc::channel(4);
+    let stale_owner = registry.register(jid.clone(), tx_a);
+
+    let (tx_b, _rx_b) = mpsc::channel(4);
+    let live_owner = registry.register(jid.clone(), tx_b);
+    assert!(registry.update_presence_state_if_owner(
+        &jid,
+        &live_owner,
+        Some("dnd".to_string()),
+        Some("busy".to_string()),
+        3,
+        Vec::new(),
+    ));
+
+    // A's stale-owner clear must be refused and leave B's state intact.
+    assert!(
+        !registry.clear_presence_state_if_owner(&jid, &stale_owner),
+        "a stale owner must not clear presence state"
+    );
+    assert!(
+        registry.get_presence_state(&jid).is_some(),
+        "the replacement's presence state must survive the stale-owner clear"
+    );
+
+    // The live owner's clear lands.
+    assert!(registry.clear_presence_state_if_owner(&jid, &live_owner));
+    assert!(registry.get_presence_state(&jid).is_none());
+}
+
+/// Owner-gated presence-state write against an unregistered JID is
+/// refused and writes nothing.
+#[test]
+fn update_presence_state_if_owner_refuses_absent_entry() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("ghost");
+    let orphan_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    assert!(!registry.update_presence_state_if_owner(
+        &jid,
+        &orphan_owner,
+        None,
+        None,
+        0,
+        Vec::new(),
+    ));
+    assert!(registry.get_presence_state(&jid).is_none());
 }

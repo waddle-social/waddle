@@ -1,6 +1,6 @@
 use jid::{BareJid, FullJid};
 
-use super::affiliation::{self, AffiliationChange};
+use super::affiliation::{self, AffiliationChange, AffiliationProvenance};
 use super::room::{MucRoom, Occupant};
 use crate::types::{Affiliation, Role};
 
@@ -30,7 +30,22 @@ impl MucRoom {
         jid: BareJid,
         affiliation: Affiliation,
     ) -> Option<AffiliationChange> {
-        let change = self.affiliation_list.set(jid.clone(), affiliation);
+        self.set_affiliation_with_provenance(jid, affiliation, AffiliationProvenance::ExplicitGrant)
+    }
+
+    /// Set the affiliation for a JID, recording where the value came
+    /// from (#1110). Explicit grants pin the room actor in memory
+    /// (`MucRoom::is_dormant` stays false); resolver-derived entries
+    /// are reconstructible on the next join and do not.
+    pub fn set_affiliation_with_provenance(
+        &mut self,
+        jid: BareJid,
+        affiliation: Affiliation,
+        provenance: AffiliationProvenance,
+    ) -> Option<AffiliationChange> {
+        let change =
+            self.affiliation_list
+                .set_with_provenance(jid.clone(), affiliation, provenance);
 
         if change.is_some() {
             let role = self.derive_role_from_affiliation(affiliation);
@@ -175,13 +190,21 @@ impl MucRoom {
             .expect("occupant just inserted on previous line")
     }
 
-    /// Update affiliations from a resolver (async operation).
+    /// Update affiliations from the join-path authz resolver.
+    ///
+    /// Recorded as [`AffiliationProvenance::ResolverDerived`] (#1110):
+    /// the resolver re-derives this value on the next join of the same
+    /// bare JID, so the entry never blocks room dormancy.
     pub fn update_affiliation_from_resolver(
         &mut self,
         jid: BareJid,
         affiliation: Affiliation,
     ) -> Option<AffiliationChange> {
-        self.set_affiliation(jid, affiliation)
+        self.set_affiliation_with_provenance(
+            jid,
+            affiliation,
+            AffiliationProvenance::ResolverDerived,
+        )
     }
 
     /// Check if the room has at least one owner.

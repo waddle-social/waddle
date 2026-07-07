@@ -118,7 +118,12 @@ pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
         else {
             continue;
         };
-        if matches!(actor.ask(IsDormant).await, Ok(true)) {
+        if actor
+            .ask(IsDormant)
+            .await
+            .map(|status| status.dormant)
+            .unwrap_or(false)
+        {
             rooms_dormant += 1;
         }
     }

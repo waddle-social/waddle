@@ -33,6 +33,204 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
     assert_eq!(room.occupant_count(), 1);
 }
 
+/// #1108: after the dormancy janitor's guarded destroy evicts a room,
+/// a join must transparently respawn it through the registry — the
+/// "room not registered; dropping" failure mode must not exist for a
+/// joining occupant.
+#[tokio::test]
+async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
+    use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoomIfInactive, RoomCount};
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "evicted-then-joined@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    // Seed a persistent, dormant room (like topology seeding does),
+    // then evict it exactly as the janitor would.
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w".to_string(),
+            channel_id: "c".to_string(),
+            config: waddle_xmpp::muc::RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    let probe = actor.ask(IsDormant).await.expect("probe");
+    assert!(probe.dormant);
+    let destroyed: bool = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(DestroyRoomIfInactive {
+            room_jid: room_jid.clone(),
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: SealGuard::Dormant,
+        })
+        .await
+        .expect("guarded destroy");
+    assert!(destroyed, "dormant room evicted");
+
+    // The join after eviction must succeed against a respawned room.
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+    let self_presence = Element::from_str(&responses[0]).expect("self presence xml");
+    assert_eq!(self_presence.name(), "presence");
+    assert_ne!(
+        self_presence.attr("type"),
+        Some("error"),
+        "join after eviction must not error: {responses:?}"
+    );
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.find_nick_by_real_jid(&sender_jid), Some("alice"));
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("count"),
+        1,
+        "the registry holds the respawned room"
+    );
+}
+
+/// #1107 / XEP-0045 §7.6: a full JID already in the room under nick A
+/// joining as nick B gets `<error type='cancel'><not-acceptable/>`
+/// on the wire (nicknames are locked to identity) and no second
+/// occupancy is created.
+#[tokio::test]
+async fn muc_join_under_second_nick_returns_not_acceptable() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "no-second-nick@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(session.clone()),
+    )
+    .await;
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice-two",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "one error presence: {responses:?}");
+    let error_presence = Element::from_str(&responses[0]).expect("error presence xml");
+    assert_eq!(error_presence.name(), "presence");
+    assert_eq!(error_presence.attr("type"), Some("error"));
+    let error = error_presence
+        .get_child("error", "jabber:client")
+        .expect("typed error element");
+    assert_eq!(error.attr("type"), Some("cancel"));
+    assert!(
+        error
+            .get_child("not-acceptable", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some(),
+        "XEP-0045 §7.6 locked-nickname refusal uses <not-acceptable/>: {responses:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.occupant_count(), 1, "no ghost occupancy");
+    assert_eq!(room.find_nick_by_real_jid(&sender_jid), Some("alice"));
+}
+
+/// #1134 / XEP-0045 §10.1.1: only the room creator receives Owner. The
+/// second user to join an unmanaged room must not be granted Owner —
+/// the created-bit comes from the registry, not from call-site
+/// inference.
+#[tokio::test]
+async fn second_joiner_of_unmanaged_room_is_not_owner() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_server_owner_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "creator-owner@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+
+    let alice_responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+    let alice_presence = Element::from_str(&alice_responses[0]).expect("alice presence");
+    let alice_item = alice_presence
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .and_then(|x| x.get_child("item", "http://jabber.org/protocol/muc#user"))
+        .expect("alice muc item");
+    assert_eq!(
+        alice_item.attr("affiliation"),
+        Some("owner"),
+        "the creator gets Owner (XEP-0045 §10.1.1)"
+    );
+
+    let bob_responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    let bob_self = bob_responses
+        .iter()
+        .filter_map(|xml| Element::from_str(xml).ok())
+        .find(|el| {
+            el.name() == "presence"
+                && el
+                    .get_child("x", "http://jabber.org/protocol/muc#user")
+                    .is_some_and(|x| {
+                        x.children()
+                            .any(|c| c.name() == "status" && c.attr("code") == Some("110"))
+                    })
+        })
+        .expect("bob self presence");
+    let bob_item = bob_self
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .and_then(|x| x.get_child("item", "http://jabber.org/protocol/muc#user"))
+        .expect("bob muc item");
+    assert_ne!(
+        bob_item.attr("affiliation"),
+        Some("owner"),
+        "a later joiner is not the creator and must not be Owner (#1134)"
+    );
+}
+
 #[tokio::test]
 async fn muc_join_responses_use_client_namespace() {
     let state = create_test_websocket_state().await;
@@ -438,7 +636,8 @@ async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row
         "chat".to_string(),
     )
     .await
-    .expect("room actor");
+    .expect("room actor")
+    .actor_ref;
 
     let denied = handle_muc_join(
         state.as_ref(),
@@ -458,6 +657,94 @@ async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
     assert!(snapshot.find_nick_by_real_jid(&sender_jid).is_none());
+}
+
+/// Review F3: on the members-only path a `Resolver(None)` verdict makes
+/// the handler return registration-required BEFORE any actor message,
+/// so a stale resolver-derived Member inside a LIVE room actor (written
+/// before the revocation) was never cleared — the revoked user stayed
+/// on the room's affiliation list (admin queries, XEP-0045 §7.x member
+/// lists) until eviction. The rejection must best-effort sync
+/// `Affiliation::None` into the existing actor.
+#[tokio::test]
+async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_actor() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "revoked@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "bob@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "revoked".to_string(),
+            name: "Revoked".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    let actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig {
+            members_only: true,
+            ..RoomConfig::default()
+        },
+        "space".to_string(),
+        "revoked".to_string(),
+    )
+    .await
+    .expect("room actor")
+    .actor_ref;
+
+    // Stale resolver-derived Member from before the revocation.
+    let seed_revision = snapshot_room(state.as_ref(), &room_jid)
+        .await
+        .admission_revision;
+    let seeded = actor
+        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
+            jid: sender_jid.to_bare(),
+            affiliation: waddle_xmpp::Affiliation::Member,
+            expected_admission_revision: seed_revision,
+        })
+        .await
+        .expect("seed stale resolver-derived member");
+    assert_eq!(
+        seeded,
+        waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied,
+        "seeding the stale member must apply"
+    );
+
+    // No permission tuples exist for bob: the resolver reports None.
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "bob",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(denied.len(), 1, "denied join: {denied:?}");
+    assert!(
+        denied[0].contains("registration-required"),
+        "revoked user's members-only join must be refused: {denied:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.get_affiliation(&sender_jid.to_bare()),
+        waddle_xmpp::Affiliation::None,
+        "the rejection must clear the stale resolver-derived Member from the live actor"
+    );
 }
 
 #[tokio::test]
@@ -3047,6 +3334,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -3059,6 +3347,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         state.as_ref(),
         &alice_phase,
         &None,
+        None,
     )
     .await;
     let recorded = recorder.snapshot();
@@ -3157,6 +3446,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
 
@@ -3169,6 +3459,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3220,6 +3511,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
     // Anchor the call thread in the inbox under the same thread id the
@@ -3271,6 +3563,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3347,6 +3640,7 @@ async fn active_muji_presence_without_sfu_does_not_register_call_thread_anchor()
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3385,6 +3679,7 @@ async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3435,6 +3730,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         state.as_ref(),
         &bob_phase,
         &None,
+        None,
     )
     .await;
 
@@ -3447,6 +3743,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3515,6 +3812,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         state.as_ref(),
         &bob_phase,
         &None,
+        None,
     )
     .await;
     while alice_rx.try_recv().is_ok() {}
@@ -3527,6 +3825,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         state.as_ref(),
         &bob_phase,
         &None,
+        None,
     )
     .await;
 
@@ -3604,6 +3903,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
 
@@ -3615,6 +3915,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3666,6 +3967,7 @@ async fn same_nick_late_join_replays_existing_muji_with_exact_owner() {
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3743,6 +4045,7 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         state.as_ref(),
         &mobile_phase,
         &Some(owner_session),
+        None,
     )
     .await;
 
@@ -3838,6 +4141,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -3851,6 +4155,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         state.as_ref(),
         &mobile_phase,
         &None,
+        None,
     )
     .await;
 
@@ -3940,6 +4245,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while mobile_rx.try_recv().is_ok() {}
@@ -4034,6 +4340,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         state.as_ref(),
         &desktop_phase,
         &Some(owner_session.clone()),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4048,6 +4355,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         state.as_ref(),
         &mobile_phase,
         &Some(owner_session),
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4391,5 +4699,155 @@ async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
     assert!(
         recorder.snapshot().is_empty(),
         "a role change that keeps the occupant must not end their call session"
+    );
+}
+
+/// Round-3 concurrency review: MUC occupancy is keyed by FULL JID, so
+/// a detached session's invalidation cleanup must NOT evict the JID
+/// from its rooms while a live same-JID replacement session exists —
+/// the replacement shares the occupancy and would be kicked out of
+/// every room it just (re)joined.
+#[tokio::test]
+async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() {
+    use super::cleanup::cleanup_invalidated_detached_session;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "replacement-race-channel@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+
+    // A live replacement session holds the registry slot for the SAME
+    // full JID (fresh bind after the old session detached).
+    let (repl_tx, _repl_rx) = mpsc::channel::<OutboundStanza>(4);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), repl_tx);
+
+    // The stale detached session (a stream id the registry no longer
+    // holds) gets invalidated.
+    let detached = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: "stale-stream".to_string(),
+        user_id: "alice@example.com".to_string(),
+        jid: alice.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    cleanup_invalidated_detached_session(state.as_ref(), detached.clone(), None).await;
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.find_nick_by_real_jid(&alice),
+        Some("alice"),
+        "the live replacement's room occupancy must survive the stale \
+         detached session's invalidation cleanup"
+    );
+
+    // Companion: with no live entry for the JID, the invalidation DOES
+    // evict the occupancy.
+    state.deps.protocol.connection_registry.unregister(&alice);
+    cleanup_invalidated_detached_session(state.as_ref(), detached, None).await;
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.find_nick_by_real_jid(&alice).is_none(),
+        "with no live replacement the invalidated session's occupancy \
+         must be cleaned up"
+    );
+}
+
+/// codex P1 on PR #1207: when the invalidation is triggered BY the
+/// same client's fresh bind (the replacement owner IS the invalidating
+/// caller), the new stream cannot have joined any rooms yet — the dead
+/// session's occupancies are certainly stale and MUST be cleaned, or
+/// the fresh connection inherits room fan-out without ever joining.
+/// Only a FOREIGN live entry (someone else's slot, unknown join state)
+/// warrants skipping room cleanup.
+#[tokio::test]
+async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
+    use super::cleanup::cleanup_invalidated_detached_session;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "fresh-bind-cleanup-channel@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+
+    // The same client fresh-binds: its NEW connection owns the slot and
+    // triggers invalidation of the old detached session.
+    let (fresh_tx, _fresh_rx) = mpsc::channel::<OutboundStanza>(4);
+    let fresh_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), fresh_tx);
+
+    let detached = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: "stale-stream-fresh-bind".to_string(),
+        user_id: "alice@example.com".to_string(),
+        jid: alice.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    cleanup_invalidated_detached_session(state.as_ref(), detached, Some(&fresh_owner)).await;
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.find_nick_by_real_jid(&alice).is_none(),
+        "a fresh bind's invalidation must clean the dead session's room \
+         occupancy — the new stream has not joined anything yet"
     );
 }

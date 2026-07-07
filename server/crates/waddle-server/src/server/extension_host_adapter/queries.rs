@@ -176,14 +176,15 @@ impl ExtensionHostAdapter {
             .await
         {
             Ok(states) => {
-                out.extend(states.into_iter().map(|(jid, show, status, priority)| {
+                out.extend(states.into_iter().map(|state| {
                     HostPresence {
-                        jid,
-                        show: show
+                        jid: state.resource,
+                        show: state
+                            .show
                             .map(host_presence_show)
                             .unwrap_or(HostPresenceShow::Available),
-                        status,
-                        priority,
+                        status: state.status,
+                        priority: state.priority,
                     }
                 }));
             }

@@ -383,6 +383,8 @@ mod tests {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         }
     }
 
@@ -502,7 +504,8 @@ mod tests {
                 waddle_xmpp::muc::RoomConfig::default(),
             )
             .await
-            .expect("create room");
+            .expect("create room")
+            .actor_ref;
         actor.kill();
         actor.wait_for_shutdown().await;
 
@@ -560,7 +563,8 @@ mod tests {
                 waddle_xmpp::muc::RoomConfig::default(),
             )
             .await
-            .expect("create room");
+            .expect("create room")
+            .actor_ref;
         assert!(actor_ref.is_alive());
 
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());

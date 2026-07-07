@@ -22,6 +22,18 @@ pub struct DetachedSessionSnapshot {
     pub presence_show: Option<xmpp_parsers::presence::Show>,
     pub presence_status: Option<String>,
     pub presence_priority: i8,
+    /// Presence extension payloads (XEP-0115 caps, XEP-0319 idle, ...)
+    /// last broadcast by the resource, carried into the detached session
+    /// so probe/subscription delivery can relay them verbatim while the
+    /// stream awaits resume (issue #1103).
+    pub presence_payloads: Vec<minidom::Element>,
+    /// Whether the session's once-per-session pending-subscribe flush
+    /// (RFC 6121 §3.1.3, issue #1104) was already consumed before
+    /// detach. Carried explicitly — it cannot be inferred from
+    /// `presence_available`, because a session that went available
+    /// (claim consumed) and then unavailable before detaching must not
+    /// re-arm the claim on resume.
+    pub pending_subscribes_flushed: bool,
 }
 
 /// Stream management state for a connection.
@@ -226,6 +238,33 @@ impl StreamManagementState {
         }
     }
 
+    /// Whether a client `<a h='N'/>` claims more stanzas handled than
+    /// this stream has sent (XEP-0198 §4 handled-count-too-high).
+    ///
+    /// Judged as an EXACT mod-2^32 window measured from `last_acked`:
+    /// a valid `h` sits inside `[last_acked, outbound_count]`, so an
+    /// ack a few stanzas behind a freshly-wrapped `outbound_count` is
+    /// valid, while the half-space comparison's blind spot at exactly
+    /// distance 2^31 (`h == outbound_count + 0x8000_0000`) is
+    /// rejected instead of poisoning `last_acked`. The regressed
+    /// half-space also measures "outside the window" here; callers
+    /// must run [`Self::ack_regresses_last_acked`] FIRST so a stale
+    /// mod-behind `h` is ignored rather than reclassified as too-high.
+    pub fn ack_exceeds_outbound(&self, h: u32) -> bool {
+        h.wrapping_sub(self.last_acked) > self.outbound_count.wrapping_sub(self.last_acked)
+    }
+
+    /// Whether a client `<a h='N'/>` regressed mod-2^32 behind what it
+    /// already acknowledged. XEP-0198 `h` is monotone; such an ack is a
+    /// stale duplicate or garbage. It must be ignored wholesale: the
+    /// wrap-aware too-high guard alone classifies the wrap-behind
+    /// half-space as "valid", and the numeric `<= h` range-delete on
+    /// pending rows would then destroy every claimed row (round-2
+    /// concurrency review on #1099).
+    pub fn ack_regresses_last_acked(&self, h: u32) -> bool {
+        sequence_gt(self.last_acked, h)
+    }
+
     /// Get the current inbound count for sending in an <a/> response.
     pub fn get_inbound_count(&self) -> u32 {
         self.inbound_count
@@ -311,6 +350,8 @@ impl StreamManagementState {
             presence_show: snapshot.presence_show,
             presence_status: snapshot.presence_status,
             presence_priority: snapshot.presence_priority,
+            presence_payloads: snapshot.presence_payloads,
+            pending_subscribes_flushed: snapshot.pending_subscribes_flushed,
         })
     }
 
@@ -360,6 +401,55 @@ mod tests {
 
         state.acknowledge(2);
         assert_eq!(state.unacked_count(), 1);
+    }
+
+    /// XEP-0198 §4 too-high detection must be an EXACT mod-2^32 window
+    /// measured from `last_acked`, not a half-space comparison:
+    /// `sequence_gt` is false at exactly distance 2^31, so
+    /// `h == outbound_count + 0x8000_0000` used to slip through,
+    /// poison `last_acked`, and corrupt replay/pending state.
+    #[test]
+    fn ack_exceeds_outbound_is_an_exact_window_from_last_acked() {
+        let mut state = StreamManagementState::new();
+        state.enable("exact-window".to_string(), true, Some(300));
+        state.outbound_count = 2;
+        state.last_acked = 2;
+
+        assert!(
+            !state.ack_exceeds_outbound(2),
+            "h == outbound is a valid full ack"
+        );
+        assert!(
+            state.ack_exceeds_outbound(2u32.wrapping_add(0x7fff_ffff)),
+            "h just below the half-space boundary is too high"
+        );
+        assert!(
+            state.ack_exceeds_outbound(2u32.wrapping_add(0x8000_0000)),
+            "h at exactly distance 2^31 is too high (the sequence_gt corner)"
+        );
+        assert!(
+            state.ack_exceeds_outbound(2u32.wrapping_add(0x8000_0001)),
+            "the regressed half-space measures outside the exact window \
+             (the live path ignores it via the regress check running first)"
+        );
+    }
+
+    /// The exact window must stay wrap-aware: with `outbound_count`
+    /// wrapped past 2^32 and `last_acked` just behind the wrap, an `h`
+    /// inside [last_acked, outbound] is valid whichever side of the
+    /// wrap it sits on.
+    #[test]
+    fn ack_exceeds_outbound_accepts_valid_h_across_the_wrap() {
+        let mut state = StreamManagementState::new();
+        state.enable("wrap-window".to_string(), true, Some(300));
+        state.outbound_count = 2;
+        state.last_acked = u32::MAX - 1;
+
+        assert!(!state.ack_exceeds_outbound(u32::MAX - 1));
+        assert!(!state.ack_exceeds_outbound(u32::MAX));
+        assert!(!state.ack_exceeds_outbound(0));
+        assert!(!state.ack_exceeds_outbound(2));
+        assert!(state.ack_exceeds_outbound(3));
     }
 
     #[test]
@@ -504,6 +594,8 @@ mod tests {
                 presence_show: Some(xmpp_parsers::presence::Show::Chat),
                 presence_status: Some("ready".to_string()),
                 presence_priority: 7,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
             })
             .expect("resumable state must produce detached session");
         assert!(
@@ -530,6 +622,8 @@ mod tests {
                 presence_show: None,
                 presence_status: None,
                 presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
             })
             .expect("resumable state must produce detached session");
         assert!(
@@ -603,6 +697,8 @@ mod tests {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         };
         let mut state = StreamManagementState::with_config(1000, 3);
         state.restore_from_session(&detached);

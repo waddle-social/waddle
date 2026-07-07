@@ -143,7 +143,19 @@ pub fn parse_subscription_presence(
         return Ok(PresenceAction::Subscription(request));
     }
 
-    Ok(PresenceAction::PresenceUpdate(pres.clone()))
+    // Only the normal available (no type attribute) and unavailable forms are
+    // broadcastable presence updates. Anything else that reaches this point
+    // (i.e. type="error") must never be relayed to subscribers — the caller
+    // logs and drops it without answering (RFC 6120 §8.3.1: never respond to
+    // an error with an error).
+    match pres.type_ {
+        PresenceType::None | PresenceType::Unavailable => {
+            Ok(PresenceAction::PresenceUpdate(pres.clone()))
+        }
+        ref other => Err(CoreError::bad_request(Some(format!(
+            "presence of type {other:?} is not a broadcastable presence update"
+        )))),
+    }
 }
 
 /// Build a subscription presence stanza.

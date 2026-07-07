@@ -2206,7 +2206,8 @@ async fn run_group_dm_rename(
             config: group_dm_record_config(&record),
         })
         .await
-        .map_err(send_err("room_registry ask GetOrCreateRoom"))?;
+        .map_err(send_err("room_registry ask GetOrCreateRoom"))?
+        .actor_ref;
     hydrate_group_dm_member_affiliations(state, &actor, &channel_id).await?;
     let snapshot = actor
         .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
@@ -4256,7 +4257,7 @@ mod sfu_eviction_tests {
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use crate::server::routes::websocket::tests::RecordingSfu;
     use crate::server::AppState;
-    use waddle_xmpp::muc::room_actor::JoinWithAffiliation;
+    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::muc::RoomConfig;
 
     async fn fresh_state() -> AppState {
@@ -4283,13 +4284,14 @@ mod sfu_eviction_tests {
                 },
             })
             .await
-            .expect("room actor");
+            .expect("room actor")
+            .actor_ref;
         let bob: FullJid = "bob@localhost/web".parse().expect("bob jid");
         actor
             .ask(JoinWithAffiliation {
                 sender_jid: bob.clone(),
                 nick: "bob".to_string(),
-                effective_affiliation: Affiliation::Member,
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "localhost".to_string(),
                 admission_revision: 0,
             })

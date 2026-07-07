@@ -29,8 +29,8 @@ use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_conte
 use waddle_extensions::ExtensionConfig;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_actor::{
-    ApplyAdminItems, ChangeAffiliation, GetConfig, GetSnapshot, JoinWithAffiliation, SetSubject,
-    UpdateConfig,
+    ApplyAdminItems, ChangeAffiliation, GetConfig, GetSnapshot, JoinAffiliationGrant,
+    JoinWithAffiliation, SetSubject, UpdateConfig,
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Affiliation;
@@ -93,12 +93,16 @@ pub(crate) async fn create_test_websocket_state_with_clustering(
 /// Tests that drive delivery or bare-JID selection through the actor cutover
 /// MUST use this instead of a bare `connection_registry.register(...)`;
 /// otherwise the actor tree is empty and the cutover paths resolve no target.
+///
+/// Returns the same owner token `connection_registry.register(...)` would —
+/// callers exercising the owner-gated presence/SM writes (#1208) carry it on
+/// their fixture's `registry_owner` exactly like real registration does.
 pub(crate) async fn register_test_connection(
     state: &WebSocketState,
     jid: &jid::FullJid,
     sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
-) {
-    state
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let owner = state
         .deps
         .protocol
         .connection_registry
@@ -123,6 +127,7 @@ pub(crate) async fn register_test_connection(
         registered,
         "test dual-registration should confirm the resource in the actor tree for {jid}"
     );
+    owner
 }
 
 /// Build a test [`WebSocketState`] with an arbitrary [`SfuService`]

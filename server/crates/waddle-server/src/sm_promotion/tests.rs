@@ -102,6 +102,8 @@ fn detached_session_with_unacked(
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -174,10 +176,11 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         Ok(0)
     }
-    async fn delete_acked_through(
+    async fn delete_acked_in_window(
         &self,
         _session: &waddle_xmpp::pending_delivery::SmSessionId,
-        _sequence_max: u32,
+        _from_exclusive: u32,
+        _to_inclusive: u32,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         Ok(0)
     }
@@ -786,6 +789,8 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
 
     let summary = promote_session_unacked(
@@ -1829,12 +1834,15 @@ impl PendingDeliveryStorage for RetractDuringInsertPending {
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner.record_pushed_at(id, sequence).await
     }
-    async fn delete_acked_through(
+    async fn delete_acked_in_window(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
-        sequence_max: u32,
+        from_exclusive: u32,
+        to_inclusive: u32,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
-        self.inner.delete_acked_through(session, sequence_max).await
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
     }
     async fn list_orphaned_claims(
         &self,
@@ -2026,12 +2034,15 @@ impl PendingDeliveryStorage for FlakyPending {
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner.record_pushed_at(id, sequence).await
     }
-    async fn delete_acked_through(
+    async fn delete_acked_in_window(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
-        sequence_max: u32,
+        from_exclusive: u32,
+        to_inclusive: u32,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
-        self.inner.delete_acked_through(session, sequence_max).await
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
     }
     async fn list_orphaned_claims(
         &self,

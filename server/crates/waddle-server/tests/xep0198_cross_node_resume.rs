@@ -171,6 +171,8 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -779,7 +781,7 @@ async fn resume_retransmit_race_against_the_same_new_node_dedups_without_double_
 /// `pending_delivery` table, exactly like every other cross-node
 /// simulation in this suite), so the Phase-3-reachable half this test
 /// proves is the part that actually matters post-move: the SM-ack-keyed
-/// delete path (`delete_acked_through`) is idempotent under retry — a
+/// delete path (`delete_acked_in_window`) is idempotent under retry — a
 /// retried ack (e.g. the client's `<a h='N'/>` re-arriving, or the
 /// recovering session's own at-least-once redelivery of the same ack)
 /// dedups to a clean no-op rather than erroring or double-processing.
@@ -859,20 +861,20 @@ async fn recipient_claim_move_retry_dedups_pending_delivery_delete() {
     );
 
     // The resumed session's ack (h=1) deletes the row — the retry path
-    // dedups: a second, retried delete_acked_through for the SAME h is a
+    // dedups: a second, retried delete_acked_in_window for the SAME h is a
     // clean no-op, never an error and never a double-delete side effect.
     let removed_first = pending_storage
-        .delete_acked_through(&session_id, 1)
+        .delete_acked_in_window(&session_id, 0, 1)
         .await
-        .expect("delete_acked_through");
+        .expect("delete_acked_in_window");
     assert_eq!(
         removed_first, 1,
         "the claimed, pushed row is deleted on first ack"
     );
     let removed_retry = pending_storage
-        .delete_acked_through(&session_id, 1)
+        .delete_acked_in_window(&session_id, 0, 1)
         .await
-        .expect("delete_acked_through retry");
+        .expect("delete_acked_in_window retry");
     assert_eq!(
         removed_retry, 0,
         "a retried ack for the same h must dedup to zero rows removed, not error or re-delete"

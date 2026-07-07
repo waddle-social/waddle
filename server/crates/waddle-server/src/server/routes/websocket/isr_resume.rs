@@ -110,6 +110,8 @@ pub(super) async fn handle_isr_resume_authenticate(
         presence_show,
         presence_status,
         presence_priority,
+        presence_payloads,
+        pending_subscribes_flushed,
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
@@ -428,6 +430,13 @@ pub(super) async fn handle_isr_resume_authenticate(
     *presence_show = detached.presence_show.clone();
     *presence_status = detached.presence_status.clone();
     *presence_priority = detached.presence_priority;
+    // #1103/#1104: restore the stored extension payloads (XEP-0115 caps,
+    // XEP-0319 idle, …) and the once-per-session pending-subscribe claim
+    // exactly like `handle_sm_resume`'s tail — an ISR resume is the SAME
+    // session, so it must not lose extension payloads or re-prompt a
+    // subscribe the detached session already answered.
+    *presence_payloads = detached.presence_payloads.clone();
+    *pending_subscribes_flushed = detached.pending_subscribes_flushed;
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
