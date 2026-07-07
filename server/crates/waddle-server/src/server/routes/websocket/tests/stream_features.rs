@@ -23,6 +23,19 @@ async fn rfc6121_features_advertise_subscription_preapproval() {
     );
 }
 
+#[tokio::test]
+async fn features_do_not_advertise_isr() {
+    // Issue #1169: `urn:xmpp:isr:0` was advertised without a
+    // conformant handshake behind it. The advertisement is removed;
+    // pin that no `<isr/>` child reappears in post-auth features.
+    let features = build_stream_features_xml(true);
+    let el = Element::from_str(&features).expect("features xml");
+    assert!(
+        !el.children().any(|child| child.ns() == "urn:xmpp:isr:0"),
+        "stream features must not advertise urn:xmpp:isr:0"
+    );
+}
+
 #[test]
 fn session_init_failure_uses_standalone_stream_error_plus_websocket_close() {
     let stream_error = build_internal_server_error_stream_error(

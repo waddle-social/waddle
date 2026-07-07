@@ -218,7 +218,6 @@ pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
         // XEP-0198: advertise stream management so clients can <enable/> it
         // after bind or <resume/> a detached session.
         features = features.append(Element::builder("sm", SM_NS).build());
-        features = features.append(Element::builder("isr", waddle_xmpp::isr::ISR_NS).build());
     } else {
         features = features.append(
             Element::builder("mechanisms", waddle_xmpp::ns::SASL)
