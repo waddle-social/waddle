@@ -34,14 +34,16 @@ Bundles marked `[one PR]` touch the same files and should land together.
 3. ✅ **#1169 — ISR: dropped `urn:xmpp:isr:0` advert + bespoke `format!`-XML token scheme (removal was the conformant choice; nothing depended on it). DONE (PR #1211, merged).**
 4. #1150 — fix all 7 wire deviations (0452, 0500, 0502, 0446, 0433, 0488, 0448). L.
 
-### Lane B — SFU / calls reliability `[one PR bundle]`
-1. #1131 — survivor hangup gets `<forbidden/>`; XEP-0166 §6.7 wants item-not-found/unknown-session or idempotent ack. Pairs with #1128.
-2. #1128 — webhook cleanup no-op for 1:1 calls (BareJid parse gate).
-3. #1130 — forwarded call IQ to offline peer silently dropped → synthesize `service-unavailable` (RFC 6120 §8.5.3).
-4. #1127 — reconciler mass-teardown on LiveKit restart.
-5. #1129 — `clear_local_state` clobbers concurrent joiner.
-6. #1142 — one JWT per `<content/>` burns JTI budget. S.
-7. #1140 — backdate join-token `nbf` for clock skew. S.
+### Lane B — SFU / calls reliability `[one PR bundle]` — ✅ **DONE (PR #1210, merged)**
+1. ✅ #1131 — survivor hangup no longer `<forbidden/>`; XEP-0166 §6.7 4-case handler (ack / item-not-found + unknown-session / forbidden). Also: an undeliverable session-terminate now acks (hangup succeeds).
+2. ✅ #1128 — 1:1 webhook cleanup keyed on raw CallId; MUC/BareJid Muji path preserved.
+3. ✅ #1130 — offline-peer request IQ → typed `service-unavailable` (echoes payload, RFC 6120 §8.3.1); transient failures not misreported.
+4. ✅ #1127 — reconciler two-pass absence streak before teardown.
+5. ✅ #1129 — `clear_local_state` atomic `emptied` gate, no concurrent-joiner clobber.
+6. ✅ #1142 — one JWT per participant shared across contents.
+7. ✅ #1140 — join-token `nbf` backdated by shared 30s skew constant.
+
+_Residual (tracked, not #945-gating): survivor-check TOCTOU needs per-call locking → #1148/#1195._
 
 ### Lane C — Push server reliability + conformance
 1. #1123 + #1124 + #1126 `[one PR]` — duplicate/spurious push trio: partial-success retry re-sends delivered devices; janitor sweeps live transient flush claims; suppress at unread=0 + retry jitter. (#1124 also touches `pending_delivery` — coordinate with Lane H work.)
