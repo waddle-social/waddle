@@ -43,7 +43,7 @@ fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
 #[tokio::test]
 async fn sm_features_advertise_sm_namespace() {
     // Stream features after successful auth must include <sm/>.
-    let features = build_stream_features_xml(true);
+    let features = build_stream_features_xml(true, false);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children()
@@ -2768,6 +2768,7 @@ mod fix3_shutdown_race {
             local_claims: None,
             room_local_claims: None,
             muc_durable_store: None,
+            isr_token_store: None,
             node_lease: None,
             lease_ttl: None,
             resume_bridge: None,
@@ -2982,6 +2983,20 @@ mod fix_a_post_cas_shutdown {
                 .ensure_schema()
                 .await
                 .expect("ensure claims schema");
+            // Provision the SM schema BEFORE cleaning it: under CI's fresh
+            // per-run Postgres this test can be the first to touch
+            // sm_sessions/sm_unacked, and a bare DELETE against a
+            // not-yet-created table fails 42P01 (caught by nixTest on the
+            // Slice 7 push — locally another suite always ran first).
+            let schema_identity = SharedNodeIdentity::new(node_identity());
+            let schema_claims: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+            let _schema_only = PostgresFencedSmPersistence::open(
+                db.clone(),
+                Arc::clone(&schema_claims),
+                schema_identity,
+            )
+            .await
+            .expect("provision sm schema");
             let conn = db.guard().await.expect("guard");
             conn.execute("DELETE FROM clustering_claims", ())
                 .await
@@ -3079,6 +3094,7 @@ mod fix_a_post_cas_shutdown {
             local_claims: None,
             room_local_claims: None,
             muc_durable_store: None,
+            isr_token_store: None,
             node_lease: None,
             lease_ttl: None,
             resume_bridge: None,
