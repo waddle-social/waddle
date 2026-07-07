@@ -500,17 +500,36 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
-    async fn delete_acked_through(
+    async fn delete_acked_in_window(
         &self,
         session: &SmSessionId,
-        sequence_max: u32,
+        from_exclusive: u32,
+        to_inclusive: u32,
     ) -> Result<u64, PendingStorageError> {
-        self.execute(
+        // SQL mirror of `waddle_xmpp::pending_delivery::sequence_in_ack_window`
+        // (mod-2^32 interval `(from, to]`): plain `> from AND <= to` when
+        // the window doesn't wrap, `> from OR <= to` when it spans the
+        // u32 wrap. `outbound_sequence IS NOT NULL` keeps claimed-but-
+        // unpushed rows untouched in both branches.
+        let sql = if from_exclusive <= to_inclusive {
             "DELETE FROM pending_delivery \
              WHERE flushed_in_session = ? \
                AND outbound_sequence IS NOT NULL \
-               AND outbound_sequence <= ?",
-            crate::db_params![session.as_str().to_string(), i64::from(sequence_max)],
+               AND outbound_sequence > ? \
+               AND outbound_sequence <= ?"
+        } else {
+            "DELETE FROM pending_delivery \
+             WHERE flushed_in_session = ? \
+               AND outbound_sequence IS NOT NULL \
+               AND (outbound_sequence > ? OR outbound_sequence <= ?)"
+        };
+        self.execute(
+            sql,
+            crate::db_params![
+                session.as_str().to_string(),
+                i64::from(from_exclusive),
+                i64::from(to_inclusive)
+            ],
         )
         .await
     }

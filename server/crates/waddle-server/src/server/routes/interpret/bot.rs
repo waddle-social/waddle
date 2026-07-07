@@ -292,7 +292,7 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
         .ask(JoinWithAffiliation {
             sender_jid: bot_full.clone(),
             nick: bot_nick.clone(),
-            effective_affiliation: waddle_xmpp::Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
             local_domain: state.deps.auth_state.xmpp_domain.clone(),
             admission_revision: initial_snapshot.admission_revision,
         })

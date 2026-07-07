@@ -37,12 +37,12 @@ pub(super) async fn handle_presence_probe(
     };
     if let Some(to_full) = &to_full {
         available.retain(|(resource, _)| resource == to_full);
-        detached_available.retain(|(resource, _, _, _)| resource == to_full);
+        detached_available.retain(|state| state.resource == *to_full);
     }
-    detached_available.retain(|(resource, _, _, _)| {
+    detached_available.retain(|state| {
         !available
             .iter()
-            .any(|(live_resource, _)| live_resource == resource)
+            .any(|(live_resource, _)| *live_resource == state.resource)
     });
     if available.is_empty() && detached_available.is_empty() {
         let unavailable = Stanza::Presence(if let Some(to_full) = &to_full {
@@ -74,14 +74,19 @@ pub(super) async fn handle_presence_probe(
         .protocol
         .connection_registry
         .get_resources_for_user(&from);
-    for (resource, show, status, priority) in detached_available {
-        let presence = Stanza::Presence(build_available_presence(
-            &resource,
+    for detached in detached_available {
+        let mut probe_response = build_available_presence(
+            &detached.resource,
             &from,
-            show.as_ref().map(show_name),
-            status.as_deref(),
-            priority,
-        ));
+            detached.show.as_ref().map(show_name),
+            detached.status.as_deref(),
+            detached.priority,
+        );
+        // Relay the detached resource's own stored extension payloads
+        // (XEP-0115 caps, XEP-0319 idle, anything else) verbatim, exactly
+        // like the live branch below (issue #1103).
+        probe_response.payloads.extend(detached.payloads);
+        let presence = Stanza::Presence(probe_response);
         for requester_resource in &requester_resources {
             let _ = state
                 .deps

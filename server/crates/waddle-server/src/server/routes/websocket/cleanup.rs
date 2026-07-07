@@ -2,7 +2,8 @@ use super::*;
 use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
-use waddle_xmpp::muc::room_actor::LeaveOutcome;
+use waddle_xmpp::muc::room_actor::{LeaveOutcome, SealGuard};
+use waddle_xmpp::muc::room_registry_actor::RoomAcquisition;
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -160,18 +161,38 @@ pub(crate) async fn maybe_evict_empty_room(
     if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
         return;
     }
-    if destroy_room_actor(state, room_jid).await {
+    // #1108: revision-guarded destroy. The registry asks the room actor
+    // to seal itself only if it is still empty at the occupancy revision
+    // captured by this leave — a join admitted after the leave bumps the
+    // revision and the destroy refuses instead of orphaning the fresh
+    // occupant.
+    let destroyed = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .destroy_room_if_inactive(
+            room_jid.clone(),
+            outcome.occupancy_revision,
+            SealGuard::EmptyNonPersistent,
+        )
+        .await
+    {
+        Ok(destroyed) => destroyed,
+        Err(error) => {
+            warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
+            false
+        }
+    };
+    if destroyed {
         debug!(
             room = %room_jid,
             "Evicted empty non-persistent MUC room from registry"
         );
     } else {
         // Either the room was already absent (race with another leave
-        // path) or `destroy_room_actor` logged a registry-ask failure.
-        // Either way we don't want to fail the user's leave on this.
+        // path), a new occupant was admitted after this leave, or the
+        // registry ask failed (logged). Either way we don't want to
+        // fail the user's leave on this.
         debug!(
             room = %room_jid,
-            "Eviction round-trip returned false; registry already cleared or ask failed (logged)"
+            "Guarded eviction returned false; room re-admitted an occupant, was already cleared, or ask failed (logged)"
         );
     }
 }
@@ -275,6 +296,16 @@ pub(super) async fn cleanup_connection_shutdown(
                     .as_ref()
                     .map(|state| state.priority)
                     .unwrap_or_else(|| entry.presence_priority()),
+                presence_payloads: presence_state
+                    .map(|state| state.payloads)
+                    .unwrap_or_default(),
+                // The once-per-session claim state travels with the
+                // detached session (not inferred from presence): a
+                // session that went available then unavailable before
+                // detaching keeps its consumed claim across resume.
+                pending_subscribes_flushed: entry
+                    .pending_subscribes_flushed
+                    .load(std::sync::atomic::Ordering::Acquire),
             },
         ) {
             let stream_id = detached.stream_id.clone();
@@ -459,15 +490,21 @@ pub(super) async fn cleanup_connection_shutdown(
         }
     }
 
-    let removed_owner = conn.registry_owner.as_ref().and_then(|owner| {
+    let removed = conn.registry_owner.as_ref().and_then(|owner| {
         state
             .deps
             .protocol
             .connection_registry
             .unregister_if_owner(&jid, owner)
-            .map(|_| std::sync::Arc::clone(owner))
+            .map(|entry| (entry, std::sync::Arc::clone(owner)))
     });
-    if let Some(owner) = removed_owner {
+    if let Some((removed_entry, owner)) = removed {
+        // Capture presence availability from the entry we just owned and
+        // removed — NOT from a fresh registry lookup, which after the
+        // unregister could only observe a replacement connection's state.
+        // The flag is only true if this session actually sent initial
+        // available presence (RFC 6121 §4.2.2) and did not retract it.
+        let was_presence_available = removed_entry.is_presence_available();
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
         // the dominant disconnect teardown path. Owner-gated (the same token
         // that owned the DashMap entry) so a superseding newcomer that
@@ -484,10 +521,53 @@ pub(super) async fn cleanup_connection_shutdown(
         // circuits the disco#info round-trip.
         state.deps.protocol.caps_resolver.drop_resource(&jid);
         info!(jid = %jid, "WebSocket connection unregistered");
+        broadcast_unavailable_if_no_replacement(state, &jid, was_presence_available).await;
         cleanup_muc_presence(state, &jid).await;
     } else {
         debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
     }
+}
+
+/// RFC 6121 §4.5.2: an ungraceful session end (connection drop with no
+/// self-sent unavailable) requires the SERVER to broadcast `<presence
+/// type='unavailable'/>` from this full JID to the user's presence
+/// subscribers (#1105).
+///
+/// Gated twice. `was_presence_available` comes from the entry the caller
+/// just owned and removed — a bound-but-silent resource advertised
+/// nothing, so there is nothing to retract. And a fresh registry lookup
+/// must find no PRESENCE-AVAILABLE replacement for this full JID: the
+/// owner-gated unregister only protects the map slot, not ordering
+/// against a replacement's presence — broadcasting after the newcomer's
+/// available would leave subscribers on a stale unavailable for a JID
+/// that is online (round-2 concurrency review). A replacement that is
+/// merely REGISTERED has broadcast nothing yet, so suppression would be
+/// wrong there: if it never sends presence, subscribers keep the
+/// dropped session's stale available forever. Broadcasting is correct
+/// in every interleaving of that case — the replacement's future
+/// available lands after our unavailable and wins (round-3 review).
+pub(crate) async fn broadcast_unavailable_if_no_replacement(
+    state: &WebSocketState,
+    jid: &FullJid,
+    was_presence_available: bool,
+) {
+    if !was_presence_available {
+        return;
+    }
+    if state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(jid)
+        .is_some_and(|entry| entry.is_presence_available())
+    {
+        debug!(
+            jid = %jid,
+            "Suppressed terminated-session unavailable: an available replacement connection is live"
+        );
+        return;
+    }
+    handlers::presence::broadcast_unavailable_for_terminated_session(state, jid).await;
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
@@ -604,14 +684,37 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .caps_resolver
             .drop_resource(&detached.jid);
     }
-    if detached.presence_available && !replacement_is_current_owner {
-        handlers::presence::broadcast_unavailable_for_expired_detached_session(
-            state,
-            &detached.jid,
-        )
+    // Same rule as the unclean-disconnect path: the helper suppresses
+    // the broadcast ONLY when the current registry entry is
+    // presence-AVAILABLE. A replacement that merely OWNS the slot but
+    // never sent presence has broadcast nothing yet — suppressing here
+    // would pin subscribers on this detached session's stale available
+    // forever if the replacement stays silent. So we pass the detached
+    // session's own availability unchanged and let the helper decide.
+    broadcast_unavailable_if_no_replacement(state, &detached.jid, detached.presence_available)
         .await;
+    // MUC occupancy is keyed by FULL JID, so a live same-JID session
+    // shares the room occupancies this stale detached session would
+    // evict. Two cases (codex P1 on PR #1207):
+    //  - The live entry IS the invalidating caller (fresh bind / failed
+    //    resume registering right now): its new stream cannot have
+    //    joined any rooms yet, so the occupancies are certainly the
+    //    dead session's — clean them, or the fresh connection inherits
+    //    room fan-out without ever joining.
+    //  - A FOREIGN live entry (third-party replacement, janitor-driven
+    //    invalidation): it may have legitimately re-joined rooms under
+    //    the shared full JID — skip cleanup; its own disconnect path
+    //    cleans up when it ends.
+    let foreign_live_entry = !replacement_is_current_owner
+        && state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&detached.jid)
+            .is_some();
+    if !foreign_live_entry {
+        cleanup_muc_presence(state, &detached.jid).await;
     }
-    cleanup_muc_presence(state, &detached.jid).await;
 }
 
 pub(crate) async fn get_room_actor(
@@ -630,18 +733,23 @@ pub(crate) async fn get_room_actor(
     }
 }
 
+/// Get or create the room via the registry. The returned
+/// [`RoomAcquisition`] carries the registry-authoritative created-bit
+/// (#1134): only the caller that observes `RoomCreation::Created`
+/// actually created the room and may grant itself the XEP-0045
+/// §10.1.1 creator Owner.
 pub(crate) async fn get_or_create_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
     config: RoomConfig,
     waddle_id: String,
     channel_id: String,
-) -> Option<ActorRef<RoomActor>> {
+) -> Option<RoomAcquisition> {
     match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .get_or_create_room(room_jid.clone(), waddle_id, channel_id, config)
         .await
     {
-        Ok(actor) => Some(actor),
+        Ok(acquisition) => Some(acquisition),
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to get or create room actor");
             None
@@ -721,7 +829,8 @@ mod eviction_tests {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
 
         let alice = full_jid("alice@example.com/r1");
         room_actor
@@ -834,7 +943,8 @@ mod eviction_tests {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
 
         let alice = full_jid("alice@example.com/r1");
         let bob = full_jid("bob@example.com/r1");

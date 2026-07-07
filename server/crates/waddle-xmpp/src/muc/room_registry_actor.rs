@@ -15,7 +15,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::affiliation::DurableMembershipSource;
-use super::room_actor::{HydrateDurableRecipients, RoomActor};
+use super::room_actor::{HydrateDurableRecipients, IsSealed, RoomActor, SealGuard, SealIfInactive};
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
 use crate::xep::xep0421::OccupantIdSecret;
@@ -159,6 +159,27 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
     }
 }
 
+/// Whether a get-or-create request spawned the room or found it
+/// already registered (#1134). The registry actor's serialized
+/// mailbox guarantees exactly one caller per room lifetime observes
+/// [`RoomCreation::Created`] — that caller is the XEP-0045 §10.1.1
+/// room creator and the only one entitled to the creator Owner grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomCreation {
+    /// This request spawned the room actor: the caller created the room.
+    Created,
+    /// The room actor already existed.
+    Existing,
+}
+
+/// Reply to [`GetOrCreateRoom`] / [`CreateInstantRoom`]: the room
+/// actor plus the authoritative created-bit (#1134).
+#[derive(Clone, kameo::Reply)]
+pub struct RoomAcquisition {
+    pub actor_ref: ActorRef<RoomActor>,
+    pub creation: RoomCreation,
+}
+
 /// Get an existing room or create one if it does not exist.
 pub struct GetOrCreateRoom {
     pub room_jid: BareJid,
@@ -168,7 +189,7 @@ pub struct GetOrCreateRoom {
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
+    type Reply = Result<RoomAcquisition, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -177,14 +198,21 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
     ) -> Self::Reply {
         if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
             debug!(room = %msg.room_jid, "Room already exists");
-            return Ok(actor_ref);
+            return Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Existing,
+            });
         }
 
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
         self.poisoned_rooms.remove(&msg.room_jid);
-        Ok(self
+        let actor_ref = self
             .spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config)
-            .await)
+            .await;
+        Ok(RoomAcquisition {
+            actor_ref,
+            creation: RoomCreation::Created,
+        })
     }
 }
 
@@ -194,7 +222,7 @@ pub struct CreateInstantRoom {
 }
 
 impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
+    type Reply = Result<RoomAcquisition, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -202,7 +230,10 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
-            return Ok(actor_ref);
+            return Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Existing,
+            });
         }
 
         let room_local = msg
@@ -220,9 +251,13 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
         };
 
         self.poisoned_rooms.remove(&msg.room_jid);
-        Ok(self
+        let actor_ref = self
             .spawn_room(msg.room_jid, waddle_id, channel_id, config)
-            .await)
+            .await;
+        Ok(RoomAcquisition {
+            actor_ref,
+            creation: RoomCreation::Created,
+        })
     }
 }
 
@@ -278,6 +313,139 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         } else {
             warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
             false
+        }
+    }
+}
+
+/// Destroy a room only if it is still inactive (#1108).
+///
+/// Replaces the janitor's unconditional [`DestroyRoom`] for eviction
+/// paths. Inside this serialized registry handler, the room actor is
+/// asked to seal itself if it is still inactive at
+/// `expected_occupancy_revision` ([`SealIfInactive`]); the room
+/// actor's mailbox serializes that check against joins, so a join that
+/// raced the caller's dormancy probe either bumped the revision
+/// (→ seal refused) or is queued behind the seal and gets the typed
+/// [`RoomActorError::RoomSealed`](super::room_actor::RoomActorError::RoomSealed)
+/// refusal, which the join path retries through the registry.
+///
+/// Returns `true` when the room was sealed and removed.
+pub struct DestroyRoomIfInactive {
+    pub room_jid: BareJid,
+    pub expected_occupancy_revision: u64,
+    pub guard: SealGuard,
+}
+
+/// Bound for the in-handler seal ask so a wedged room actor cannot
+/// wedge the whole registry: shorter than
+/// [`ROOM_REGISTRY_REPLY_TIMEOUT`](super::room_registry_handle::ROOM_REGISTRY_REPLY_TIMEOUT)
+/// so the outer registry ask still gets a reply.
+const SEAL_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyRoomIfInactive,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(actor_ref) = self.rooms.get(&msg.room_jid).cloned() else {
+            return false;
+        };
+        let sealed = actor_ref
+            .ask(SealIfInactive {
+                expected_occupancy_revision: msg.expected_occupancy_revision,
+                guard: msg.guard,
+            })
+            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+            .reply_timeout(SEAL_ASK_TIMEOUT)
+            .await;
+        match sealed {
+            Ok(true) => {
+                self.rooms.remove(&msg.room_jid);
+                self.poisoned_rooms.remove(&msg.room_jid);
+                info!(room = %msg.room_jid, "Destroyed inactive room (guarded)");
+                true
+            }
+            Ok(false) => {
+                debug!(
+                    room = %msg.room_jid,
+                    "Guarded destroy refused: room no longer inactive at expected revision"
+                );
+                false
+            }
+            Err(error) => {
+                // Never remove on uncertainty. If the seal actually
+                // landed but the reply was lost, the seal is idempotent
+                // and the next sweep converges (a sealed room reports
+                // dormant and re-confirms the seal).
+                warn!(
+                    room = %msg.room_jid,
+                    error = ?error,
+                    "Guarded destroy seal ask failed; keeping the room"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Purge a sealed room actor that is still registered (#1108
+/// follow-up): when [`DestroyRoomIfInactive`]'s seal ask times out but
+/// the queued [`SealIfInactive`] lands anyway, the actor stays in the
+/// map, sealed, refusing every join. The join retry path sends this
+/// before re-running get-or-create so the room respawns immediately
+/// instead of waiting for the next janitor sweep.
+///
+/// Returns `true` when a sealed (or dead) actor was removed. Never
+/// removes on uncertainty: a timeout or an unsealed reply keeps the
+/// room.
+pub struct ReapSealedRoom {
+    pub room_jid: BareJid,
+}
+
+impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: ReapSealedRoom,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(actor_ref) = self.rooms.get(&msg.room_jid).cloned() else {
+            return false;
+        };
+        if !actor_ref.is_alive() {
+            self.rooms.remove(&msg.room_jid);
+            self.poisoned_rooms.remove(&msg.room_jid);
+            info!(room = %msg.room_jid, "Reaped dead room actor during sealed-room purge");
+            return true;
+        }
+        let sealed = actor_ref
+            .ask(IsSealed)
+            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+            .reply_timeout(SEAL_ASK_TIMEOUT)
+            .await;
+        match sealed {
+            Ok(true) => {
+                self.rooms.remove(&msg.room_jid);
+                self.poisoned_rooms.remove(&msg.room_jid);
+                info!(
+                    room = %msg.room_jid,
+                    "Reaped sealed room actor left by a timed-out guarded destroy"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                warn!(
+                    room = %msg.room_jid,
+                    error = ?error,
+                    "Sealed-room probe failed; keeping the room"
+                );
+                false
+            }
         }
     }
 }

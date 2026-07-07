@@ -18,6 +18,7 @@ mod trait_impl;
 mod traits;
 
 pub use core::InMemorySmSessionRegistry;
+pub use resources::DetachedPresenceState;
 pub use session::{DetachedSession, DetachedUnackedStanza};
 pub use tombstones::RecentTombstoneRecord;
 pub use traits::{SmClaimCompletion, SmRegistryError, SmSessionRegistry};

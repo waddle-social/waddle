@@ -277,6 +277,8 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     for sequence in 1..=(waddle_xmpp::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1)
     {
@@ -359,6 +361,8 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     state
         .deps
@@ -439,6 +443,8 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -515,6 +521,8 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -629,6 +637,512 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
     assert_eq!(ack2_el.attr("h"), Some("1"));
 }
 
+/// Enable SM on a fresh ready connection and return the negotiated
+/// stream id. Shared setup for the live `<a h='N'/>` validation tests
+/// (issue #1099).
+async fn enable_sm_for_live_ack_tests(
+    state: &super::super::state::WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+) -> String {
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state,
+        conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    assert_eq!(enabled.name(), "enabled");
+    enabled.attr("id").expect("stream id").to_string()
+}
+
+/// Seed a pending_delivery row claimed by `stream_id` whose flush
+/// stanza was recorded at `outbound_sequence`, mirroring the Q7b
+/// SM-ack lifecycle rows that `<a h='N'/>` range-deletes.
+async fn seed_claimed_pending_row(
+    state: &super::super::state::WebSocketState,
+    recipient: &BareJid,
+    stream_id: &str,
+    outbound_sequence: u32,
+) {
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new({
+                let mut m =
+                    xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+                m.id = Some(xmpp_parsers::message::Id("pd-1".to_string()));
+                m
+            })),
+            flushed_in_session: Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                stream_id.to_string(),
+            )),
+            outbound_sequence: Some(outbound_sequence),
+        })
+        .await
+        .expect("seed claimed pending_delivery row");
+}
+
+#[tokio::test]
+async fn sm_live_ack_with_impossible_handled_count_closes_stream_without_purging() {
+    // Issue #1099 / XEP-0198 §4: "If the value of 'h' is greater than
+    // the number of stanzas sent by the server... it is RECOMMENDED
+    // to close the stream with an undefined-condition stream error"
+    // carrying <handled-count-too-high/>. The live `<a h='N'/>` path
+    // previously acknowledged unconditionally, silently destroying
+    // the replay queue and the claimed pending_delivery rows.
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    // Two outbound stanzas recorded → send-count is 2.
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    // Client claims it handled 5 stanzas; we only sent 2.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='5'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        2,
+        "bogus live ack must yield stream error + close: {responses:?}"
+    );
+    let stream_error = Element::from_str(&responses[0]).expect("stream error xml");
+    assert_eq!(stream_error.name(), "error");
+    assert_eq!(stream_error.ns(), waddle_xmpp::ns::STREAM);
+    assert!(
+        responses[0].contains("undefined-condition")
+            && responses[0].contains("handled-count-too-high")
+            && (responses[0].contains("h='5'") || responses[0].contains("h=\"5\""))
+            && (responses[0].contains("send-count='2'")
+                || responses[0].contains("send-count=\"2\"")),
+        "expected handled-count-too-high stream error: {responses:?}"
+    );
+    let close = Element::from_str(&responses[1]).expect("close frame xml");
+    assert_eq!(close.name(), "close");
+    assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
+    assert!(
+        conn.phase.is_closing(),
+        "connection must be Closing after handled-count-too-high"
+    );
+
+    // Nothing was purged: both stanzas remain replayable and the
+    // claimed pending_delivery row survives.
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        2,
+        "bogus ack must not purge the replay queue"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert_eq!(rows.len(), 1, "bogus ack must not delete pending rows");
+}
+
+#[tokio::test]
+async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(responses.is_empty(), "valid ack yields no response frames");
+    assert!(!conn.phase.is_closing(), "valid ack must not close");
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        1,
+        "acked prefix must be purged, unacked tail retained"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert!(
+        rows.is_empty(),
+        "acked pending_delivery rows must be range-deleted"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
+    // Boundary: h == send-count is a full ack, not a violation
+    // (XEP-0198 §4 only forbids h GREATER than the sent count).
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='2'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(responses.is_empty(), "h == send-count is a valid full ack");
+    assert!(!conn.phase.is_closing());
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        0,
+        "full ack empties the replay queue"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_is_wrap_aware_past_u32_max() {
+    // XEP-0198 §4: counters wrap at 2^32 ("in the unlikely case that
+    // the number of stanzas handled ... exceeds 2^32"). "Greater than"
+    // must therefore be judged mod 2^32: with outbound_count wrapped
+    // to 2, a client ack of h = 4294967295 (u32::MAX, i.e. 3 stanzas
+    // behind the wrap) is VALID, not "too high".
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    // Restore counters as a wrapped session would carry them: the
+    // server has sent 2^32 + 2 stanzas, the client acked u32::MAX - 1.
+    let detached = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: stream_id.clone(),
+        user_id: "alice@example.com".to_string(),
+        jid: jid.clone(),
+        inbound_count: 0,
+        outbound_count: 2,
+        last_acked: u32::MAX - 1,
+        replay_gap_through: None,
+        unacked_stanzas: vec![
+            waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: u32::MAX,
+                stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            },
+            waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 1,
+                stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            },
+            waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 2,
+                stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            },
+        ],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    conn.sm_state.restore_from_session(&detached);
+
+    // h = u32::MAX acks the pre-wrap stanza. A naive `h > outbound`
+    // comparison would misread this as handled-count-too-high.
+    let responses = handle_xmpp_frame(
+        &waddle_xmpp::stream_management::SmAck::new(u32::MAX).to_xml(),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "wrapped ack behind the counter is valid: {responses:?}"
+    );
+    assert!(!conn.phase.is_closing(), "wrapped valid ack must not close");
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(u32::MAX).len(),
+        2,
+        "pre-wrap stanza purged; post-wrap stanzas retained"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged() {
+    // XEP-0198 §4 exact-window corner: h == outbound_count +
+    // 0x8000_0000 sits at exactly mod-2^32 distance 2^31 from the
+    // confirmed window — the one point where "ahead" and "behind" are
+    // indistinguishable. Whatever it is classified as, it MUST NOT be
+    // acknowledged (that would poison last_acked and purge the replay
+    // queue). The regress guard runs first and its half-space
+    // comparison is true at exactly 2^31, so the live path ignores it
+    // inert, exactly like any other stale mod-behind h.
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    // Full valid ack first: last_acked == outbound_count == 2.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='2'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(responses.is_empty(), "full ack is valid");
+
+    let bogus_h = 2u32.wrapping_add(0x8000_0000);
+    let responses = handle_xmpp_frame(
+        &waddle_xmpp::stream_management::SmAck::new(bogus_h).to_xml(),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "half-window h must be ignored inert: {responses:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "ignored half-window h must not close the stream"
+    );
+    // MUST NOT have acknowledged: a later in-window ack still works
+    // against uncorrupted state.
+    assert_eq!(
+        conn.sm_state.unacked_count(),
+        0,
+        "last_acked must not be poisoned by the ignored h"
+    );
+}
+
+#[tokio::test]
+async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
+    // h == outbound_count + 0x8000_0001 lands mod-2^32 BEHIND
+    // last_acked: the regress guard must ignore it wholesale (before
+    // the exact-window too-high check reclassifies it), leaving the
+    // replay queue and last_acked untouched.
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    // Partial ack: last_acked = 1, one stanza still unacked.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(responses.is_empty(), "partial ack is valid");
+
+    let stale_h = 2u32.wrapping_add(0x8000_0001);
+    let responses = handle_xmpp_frame(
+        &waddle_xmpp::stream_management::SmAck::new(stale_h).to_xml(),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "regressed-half-space h must be ignored inert: {responses:?}"
+    );
+    assert!(!conn.phase.is_closing(), "ignored ack must not close");
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(1).len(),
+        1,
+        "ignored ack must not purge the replay queue"
+    );
+}
+
+#[tokio::test]
+async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high() {
+    // Resume-path twin of the live half-window corner: a detached
+    // session with outbound_count == last_acked == 2 must reject
+    // h == 2 + 0x8000_0000 as handled-count-too-high instead of
+    // resuming and poisoning the restored counters.
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-half-window".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 2,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let bogus_h = 2u32.wrapping_add(0x8000_0000);
+    let resume_frame = resume_frame_xml("stream-half-window", bogus_h);
+    let responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert!(
+        !responses.iter().any(|frame| frame.contains("<resumed")),
+        "half-window h must not resume: {responses:?}"
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("handled-count-too-high")),
+        "expected handled-count-too-high stream error: {responses:?}"
+    );
+    assert!(
+        conn.phase.is_closing(),
+        "connection must be Closing after handled-count-too-high"
+    );
+}
+
+#[tokio::test]
+async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
+    // A resume h mod-2^32 BEHIND the detached last_acked is a failed
+    // resume (<failed/> resource-constraint via can_resume_from), NOT
+    // a handled-count-too-high stream error — matching the live path
+    // where the regress guard runs before the exact-window check.
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-regressed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 2,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let resume_frame = resume_frame_xml("stream-regressed", 1);
+    let responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("<failed") && frame.contains("resource-constraint")),
+        "regressed h must produce a failed resume: {responses:?}"
+    );
+    assert!(
+        !responses
+            .iter()
+            .any(|frame| frame.contains("handled-count-too-high")),
+        "regressed h must not be reclassified as too-high: {responses:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "failed resume keeps the stream open for a fresh session"
+    );
+}
+
 #[tokio::test]
 async fn sm_resume_restores_session_and_replays_unacked() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
@@ -667,6 +1181,8 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     state
         .deps
@@ -743,6 +1259,8 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -823,6 +1341,8 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -896,6 +1416,8 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -965,6 +1487,8 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -1042,6 +1566,8 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice laptop");
@@ -1105,6 +1631,8 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice laptop again");
@@ -1186,12 +1714,12 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
     let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(16);
-    state
+    let bob_owner = state
         .deps
         .protocol
         .connection_registry
         .register(bob_jid.clone(), bob_tx);
-    state
+    let alice_owner = state
         .deps
         .protocol
         .connection_registry
@@ -1199,6 +1727,10 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
 
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+    // #1208: presence registry writes are owner-gated; the fixture
+    // registers out-of-band, so carry the owner token like real
+    // registration does.
+    alice.registry_owner = Some(alice_owner);
     let _ = handle_xmpp_frame(
             r#"<iq xmlns="jabber:client" type="get" id="alice-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
             "example.com",
@@ -1217,6 +1749,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+    bob.registry_owner = Some(bob_owner);
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -1288,6 +1821,8 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");
@@ -1352,6 +1887,8 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");
@@ -1446,6 +1983,8 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             presence_show: Some(xmpp_parsers::presence::Show::Chat),
             presence_status: Some("ready from detach".to_string()),
             presence_priority: 7,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice web");
@@ -1535,6 +2074,8 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             presence_show: Some(xmpp_parsers::presence::Show::Away),
             presence_status: Some("stepped away".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -1635,6 +2176,8 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 presence_show: Some(show),
                 presence_status: Some(status.to_string()),
                 presence_priority: 5,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
             })
             .await
             .expect("store detached alice resource");
@@ -1706,6 +2249,8 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             presence_show: Some(xmpp_parsers::presence::Show::Away),
             presence_status: Some("private".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -1786,11 +2331,8 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
     while bob_rx.try_recv().is_ok() {}
     while alice_sibling_rx.try_recv().is_ok() {}
 
-    handlers::presence::broadcast_unavailable_for_expired_detached_session(
-        state.as_ref(),
-        &alice_jid,
-    )
-    .await;
+    handlers::presence::broadcast_unavailable_for_terminated_session(state.as_ref(), &alice_jid)
+        .await;
 
     let outbound = tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv())
         .await
@@ -1866,6 +2408,8 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached bob");
@@ -1925,6 +2469,8 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -2002,6 +2548,8 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached bob");
@@ -2088,6 +2636,8 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     state
         .deps
@@ -2432,6 +2982,8 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -2569,6 +3121,8 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -2655,4 +3209,541 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
             .is_some(),
         "occupant slot survives the detach"
     );
+}
+
+/// XEP-0198 §4 counters are mod 2^32: a resume whose `h` sits just
+/// behind a freshly wrapped `outbound_count` is VALID, not
+/// handled-count-too-high (gpt-5.5 review follow-up to #1099 — the
+/// live ack path was made wrap-aware, resume must agree).
+#[tokio::test]
+async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-wrapped".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            // The server's send counter wrapped past 2^32: it now
+            // reads 2, while the client last handled u32::MAX.
+            outbound_count: 2,
+            last_acked: u32::MAX - 1,
+            replay_gap_through: None,
+            unacked_stanzas: vec![
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: u32::MAX,
+                    stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 2,
+                    stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    // h = u32::MAX acks the pre-wrap stanza; a naive `h > outbound`
+    // comparison misreads this as handled-count-too-high.
+    let resume_frame = resume_frame_xml("stream-wrapped", u32::MAX);
+    let responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    let resumed = responses
+        .iter()
+        .any(|frame| frame.contains("<resumed") && frame.contains("stream-wrapped"));
+    assert!(
+        resumed,
+        "wrapped-counter resume must succeed, got frames: {responses:?}"
+    );
+    assert!(
+        responses.iter().any(|frame| frame.contains("post-wrap-1"))
+            && responses.iter().any(|frame| frame.contains("post-wrap-2")),
+        "post-wrap unacked stanzas must be replayed: {responses:?}"
+    );
+    assert!(
+        !responses.iter().any(|frame| frame.contains("pre-wrap")),
+        "the acked pre-wrap stanza must not be replayed: {responses:?}"
+    );
+}
+
+/// Conformance review follow-up to #1103: resuming must carry the
+/// detached session's presence extension payloads back onto the live
+/// registry entry. RFC 6121 §4.3.2 requires probe responses to
+/// reproduce the full last presence stanza; before this fix a resume
+/// silently stripped the XEP-0319 idle stamp (and caps) even though
+/// the client sent no new presence.
+#[tokio::test]
+async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let idle = waddle_xmpp::xep::xep0319::build_idle_element(
+        chrono::DateTime::parse_from_rfc3339("2026-07-07T00:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
+    );
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-idle".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: true,
+            presence_show: Some(xmpp_parsers::presence::Show::Away),
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: vec![idle.clone()],
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-idle", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let presence_state = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(&jid)
+        .expect("live presence state after resume");
+    assert!(
+        presence_state.payloads.contains(&idle),
+        "the XEP-0319 idle payload must survive resume onto the live \
+         registry entry, got {:?}",
+        presence_state.payloads
+    );
+}
+
+/// Conformance review follow-up to #1104: an XEP-0198 resume is the
+/// SAME session (§5) — the once-per-session pending-subscribe claim
+/// must survive it. Before this fix the fresh ConnectionEntry's CAS
+/// re-armed, so the first auto-away flip after a resume re-prompted
+/// the user with the still-unanswered subscribe.
+#[tokio::test]
+async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-claimed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            // Still available at detach; the claim consumed by the
+            // initial available presence is recorded explicitly.
+            presence_available: true,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: true,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-claimed", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry after resume");
+    assert!(
+        !entry.claim_pending_subscribes_flush(),
+        "the once-per-session claim must already be consumed on the \
+         resumed entry — a presence flip after resume must not \
+         re-deliver pending subscribes"
+    );
+}
+
+/// The consumed claim must survive detach even when the session went
+/// UNAVAILABLE after its initial available presence: presence state at
+/// detach says nothing about whether the flush already happened, so
+/// the claim is carried explicitly on the detached session. Before
+/// this fix the pre-claim was gated on `presence_available`, so an
+/// available → unavailable → detach → resume sequence re-armed the CAS
+/// and the next available re-prompted the user.
+#[tokio::test]
+async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-claimed-unavail".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            // Went available (claim consumed), then unavailable before
+            // the transport dropped.
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: true,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-claimed-unavail", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry after resume");
+    assert!(
+        !entry.claim_pending_subscribes_flush(),
+        "the claim consumed before the unavailable flip must stay \
+         consumed across resume — the next available presence must \
+         not re-deliver pending subscribes"
+    );
+}
+
+/// Companion: a session that NEVER went available before detaching has
+/// an unconsumed claim, and resume must keep it armed — the resumed
+/// session's true initial available presence still owes the RFC 6121
+/// §3.1.3 pending-subscribe delivery.
+#[tokio::test]
+async fn sm_resume_keeps_unconsumed_claim_armed() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-unclaimed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-unclaimed", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry after resume");
+    assert!(
+        entry.claim_pending_subscribes_flush(),
+        "a never-available session's claim must still be armed after \
+         resume so the initial available presence delivers the queued \
+         subscribes"
+    );
+}
+
+/// Round-2 concurrency review on #1099: an `h` in the wrap-BEHIND
+/// half-space (mod-2^32 "less than" everything the session ever acked)
+/// passed the too-high guard as "behind", then the numeric range-delete
+/// wiped every claimed pending_delivery row and corrupted last_acked.
+/// A live ack outside the valid window [last_acked, outbound_count] on
+/// the low side is stale garbage: it must be ignored wholesale — no
+/// purge, no counter movement, no stream error.
+#[tokio::test]
+async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    // 0xC0000000 is mod-2^32 "behind" outbound_count=2, so the
+    // too-high guard alone does not catch it — but numerically it
+    // exceeds every real sequence, so an unguarded range-delete would
+    // destroy all rows.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='3221225472'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "stale wrap-behind ack must be ignored, got {responses:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "stale ack must not terminate the stream"
+    );
+    assert_eq!(
+        conn.sm_state.last_acked, 0,
+        "stale ack must not move last_acked"
+    );
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        2,
+        "stale ack must not purge the replay queue"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "stale ack must not range-delete pending rows"
+    );
+}
+
+/// Companion to the wrap-behind live-ack guard: a resume whose `h`
+/// regressed mod-2^32 behind the session's last_acked cannot be
+/// replayed (that prefix was purged when the ack landed) and must be
+/// refused as a failed resume — session preserved, nothing purged.
+#[tokio::test]
+async fn sm_resume_rejects_handled_count_behind_last_acked() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-regressed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 4,
+            last_acked: 3,
+            replay_gap_through: None,
+            unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 4,
+                stanza_xml: "<message xmlns='jabber:client' id='m4'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            }],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    // h = 0xC0000000 is mod-2^32 behind last_acked=3 (stale garbage);
+    // the wrap-aware too-high guard alone would classify it "behind
+    // outbound" and let acknowledge() + the numeric row range-delete
+    // run.
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-regressed", 0xC000_0000),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("<failed") && frame.contains("resource-constraint")),
+        "regressed-h resume must fail as unresumable, got {responses:?}"
+    );
+    // The detached session survives for a corrected retry.
+    let restored = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .claim_session("stream-regressed")
+        .await
+        .expect("registry")
+        .expect("session preserved after failed resume");
+    assert_eq!(restored.last_acked, 3);
 }

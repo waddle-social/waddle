@@ -5,7 +5,7 @@
 //! countable stanza with an `<r/>`, and drains already-arrived inbound
 //! frames after each `<r/>` so `<a/>` acks shrink the queue mid-flood.
 
-use super::super::transport_xml::element_to_xml;
+use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::super::{
     batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     state::WsConnState,
@@ -494,6 +494,125 @@ async fn drain_stops_parking_deferred_frames_at_the_cap() {
         conn.deferred_inbound.len(),
         64,
         "deferred queue must stop growing at the cap"
+    );
+}
+
+/// Issue #1099, mid-batch path: a bogus-high `<a h/>` (a handled count
+/// ahead of anything the server ever sent) drained between chunks must
+/// terminate the stream with the handled-count-too-high stream error
+/// followed by `<close/>`, signal transport-closed to the batch writer —
+/// and must NOT purge the replay queue: XEP-0198 gives no legal way for
+/// `h` to exceed the send count, so acknowledging it would destroy
+/// stanzas the client provably never received.
+#[tokio::test]
+async fn bogus_high_ack_drained_mid_batch_closes_stream_without_purging_replay() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 5);
+    conn.sm_state
+        .enable("bogus-high".to_string(), true, Some(300));
+
+    let mut sink = CollectSink::default();
+    // The drain after the first <r/> (frame 5) reads an ack claiming
+    // the client handled 999 stanzas; the server has only sent 5.
+    let mut reader = ScriptedReader::new(vec![Some(ack_frame(999))]);
+    let frames: Vec<String> = (1..=12).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    let texts = sink_texts(&sink);
+    // 5 stanzas + <r/> + stream error + <close/> reached the wire.
+    assert_eq!(texts.len(), 8, "wire: {texts:?}");
+    assert!(
+        texts[6].contains("handled-count-too-high") && texts[6].contains("999"),
+        "the drained bogus ack must produce the stream error mid-batch: {}",
+        texts[6]
+    );
+    assert_eq!(
+        texts[7],
+        websocket_stream_close_xml(),
+        "the stream error must be followed by the framing <close/>"
+    );
+    assert!(
+        conn.phase.is_closing(),
+        "the connection phase must flip to Closing"
+    );
+    // The replay queue was NOT purged: the 5 written frames stay
+    // unacked and the 7 unwritten ones were recorded for replay.
+    assert_eq!(
+        conn.sm_state.last_acked, 0,
+        "bogus h must never be acknowledged"
+    );
+    assert_eq!(conn.sm_state.outbound_count, 12);
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        12,
+        "every countable frame must stay replayable for a later resume"
+    );
+}
+
+/// Round-2 #1099 review: an `<a h/>` mod-2^32 BEHIND `last_acked` (a
+/// stale duplicate or garbage, e.g. h=0xC0000000 against last_acked=0)
+/// sits in the half-space the wrap-aware too-high guard classifies as
+/// "valid" — only the regression guard stops the numeric `<= h`
+/// range-delete from wiping every pending row. It must be ignored
+/// wholesale: no frames, no purge, and the batch keeps writing.
+#[tokio::test]
+async fn wrap_behind_stale_ack_drained_mid_batch_is_ignored_and_batch_continues() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 5);
+    conn.sm_state
+        .enable("wrap-behind".to_string(), true, Some(300));
+
+    let mut sink = CollectSink::default();
+    let mut reader = ScriptedReader::new(vec![Some(ack_frame(0xC000_0000)), None]);
+    let frames: Vec<String> = (1..=12).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    let texts = sink_texts(&sink);
+    // The full batch was written: 12 stanzas + 2 interleaved <r/>,
+    // and nothing else — no stream error, no <close/>.
+    assert_eq!(texts.len(), 14, "wire: {texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.contains("handled-count-too-high")),
+        "a stale wrap-behind ack must not raise a stream error: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| *t == websocket_stream_close_xml()),
+        "a stale wrap-behind ack must not close the stream: {texts:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "the connection phase must stay put — the stream keeps serving"
+    );
+    assert_eq!(
+        conn.sm_state.last_acked, 0,
+        "a regressed h must never advance last_acked"
+    );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        12,
+        "the stale ack must not purge a single replayable frame"
     );
 }
 

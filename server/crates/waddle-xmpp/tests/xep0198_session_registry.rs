@@ -38,6 +38,8 @@ fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
         presence_show: None,
         presence_status: Some("available".to_string()),
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 

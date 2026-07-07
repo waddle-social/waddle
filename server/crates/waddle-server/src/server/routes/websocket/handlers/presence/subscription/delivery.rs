@@ -240,10 +240,15 @@ async fn send_presence_stanza_to_jid(
     }
 }
 
-pub async fn broadcast_unavailable_for_expired_detached_session(
-    state: &WebSocketState,
-    from: &FullJid,
-) {
+/// RFC 6121 §4.5.2: broadcast a server-generated
+/// `<presence type='unavailable'/>` from `from` to the user's presence
+/// subscribers (and to the user's own sibling resources) when a
+/// presence-available session ends without the client retracting its
+/// presence itself. Used by both terminal session paths: SM-detached
+/// session expiry/invalidation and the unclean disconnect of a non-SM
+/// session (issue #1105). Callers gate on the session having actually
+/// been presence-available.
+pub async fn broadcast_unavailable_for_terminated_session(state: &WebSocketState, from: &FullJid) {
     let Some(storage) = roster_storage(state).await else {
         return;
     };
@@ -342,13 +347,11 @@ async fn presence_state_for_available_resource(
         .detached_presence_state(resource)
         .await
     {
-        Ok(Some((show, status, priority))) => Some(PresenceStateSnapshot {
-            show,
-            status,
-            priority,
-            // Detached (XEP-0198) presence state does not yet persist
-            // extension payloads (idle, caps, ...).
-            payloads: Vec::new(),
+        Ok(Some(detached)) => Some(PresenceStateSnapshot {
+            show: detached.show,
+            status: detached.status,
+            priority: detached.priority,
+            payloads: detached.payloads,
         }),
         Ok(None) => None,
         Err(error) => {
@@ -363,8 +366,8 @@ struct PresenceStateSnapshot {
     status: Option<String>,
     priority: i8,
     /// The resource's original presence extension payloads (XEP-0115 caps,
-    /// XEP-0319 idle, anything else), relayed verbatim (issue #1101). Only the
-    /// live registry persists them; the detached (XEP-0198) path has none yet.
+    /// XEP-0319 idle, anything else), relayed verbatim (issues #1101/#1103)
+    /// from either the live registry or the detached (XEP-0198) session.
     payloads: Vec<Element>,
 }
 

@@ -33,10 +33,11 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use super::affiliation::DurableMembershipSource;
-use super::room_actor::RoomActor;
+use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CreateInstantRoom, CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
-    RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom,
+    IsMucJid, ListRooms, ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor,
+    RoomRegistryError,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -276,13 +277,15 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Get an existing room or create one if absent.
+        /// Get an existing room or create one if absent. The reply's
+        /// [`RoomAcquisition::creation`] bit is authoritative for the
+        /// XEP-0045 §10.1.1 creator Owner grant (#1134).
         get_or_create_room(
             room_jid: BareJid,
             waddle_id: String,
             channel_id: String,
             config: RoomConfig
-        ) -> ActorRef<RoomActor>,
+        ) -> RoomAcquisition,
         "get_or_create_room",
         GetOrCreateRoom { room_jid, waddle_id, channel_id, config }
     );
@@ -300,8 +303,10 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Create an instant room per XEP-0045.
-        create_instant_room(room_jid: BareJid) -> ActorRef<RoomActor>,
+        /// Create an instant room per XEP-0045. The reply's
+        /// [`RoomAcquisition::creation`] bit is authoritative for the
+        /// XEP-0045 §10.1.1 creator Owner grant (#1134).
+        create_instant_room(room_jid: BareJid) -> RoomAcquisition,
         "create_instant_room",
         CreateInstantRoom { room_jid }
     );
@@ -311,6 +316,27 @@ impl RoomRegistry {
         destroy_room(room_jid: BareJid) -> bool,
         "destroy_room",
         DestroyRoom { room_jid }
+    );
+
+    registry_method!(
+        /// Destroy a room only if it is still inactive at the expected
+        /// occupancy revision (#1108). Returns whether it was destroyed.
+        destroy_room_if_inactive(
+            room_jid: BareJid,
+            expected_occupancy_revision: u64,
+            guard: SealGuard
+        ) -> bool,
+        "destroy_room_if_inactive",
+        DestroyRoomIfInactive { room_jid, expected_occupancy_revision, guard }
+    );
+
+    registry_method!(
+        /// Purge a sealed-but-registered room actor left behind by a
+        /// timed-out guarded destroy (#1108 follow-up). Returns whether
+        /// one was removed.
+        reap_sealed_room(room_jid: BareJid) -> bool,
+        "reap_sealed_room",
+        ReapSealedRoom { room_jid }
     );
 
     registry_method!(

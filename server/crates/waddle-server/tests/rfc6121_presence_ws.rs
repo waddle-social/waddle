@@ -566,3 +566,188 @@ async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_se
     let _ = bob.close().await;
     let _ = alice.close().await;
 }
+
+#[tokio::test]
+async fn websocket_unclean_disconnect_broadcasts_unavailable_to_subscribers() {
+    // RFC 6121 §4.5.2: when a session ends ungracefully (connection drop,
+    // no </stream> close, no self-sent unavailable), the SERVER must
+    // generate <presence type='unavailable'/> from that full JID to the
+    // user's presence subscribers. A resource that never sent initial
+    // available presence must NOT trigger such a broadcast.
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    let alice_full = alice.full_jid.clone().expect("alice full jid");
+
+    // A second alice resource that binds but NEVER sends available presence.
+    let silent_resource = format!("alice-silent-{}", uuid::Uuid::new_v4());
+    let alice_silent = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &silent_resource,
+    )
+    .await
+    .expect("silent alice connection");
+    let alice_silent_full = alice_silent
+        .full_jid
+        .clone()
+        .expect("silent alice full jid");
+
+    // Abrupt drop: no <close/>, no </stream>, no unavailable presence —
+    // the TCP/WebSocket stream is simply torn down.
+    drop(alice_silent);
+    assert_no_frame_matching(
+        &mut bob,
+        Duration::from_millis(700),
+        |frame| {
+            frame.contains("type='unavailable'")
+                && frame.contains(&format!("from='{alice_silent_full}'"))
+        },
+        "a session that never sent available presence must not produce a server-generated unavailable broadcast",
+    )
+    .await;
+
+    // Abrupt drop of the presence-available resource: subscribers MUST
+    // receive a server-generated unavailable from that full JID.
+    drop(alice);
+    let unavailable = bob
+        .recv_matching(|frame| {
+            frame.contains("type='unavailable'") && frame.contains(&format!("from='{alice_full}'"))
+        })
+        .await
+        .expect("bob receives server-generated unavailable after alice's unclean disconnect");
+    assert!(
+        unavailable.contains("to='bob@localhost"),
+        "server-generated unavailable must be addressed to the subscriber: {unavailable}"
+    );
+
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn websocket_probe_returns_xep0319_idle_for_live_and_detached_resource() {
+    // XEP-0319 §2.2 + RFC 6121 §4.3: a probe response reports the contact's
+    // last broadcast presence, including the <idle xmlns='urn:xmpp:idle:1'
+    // since='…'/> stamp the client advertised. Issue #1103 acceptance covers
+    // "live AND detached": the stored payloads must answer a probe while the
+    // resource is still LIVE, and must survive into the detached snapshot
+    // once the XEP-0198 session is awaiting resume.
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    let alice_full = alice.full_jid.clone().expect("alice full jid");
+
+    // Make alice's session resumable so the abrupt drop below detaches the
+    // session instead of tearing it down.
+    alice
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("alice enables stream management");
+    let _enabled = alice
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("alice receives <enabled/>");
+
+    const IDLE_SINCE: &str = "2024-06-01T12:00:00Z";
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><show>away</show><idle xmlns="urn:xmpp:idle:1" since="{IDLE_SINCE}"/></presence>"#
+        ))
+        .await
+        .expect("alice sends away presence with XEP-0319 idle");
+    let live_broadcast = bob
+        .recv_matching(|frame| {
+            frame.contains(&format!("from='{alice_full}'")) && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("bob receives alice's live away broadcast");
+    assert!(
+        live_broadcast.contains("urn:xmpp:idle:1"),
+        "live broadcast relays the idle stamp verbatim (issue #1101): {live_broadcast}"
+    );
+
+    // Probe the LIVE resource's full JID before any disconnect: the
+    // stored last-broadcast presence must already carry the idle stamp
+    // (RFC 6121 §4.3.2, XEP-0319 §2.2 — issue #1103 "live" half).
+    bob.send(&probe_presence_xml(&alice_full))
+        .await
+        .expect("bob probes alice's live resource");
+    let live_probe = bob
+        .recv_matching(|frame| {
+            frame.contains(&format!("from='{alice_full}'")) && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("probe response for the live resource");
+    assert!(
+        live_probe.contains("urn:xmpp:idle:1") && live_probe.contains(IDLE_SINCE),
+        "probe response for a live resource must carry the stored XEP-0319 idle stamp: {live_probe}"
+    );
+
+    // Abrupt drop: the resumable session detaches, awaiting resume.
+    drop(alice);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    bob.send(&probe_presence_xml("alice@localhost"))
+        .await
+        .expect("bob probes alice");
+    let probe = bob
+        .recv_matching(|frame| {
+            frame.contains(&format!("from='{alice_full}'")) && frame.contains("<show>away</show>")
+        })
+        .await
+        .expect("probe response for the detached resource");
+    assert!(
+        probe.contains("urn:xmpp:idle:1") && probe.contains(IDLE_SINCE),
+        "probe response for a detached resource must carry the stored XEP-0319 idle stamp: {probe}"
+    );
+
+    let _ = bob.close().await;
+}

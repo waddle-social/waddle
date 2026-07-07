@@ -80,7 +80,37 @@ async fn complete_pending_resume_claim(
         Ok(Some(SmClaimCompletion::Resumed(detached))) => match resume_h {
             Some(h) => {
                 conn.sm_state.restore_from_session(&detached);
+                // The resume `h` acknowledges the mod-2^32 window
+                // (detached.last_acked, h] — purge the pending_delivery
+                // rows this SM session claimed in exactly that window
+                // (review F4). Before the ack window went wrap-aware
+                // these rows were swept up by the NEXT live ack's
+                // numeric `<= h` delete; a windowed delete anchored at
+                // the post-resume `last_acked` would skip them forever,
+                // stranding them claimed until the claim-expiry janitor
+                // re-released them as duplicates.
+                let acked_from_exclusive = detached.last_acked;
                 conn.sm_state.acknowledge(h);
+                if acked_from_exclusive != h {
+                    let session_id =
+                        waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .delete_acked_in_window(&session_id, acked_from_exclusive, h)
+                        .await
+                    {
+                        warn!(
+                            session = %session_id,
+                            from = acked_from_exclusive,
+                            h,
+                            error = %error,
+                            "pending_delivery delete_acked_in_window failed on resume; \
+                             rows will be retried on next session via release_claim"
+                        );
+                    }
+                }
                 SmRegistrationFinalization::ReplaceWithResumed {
                     resumed: SmResumed::new(stream_id.clone(), conn.sm_state.get_inbound_count()),
                     replay_after_h: h,

@@ -35,8 +35,9 @@ mod unacked_queue;
 
 pub use replay::{stamp_replay_delay, ReplayStanza};
 pub use session_registry::{
-    DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, RecentTombstoneRecord,
-    SmClaimCompletion, SmRegistryError, SmSessionRegistry, DEFAULT_MAX_SESSIONS,
+    DetachedPresenceState, DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry,
+    RecentTombstoneRecord, SmClaimCompletion, SmRegistryError, SmSessionRegistry,
+    DEFAULT_MAX_SESSIONS,
 };
 pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};
 pub use state::{DetachedSessionSnapshot, StreamManagementState};

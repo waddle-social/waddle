@@ -1,6 +1,9 @@
 use super::super::{
     frame::handle_xmpp_frame,
-    registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
+    registration::{
+        publish_stream_id_and_presence, register_bound_connection_after_frame,
+        RegistrationAfterFrame,
+    },
     session_init::load_blocklist_for_bind,
     state::WsConnState,
     stream_management::SmRegistrationFinalization,
@@ -174,6 +177,8 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             presence_show: Some(xmpp_parsers::presence::Show::Chat),
             presence_status: Some("back".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");
@@ -309,6 +314,8 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");
@@ -465,6 +472,121 @@ async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
         entries,
         vec![blocked_bare],
         "MessageContext snapshot must reflect the persisted blocklist"
+    );
+}
+
+/// Concurrency review F1: after `register_with_stream_state` returns, a
+/// racing same-JID replacement can take the registry slot before the
+/// registering connection publishes its SM stream id and restored
+/// presence. That publication runs with the OLD connection's (now
+/// stale) owner token and must be owner-gated: a stale-owner
+/// publication must not stamp its stream id onto the replacement's
+/// entry nor overwrite the JID-keyed presence map with its restored
+/// presence.
+#[tokio::test]
+async fn stale_owner_publication_does_not_stamp_replacement_entry() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+    // Connection A registers and receives its owner token.
+    let (tx_a, _rx_a) = mpsc::channel::<OutboundStanza>(4);
+    let stale_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx_a);
+
+    // While A still owns the slot, its publication takes effect — the
+    // happy path.
+    let mut conn_a = WsConnState::new();
+    conn_a.sm_state.stream_id = Some("a-stream".to_string());
+    conn_a.presence_available = true;
+    conn_a.presence_show = Some(xmpp_parsers::presence::Show::Chat);
+    conn_a.presence_status = Some("a-status".to_string());
+    conn_a.presence_priority = 9;
+    publish_stream_id_and_presence(state.as_ref(), &jid, &stale_owner, &conn_a);
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("A's entry");
+    assert_eq!(
+        entry.sm_stream_id(),
+        Some(waddle_xmpp::pending_delivery::SmSessionId::new("a-stream")),
+        "owner's own publication must land"
+    );
+
+    // A same-JID replacement supersedes A and publishes ITS stream id
+    // and presence.
+    let (tx_b, _rx_b) = mpsc::channel::<OutboundStanza>(4);
+    let _replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx_b);
+    let repl_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("replacement entry");
+    repl_entry.set_sm_stream_id(Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+        "replacement-stream",
+    )));
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 3);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence_state(
+            &jid,
+            Some("dnd".to_string()),
+            Some("busy".to_string()),
+            3,
+            Vec::new(),
+        );
+
+    // A's registration-completion publication now fires with its STALE
+    // owner token (the mid-register race): it must be a no-op.
+    publish_stream_id_and_presence(state.as_ref(), &jid, &stale_owner, &conn_a);
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("replacement entry");
+    assert_eq!(
+        entry.sm_stream_id(),
+        Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+            "replacement-stream"
+        )),
+        "a stale-owner publication must not stamp its stream id onto the replacement's entry"
+    );
+    assert_eq!(
+        entry.presence_priority(),
+        3,
+        "a stale-owner publication must not overwrite the replacement's presence availability"
+    );
+    let presence = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(&jid)
+        .expect("replacement presence state");
+    assert_eq!(
+        (
+            presence.show.as_deref(),
+            presence.status.as_deref(),
+            presence.priority
+        ),
+        (Some("dnd"), Some("busy"), 3),
+        "a stale-owner publication must not overwrite the JID-keyed presence map"
     );
 }
 

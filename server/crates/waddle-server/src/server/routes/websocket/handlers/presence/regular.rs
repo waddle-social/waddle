@@ -6,9 +6,21 @@ use super::*;
 use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
 use waddle_xmpp::Stanza;
 
+/// Handle a broadcast (undirected) presence update from a live connection.
+///
+/// `owner` is the connection's registry ownership token
+/// (`WsConnState::registry_owner`, the carbons handle returned by
+/// `register_*`). Every JID-keyed registry write below is owner-gated
+/// (issue #1208): a superseded same-full-JID connection processing a late
+/// presence frame must neither stamp stale presence onto the replacement's
+/// entry nor consume the replacement's once-per-session claims. `None`
+/// means the connection never completed registration (or its registration
+/// was rolled back), so it owns no registry slot and is treated as a
+/// non-owner: registry writes are skipped entirely.
 pub(super) async fn handle_regular_presence_update(
     state: &WebSocketState,
     sender_jid: &FullJid,
+    owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     presence: xmpp_parsers::presence::Presence,
 ) {
     // Defense in depth behind `parse_subscription_presence`: only the normal
@@ -28,66 +40,97 @@ pub(super) async fn handle_regular_presence_update(
     }
     let available = presence.type_ != xmpp_parsers::presence::Type::Unavailable;
     let priority: i8 = priority_to_i8(&presence.priority);
-    if available {
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .clear_last_activity(&sender_jid.to_bare());
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .update_presence(sender_jid, true, priority);
-        resolve_caps_for_presence(state, sender_jid, &presence).await;
-        // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
-        // priority presence of a fresh session, drain pending_delivery
-        // for the recipient. `claim_offline_flush` ensures this fires at
-        // most once per session even across priority transitions.
-        if priority >= 0 {
-            maybe_flush_pending_delivery(state, sender_jid).await;
-        }
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .update_presence_state(
-                sender_jid,
-                presence
-                    .show
-                    .as_ref()
-                    .map(|show| show_name(show).to_string()),
-                presence.statuses.values().next().cloned(),
-                priority,
-                // The client's extension payloads (XEP-0115 caps, XEP-0319
-                // idle, ...) are stored verbatim so probe/subscription
-                // delivery relays the real advertisements (issue #1101).
-                presence.payloads.clone(),
-            );
-        for stanza in state
-            .deps
-            .protocol
-            .connection_registry
-            .pending_subscription_stanzas(&sender_jid.to_bare())
-        {
-            let _ = state
+    // Issue #1208: each write re-verifies ownership INSIDE the registry call
+    // (the owner-gated variants hold the connections entry guard across
+    // check and write, see `update_presence_state_if_owner`). The gated
+    // `update_presence_if_owner` doubles as the ownership probe for the
+    // sibling writes in each branch: a refusal means this connection's slot
+    // is gone or belongs to a same-JID replacement, whose own presence
+    // supersedes ours — so every registry write (including the bare-JID
+    // last-activity bookkeeping and the once-per-session claims) is skipped.
+    let owned_availability_written = |available: bool| {
+        owner.filter(|owner| {
+            state
                 .deps
                 .protocol
                 .connection_registry
-                .send_to(sender_jid, stanza)
-                .await;
+                .update_presence_if_owner(sender_jid, owner, available, priority)
+        })
+    };
+    if available {
+        if let Some(owner) = owned_availability_written(true) {
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .clear_last_activity(&sender_jid.to_bare());
+            resolve_caps_for_presence(state, sender_jid, &presence).await;
+            // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
+            // priority presence of a fresh session, drain pending_delivery
+            // for the recipient. `claim_offline_flush` ensures this fires at
+            // most once per session even across priority transitions.
+            if priority >= 0 {
+                maybe_flush_pending_delivery(state, sender_jid, owner).await;
+            }
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .update_presence_state_if_owner(
+                    sender_jid,
+                    owner,
+                    presence
+                        .show
+                        .as_ref()
+                        .map(|show| show_name(show).to_string()),
+                    presence.statuses.values().next().cloned(),
+                    priority,
+                    // The client's extension payloads (XEP-0115 caps, XEP-0319
+                    // idle, ...) are stored verbatim so probe/subscription
+                    // delivery relays the real advertisements (issue #1101).
+                    presence.payloads.clone(),
+                );
+            // RFC 6121 §3.1.3: deliver queued inbound subscription requests on
+            // this resource's INITIAL available presence only. The per-connection
+            // CAS mirrors `claim_offline_flush` so auto-away/available flips
+            // within a session never re-prompt the user (issue #1104). A subscribe
+            // arriving while the user is online is still delivered directly by
+            // `handle_subscription_presence`'s live path; the queue exists for the
+            // next fresh session until the request is answered. Owner-gated so a
+            // superseded connection cannot consume the replacement's claim.
+            let first_available = state
+                .deps
+                .protocol
+                .connection_registry
+                .entry_if_owner(sender_jid, owner)
+                .is_some_and(|entry| entry.claim_pending_subscribes_flush());
+            if first_available {
+                for stanza in state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .pending_subscription_stanzas(&sender_jid.to_bare())
+                {
+                    let _ = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .send_to(sender_jid, stanza)
+                        .await;
+                }
+            }
+        } else {
+            debug!(
+                jid = %sender_jid,
+                "Skipping presence registry writes: connection does not own its registry slot"
+            );
         }
-    } else {
+    } else if let Some(owner) = owned_availability_written(false) {
         state
             .deps
             .protocol
             .connection_registry
-            .update_presence(sender_jid, false, priority);
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .clear_presence_state(sender_jid);
+            .clear_presence_state_if_owner(sender_jid, owner);
         state
             .deps
             .protocol
@@ -96,6 +139,11 @@ pub(super) async fn handle_regular_presence_update(
                 &sender_jid.to_bare(),
                 presence.statuses.values().next().cloned(),
             );
+    } else {
+        debug!(
+            jid = %sender_jid,
+            "Skipping unavailable-presence registry writes: connection does not own its registry slot"
+        );
     }
     broadcast_presence_to_subscribers(state, sender_jid, &presence).await;
 }
@@ -112,12 +160,20 @@ pub(super) async fn handle_regular_presence_update(
 /// flush defers rows on a transient MAM failure
 /// (`deferred_transient > 0`), the CAS is reset so the next presence
 /// update retries instead of stranding the rows until reconnect.
-async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJid) {
+///
+/// Owner-gated (issue #1208): the entry lookup uses `entry_if_owner` so a
+/// superseded same-JID connection cannot consume the replacement's
+/// once-per-session `claim_offline_flush` CAS.
+async fn maybe_flush_pending_delivery(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let entry = match state
         .deps
         .protocol
         .connection_registry
-        .get_entry(sender_jid)
+        .entry_if_owner(sender_jid, owner)
     {
         Some(entry) => entry,
         None => return,

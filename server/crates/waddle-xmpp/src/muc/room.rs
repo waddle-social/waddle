@@ -537,7 +537,14 @@ impl MucRoom {
     /// True when this room carries no in-memory state that would be
     /// lost on eviction from the room registry: zero occupants, no
     /// stored subject, no pinned entries, and no explicit
-    /// affiliations.
+    /// affiliation grants.
+    ///
+    /// Resolver-derived affiliations (#1110) do NOT block dormancy:
+    /// they are written by the join-path authz resolver and re-derived
+    /// on the next join by construction, so dropping them with the
+    /// actor loses nothing. Explicit grants (admin IQ writes, bans,
+    /// the instant-room creator's Owner) are in-memory only and keep
+    /// the room non-dormant.
     ///
     /// The dormancy janitor uses this predicate to safely reap
     /// persistent rooms whose `RoomActor` is holding nothing but a
@@ -558,7 +565,7 @@ impl MucRoom {
         self.occupants.is_empty()
             && self.subject.is_none()
             && self.pinned_entries.is_empty()
-            && self.affiliation_list.is_empty()
+            && !self.affiliation_list.has_explicit_grants()
             && self.muji_state.is_empty()
             && self.in_call_state.is_empty()
     }

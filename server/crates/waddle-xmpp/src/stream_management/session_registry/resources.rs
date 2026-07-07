@@ -3,8 +3,36 @@ use jid::{BareJid, FullJid};
 use xmpp_parsers::presence::Show;
 
 use super::core::InMemorySmSessionRegistry;
+use super::session::DetachedSession;
 use super::SmRegistryError;
 use crate::Stanza;
+
+/// Last broadcast rich presence of a detached available resource.
+///
+/// `payloads` are the resource's own presence extension elements
+/// (XEP-0115 caps, XEP-0319 idle, anything else) exactly as last
+/// advertised, so probe/subscription delivery can relay them verbatim
+/// while the XEP-0198 stream awaits resume (issue #1103).
+#[derive(Debug, Clone)]
+pub struct DetachedPresenceState {
+    pub resource: FullJid,
+    pub show: Option<Show>,
+    pub status: Option<String>,
+    pub priority: i8,
+    pub payloads: Vec<minidom::Element>,
+}
+
+impl DetachedPresenceState {
+    fn from_session(session: &DetachedSession) -> Self {
+        Self {
+            resource: session.jid.clone(),
+            show: session.presence_show.clone(),
+            status: session.presence_status.clone(),
+            priority: session.presence_priority,
+            payloads: session.presence_payloads.clone(),
+        }
+    }
+}
 
 impl InMemorySmSessionRegistry {
     fn stanza_to_replay_xml(stanza: &Stanza) -> String {
@@ -382,7 +410,7 @@ impl InMemorySmSessionRegistry {
     pub async fn detached_presence_state(
         &self,
         jid: &FullJid,
-    ) -> Result<Option<(Option<Show>, Option<String>, i8)>, SmRegistryError> {
+    ) -> Result<Option<DetachedPresenceState>, SmRegistryError> {
         let sessions = self
             .sessions
             .read()
@@ -390,11 +418,7 @@ impl InMemorySmSessionRegistry {
         if let Some(session) = sessions.values().find(|session| {
             !session.is_expired() && session.presence_available && session.jid == *jid
         }) {
-            return Ok(Some((
-                session.presence_show.clone(),
-                session.presence_status.clone(),
-                session.presence_priority,
-            )));
+            return Ok(Some(DetachedPresenceState::from_session(session)));
         }
         drop(sessions);
         let claimed = self
@@ -406,13 +430,7 @@ impl InMemorySmSessionRegistry {
             .find(|session| {
                 !session.is_expired() && session.presence_available && session.jid == *jid
             })
-            .map(|session| {
-                (
-                    session.presence_show.clone(),
-                    session.presence_status.clone(),
-                    session.presence_priority,
-                )
-            }))
+            .map(DetachedPresenceState::from_session))
     }
 
     /// Return last known rich presence state for every detached available
@@ -420,27 +438,20 @@ impl InMemorySmSessionRegistry {
     pub async fn available_detached_presence_states_for_user(
         &self,
         bare_jid: &BareJid,
-    ) -> Result<Vec<(FullJid, Option<Show>, Option<String>, i8)>, SmRegistryError> {
+    ) -> Result<Vec<DetachedPresenceState>, SmRegistryError> {
         let sessions = self
             .sessions
             .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut states: Vec<(FullJid, Option<Show>, Option<String>, i8)> = sessions
+        let mut states: Vec<DetachedPresenceState> = sessions
             .values()
             .filter(|session| {
                 !session.is_expired()
                     && session.presence_available
                     && session.jid.to_bare() == *bare_jid
             })
-            .map(|session| {
-                (
-                    session.jid.clone(),
-                    session.presence_show.clone(),
-                    session.presence_status.clone(),
-                    session.presence_priority,
-                )
-            })
+            .map(DetachedPresenceState::from_session)
             .collect();
         drop(sessions);
 
@@ -456,14 +467,7 @@ impl InMemorySmSessionRegistry {
                         && session.presence_available
                         && session.jid.to_bare() == *bare_jid
                 })
-                .map(|session| {
-                    (
-                        session.jid.clone(),
-                        session.presence_show.clone(),
-                        session.presence_status.clone(),
-                        session.presence_priority,
-                    )
-                }),
+                .map(DetachedPresenceState::from_session),
         );
         Ok(states)
     }

@@ -160,9 +160,10 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// claimed row, after that row's flush stanza has been pushed
     /// onto the recovering session's outbound queue and assigned its
     /// SM outbound sequence (locked Q7b). Pair with
-    /// [`Self::delete_acked_through`]: an SM `<a h='N'/>` ack from
+    /// [`Self::delete_acked_in_window`]: an SM `<a h='N'/>` ack from
     /// the recovering session range-deletes claimed rows whose
-    /// `outbound_sequence <= N`.
+    /// `outbound_sequence` lies in the newly-acknowledged mod-2^32
+    /// window `(last_acked, N]`.
     async fn record_pushed_at(
         &self,
         id: &PendingRowId,
@@ -170,19 +171,30 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ) -> Result<u64, PendingStorageError>;
 
     /// Range-delete rows previously claimed by `session` whose
-    /// recorded `outbound_sequence <= sequence_max` (locked Q7b
-    /// SM-ack-keyed deletion). The SM ack handler invokes this with
-    /// the `h` value carried in the ack so only stanzas the recovering
-    /// session has actually acknowledged are removed; rows whose
-    /// flush stanzas haven't yet been ack'd stay claimed for a future
-    /// ack. Rows with `outbound_sequence = NULL` (claimed but not yet
+    /// recorded `outbound_sequence` lies in the mod-2^32 ack interval
+    /// `(from_exclusive, to_inclusive]` (locked Q7b SM-ack-keyed
+    /// deletion). The SM ack handler invokes this with the
+    /// pre-acknowledge `last_acked` as `from_exclusive` and the `h`
+    /// value carried in the ack as `to_inclusive`, so only stanzas the
+    /// recovering session has actually acknowledged are removed; rows
+    /// whose flush stanzas haven't yet been ack'd stay claimed for a
+    /// future ack.
+    ///
+    /// The interval is WRAP-AWARE: XEP-0198 counters are mod 2^32, so
+    /// a valid wrap-spanning ack (`h` numerically small post-wrap)
+    /// must also delete the pre-wrap rows near `u32::MAX` — see
+    /// [`sequence_in_ack_window`] for the shared predicate. An empty
+    /// window (`from_exclusive == to_inclusive`) deletes nothing.
+    ///
+    /// Rows with `outbound_sequence = NULL` (claimed but not yet
     /// pushed) are intentionally NOT deleted by this call — they are
     /// either still in the push pipeline or were claimed by a session
     /// that died pre-push (handled by [`Self::release_claim`]).
-    async fn delete_acked_through(
+    async fn delete_acked_in_window(
         &self,
         session: &SmSessionId,
-        sequence_max: u32,
+        from_exclusive: u32,
+        to_inclusive: u32,
     ) -> Result<u64, PendingStorageError>;
 
     /// List rows whose `flushed_in_session` references a session
@@ -272,6 +284,23 @@ pub fn pending_row_matches_tombstone(
         super::PendingPayload::Archived(stanza_id) => {
             stanza_id.id.as_str() == target.id() && &stanza_id.by.to_bare() == target.archive_jid()
         }
+    }
+}
+
+/// Shared mod-2^32 ack-window predicate for
+/// [`PendingDeliveryStorage::delete_acked_in_window`] implementations:
+/// is `seq` inside the interval `(from_exclusive, to_inclusive]` on the
+/// XEP-0198 counter circle?
+///
+/// Numerically: `seq > from && seq <= to` when `from <= to`, else (the
+/// window spans the u32 wrap) `seq > from || seq <= to`. An empty
+/// window (`from == to`) contains nothing. SQL backends mirror this
+/// exact two-branch expression on their `outbound_sequence` column.
+pub fn sequence_in_ack_window(seq: u32, from_exclusive: u32, to_inclusive: u32) -> bool {
+    if from_exclusive <= to_inclusive {
+        seq > from_exclusive && seq <= to_inclusive
+    } else {
+        seq > from_exclusive || seq <= to_inclusive
     }
 }
 
@@ -601,10 +630,11 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         Ok(0)
     }
 
-    async fn delete_acked_through(
+    async fn delete_acked_in_window(
         &self,
         session: &SmSessionId,
-        sequence_max: u32,
+        from_exclusive: u32,
+        to_inclusive: u32,
     ) -> Result<u64, PendingStorageError> {
         let mut guard = self
             .inner
@@ -616,7 +646,10 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 let claimed_by_session = row.flushed_in_session.as_ref() == Some(session);
-                let acked = matches!(row.outbound_sequence, Some(seq) if seq <= sequence_max);
+                let acked = matches!(
+                    row.outbound_sequence,
+                    Some(seq) if sequence_in_ack_window(seq, from_exclusive, to_inclusive)
+                );
                 if claimed_by_session && acked {
                     removed_ids.push(row.id);
                     removed += 1;

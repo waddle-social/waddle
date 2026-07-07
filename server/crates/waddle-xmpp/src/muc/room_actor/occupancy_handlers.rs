@@ -10,10 +10,30 @@ use super::{
 use crate::muc::RoomConfig;
 use crate::types::Affiliation;
 
+/// The affiliation a join request carries into the room, typed by
+/// where it came from (#1110/#1134).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinAffiliationGrant {
+    /// The joiner brings no affiliation of their own; whatever the
+    /// room's affiliation list already stores applies.
+    Unaffiliated,
+    /// Derived by the join-path authz resolver from the managed
+    /// channel / space graph. Reconstructible on the next join, so it
+    /// is stored with [`AffiliationProvenance::ResolverDerived`] and
+    /// never blocks room dormancy.
+    ///
+    /// [`AffiliationProvenance::ResolverDerived`]: crate::muc::affiliation::AffiliationProvenance::ResolverDerived
+    Resolver(Affiliation),
+    /// XEP-0045 §10.1.1: this join created the room, so the joiner is
+    /// the room creator and receives Owner. Stored as an explicit
+    /// grant — it is not reconstructible from any resolver.
+    CreatorOwner,
+}
+
 pub struct JoinWithAffiliation {
     pub sender_jid: FullJid,
     pub nick: String,
-    pub effective_affiliation: Affiliation,
+    pub affiliation_grant: JoinAffiliationGrant,
     pub local_domain: String,
     pub admission_revision: u64,
 }
@@ -26,21 +46,73 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.sealed {
+            // #1108: the registry sealed this actor for destruction; a
+            // caller holding a stale ActorRef must retry through the
+            // registry, which respawns the room.
+            return Err(RoomActorError::RoomSealed);
+        }
         if msg.admission_revision != self.admission_revision {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
 
-        if msg.effective_affiliation != Affiliation::None {
-            self.room.update_affiliation_from_resolver(
-                msg.sender_jid.to_bare(),
-                msg.effective_affiliation,
-            );
+        match msg.affiliation_grant {
+            JoinAffiliationGrant::Unaffiliated => {}
+            JoinAffiliationGrant::Resolver(affiliation) => {
+                // Applied unconditionally, including `Affiliation::None`:
+                // a resolver revocation must clear any stale
+                // resolver-derived Member/Admin entry so the revoked
+                // user no longer passes members-only admission below.
+                // `set_with_provenance` keeps this safe — it refuses
+                // resolver writes over explicit grants (bans survive)
+                // and removes the map entry on a None write.
+                //
+                // An applied change bumps the admission revision (like
+                // `ChangeAffiliation`): a delayed
+                // `SyncResolverAffiliation` from an earlier rejected
+                // join of this user carries the pre-change revision and
+                // must be refused, or it would clear the affiliation
+                // this join just re-derived.
+                if self
+                    .room
+                    .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation)
+                    .is_some()
+                {
+                    self.admission_revision = self.admission_revision.saturating_add(1);
+                }
+            }
+            JoinAffiliationGrant::CreatorOwner => {
+                // #1134 defense-in-depth on top of the registry's
+                // created-bit: XEP-0045 §10.1.1 gives Owner to the
+                // creator only, so the grant applies only while no
+                // owner exists. If two racing first-joins both claim
+                // creatorship, the actor's serialized mailbox makes
+                // exactly one of them the owner.
+                if !self.room.has_owner() {
+                    self.room
+                        .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
+                }
+            }
         }
 
         if !self.room.can_user_join(&msg.sender_jid.to_bare()) {
             return Err(RoomActorError::JoinForbidden {
                 members_only: self.room.config.members_only,
             });
+        }
+        // #1107: the same FULL JID must never hold two occupancies.
+        // Sibling sessions of the same BARE jid legitimately share one
+        // nick (multi-session join below), but this exact session
+        // joining under a second nick would create a ghost occupancy
+        // that leave-cleanup misses. Nicknames are locked to identity,
+        // so refuse per XEP-0045 §7.6 (`<not-acceptable/>`).
+        if let Some(current_nick) = self.room.find_nick_by_real_jid(&msg.sender_jid) {
+            if current_nick != msg.nick {
+                return Err(RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
+                    current_nick: current_nick.to_owned(),
+                    requested_nick: msg.nick,
+                });
+            }
         }
         let mut is_same_bare_multi_session_join = false;
         let is_existing_session_rejoin = self
@@ -93,6 +165,10 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let new_occupant_role = new_occupant.role;
         let occupant_count = self.room.occupant_count();
         let room_jid = self.room.room_jid.clone();
+        // #1108: every successful admission bumps the occupancy
+        // revision so a dormancy probe taken before this join can no
+        // longer authorize a destroy.
+        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
 
         let subject_state = self.room.subject.clone();
 
@@ -121,11 +197,27 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let Some(nick) = self
+        // #1107: collect EVERY nick this full JID occupies. Post-#1107
+        // the join path refuses a second nick for the same full JID, so
+        // this is normally a single entry — but pre-existing ghost
+        // states (or direct state manipulation) must still converge on
+        // disconnect, or the ghost lives forever: wrong occupant count,
+        // fan-out to a dead session, room never dormant. Sorted for
+        // deterministic primary-nick selection.
+        let mut nicks: Vec<String> = self
             .room
-            .find_nick_by_real_jid(&msg.sender_jid)
-            .map(ToOwned::to_owned)
-        else {
+            .occupants
+            .values()
+            .filter(|occupant| {
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .iter()
+                    .any(|session| session == &msg.sender_jid)
+            })
+            .map(|occupant| occupant.nick.clone())
+            .collect();
+        nicks.sort();
+        let Some(nick) = nicks.first().cloned() else {
             return Ok(None);
         };
         let Some(occupant) = self.room.get_occupant(&nick) else {
@@ -155,6 +247,14 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .room
             .remove_occupant_session(&nick, &msg.sender_jid)
             .unwrap_or(false);
+        // Reap any additional (ghost) occupancies of the same full JID.
+        // The outcome describes the primary nick; ghost occupancies are
+        // bug states that were never legitimately visible, so they are
+        // removed silently to make count and fan-out set correct.
+        for ghost_nick in nicks.iter().skip(1) {
+            self.room
+                .remove_occupant_session(ghost_nick, &msg.sender_jid);
+        }
         let remaining_muji = if removed_last_session {
             None
         } else {
@@ -174,6 +274,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         };
         let occupant_count = self.room.occupant_count();
         let is_persistent = self.room.config.persistent;
+        let occupancy_revision = self.occupancy_revision;
         Ok(Some(LeaveOutcome {
             nick,
             affiliation,
@@ -187,6 +288,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             remaining_nick_real_jid,
             occupant_count,
             is_persistent,
+            occupancy_revision,
         }))
     }
 }
@@ -449,5 +551,68 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         self.room.waddle_id = msg.waddle_id;
         self.room.channel_id = msg.channel_id;
         self.room.config = desired_config;
+    }
+}
+
+/// Best-effort resolver-affiliation sync for joins the presence handler
+/// rejects BEFORE any actor message (members-only registration-required
+/// and resolver Outcast → forbidden). Without it, a stale
+/// resolver-derived affiliation inside a live room actor (written
+/// before the revocation) lingers on the room's affiliation list —
+/// visible via admin queries and XEP-0045 §7.x member lists — until the
+/// room is evicted. Provenance-aware via
+/// `MucRoom::update_affiliation_from_resolver`: explicit grants (bans,
+/// creator Owner) are never touched, and `Affiliation::None` removes
+/// resolver-derived entries.
+pub struct SyncResolverAffiliation {
+    pub jid: BareJid,
+    pub affiliation: Affiliation,
+    /// The `admission_revision` the caller's rejection decision was
+    /// computed against (the room snapshot of that same join attempt).
+    /// The sync applies only while the room is still at that revision:
+    /// any interleaved admission/affiliation change — including a later
+    /// successful join of the re-granted user — invalidates this
+    /// delayed sync instead of letting it clear a live occupant's
+    /// freshly re-derived affiliation.
+    pub expected_admission_revision: u64,
+}
+
+/// Typed outcome of a [`SyncResolverAffiliation`] request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum ResolverAffiliationSyncOutcome {
+    /// The resolver verdict was applied (or was already in effect).
+    Applied,
+    /// The room's admission state changed since the caller snapshotted
+    /// it; the stale sync was refused.
+    StaleAdmissionRevision,
+    /// The actor is sealed pending destruction (#1108); nothing to sync.
+    RoomSealed,
+}
+
+impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
+    type Reply = ResolverAffiliationSyncOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: SyncResolverAffiliation,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.sealed {
+            return ResolverAffiliationSyncOutcome::RoomSealed;
+        }
+        if msg.expected_admission_revision != self.admission_revision {
+            return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
+        }
+        // An applied change is itself an admission-relevant affiliation
+        // change, so it bumps the revision like `ChangeAffiliation` —
+        // any join admitted against the pre-sync snapshot retries.
+        if self
+            .room
+            .update_affiliation_from_resolver(msg.jid, msg.affiliation)
+            .is_some()
+        {
+            self.admission_revision = self.admission_revision.saturating_add(1);
+        }
+        ResolverAffiliationSyncOutcome::Applied
     }
 }

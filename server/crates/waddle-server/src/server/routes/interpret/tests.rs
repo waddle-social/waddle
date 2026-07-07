@@ -266,6 +266,8 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     sm.store_session(detached).await.expect("store session");
 
