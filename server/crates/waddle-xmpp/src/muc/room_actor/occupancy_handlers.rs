@@ -59,10 +59,15 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         match msg.affiliation_grant {
             JoinAffiliationGrant::Unaffiliated => {}
             JoinAffiliationGrant::Resolver(affiliation) => {
-                if affiliation != Affiliation::None {
-                    self.room
-                        .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation);
-                }
+                // Applied unconditionally, including `Affiliation::None`:
+                // a resolver revocation must clear any stale
+                // resolver-derived Member/Admin entry so the revoked
+                // user no longer passes members-only admission below.
+                // `set_with_provenance` keeps this safe — it refuses
+                // resolver writes over explicit grants (bans survive)
+                // and removes the map entry on a None write.
+                self.room
+                    .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation);
             }
             JoinAffiliationGrant::CreatorOwner => {
                 // #1134 defense-in-depth on top of the registry's

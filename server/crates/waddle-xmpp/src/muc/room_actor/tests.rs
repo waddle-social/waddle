@@ -3306,6 +3306,121 @@ async fn resolver_write_does_not_replace_explicit_ban_and_join_stays_forbidden()
     );
 }
 
+/// A `Resolver(Affiliation::None)` grant must be APPLIED, not skipped:
+/// the authz resolver revoking a previously derived Member/Admin tier
+/// has to clear the stale resolver-derived entry from room state, so a
+/// revoked user no longer passes members-only admission on rejoin.
+#[tokio::test]
+async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_forbidden() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice: FullJid = test_full_jid("alice");
+    let alice_bare = alice.to_bare();
+
+    // Seed a resolver-derived Member entry, then leave the room.
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("resolver-derived member joins the members-only room");
+    actor
+        .ask(Leave {
+            nick: "alice".to_string(),
+        })
+        .await
+        .expect("leave");
+
+    // The resolver has since revoked the derived tier: the rejoin
+    // carries Resolver(None) and must be refused, not admitted via the
+    // stale Member entry.
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::None),
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(
+                RoomActorError::JoinForbidden { .. }
+            ))
+        ),
+        "revoked user's rejoin must be refused by members-only admission, got {outcome:?}"
+    );
+
+    let affiliation = actor
+        .ask(GetAffiliation {
+            jid: alice_bare.clone(),
+        })
+        .await
+        .expect("affiliation query");
+    assert_eq!(
+        affiliation,
+        Affiliation::None,
+        "the stale resolver-derived Member entry must be cleared"
+    );
+}
+
+/// Companion to the Resolver(None) fix: applying the None write must
+/// NOT lift an explicit ban — `set_with_provenance` refuses
+/// resolver-derived writes over explicit grants, so the Outcast entry
+/// survives and the join stays forbidden.
+#[tokio::test]
+async fn resolver_none_does_not_clear_explicit_ban() {
+    let actor = spawn_room_actor().await;
+    let banned: BareJid = "mallory@example.com".parse().expect("bare jid");
+    actor
+        .ask(ChangeAffiliation {
+            jid: banned.clone(),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban mallory");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: "mallory@example.com/res".parse().expect("full jid"),
+            nick: "mallory".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::None),
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(
+                RoomActorError::JoinForbidden { .. }
+            ))
+        ),
+        "banned user must stay refused, got {outcome:?}"
+    );
+
+    let affiliation = actor
+        .ask(GetAffiliation { jid: banned })
+        .await
+        .expect("affiliation query");
+    assert_eq!(
+        affiliation,
+        Affiliation::Outcast,
+        "the explicit ban must survive the resolver None write"
+    );
+}
+
 /// A resolver write with a different value must not downgrade an
 /// explicit grant (#1110): an admin-granted Admin stays Admin when the
 /// resolver reports Member, and it keeps blocking dormancy.
