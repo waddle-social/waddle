@@ -4782,3 +4782,72 @@ async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() 
          must be cleaned up"
     );
 }
+
+/// codex P1 on PR #1207: when the invalidation is triggered BY the
+/// same client's fresh bind (the replacement owner IS the invalidating
+/// caller), the new stream cannot have joined any rooms yet — the dead
+/// session's occupancies are certainly stale and MUST be cleaned, or
+/// the fresh connection inherits room fan-out without ever joining.
+/// Only a FOREIGN live entry (someone else's slot, unknown join state)
+/// warrants skipping room cleanup.
+#[tokio::test]
+async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
+    use super::cleanup::cleanup_invalidated_detached_session;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "fresh-bind-cleanup-channel@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+
+    // The same client fresh-binds: its NEW connection owns the slot and
+    // triggers invalidation of the old detached session.
+    let (fresh_tx, _fresh_rx) = mpsc::channel::<OutboundStanza>(4);
+    let fresh_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), fresh_tx);
+
+    let detached = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: "stale-stream-fresh-bind".to_string(),
+        user_id: "alice@example.com".to_string(),
+        jid: alice.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    cleanup_invalidated_detached_session(state.as_ref(), detached, Some(&fresh_owner)).await;
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.find_nick_by_real_jid(&alice).is_none(),
+        "a fresh bind's invalidation must clean the dead session's room \
+         occupancy — the new stream has not joined anything yet"
+    );
+}

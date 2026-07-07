@@ -105,7 +105,11 @@ async fn handle_muc_join_unlocked(
     // revisions in a row — allow a few re-snapshots before giving up
     // (each retry re-reads the current revision; convergence is
     // guaranteed once admissions quiesce).
-    const MAX_STALE_ADMISSION_RETRIES: u32 = 3;
+    // 10 bounds a pathological revision-churn loop while making spurious
+    // failure implausible for realistic bursts: each retry re-snapshots the
+    // CURRENT revision, so a retry only fails when yet another admission
+    // landed inside that single snapshot-to-ask window.
+    const MAX_STALE_ADMISSION_RETRIES: u32 = 10;
     let mut stale_admission_retries = 0u32;
     // #1108: a room actor can be sealed+destroyed by the guarded
     // dormancy eviction between our registry lookup and the join ask.

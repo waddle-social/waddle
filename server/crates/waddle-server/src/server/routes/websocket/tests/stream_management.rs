@@ -896,7 +896,7 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
     // h = u32::MAX acks the pre-wrap stanza. A naive `h > outbound`
     // comparison would misread this as handled-count-too-high.
     let responses = handle_xmpp_frame(
-        &format!("<a xmlns='urn:xmpp:sm:3' h='{}'/>", u32::MAX),
+        &waddle_xmpp::stream_management::SmAck::new(u32::MAX).to_xml(),
         "example.com",
         state.as_ref(),
         &mut conn,
@@ -948,7 +948,7 @@ async fn sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged() {
 
     let bogus_h = 2u32.wrapping_add(0x8000_0000);
     let responses = handle_xmpp_frame(
-        &format!("<a xmlns='urn:xmpp:sm:3' h='{bogus_h}'/>"),
+        &waddle_xmpp::stream_management::SmAck::new(bogus_h).to_xml(),
         "example.com",
         state.as_ref(),
         &mut conn,
@@ -1001,7 +1001,7 @@ async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
 
     let stale_h = 2u32.wrapping_add(0x8000_0001);
     let responses = handle_xmpp_frame(
-        &format!("<a xmlns='urn:xmpp:sm:3' h='{stale_h}'/>"),
+        &waddle_xmpp::stream_management::SmAck::new(stale_h).to_xml(),
         "example.com",
         state.as_ref(),
         &mut conn,
