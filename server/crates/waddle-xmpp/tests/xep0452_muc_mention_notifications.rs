@@ -91,7 +91,9 @@ fn xep0452_message_round_trip_recovers_room_from_outer_from() {
         reparsed.from,
         Some("coven@chat.shakespeare.lit".parse().expect("valid room"))
     );
-    assert_eq!(reparsed.type_, MessageType::Chat);
+    assert_eq!(reparsed.type_, MessageType::Normal);
+    assert_ne!(reparsed.type_, MessageType::Chat);
+    assert_ne!(elem.attr("type"), Some("chat"));
     assert!(reparsed.bodies.is_empty());
     assert!(reparsed.has_mention_notification());
 

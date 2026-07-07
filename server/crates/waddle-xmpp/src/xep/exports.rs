@@ -393,10 +393,7 @@ pub use waddle_xmpp_core::xep0501::{
     NS_STORIES, PUBSUB_NODE_STORIES,
 };
 
-pub use super::xep0502::{
-    build_message_activity_field, build_muc_activity_roominfo_form, parse_message_activity_field,
-    ActivityTracker, RoomActivity, FIELD_MESSAGE_ACTIVITY, NS_MUC_ACTIVITY,
-};
+pub use super::xep0502::{ActivityTracker, RoomActivity};
 
 pub use super::xep0500::{
     build_muc_slow_mode_roominfo_form, build_roominfo_slow_mode_duration_field,

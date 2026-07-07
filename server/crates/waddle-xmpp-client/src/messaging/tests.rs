@@ -1,7 +1,9 @@
 use super::namespaces::*;
 use super::*;
+use crate::error::ClientError;
 use crate::request::StanzaId;
 use minidom::Element;
+use waddle_xmpp_core::CoreError;
 
 fn el(xml: &str) -> Element {
     xml.parse().expect("invalid XML")
@@ -1537,6 +1539,10 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
     let sources = file_sharing
         .get_child("sources", NS_SFS)
         .expect("file-sharing sources");
+    assert!(
+        sources.get_child("url-data", NS_URL_DATA).is_none(),
+        "encrypted file-sharing must not expose a direct outer url-data source"
+    );
     // The XEP-0448 envelope is nested in the XEP-0447 source list.
     let encrypted = sources
         .get_child("encrypted", NS_ESFS)
@@ -1563,6 +1569,123 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
     assert!(
         stanza.get_child("encrypted", NS_ESFS).is_none(),
         "encrypted must not be a direct message child"
+    );
+}
+
+#[test]
+fn build_outbound_message_uses_file_url_as_nested_encrypted_source_fallback() {
+    use crate::xep::encrypted_file::{Cipher, EncryptedFile, NS_ESFS};
+    let url = "https://files.example.com/photo.jpg.enc";
+    let options = SendMessageOptions {
+        shared_files: vec![SharedFile {
+            url: url.to_string(),
+            name: Some("photo.jpg".to_string()),
+            media_type: Some("image/jpeg".to_string()),
+            size: Some(2048),
+            width: None,
+            height: None,
+            disposition: SharedFileDisposition::Inline,
+            encrypted: Some(EncryptedFile {
+                cipher: Cipher::Aes256GcmNoPadding,
+                key_b64: "a2V5".to_string(),
+                iv_b64: "aXY=".to_string(),
+                hashes: Vec::new(),
+                sources: Vec::new(),
+            }),
+        }],
+        ..Default::default()
+    };
+    let (_, stanza) =
+        build_outbound_message("bob@example.com", "chat", "see attached", &options).unwrap();
+    let sources = stanza
+        .get_child("file-sharing", NS_SFS)
+        .and_then(|file_sharing| file_sharing.get_child("sources", NS_SFS))
+        .expect("file-sharing sources");
+
+    assert!(
+        sources.get_child("url-data", NS_URL_DATA).is_none(),
+        "fallback ciphertext URL must still not be exposed as an outer source"
+    );
+    let nested_url = sources
+        .get_child("encrypted", NS_ESFS)
+        .and_then(|encrypted| encrypted.get_child("sources", NS_SFS))
+        .and_then(|encrypted_sources| encrypted_sources.get_child("url-data", NS_URL_DATA))
+        .and_then(|url_data| url_data.attr("target"));
+    assert_eq!(nested_url, Some(url));
+}
+
+#[test]
+fn build_outbound_message_uses_file_url_as_primary_nested_encrypted_source() {
+    use crate::xep::encrypted_file::{Cipher, EncryptedFile, NS_ESFS};
+    let url = "https://files.example.com/photo.jpg.enc";
+    let mirror_url = "https://mirror.example.com/photo.jpg.enc";
+    let options = SendMessageOptions {
+        shared_files: vec![SharedFile {
+            url: url.to_string(),
+            name: Some("photo.jpg".to_string()),
+            media_type: Some("image/jpeg".to_string()),
+            size: Some(2048),
+            width: None,
+            height: None,
+            disposition: SharedFileDisposition::Inline,
+            encrypted: Some(EncryptedFile {
+                cipher: Cipher::Aes256GcmNoPadding,
+                key_b64: "a2V5".to_string(),
+                iv_b64: "aXY=".to_string(),
+                hashes: Vec::new(),
+                sources: vec![mirror_url.to_string()],
+            }),
+        }],
+        ..Default::default()
+    };
+    let (_, stanza) =
+        build_outbound_message("bob@example.com", "chat", "see attached", &options).unwrap();
+    let encrypted_sources = stanza
+        .get_child("file-sharing", NS_SFS)
+        .and_then(|file_sharing| file_sharing.get_child("sources", NS_SFS))
+        .and_then(|sources| sources.get_child("encrypted", NS_ESFS))
+        .and_then(|encrypted| encrypted.get_child("sources", NS_SFS))
+        .expect("encrypted sources");
+
+    let targets: Vec<_> = encrypted_sources
+        .children()
+        .filter(|child| child.is("url-data", NS_URL_DATA))
+        .filter_map(|url_data| url_data.attr("target"))
+        .collect();
+    assert_eq!(targets, vec![url, mirror_url]);
+}
+
+#[test]
+fn build_outbound_message_rejects_encrypted_file_without_usable_source() {
+    use crate::xep::encrypted_file::{Cipher, EncryptedFile};
+    let options = SendMessageOptions {
+        shared_files: vec![SharedFile {
+            url: "  ".to_string(),
+            name: Some("photo.jpg".to_string()),
+            media_type: Some("image/jpeg".to_string()),
+            size: Some(2048),
+            width: None,
+            height: None,
+            disposition: SharedFileDisposition::Inline,
+            encrypted: Some(EncryptedFile {
+                cipher: Cipher::Aes256GcmNoPadding,
+                key_b64: "a2V5".to_string(),
+                iv_b64: "aXY=".to_string(),
+                hashes: Vec::new(),
+                sources: vec![" \t ".to_string()],
+            }),
+        }],
+        ..Default::default()
+    };
+    let error = build_outbound_message("bob@example.com", "chat", "see attached", &options)
+        .expect_err("encrypted file without a ciphertext source must fail");
+    assert!(
+        matches!(
+            error,
+            ClientError::Core(CoreError::BadRequest(Some(ref text)))
+                if text == "encrypted shared file requires a ciphertext source URL"
+        ),
+        "unexpected error: {error:?}"
     );
 }
 

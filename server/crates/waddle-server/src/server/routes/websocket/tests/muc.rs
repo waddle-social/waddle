@@ -2442,6 +2442,14 @@ async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
     assert!(response.contains("muc#roomconfig_pubsub"));
     assert!(response.contains("muc#roominfo_description"));
     assert!(response.contains("Linked channel description"));
+    assert!(
+        !response.contains("urn:xmpp:muc-activity"),
+        "room disco must not advertise XEP-0502 without truthful messages/hour data: {response}"
+    );
+    assert!(
+        !response.contains("message-activity"),
+        "room disco must not emit the XEP-0502 roominfo field without truthful data: {response}"
+    );
 }
 
 #[tokio::test]

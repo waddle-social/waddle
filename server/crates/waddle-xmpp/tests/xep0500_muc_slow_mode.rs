@@ -70,6 +70,7 @@ fn xep0500_roominfo_field_uses_spec_var() {
     assert_eq!(field.name(), "field");
     assert_eq!(field.ns(), NS_DATA_FORMS);
     assert_eq!(field.attr("var"), Some(FIELD_ROOMINFO_SLOW_MODE_DURATION));
+    assert_eq!(field.attr("type"), Some("text-single"));
     assert_eq!(
         field
             .get_child("value", NS_DATA_FORMS)

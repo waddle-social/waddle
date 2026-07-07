@@ -185,6 +185,7 @@ fn room_from_forwarded_message(original: &Message) -> Option<jid::BareJid> {
 pub fn build_mention_notification_message(to: jid::Jid, original: &Message) -> Option<Message> {
     let room = room_from_forwarded_message(original)?;
     let mut msg = Message::new(Some(to));
+    msg.type_ = MessageType::Normal;
     msg.from = Some(jid::Jid::from(room));
     msg.payloads
         .push(build_mention_notification_element(original));
@@ -348,7 +349,7 @@ mod tests {
             msg.from,
             Some("room@muc.example.com".parse().expect("valid room"))
         );
-        assert_eq!(msg.type_, MessageType::Chat);
+        assert_eq!(msg.type_, MessageType::Normal);
         assert!(has_mention_notification(&msg));
         assert!(msg.bodies.is_empty());
     }

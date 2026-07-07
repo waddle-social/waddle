@@ -16,7 +16,7 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0300::NS_HASHES;
 use waddle_xmpp::xep::xep0446::NS_FILE_METADATA;
-use waddle_xmpp::xep::xep0447::NS_SFS;
+use waddle_xmpp::xep::xep0447::{NS_SFS, NS_URL_DATA};
 use waddle_xmpp::xep::xep0448::{
     build_encrypted_element, extract_encrypted_file, is_encrypted_file_element,
     parse_encrypted_element, set_encrypted_file, Cipher, EncryptedFile, EncryptedFileError,
@@ -54,6 +54,22 @@ fn message_with_file_sharing() -> Message {
         Element::builder("file-sharing", NS_SFS)
             .append(file)
             .append(Element::builder("sources", NS_SFS).build())
+            .build(),
+    );
+    msg
+}
+
+fn message_with_plain_url_source() -> Message {
+    let mut msg = message_with_file_sharing();
+    let sources = msg.payloads[0]
+        .get_child_mut("sources", NS_SFS)
+        .expect("sources");
+    sources.append_child(
+        Element::builder("url-data", NS_URL_DATA)
+            .attr(
+                minidom::rxml::xml_ncname!("target").to_owned(),
+                "https://files.example.com/plain.jpg",
+            )
             .build(),
     );
     msg
@@ -289,14 +305,52 @@ fn xep0448_message_set_and_extract_round_trip() {
         .get_child("sources", NS_SFS)
         .expect("file-sharing sources");
     assert!(
+        sources.get_child("url-data", NS_URL_DATA).is_none(),
+        "encrypted file-sharing must not expose a direct outer url-data source"
+    );
+    assert!(
         sources.children().any(is_encrypted_file_element),
         "encrypted is nested inside file-sharing sources"
+    );
+    let inner_url_data = sources
+        .get_child("encrypted", NS_ESFS)
+        .and_then(|encrypted| encrypted.get_child("sources", NS_SFS))
+        .and_then(|encrypted_sources| encrypted_sources.get_child("url-data", NS_URL_DATA))
+        .expect("ciphertext url-data inside encrypted sources");
+    assert_eq!(
+        inner_url_data.attr("target"),
+        Some("https://files.example.com/blob.enc")
     );
 
     let extracted = extract_encrypted_file(&msg)
         .expect("payload present")
         .expect("payload parses");
     assert_eq!(extracted, enc);
+}
+
+#[test]
+fn xep0448_set_removes_stale_outer_url_data_for_encrypted_file() {
+    let mut msg = message_with_plain_url_source();
+    set_encrypted_file(&mut msg, &sample()).expect("has sources");
+
+    let file_sharing = msg
+        .payloads
+        .iter()
+        .find(|payload| payload.is("file-sharing", NS_SFS))
+        .expect("file-sharing payload");
+    let sources = file_sharing
+        .get_child("sources", NS_SFS)
+        .expect("file-sharing sources");
+    assert!(
+        sources.get_child("url-data", NS_URL_DATA).is_none(),
+        "outer XEP-0447 sources must not contain a bare URL for encrypted files"
+    );
+    let nested_url = sources
+        .get_child("encrypted", NS_ESFS)
+        .and_then(|encrypted| encrypted.get_child("sources", NS_SFS))
+        .and_then(|encrypted_sources| encrypted_sources.get_child("url-data", NS_URL_DATA))
+        .and_then(|url_data| url_data.attr("target"));
+    assert_eq!(nested_url, Some("https://files.example.com/blob.enc"));
 }
 
 #[test]

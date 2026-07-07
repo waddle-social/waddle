@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use minidom::Element;
 
-use super::xep0004::{DataForm, Field, FormType, ToElement, NS_DATA_FORMS};
+use super::xep0004::{DataForm, Field, FormType, ToElement};
 
 /// Room configuration field for slow mode duration.
 pub const FIELD_SLOW_MODE_DURATION: &str = "muc#roomconfig_slow_mode_duration";
@@ -201,17 +201,7 @@ pub fn parse_slow_mode_duration(value: &str) -> u64 {
 
 /// Build the XEP-0500 roominfo field for disco#info extension forms.
 pub fn build_roominfo_slow_mode_duration_field(duration_secs: u64) -> Element {
-    Element::builder("field", NS_DATA_FORMS)
-        .attr(
-            minidom::rxml::xml_ncname!("var").to_owned(),
-            FIELD_ROOMINFO_SLOW_MODE_DURATION,
-        )
-        .append(
-            Element::builder("value", NS_DATA_FORMS)
-                .append(duration_secs.to_string())
-                .build(),
-        )
-        .build()
+    Field::text_single(FIELD_ROOMINFO_SLOW_MODE_DURATION, duration_secs.to_string()).to_element()
 }
 
 /// Build a MUC roominfo data-form extension containing the slow mode duration.
@@ -227,6 +217,7 @@ pub fn build_muc_slow_mode_roominfo_form(duration_secs: u64) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use super::super::xep0004::NS_DATA_FORMS;
     use super::*;
     use std::thread;
 
@@ -357,6 +348,7 @@ mod tests {
         assert_eq!(field.name(), "field");
         assert_eq!(field.ns(), NS_DATA_FORMS);
         assert_eq!(field.attr("var"), Some(FIELD_ROOMINFO_SLOW_MODE_DURATION));
+        assert_eq!(field.attr("type"), Some("text-single"));
         assert_eq!(
             field.get_child("value", NS_DATA_FORMS).map(|v| v.text()),
             Some("20".to_owned())

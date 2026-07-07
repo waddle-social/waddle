@@ -243,6 +243,7 @@ pub fn set_encrypted_file(
         .find(|payload| payload.is("file-sharing", NS_SFS))
     {
         if let Some(sources) = file_sharing.get_child_mut("sources", NS_SFS) {
+            while sources.remove_child("url-data", NS_URL_DATA).is_some() {}
             sources.remove_child("encrypted", NS_ESFS);
             sources.append_child(encrypted);
         } else {

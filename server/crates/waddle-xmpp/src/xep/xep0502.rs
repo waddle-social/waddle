@@ -1,20 +1,10 @@
 //! XEP-0502: MUC Activity Indicator
 //!
-//! XEP-0502 exposes room activity through a disco#info data-form field. It
-//! does not define a subscribe/notify stanza protocol.
+//! Local activity tracking support. Waddle does not currently emit the optional
+//! disco#info activity field because there is no truthful messages/hour value
+//! available at disco time.
 
 use chrono::{DateTime, Utc};
-use minidom::Element;
-
-use super::xep0004::{DataForm, Field, FormType, ToElement, NS_DATA_FORMS};
-
-/// Namespace for XEP-0502 MUC Activity Indicator.
-pub const NS_MUC_ACTIVITY: &str = "urn:xmpp:muc-activity";
-
-/// MUC roominfo field containing the room's messages/hour value.
-pub const FIELD_MESSAGE_ACTIVITY: &str = "{urn:xmpp:muc-activity}message-activity";
-
-const FORM_TYPE_MUC_ROOMINFO: &str = "http://jabber.org/protocol/muc#roominfo";
 
 /// Activity state for a room. This is a local model, not a XEP-0502 stanza.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,51 +107,6 @@ impl ActivityTracker {
     }
 }
 
-fn message_activity_value(messages_per_hour: f64) -> String {
-    if messages_per_hour.is_finite() && messages_per_hour >= 0.0 {
-        messages_per_hour.to_string()
-    } else {
-        "0".to_owned()
-    }
-}
-
-/// Build the XEP-0502 roominfo field containing messages/hour.
-pub fn build_message_activity_field(messages_per_hour: f64) -> Element {
-    Element::builder("field", NS_DATA_FORMS)
-        .attr(
-            minidom::rxml::xml_ncname!("var").to_owned(),
-            FIELD_MESSAGE_ACTIVITY,
-        )
-        .append(
-            Element::builder("value", NS_DATA_FORMS)
-                .append(message_activity_value(messages_per_hour))
-                .build(),
-        )
-        .build()
-}
-
-/// Parse the XEP-0502 roominfo activity field.
-pub fn parse_message_activity_field(field: &Element) -> Option<f64> {
-    if !field.is("field", NS_DATA_FORMS) || field.attr("var") != Some(FIELD_MESSAGE_ACTIVITY) {
-        return None;
-    }
-    field
-        .get_child("value", NS_DATA_FORMS)
-        .and_then(|value| value.text().parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value >= 0.0)
-}
-
-/// Build a MUC roominfo extension form containing XEP-0502 activity.
-pub fn build_muc_activity_roominfo_form(messages_per_hour: f64) -> Element {
-    DataForm::new(FormType::Result)
-        .add_field(Field::form_type(FORM_TYPE_MUC_ROOMINFO))
-        .add_field(Field::text_single(
-            FIELD_MESSAGE_ACTIVITY,
-            message_activity_value(messages_per_hour),
-        ))
-        .to_element()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,42 +165,5 @@ mod tests {
 
         tracker.clear();
         assert_eq!(tracker.active_count(), 0);
-    }
-
-    #[test]
-    fn test_build_message_activity_field() {
-        let field = build_message_activity_field(12.5);
-        assert_eq!(field.name(), "field");
-        assert_eq!(field.ns(), NS_DATA_FORMS);
-        assert_eq!(field.attr("var"), Some(FIELD_MESSAGE_ACTIVITY));
-        assert_eq!(parse_message_activity_field(&field), Some(12.5));
-    }
-
-    #[test]
-    fn test_message_activity_field_rejects_foreign_fields() {
-        let field = Element::builder("field", NS_DATA_FORMS)
-            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "other")
-            .append(Element::builder("value", NS_DATA_FORMS).append("1").build())
-            .build();
-        assert_eq!(parse_message_activity_field(&field), None);
-    }
-
-    #[test]
-    fn test_build_roominfo_activity_form() {
-        let form = build_muc_activity_roominfo_form(3.25);
-        assert_eq!(form.name(), "x");
-        assert_eq!(form.ns(), NS_DATA_FORMS);
-        assert_eq!(form.attr("type"), Some("result"));
-
-        let field = form
-            .children()
-            .find(|child| child.attr("var") == Some(FIELD_MESSAGE_ACTIVITY))
-            .expect("message activity field");
-        assert_eq!(
-            field
-                .get_child("value", NS_DATA_FORMS)
-                .map(|value| value.text()),
-            Some("3.25".to_owned())
-        );
     }
 }
