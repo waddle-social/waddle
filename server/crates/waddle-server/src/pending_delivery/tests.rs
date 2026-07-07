@@ -252,7 +252,7 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
 #[tokio::test]
 async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
     // SM-enabled flush: rows are pushed but stay in storage
-    // claimed by the SM session until `delete_acked_through` is
+    // claimed by the SM session until `delete_acked_in_window` is
     // called by the SM ack handler.
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -294,7 +294,7 @@ async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
 
     // Locked Q7b SM-ack lifecycle: rows stay in storage tagged
     // `flushed_in_session` after push; deletion happens on SM
-    // `<a h>` ack via `delete_acked_through`, NOT on send.
+    // `<a h>` ack via `delete_acked_in_window`, NOT on send.
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 2);
     let listed = storage.list(&bare("alice@example.com")).await.unwrap();
     for row in &listed {
@@ -679,7 +679,7 @@ async fn pending_row_deleted_only_after_sm_ack() {
     //    (OutboundStanza in the channel) but stays in storage.
     // 3. Simulate the recipient main loop's `record_pushed_at`
     //    after `record_outbound`.
-    // 4. Simulate an SM `<a h>` ack via `delete_acked_through`.
+    // 4. Simulate an SM `<a h>` ack via `delete_acked_in_window`.
     // 5. Verify the row is now gone.
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -724,12 +724,18 @@ async fn pending_row_deleted_only_after_sm_ack() {
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
 
     // Pre-ack with h=6 (covers earlier stanzas, not this one).
-    let removed = storage.delete_acked_through(&session_id, 6).await.unwrap();
+    let removed = storage
+        .delete_acked_in_window(&session_id, 0, 6)
+        .await
+        .unwrap();
     assert_eq!(removed, 0, "ack(h=6) does not cover h=7 row");
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
 
     // SM ack arrives covering h=7.
-    let removed = storage.delete_acked_through(&session_id, 7).await.unwrap();
+    let removed = storage
+        .delete_acked_in_window(&session_id, 6, 7)
+        .await
+        .unwrap();
     assert_eq!(removed, 1);
     assert_eq!(
         storage.count(&bare("alice@example.com")).await.unwrap(),
@@ -821,8 +827,8 @@ async fn pending_row_released_on_pre_ack_session_death() {
 async fn ack_before_record_pushed_at_skips_unsequenced_row() {
     // Greptile review on PR #358: documents the storage-layer
     // contract that motivates the `record_pushed_at` /
-    // `delete_acked_through` ordering rule in the websocket main
-    // loop. If `delete_acked_through` runs while a freshly-claimed
+    // `delete_acked_in_window` ordering rule in the websocket main
+    // loop. If `delete_acked_in_window` runs while a freshly-claimed
     // row's `outbound_sequence` is still NULL, the row is skipped
     // (correct: NULL means "not yet pushed, no h-coverage
     // possible"). The websocket main loop guarantees the
@@ -847,10 +853,13 @@ async fn ack_before_record_pushed_at_skips_unsequenced_row() {
     // NULL so the row is skipped. This is the failure mode
     // Greptile flagged when both calls were spawned: the row
     // would persist claimed-but-never-acked until session death.
-    let removed = storage.delete_acked_through(&session, 100).await.unwrap();
+    let removed = storage
+        .delete_acked_in_window(&session, 0, 100)
+        .await
+        .unwrap();
     assert_eq!(
         removed, 0,
-        "NULL outbound_sequence is skipped by delete_acked_through"
+        "NULL outbound_sequence is skipped by delete_acked_in_window"
     );
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
 
@@ -859,7 +868,10 @@ async fn ack_before_record_pushed_at_skips_unsequenced_row() {
     // h DOES delete the row. This proves recovery — the next ack
     // after the stamp completes the cleanup.
     storage.record_pushed_at(&row_id, 50).await.unwrap();
-    let removed = storage.delete_acked_through(&session, 50).await.unwrap();
+    let removed = storage
+        .delete_acked_in_window(&session, 0, 50)
+        .await
+        .unwrap();
     assert_eq!(removed, 1);
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
 }
@@ -1362,12 +1374,15 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         ) -> Result<u64, PendingStorageError> {
             self.inner.record_pushed_at(id, sequence).await
         }
-        async fn delete_acked_through(
+        async fn delete_acked_in_window(
             &self,
             session: &waddle_xmpp::pending_delivery::SmSessionId,
-            sequence_max: u32,
+            from_exclusive: u32,
+            to_inclusive: u32,
         ) -> Result<u64, PendingStorageError> {
-            self.inner.delete_acked_through(session, sequence_max).await
+            self.inner
+                .delete_acked_in_window(session, from_exclusive, to_inclusive)
+                .await
         }
         async fn list_orphaned_claims(
             &self,
@@ -2114,7 +2129,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].flushed_in_session.as_ref(), Some(&sm_session));
     storage
-        .delete_acked_through(&sm_session, u32::MAX)
+        .delete_acked_in_window(&sm_session, 0, u32::MAX)
         .await
         .unwrap();
 }

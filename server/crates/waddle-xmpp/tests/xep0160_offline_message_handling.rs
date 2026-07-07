@@ -453,7 +453,7 @@ async fn xep0160_pending_row_survives_pre_ack_session_death_for_reflush() {
     // restores the row to the unclaimed pool. A subsequent resource
     // can then re-claim and re-flush the same row — its content is
     // preserved exactly because deletion is gated on SM-ack via
-    // `delete_acked_through`, not on push.
+    // `delete_acked_in_window`, not on push.
     use std::sync::Arc;
     use waddle_xmpp::pending_delivery::storage::{
         InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
@@ -505,7 +505,10 @@ async fn xep0160_pending_row_survives_pre_ack_session_death_for_reflush() {
     // counter on a different SM stream). On its SM ack, the row is
     // finally deleted.
     storage.record_pushed_at(&row_id, 2).await.unwrap();
-    let removed = storage.delete_acked_through(&session_b, 2).await.unwrap();
+    let removed = storage
+        .delete_acked_in_window(&session_b, 0, 2)
+        .await
+        .unwrap();
     assert_eq!(removed, 1);
     assert_eq!(storage.count(&recipient).await.unwrap(), 0);
 }

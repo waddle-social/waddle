@@ -18,7 +18,7 @@
 //!   assigned XEP-0198 outbound counter via
 //!   [`PendingDeliveryStorage::record_pushed_at`]. Rows are deleted
 //!   only on SM `<a h>` ack via
-//!   [`PendingDeliveryStorage::delete_acked_through`].
+//!   [`PendingDeliveryStorage::delete_acked_in_window`].
 //! - **Q7c** — `claim_for_session` atomically tags rows with the
 //!   recipient's resource so a concurrent presence from another
 //!   resource sees an empty pool. On pre-ack session death the SM

@@ -212,10 +212,11 @@ async fn empty_recipient_count_is_zero() {
 }
 
 #[tokio::test]
-async fn delete_acked_through_only_removes_acked_session_rows() {
+async fn delete_acked_in_window_only_removes_acked_session_rows() {
     // Locked Q7b SM-ack-keyed deletion: an SM `<a h>` ack with
     // h=N must remove rows where flushed_in_session = current
-    // AND outbound_sequence <= N — and must leave alone:
+    // AND outbound_sequence in the acked window (last_acked, N] —
+    // and must leave alone:
     // - rows with outbound_sequence = NULL (claimed but not yet
     //   pushed),
     // - rows with outbound_sequence > N (pushed but not yet
@@ -246,7 +247,10 @@ async fn delete_acked_through_only_removes_acked_session_rows() {
     // claimed[3] left without record_pushed_at.
 
     // SM ack with h=2 covers the first two only.
-    let removed = store.delete_acked_through(&session_a, 2).await.unwrap();
+    let removed = store
+        .delete_acked_in_window(&session_a, 0, 2)
+        .await
+        .unwrap();
     assert_eq!(removed, 2);
     let remaining = store.list(&recipient).await.unwrap();
     assert_eq!(remaining.len(), 2);
@@ -269,7 +273,7 @@ async fn delete_acked_through_only_removes_acked_session_rows() {
 }
 
 #[tokio::test]
-async fn delete_acked_through_ignores_other_sessions() {
+async fn delete_acked_in_window_ignores_other_sessions() {
     // Two sessions for the same recipient (e.g. parallel
     // resources): an ack from session A must not affect rows
     // claimed by session B.
@@ -288,13 +292,96 @@ async fn delete_acked_through_ignores_other_sessions() {
     // A different session's ack with h=10 must not touch
     // session_a's row.
     let session_b = SmSessionId::new("s-b");
-    let removed = store.delete_acked_through(&session_b, 10).await.unwrap();
+    let removed = store
+        .delete_acked_in_window(&session_b, 0, 10)
+        .await
+        .unwrap();
     assert_eq!(removed, 0);
     assert_eq!(
         store.count(&bare("alice@example.com")).await.unwrap(),
         1,
         "session_a row preserved"
     );
+}
+
+#[tokio::test]
+async fn delete_acked_in_window_handles_mod_2_32_wrap() {
+    // Review F4: the XEP-0198 ack window is mod-2^32, so a valid
+    // wrap-spanning ack (h small post-wrap) must delete the pre-wrap
+    // rows near u32::MAX too. A numeric `seq <= h` delete would only
+    // remove the numerically-small rows and strand the pre-wrap rows
+    // claimed, to be later released by the claim-expiry janitor as
+    // duplicates.
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..4 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("s-wrap");
+    let claimed = store.claim_for_session(&recipient, &session).await.unwrap();
+    assert_eq!(claimed.len(), 4);
+
+    store
+        .record_pushed_at(&claimed[0].id, u32::MAX - 1)
+        .await
+        .unwrap();
+    store
+        .record_pushed_at(&claimed[1].id, u32::MAX)
+        .await
+        .unwrap();
+    store.record_pushed_at(&claimed[2].id, 1).await.unwrap();
+    store.record_pushed_at(&claimed[3].id, 2).await.unwrap();
+
+    // Ack window (u32::MAX - 2, 1]: covers MAX-1, MAX, and 1 — NOT 2.
+    let removed = store
+        .delete_acked_in_window(&session, u32::MAX - 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(removed, 3, "wrap-spanning window deletes across the wrap");
+    let remaining = store.list(&recipient).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0].outbound_sequence,
+        Some(2),
+        "the row past the ack window survives"
+    );
+}
+
+#[tokio::test]
+async fn delete_acked_in_window_non_wrapping_window() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..3 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("s-plain");
+    let claimed = store.claim_for_session(&recipient, &session).await.unwrap();
+    store.record_pushed_at(&claimed[0].id, 5).await.unwrap();
+    store.record_pushed_at(&claimed[1].id, 6).await.unwrap();
+    store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
+
+    // Window (5, 6]: exclusive lower bound keeps 5, deletes 6, keeps 7.
+    let removed = store.delete_acked_in_window(&session, 5, 6).await.unwrap();
+    assert_eq!(removed, 1);
+    let mut remaining: Vec<_> = store
+        .list(&recipient)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.outbound_sequence)
+        .collect();
+    remaining.sort();
+    assert_eq!(remaining, vec![Some(5), Some(7)]);
+
+    // Empty window (7, 7] deletes nothing.
+    let removed = store.delete_acked_in_window(&session, 7, 7).await.unwrap();
+    assert_eq!(removed, 0, "an empty (from == to) window is a no-op");
 }
 
 #[tokio::test]

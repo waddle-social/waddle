@@ -212,13 +212,14 @@ where
                     // Applied ahead of any frames already parked in
                     // `deferred_inbound`. Safe ONLY because ack
                     // application is order-independent here: `h` is
-                    // cumulative/monotone, and `delete_acked_through`
-                    // removes rows keyed sequence <= h — outbound
-                    // stanzas a deferred frame produces later get
-                    // sequences > h and are untouched. If ack handling
-                    // ever grows a side effect that is not keyed on
-                    // sequence <= h, it must move to the deferred
-                    // queue instead of running inline.
+                    // cumulative/monotone, and `delete_acked_in_window`
+                    // removes rows keyed on the newly-acked window
+                    // (last_acked, h] — outbound stanzas a deferred
+                    // frame produces later get sequences past h and are
+                    // untouched. If ack handling ever grows a side
+                    // effect that is not keyed on the acked window, it
+                    // must move to the deferred queue instead of
+                    // running inline.
                     // Issue #1099: a handled-count-too-high `h` makes
                     // apply_sm_ack return the stream error + close
                     // frames and flip the phase to Closing instead of

@@ -110,7 +110,8 @@ pub(super) async fn handle_sm_stanza(
 /// Apply a client `<a h='N'/>` ack: advance the SM counters, drop the
 /// acked prefix of the unacked queue, and range-delete every
 /// `pending_delivery` row this XEP-0198 session claimed whose
-/// recorded outbound counter is <= `h`.
+/// recorded outbound counter lies in the newly-acknowledged mod-2^32
+/// window `(last_acked, h]`.
 ///
 /// Locked Q7b SM-ack lifecycle (issue #209): the range-delete is what
 /// actually frees rows from the durable queue — the flush path no
@@ -125,7 +126,7 @@ pub(super) async fn handle_sm_stanza(
 ///
 /// Greptile review on PR #358: this MUST run inline so it executes
 /// after any preceding `record_pushed_at` for the same connection.
-/// Spawning would let a quick ack arrive and run delete_acked_through
+/// Spawning would let a quick ack arrive and run delete_acked_in_window
 /// against a row whose outbound_sequence is still NULL (because the
 /// record_pushed_at task hadn't completed), silently skipping the
 /// delete.
@@ -180,6 +181,13 @@ pub(super) async fn apply_sm_ack(
             websocket_stream_close_xml(),
         ];
     }
+    // Capture the PRE-acknowledge floor: the newly-acknowledged rows
+    // are exactly the mod-2^32 window (last_acked, h], and the delete
+    // below must be wrap-aware — a numeric `<= h` delete on a
+    // wrap-spanning ack would strand the pre-wrap rows near u32::MAX
+    // claimed, to be released later by the claim-expiry janitor as
+    // duplicates (review F4).
+    let acked_from_exclusive = sm_state.last_acked;
     sm_state.acknowledge(h);
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
@@ -187,7 +195,7 @@ pub(super) async fn apply_sm_ack(
             .deps
             .protocol
             .pending_delivery_storage
-            .delete_acked_through(&session_id, h)
+            .delete_acked_in_window(&session_id, acked_from_exclusive, h)
             .await
         {
             Ok(removed) if removed > 0 => {
@@ -204,7 +212,7 @@ pub(super) async fn apply_sm_ack(
                     session = %session_id,
                     h,
                     error = %error,
-                    "pending_delivery delete_acked_through failed; rows \
+                    "pending_delivery delete_acked_in_window failed; rows \
                      will be retried on next session via release_claim"
                 );
             }
