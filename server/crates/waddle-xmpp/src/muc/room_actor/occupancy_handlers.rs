@@ -83,6 +83,20 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 members_only: self.room.config.members_only,
             });
         }
+        // #1107: the same FULL JID must never hold two occupancies.
+        // Sibling sessions of the same BARE jid legitimately share one
+        // nick (multi-session join below), but this exact session
+        // joining under a second nick would create a ghost occupancy
+        // that leave-cleanup misses. Nicknames are locked to identity,
+        // so refuse per XEP-0045 §7.6 (`<not-acceptable/>`).
+        if let Some(current_nick) = self.room.find_nick_by_real_jid(&msg.sender_jid) {
+            if current_nick != msg.nick {
+                return Err(RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
+                    current_nick: current_nick.to_owned(),
+                    requested_nick: msg.nick,
+                });
+            }
+        }
         let mut is_same_bare_multi_session_join = false;
         let is_existing_session_rejoin = self
             .room
@@ -166,11 +180,27 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let Some(nick) = self
+        // #1107: collect EVERY nick this full JID occupies. Post-#1107
+        // the join path refuses a second nick for the same full JID, so
+        // this is normally a single entry — but pre-existing ghost
+        // states (or direct state manipulation) must still converge on
+        // disconnect, or the ghost lives forever: wrong occupant count,
+        // fan-out to a dead session, room never dormant. Sorted for
+        // deterministic primary-nick selection.
+        let mut nicks: Vec<String> = self
             .room
-            .find_nick_by_real_jid(&msg.sender_jid)
-            .map(ToOwned::to_owned)
-        else {
+            .occupants
+            .values()
+            .filter(|occupant| {
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .iter()
+                    .any(|session| session == &msg.sender_jid)
+            })
+            .map(|occupant| occupant.nick.clone())
+            .collect();
+        nicks.sort();
+        let Some(nick) = nicks.first().cloned() else {
             return Ok(None);
         };
         let Some(occupant) = self.room.get_occupant(&nick) else {
@@ -200,6 +230,14 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .room
             .remove_occupant_session(&nick, &msg.sender_jid)
             .unwrap_or(false);
+        // Reap any additional (ghost) occupancies of the same full JID.
+        // The outcome describes the primary nick; ghost occupancies are
+        // bug states that were never legitimately visible, so they are
+        // removed silently to make count and fan-out set correct.
+        for ghost_nick in nicks.iter().skip(1) {
+            self.room
+                .remove_occupant_session(ghost_nick, &msg.sender_jid);
+        }
         let remaining_muji = if removed_last_session {
             None
         } else {

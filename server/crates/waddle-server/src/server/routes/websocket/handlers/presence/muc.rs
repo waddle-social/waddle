@@ -337,6 +337,36 @@ async fn handle_muc_join_unlocked(
                     return vec![build_muc_conflict_presence_xml(room_jid, &nick, sender_jid)];
                 }
                 if let kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
+                        current_nick,
+                        ..
+                    },
+                ) = &error
+                {
+                    // #1107 / XEP-0045 §7.6: nicknames are locked to
+                    // identity; a session already in the room under
+                    // another nick is refused with <not-acceptable/>
+                    // instead of being admitted as a ghost occupancy.
+                    warn!(
+                        room = %room_jid,
+                        nick = %nick,
+                        current_nick = %current_nick,
+                        sender = %sender_jid,
+                        "MUC join under second nick refused (nicknames locked)"
+                    );
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Cancel,
+                            DefinedCondition::NotAcceptable,
+                            "en",
+                            "You are already in this room under a different nickname.",
+                        ),
+                    )];
+                }
+                if let kameo::error::SendError::HandlerError(
                     waddle_xmpp::muc::room_actor::RoomActorError::StaleAdmissionRevision,
                 ) = &error
                 {

@@ -229,6 +229,18 @@ pub enum RoomActorError {
     /// re-run the registry lookup, which respawns the room.
     #[error("room actor is sealed pending destruction")]
     RoomSealed,
+    /// #1107: the joining FULL JID already occupies this room under a
+    /// different nick. Waddle locks nicknames to identity, so per
+    /// XEP-0045 §7.6 this maps to the typed stanza error
+    /// `<error type='cancel'><not-acceptable/></error>` instead of
+    /// admitting a second (ghost) occupancy or performing a nick change.
+    #[error(
+        "occupant already joined as '{current_nick}', refusing second nick '{requested_nick}'"
+    )]
+    OccupantAlreadyJoinedUnderDifferentNick {
+        current_nick: String,
+        requested_nick: String,
+    },
     /// XEP-0045 §7.4: sender is not an occupant of this room. Maps to
     /// the typed stanza error `<error type='cancel'><not-acceptable/></error>`.
     #[error("sender '{0}' is not an occupant of this room")]

@@ -111,6 +111,58 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
     );
 }
 
+/// #1107 / XEP-0045 §7.6: a full JID already in the room under nick A
+/// joining as nick B gets `<error type='cancel'><not-acceptable/>`
+/// on the wire (nicknames are locked to identity) and no second
+/// occupancy is created.
+#[tokio::test]
+async fn muc_join_under_second_nick_returns_not_acceptable() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "no-second-nick@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(session.clone()),
+    )
+    .await;
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice-two",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "one error presence: {responses:?}");
+    let error_presence = Element::from_str(&responses[0]).expect("error presence xml");
+    assert_eq!(error_presence.name(), "presence");
+    assert_eq!(error_presence.attr("type"), Some("error"));
+    let error = error_presence
+        .get_child("error", "jabber:client")
+        .expect("typed error element");
+    assert_eq!(error.attr("type"), Some("cancel"));
+    assert!(
+        error
+            .get_child("not-acceptable", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some(),
+        "XEP-0045 §7.6 locked-nickname refusal uses <not-acceptable/>: {responses:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.occupant_count(), 1, "no ghost occupancy");
+    assert_eq!(room.find_nick_by_real_jid(&sender_jid), Some("alice"));
+}
+
 /// #1134 / XEP-0045 §10.1.1: only the room creator receives Owner. The
 /// second user to join an unmanaged room must not be granted Owner —
 /// the created-bit comes from the registry, not from call-site

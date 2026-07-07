@@ -1367,6 +1367,137 @@ async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
     );
 }
 
+/// #1107 part 1: a FULL JID that already occupies the room under nick
+/// A must not be admitted under nick B — that created a second
+/// occupancy whose leave-cleanup only removed one, leaving a permanent
+/// ghost. Waddle locks nicknames to identity, so per XEP-0045 §7.6 the
+/// request is denied with `<not-acceptable/>` (type='cancel') rather
+/// than performing a §7.6 nick change.
+#[tokio::test]
+async fn same_full_jid_joining_under_second_nick_is_rejected() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("first join");
+
+    let result = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice-again".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await;
+    assert!(
+        matches!(
+            &result,
+            Err(SendError::HandlerError(
+                RoomActorError::OccupantAlreadyJoinedUnderDifferentNick { current_nick, .. }
+            )) if current_nick == "alice"
+        ),
+        "the same full JID under a second nick must be refused, not \
+         admitted as a ghost occupant (#1107); got: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("count"),
+        1,
+        "no second occupancy was created"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert_eq!(snapshot.find_nick_by_real_jid(&alice), Some("alice"));
+}
+
+/// #1107 part 2: disconnect cleanup must remove EVERY occupancy held
+/// by the full JID, not just the first-found nick. The two-nick state
+/// is constructed via the unguarded legacy `Join` message (mirroring
+/// pre-fix ghosts); after `LeaveByRealJid` no occupancy of the JID may
+/// survive, and the remaining-occupant fan-out set is exactly the
+/// other occupants.
+#[tokio::test]
+async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+
+    for nick in ["alice", "alice-ghost"] {
+        actor
+            .ask(Join {
+                nick: nick.to_string(),
+                real_jid: alice.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("legacy join");
+    }
+    actor
+        .ask(Join {
+            nick: "bob".to_string(),
+            real_jid: bob.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("bob join");
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 3);
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("leave")
+        .expect("outcome");
+
+    assert_eq!(
+        outcome.occupant_count, 1,
+        "every occupancy of the leaving full JID is removed — \
+         only bob remains (#1107)"
+    );
+    assert!(outcome.removed_last_session);
+    assert_eq!(
+        outcome.remaining_occupants,
+        vec![bob.clone()],
+        "the leave fan-out set contains only the other occupants — \
+         never a dead session of the leaver"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert!(
+        snapshot.find_nick_by_real_jid(&alice).is_none(),
+        "no ghost occupancy survives for the disconnected full JID"
+    );
+    assert_eq!(snapshot.find_nick_by_real_jid(&bob), Some("bob"));
+
+    // Rejoin + disconnect converges: counts stay correct.
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("rejoin");
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 2);
+    actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("second leave")
+        .expect("outcome");
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
 /// #1110 counterpart: an explicit grant (here a XEP-0045 §9.1 ban)
 /// is in-memory only, so it MUST keep blocking dormancy after every
 /// occupant leaves — otherwise the ban would evaporate on eviction.
