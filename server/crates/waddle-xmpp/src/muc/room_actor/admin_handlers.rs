@@ -24,21 +24,12 @@ fn all_room_sessions(room: &MucRoom) -> Vec<FullJid> {
         .collect()
 }
 
-fn recipient_role(room: &MucRoom, recipient: &FullJid) -> Role {
-    room.find_occupant_by_real_jid(recipient)
-        .map(|occupant| occupant.role)
-        .unwrap_or(Role::None)
-}
-
 fn visible_real_jid_for_recipient<'a>(
-    room: &MucRoom,
-    recipient: &FullJid,
+    _room: &MucRoom,
+    _recipient: &FullJid,
     subject_real_jid: &'a FullJid,
 ) -> Option<&'a FullJid> {
-    room.config
-        .anonymity
-        .discloses_real_jids_to_role(recipient_role(room, recipient))
-        .then_some(subject_real_jid)
+    Some(subject_real_jid)
 }
 
 fn occupants_for_bare(room: &MucRoom, target_jid: &BareJid) -> Vec<Occupant> {
@@ -75,7 +66,7 @@ fn removal_presence_updates(
                 &from_room_jid,
                 &recipient,
                 status_code,
-                MucPresenceStatus::new(is_self, room.config.anonymity.is_nonanonymous()),
+                MucPresenceStatus::new(is_self, true),
                 actor,
                 &occupant_identity,
             );
@@ -132,7 +123,7 @@ fn apply_affiliation_change(
                 let presence = build_ban_presence(
                     &from_room_jid,
                     &recipient,
-                    MucPresenceStatus::new(is_self, room.config.anonymity.is_nonanonymous()),
+                    MucPresenceStatus::new(is_self, true),
                     reason,
                     actor,
                     &occupant_identity,
@@ -193,7 +184,7 @@ fn apply_affiliation_change(
                 &recipient,
                 new_affiliation,
                 occupant.role,
-                MucPresenceStatus::new(is_self, room.config.anonymity.is_nonanonymous()),
+                MucPresenceStatus::new(is_self, true),
                 &occupant_identity,
             );
             (recipient, presence)
@@ -380,10 +371,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             &from_room_jid,
                             &recipient,
                             target_occupant.affiliation,
-                            MucPresenceStatus::new(
-                                is_self,
-                                self.room.config.anonymity.is_nonanonymous(),
-                            ),
+                            MucPresenceStatus::new(is_self, true),
                             item.reason.as_deref(),
                             Some(&msg.sender_jid.to_bare()),
                             &target_identity,
@@ -412,10 +400,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             &recipient,
                             target_occupant.affiliation,
                             new_role,
-                            MucPresenceStatus::new(
-                                is_self,
-                                self.room.config.anonymity.is_nonanonymous(),
-                            ),
+                            MucPresenceStatus::new(is_self, true),
                             &target_identity,
                         );
                         presence_updates.push((recipient, presence));

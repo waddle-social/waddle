@@ -40,17 +40,6 @@ pub async fn handle_muc_join(
     .await
 }
 
-fn room_is_nonanonymous(anonymity: waddle_xmpp::muc::RoomAnonymity) -> bool {
-    anonymity.is_nonanonymous()
-}
-
-fn disclose_real_jid_to_role(
-    anonymity: waddle_xmpp::muc::RoomAnonymity,
-    recipient_role: Role,
-) -> bool {
-    anonymity.discloses_real_jids_to_role(recipient_role)
-}
-
 /// Best-effort resolver-affiliation sync into an EXISTING live room
 /// actor when join admission rejects before any actor message (review
 /// F3). Never creates an actor — a rejection must not spawn rooms —
@@ -643,13 +632,10 @@ async fn handle_muc_join_unlocked(
                 affiliation: existing.affiliation,
                 role: existing.role,
                 real_jid: &existing.jid,
-                disclose_real_jid: disclose_real_jid_to_role(
-                    join_outcome.room_anonymity,
-                    join_outcome.new_occupant_role,
-                ),
+                disclose_real_jid: true,
                 include_self_status: false,
                 room_created: false,
-                include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
+                include_nonanonymous_status: true,
                 muji: existing.muji.as_ref(),
                 in_call: existing.in_call,
             }));
@@ -667,13 +653,10 @@ async fn handle_muc_join_unlocked(
                     affiliation: extra.affiliation,
                     role: extra.role,
                     real_jid: &extra.jid,
-                    disclose_real_jid: disclose_real_jid_to_role(
-                        join_outcome.room_anonymity,
-                        join_outcome.new_occupant_role,
-                    ),
+                    disclose_real_jid: true,
                     include_self_status: false,
                     room_created: false,
-                    include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
+                    include_nonanonymous_status: true,
                     muji: extra.muji.as_ref(),
                     in_call: extra.in_call,
                 }));
@@ -697,13 +680,10 @@ async fn handle_muc_join_unlocked(
                     affiliation: join_outcome.new_occupant_affiliation,
                     role: join_outcome.new_occupant_role,
                     real_jid: sender_jid,
-                    disclose_real_jid: disclose_real_jid_to_role(
-                        join_outcome.room_anonymity,
-                        existing.role,
-                    ),
+                    disclose_real_jid: true,
                     include_self_status: false,
                     room_created: false,
-                    include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
+                    include_nonanonymous_status: true,
                     muji: None,
                     in_call: waddle_xmpp::xep::InCallPresenceState::default(),
                 });
@@ -725,13 +705,10 @@ async fn handle_muc_join_unlocked(
             affiliation: join_outcome.new_occupant_affiliation,
             role: join_outcome.new_occupant_role,
             real_jid: sender_jid,
-            disclose_real_jid: disclose_real_jid_to_role(
-                join_outcome.room_anonymity,
-                join_outcome.new_occupant_role,
-            ),
+            disclose_real_jid: true,
             include_self_status: true,
             room_created: created_instant_room,
-            include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
+            include_nonanonymous_status: true,
             muji: self_muji,
             in_call: self_in_call,
         }));
@@ -756,13 +733,10 @@ async fn handle_muc_join_unlocked(
                 affiliation: existing.affiliation,
                 role: existing.role,
                 real_jid: &existing.jid,
-                disclose_real_jid: disclose_real_jid_to_role(
-                    join_outcome.room_anonymity,
-                    join_outcome.new_occupant_role,
-                ),
+                disclose_real_jid: true,
                 include_self_status: true,
                 room_created: false,
-                include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
+                include_nonanonymous_status: true,
                 muji: existing.muji.as_ref(),
                 in_call: existing.in_call,
             }));
@@ -875,7 +849,7 @@ pub async fn handle_muc_leave(
         room_jid,
         &outcome.nick,
         sender_jid,
-        outcome.room_anonymity.is_nonanonymous(),
+        true,
     )];
     super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
     response

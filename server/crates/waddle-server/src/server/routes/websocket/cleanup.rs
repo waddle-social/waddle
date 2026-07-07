@@ -50,24 +50,16 @@ pub(crate) fn broadcast_muc_leave_to_remaining(
         .unwrap_or_else(|_| sender_jid.clone());
     let sender_bare = sender_jid.to_bare();
     for occupant_jid in &outcome.remaining_occupants {
-        let disclose_real_jid = outcome
-            .remaining_occupant_roles
-            .iter()
-            .find(|(jid, _)| jid == occupant_jid)
-            .is_some_and(|(_, role)| outcome.room_anonymity.discloses_real_jids_to_role(*role));
         let identity = OccupantIdentity {
             bare_jid: &sender_bare,
-            real_jid: disclose_real_jid.then_some(sender_jid),
+            real_jid: Some(sender_jid),
             secret: &state.deps.occupant_id_secret,
         };
         let presence = waddle_xmpp::muc::build_leave_presence(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(
-                false,
-                outcome.room_anonymity.is_nonanonymous(),
-            ),
+            waddle_xmpp::muc::MucPresenceStatus::new(false, true),
             &identity,
         );
         let _ = state
@@ -106,16 +98,11 @@ pub(crate) fn broadcast_muc_muji_clear_to_remaining(
     entries.extend(outcome.remaining_muji_sessions.iter().cloned());
     entries.sort_by_key(|(owner_jid, muji)| (muji_reflection_rank(muji), owner_jid.to_string()));
     for occupant_jid in &outcome.remaining_occupants {
-        let disclose_real_jid = outcome
-            .remaining_occupant_roles
-            .iter()
-            .find(|(jid, _)| jid == occupant_jid)
-            .is_some_and(|(_, role)| outcome.room_anonymity.discloses_real_jids_to_role(*role));
         for (owner_jid, muji) in &entries {
             let owner_bare = owner_jid.to_bare();
             let identity = OccupantIdentity {
                 bare_jid: &owner_bare,
-                real_jid: disclose_real_jid.then_some(owner_jid),
+                real_jid: Some(owner_jid),
                 secret: &state.deps.occupant_id_secret,
             };
             let is_self = occupant_jid.to_bare() == owner_bare;
@@ -124,10 +111,7 @@ pub(crate) fn broadcast_muc_muji_clear_to_remaining(
                 occupant_jid,
                 outcome.affiliation,
                 outcome.role,
-                waddle_xmpp::muc::MucPresenceStatus::new(
-                    is_self,
-                    outcome.room_anonymity.is_nonanonymous(),
-                ),
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
                 &identity,
             );
             if !muji.is_empty() {

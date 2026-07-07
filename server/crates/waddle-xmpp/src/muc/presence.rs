@@ -268,8 +268,8 @@ fn add_presence_identity_payloads(
 ) {
     // XEP-0421 §"Business Rules": occupant-id MUST be on every emitted
     // MUC presence regardless of whether the real JID is disclosed.
-    // The room service knows `bare_jid` even in fully-anonymous rooms;
-    // disclosure is governed independently by `identity.real_jid`.
+    // The room service knows `bare_jid`; real-JID disclosure is governed
+    // independently by `identity.real_jid`.
     //
     // No XEP-0317 hats are derived here: hats are descriptive social
     // metadata, not a duplicate of authority. MUC affiliation and role
@@ -444,7 +444,7 @@ pub fn build_membership_removal_presence(
 /// * `new_affiliation` - The user's new affiliation
 /// * `role` - The user's current role
 /// * `is_self` - True if this presence is going to the affected user
-/// * `occupant_real_jid` - Optional real JID for semi-anonymous rooms
+/// * `identity` - Real JID and occupant-id source for the affected occupant
 pub fn build_affiliation_change_presence(
     from_room_jid: &FullJid,
     to_jid: &FullJid,
@@ -484,7 +484,7 @@ pub fn build_affiliation_change_presence(
 /// * `affiliation` - The user's affiliation
 /// * `new_role` - The user's new role
 /// * `is_self` - True if this presence is going to the affected user
-/// * `occupant_real_jid` - Optional real JID for semi-anonymous rooms
+/// * `identity` - Real JID and occupant-id source for the affected occupant
 pub fn build_role_change_presence(
     from_room_jid: &FullJid,
     to_jid: &FullJid,

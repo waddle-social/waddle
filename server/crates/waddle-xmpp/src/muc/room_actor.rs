@@ -14,7 +14,7 @@ use thiserror::Error;
 use super::affiliation::AffiliationEntry;
 use super::pin::{PinStateChange, PinnedEntry};
 use super::room_registry::RoomInfo;
-use super::{MucRoom, RoomAnonymity, RoomConfig, RoomSubjectTexts, SubjectState};
+use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role};
 
 mod admin_handlers;
@@ -85,7 +85,6 @@ pub struct JoinOutcome {
     pub new_occupant_role: Role,
     pub occupant_count: usize,
     pub room_jid: BareJid,
-    pub room_anonymity: RoomAnonymity,
     pub is_same_bare_multi_session_join: bool,
     pub is_existing_session_rejoin: bool,
     /// Snapshot of `MucRoom.subject` at join time. Powers the XEP-0045
@@ -103,14 +102,12 @@ pub struct LeaveOutcome {
     pub role: Role,
     pub leaving_room_jid: FullJid,
     pub remaining_occupants: Vec<FullJid>,
-    pub remaining_occupant_roles: Vec<(FullJid, Role)>,
     pub removed_last_session: bool,
     pub cleared_muji_state: bool,
     pub remaining_muji: Option<crate::xep::xep0272::Muji>,
     pub remaining_muji_sessions: Vec<(FullJid, crate::xep::xep0272::Muji)>,
     pub remaining_nick_real_jid: Option<FullJid>,
     pub occupant_count: usize,
-    pub room_anonymity: RoomAnonymity,
     /// Mirrors `MucRoom.config.persistent`. Surfaced so the leave
     /// caller can decide whether to evict the room's `RoomActor` +
     /// registry entry without an extra `GetConfig` round-trip when
@@ -133,9 +130,7 @@ pub struct PresenceUpdateOutcome {
     pub sender_role: Role,
     pub sender_affiliation: Affiliation,
     pub room_jid: BareJid,
-    pub room_anonymity: RoomAnonymity,
     pub recipients: Vec<FullJid>,
-    pub recipient_roles: Vec<(FullJid, Role)>,
 }
 
 #[derive(Debug, Clone)]

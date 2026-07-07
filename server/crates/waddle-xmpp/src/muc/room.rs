@@ -18,49 +18,6 @@ pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
     jid.domain().as_str() != local_domain
 }
 
-/// XEP-0045 room anonymity profile from `muc#roomconfig_whois`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RoomAnonymity {
-    /// `anyone`: all occupants may discover real JIDs.
-    #[default]
-    NonAnonymous,
-    /// `moderators`: only moderators may discover real JIDs.
-    SemiAnonymous,
-    /// `none`: deprecated by modern XEP-0045, retained for status-code interop.
-    FullyAnonymous,
-}
-
-impl RoomAnonymity {
-    pub fn from_roomconfig_whois(value: &str) -> Option<Self> {
-        match value {
-            "anyone" => Some(Self::NonAnonymous),
-            "moderators" => Some(Self::SemiAnonymous),
-            "none" => Some(Self::FullyAnonymous),
-            _ => None,
-        }
-    }
-
-    pub fn as_roomconfig_whois(self) -> &'static str {
-        match self {
-            Self::NonAnonymous => "anyone",
-            Self::SemiAnonymous => "moderators",
-            Self::FullyAnonymous => "none",
-        }
-    }
-
-    pub fn is_nonanonymous(self) -> bool {
-        matches!(self, Self::NonAnonymous)
-    }
-
-    pub fn discloses_real_jids_to_role(self, role: crate::types::Role) -> bool {
-        match self {
-            Self::NonAnonymous => true,
-            Self::SemiAnonymous => matches!(role, crate::types::Role::Moderator),
-            Self::FullyAnonymous => false,
-        }
-    }
-}
-
 /// MUC room configuration.
 ///
 /// Configuration knobs only — the live subject (text + setter +
@@ -85,9 +42,6 @@ pub struct RoomConfig {
     pub max_occupants: u32,
     /// Whether to log messages (for MAM)
     pub enable_logging: bool,
-    /// Which occupants may discover real JIDs.
-    #[serde(default)]
-    pub anonymity: RoomAnonymity,
     /// Whether the room uses Waddle thread-oriented metadata.
     #[serde(default)]
     pub forum: bool,
@@ -120,7 +74,6 @@ impl Default for RoomConfig {
             moderated: false,
             max_occupants: 0,
             enable_logging: true,
-            anonymity: RoomAnonymity::NonAnonymous,
             forum: false,
             group_dm: false,
             pin_permission: PinPermission::default(),

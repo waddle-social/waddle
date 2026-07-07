@@ -121,13 +121,6 @@ pub(super) async fn apply_muc_owner_config(
             if let Some(enable_logging) = data_form_bool(form, "muc#roomconfig_enablelogging") {
                 config.enable_logging = enable_logging;
             }
-            if let Some(whois) = data_form_value(form, "muc#roomconfig_whois") {
-                if let Some(anonymity) =
-                    waddle_xmpp::muc::RoomAnonymity::from_roomconfig_whois(&whois)
-                {
-                    config.anonymity = anonymity;
-                }
-            }
             if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
                 config.forum = forum;
             }

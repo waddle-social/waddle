@@ -8,7 +8,7 @@ use tracing::debug;
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::presence::NS_MUC_USER;
-use super::room::{RoomAnonymity, RoomConfig};
+use super::room::RoomConfig;
 use super::SubjectState;
 use crate::xep::xep0085::{self, ChatStateCarrier};
 use crate::xep::xep0203;
@@ -147,12 +147,6 @@ pub enum MucConfigStatusCode {
     LoggingEnabled,
     /// 171: room logging is now disabled.
     LoggingDisabled,
-    /// 172: room is now non-anonymous.
-    NonAnonymous,
-    /// 173: room is now semi-anonymous.
-    SemiAnonymous,
-    /// 174: room is now fully anonymous.
-    FullyAnonymous,
 }
 
 impl MucConfigStatusCode {
@@ -161,9 +155,6 @@ impl MucConfigStatusCode {
             Self::NonPrivacyConfigurationChange => "104",
             Self::LoggingEnabled => "170",
             Self::LoggingDisabled => "171",
-            Self::NonAnonymous => "172",
-            Self::SemiAnonymous => "173",
-            Self::FullyAnonymous => "174",
         }
     }
 }
@@ -180,14 +171,6 @@ pub fn config_change_status_codes(
             MucConfigStatusCode::LoggingEnabled
         } else {
             MucConfigStatusCode::LoggingDisabled
-        });
-    }
-
-    if previous.anonymity != next.anonymity {
-        codes.push(match next.anonymity {
-            RoomAnonymity::NonAnonymous => MucConfigStatusCode::NonAnonymous,
-            RoomAnonymity::SemiAnonymous => MucConfigStatusCode::SemiAnonymous,
-            RoomAnonymity::FullyAnonymous => MucConfigStatusCode::FullyAnonymous,
         });
     }
 

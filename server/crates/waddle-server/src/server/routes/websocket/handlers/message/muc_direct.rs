@@ -23,12 +23,21 @@ async fn handle_muc_private_message(
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
 ) -> Option<Vec<String>> {
-    if incoming.type_ != MessageType::Chat {
-        return None;
-    }
     let target_occupant_jid = incoming.to.as_ref()?.clone().try_into_full().ok()?;
     let room_jid = target_occupant_jid.to_bare();
     if room_jid.domain().as_str() != state.deps.service_domains.muc {
+        return None;
+    }
+    if incoming.type_ == MessageType::Groupchat {
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "Groupchat messages must be addressed to the room bare JID.",
+        )]);
+    }
+    if !matches!(incoming.type_, MessageType::Chat | MessageType::Normal) {
         return None;
     }
     let target_nick = target_occupant_jid.resource().to_string();
@@ -97,10 +106,9 @@ async fn handle_muc_private_message(
     };
     for recipient in snapshot.room.get_occupant_sessions(&target_nick) {
         let mut routed = incoming.clone();
-        routed.type_ = MessageType::Chat;
         routed.from = Some(jid::Jid::from(from_room_jid.clone()));
         routed.to = Some(jid::Jid::from(recipient.clone()));
-        replace_muc_user_payload(&mut routed);
+        canonicalize_muc_private_payloads(&mut routed, &room_jid);
         let _ = state
             .deps
             .protocol
@@ -155,17 +163,25 @@ async fn handle_muc_mediated_decline(
         )]);
     };
     let inbound_decline = mediated_decline(incoming)?;
-    let to = inbound_decline.attr("to")?.parse::<jid::Jid>().ok()?;
-    let recipients = decline_recipients(&room_jid, &snapshot.room, &to);
-    if recipients.is_empty() {
+    let Some(to_attr) = inbound_decline.attr("to") else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ErrorType::Cancel,
-            DefinedCondition::ItemNotFound,
-            "Decline target not found in room.",
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "Mediated decline missing target.",
         )]);
-    }
+    };
+    let Ok(to) = to_attr.parse::<jid::Jid>() else {
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "Mediated decline target is not a valid JID.",
+        )]);
+    };
+    let recipients = decline_recipients(&room_jid, &snapshot.room, &to);
 
     let x = build_mediated_decline_payload(bound_jid, inbound_decline);
     for recipient in recipients {
@@ -236,10 +252,21 @@ fn build_mediated_decline_payload(
         .build()
 }
 
-fn replace_muc_user_payload(message: &mut Message) {
-    message
-        .payloads
-        .retain(|payload| !payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER));
+fn canonicalize_muc_private_payloads(message: &mut Message, room_jid: &jid::BareJid) {
+    message.payloads.retain(|payload| {
+        if payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            || payload.is("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
+        {
+            return false;
+        }
+        if payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID) {
+            return payload
+                .attr("by")
+                .and_then(|raw| raw.parse::<jid::BareJid>().ok())
+                .is_none_or(|by| by != *room_jid);
+        }
+        true
+    });
     message
         .payloads
         .push(minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER).build());

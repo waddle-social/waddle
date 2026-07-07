@@ -101,22 +101,11 @@ pub(crate) fn broadcast_muji_clear(
     }
 
     for recipient in &outcome.update.recipients {
-        let disclose_real_jid = outcome
-            .update
-            .recipient_roles
-            .iter()
-            .find(|(jid, _)| jid == recipient)
-            .is_some_and(|(_, role)| {
-                outcome
-                    .update
-                    .room_anonymity
-                    .discloses_real_jids_to_role(*role)
-            });
         for (owner_jid, muji) in &entries {
             let owner_bare = owner_jid.to_bare();
             let identity = OccupantIdentity {
                 bare_jid: &owner_bare,
-                real_jid: disclose_real_jid.then_some(owner_jid),
+                real_jid: Some(owner_jid),
                 secret: &state.deps.occupant_id_secret,
             };
             let is_self = recipient.to_bare() == owner_bare;
@@ -125,10 +114,7 @@ pub(crate) fn broadcast_muji_clear(
                 recipient,
                 outcome.update.sender_affiliation,
                 outcome.update.sender_role,
-                waddle_xmpp::muc::MucPresenceStatus::new(
-                    is_self,
-                    outcome.update.room_anonymity.is_nonanonymous(),
-                ),
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
                 &identity,
             );
             if let Some(muji_ref) = muji {

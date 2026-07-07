@@ -85,17 +85,15 @@ fn test_create_broadcast_message() {
 }
 
 #[test]
-fn config_change_status_codes_cover_logging_anonymity_and_nonprivacy_changes() {
+fn config_change_status_codes_cover_logging_and_nonprivacy_changes() {
     let previous = RoomConfig {
         name: "Old".to_string(),
         enable_logging: false,
-        anonymity: RoomAnonymity::NonAnonymous,
         ..RoomConfig::default()
     };
     let next = RoomConfig {
         name: "New".to_string(),
         enable_logging: true,
-        anonymity: RoomAnonymity::SemiAnonymous,
         ..previous.clone()
     };
 
@@ -104,7 +102,6 @@ fn config_change_status_codes_cover_logging_anonymity_and_nonprivacy_changes() {
         codes,
         vec![
             MucConfigStatusCode::LoggingEnabled,
-            MucConfigStatusCode::SemiAnonymous,
             MucConfigStatusCode::NonPrivacyConfigurationChange,
         ]
     );
@@ -125,7 +122,19 @@ fn config_change_status_codes_cover_logging_anonymity_and_nonprivacy_changes() {
         .filter(|child| child.is("status", NS_MUC_USER))
         .filter_map(|status| status.attr("code"))
         .collect();
-    assert_eq!(wire_codes, vec!["170", "173", "104"]);
+    assert_eq!(wire_codes, vec!["170", "104"]);
+
+    let disabled_codes = config_change_status_codes(
+        &RoomConfig {
+            enable_logging: true,
+            ..RoomConfig::default()
+        },
+        &RoomConfig {
+            enable_logging: false,
+            ..RoomConfig::default()
+        },
+    );
+    assert_eq!(disabled_codes, vec![MucConfigStatusCode::LoggingDisabled]);
 }
 
 #[test]

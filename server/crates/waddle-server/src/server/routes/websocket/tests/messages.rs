@@ -3706,6 +3706,26 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             )
             .build(),
     );
+    message.payloads.push(
+        Element::builder("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "spoofed-occupant",
+            )
+            .build(),
+    );
+    message.payloads.push(
+        Element::builder("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+            .attr(
+                minidom::rxml::xml_ncname!("by").to_owned(),
+                room_jid.to_string(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "spoofed-room-stanza",
+            )
+            .build(),
+    );
     let responses =
         handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
     assert!(responses.is_empty(), "MUC PM routes asynchronously");
@@ -3734,6 +3754,165 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             .get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER)
             .is_none(),
         "routed MUC PM must not preserve caller-supplied muc#user metadata: {xml}"
+    );
+    assert!(
+        routed
+            .get_child("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
+            .is_none(),
+        "routed MUC PM must not preserve caller-supplied occupant-id: {xml}"
+    );
+    let room_jid_string = room_jid.to_string();
+    assert!(
+        !routed.children().any(|child| {
+            child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+                && child.attr("by") == Some(room_jid_string.as_str())
+                && child.attr("id") == Some("spoofed-room-stanza")
+        }),
+        "routed MUC PM must not preserve caller-supplied room stanza-id: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn muc_private_message_routes_normal_type_to_target_session() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "pm-normal-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+        room_jid
+            .clone()
+            .with_resource_str("bob")
+            .expect("target occupant jid"),
+    )));
+    message.type_ = XmppMessageType::Normal;
+    message.id = Some(xmpp_parsers::message::Id("muc-pm-normal-1".to_string()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "normal private through the room".to_string(),
+    );
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(responses.is_empty(), "normal MUC PM routes asynchronously");
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("target occupant receives routed normal MUC PM");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let routed = Element::from_str(&xml).expect("routed normal MUC PM XML");
+    assert_eq!(
+        routed.attr("from"),
+        Some(format!("{room_jid}/alice").as_str())
+    );
+    assert_eq!(routed.attr("to"), Some(bob_jid.to_string().as_str()));
+    assert!(
+        routed.attr("type").is_none() || routed.attr("type") == Some("normal"),
+        "normal message type should remain normal/omitted: {xml}"
+    );
+    assert!(
+        xml.contains("normal private through the room"),
+        "body is preserved: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn muc_groupchat_to_occupant_jid_is_rejected_with_bad_request() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "pm-groupchat-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+        room_jid
+            .clone()
+            .with_resource_str("bob")
+            .expect("target occupant jid"),
+    )));
+    message.type_ = XmppMessageType::Groupchat;
+    message.id = Some(xmpp_parsers::message::Id(
+        "muc-pm-groupchat-bad-request".to_string(),
+    ));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "must not be broadcast".to_string(),
+    );
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert_eq!(
+        responses.len(),
+        1,
+        "groupchat-to-occupant response: {responses:?}"
+    );
+    assert!(responses[0].contains("bad-request"));
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "groupchat addressed to room/nick must not broadcast to the room"
     );
 }
 
@@ -4002,7 +4181,7 @@ async fn muc_mediated_decline_to_full_jid_is_forwarded_to_that_inviter_resource(
 }
 
 #[tokio::test]
-async fn muc_mediated_decline_to_non_occupant_is_rejected() {
+async fn muc_mediated_decline_to_non_occupant_is_silent_success() {
     let state = create_test_websocket_state().await;
     let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "decline-spoof-room@muc.example.com"
@@ -4014,6 +4193,8 @@ async fn muc_mediated_decline_to_non_occupant_is_rejected() {
     let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
     let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
 
+    let (alice_tx, mut alice_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &alice_jid, alice_tx).await;
     let (mallory_tx, mut mallory_rx) = mpsc::channel(8);
     register_test_connection(state.as_ref(), &mallory_jid, mallory_tx).await;
 
@@ -4027,6 +4208,7 @@ async fn muc_mediated_decline_to_non_occupant_is_rejected() {
         &Some(alice_session),
     )
     .await;
+    while alice_rx.try_recv().is_ok() {}
 
     let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
         .append(
@@ -4044,15 +4226,17 @@ async fn muc_mediated_decline_to_non_occupant_is_rejected() {
     message.payloads.push(decline_payload);
 
     let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
-    assert_eq!(
-        responses.len(),
-        1,
-        "spoofed decline response: {responses:?}"
+    assert!(
+        responses.is_empty(),
+        "well-formed decline to unresolved target must not reveal occupancy: {responses:?}"
     );
-    assert!(responses[0].contains("item-not-found"));
     assert!(
         mallory_rx.try_recv().is_err(),
         "decline must not be mediated to non-occupants"
+    );
+    assert!(
+        alice_rx.try_recv().is_err(),
+        "unresolved decline must not be broadcast to current occupants"
     );
 }
 

@@ -271,10 +271,6 @@ impl Feature {
         Self::new("muc_hidden")
     }
 
-    pub fn muc_semianonymous() -> Self {
-        Self::new("muc_semianonymous")
-    }
-
     pub fn muc_nonanonymous() -> Self {
         Self::new("muc_nonanonymous")
     }
