@@ -7,6 +7,7 @@ import {
   bareJidKey,
   barePeerJid,
   type CatchupConversationFailure,
+  type LiveRoomMessage,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
   type RoomAuthority,
@@ -246,12 +247,14 @@ export function useChannelMessages(
             recordMentionActivity(activity);
             lastMentionActivity.value = activity;
           }
-        } else if (isMentioned && msg.stanzaId) {
+        } else if (isMentioned && msg.stanzaId && isFeedVisibleRoomMessage(msg)) {
           // Rendered in the open channel with the tab visible: the
           // mention is SEEN, not missed. Account it without recording so
           // a later re-emission of the same stanza (catch-up page, or
           // the activity route after a room switch) cannot badge a
-          // message the user already read.
+          // message the user already read. Thread replies are excluded —
+          // the feed hides them (mirroring the `isFeedVisible` read-marker
+          // policy), so on-screen never meant seen for those.
           accountMentionStanzaId(msg.stanzaId);
         }
       });
@@ -703,6 +706,12 @@ export function useChannelMessages(
       recordMentionActivity(event);
       lastMentionActivity.value = event;
     }
+  }
+
+  /** `isFeedTimelineMessage` for the raw live shape: thread replies are
+   * hidden from the feed, so being in the open channel never showed them. */
+  function isFeedVisibleRoomMessage(msg: LiveRoomMessage): boolean {
+    return !msg.threadId || msg.id === msg.threadId || !!msg.callThread;
   }
 
   /**
