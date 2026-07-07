@@ -351,21 +351,19 @@ impl JingleHandler {
             None
         };
 
-        for content in &mut jingle.contents {
-            match rewrite_content_transport(content, &call_id, &peer_identity, &*self.sfu) {
-                Ok(()) => {}
-                Err(reason) => {
-                    if let Some(invite) = claimed_invite.clone() {
-                        let mut pending = self.lock_pending_dm_invites();
-                        pending.entry(call_id.clone()).or_insert(invite);
-                    }
-                    // 1:1 P2P path: the requester addressed the
-                    // session-initiate to `peer`, so the Jingle-level
-                    // rejection must appear from that peer resource,
-                    // not from the requester back to itself.
-                    return reason.into_error_reply(iq, &jingle.sid, &peer);
-                }
+        // One join token per stanza, shared across contents (#1142).
+        if let Err(reason) =
+            rewrite_contents_transport(&mut jingle.contents, &call_id, &peer_identity, &*self.sfu)
+        {
+            if let Some(invite) = claimed_invite.clone() {
+                let mut pending = self.lock_pending_dm_invites();
+                pending.entry(call_id.clone()).or_insert(invite);
             }
+            // 1:1 P2P path: the requester addressed the
+            // session-initiate to `peer`, so the Jingle-level
+            // rejection must appear from that peer resource,
+            // not from the requester back to itself.
+            return reason.into_error_reply(iq, &jingle.sid, &peer);
         }
 
         if claimed_invite.is_some() && self.lock_pending_dm_invites().contains_key(&call_id) {
@@ -526,19 +524,18 @@ impl JingleHandler {
         // identity — multi-resource correct.
         let identity = Identity::from_jid(ctx.full_jid.clone());
 
-        // Rewrite each `<content>`'s transport with an issued token.
-        // Every content shares the same token because LiveKit's
-        // identity model is "one identity per participant"; the
-        // audio/video split lives below the LiveKit layer.
+        // Rewrite the contents' transports with ONE issued token
+        // shared across every content (#1142): LiveKit's identity
+        // model is "one identity per participant"; the audio/video
+        // split lives below the LiveKit layer.
         // Mixer JID becomes the `from` of any session-terminate
         // we emit per XEP-0166 §10.2 — the conference focus is the
         // source of the rejection, not the requester.
         let mixer_jid: Jid = calls_mixer_jid(ctx.domain).into();
-        for content in &mut jingle.contents {
-            match rewrite_content_transport(content, &call_id, &identity, &*self.sfu) {
-                Ok(()) => {}
-                Err(reason) => return reason.into_error_reply(iq, &jingle.sid, &mixer_jid),
-            }
+        if let Err(reason) =
+            rewrite_contents_transport(&mut jingle.contents, &call_id, &identity, &*self.sfu)
+        {
+            return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
         }
         self.sfu.register_call_participant(&call_id, &identity);
 
@@ -643,6 +640,33 @@ impl JingleHandler {
         ))))]
     }
 
+    /// Handle a 1:1 `session-terminate` (#1131).
+    ///
+    /// Authorization is on the SENDER's call membership — requiring
+    /// the addressed peer to still be registered meant a survivor
+    /// whose peer had already been swept (crashed client cleaned up
+    /// via the LiveKit webhook or the reconciler) got `<forbidden/>`
+    /// and NO cleanup: their registration and un-revoked JTIs
+    /// lingered until reconciliation.
+    ///
+    /// Resolution order over the two sid-scoped call-id candidates
+    /// (`<sender-bare>::<sid>`, `<peer-bare>::<sid>`):
+    ///
+    /// 1. Both sender and peer registered → unregister both (revoking
+    ///    their JTIs) and forward the terminate to the peer, whose
+    ///    client acks per XEP-0166 §6.7.
+    /// 2. Sender is the ONLY remaining registered party (survivor
+    ///    terminate) → unregister the sender and ack the IQ on the
+    ///    departed peer's behalf — the peer is gone, so there is
+    ///    nobody left to forward to.
+    /// 3. A candidate call still has participants but the sender+peer
+    ///    pairing is not among them → `<forbidden/>`: a third party
+    ///    (or a revoked/superseded responder) must not tear down or
+    ///    probe someone else's call.
+    /// 4. No candidate call exists at all (duplicate terminate,
+    ///    terminate glare, long-dead session) → `<item-not-found/>` +
+    ///    `<unknown-session/>` per the XEP-0166 error table — never
+    ///    `<forbidden/>`, and idempotent (no state is touched).
     fn handle_session_terminate(
         &self,
         iq: &Iq,
@@ -661,34 +685,59 @@ impl JingleHandler {
         let peer_bare = peer.to_bare();
         let sender_identity = Identity::from_jid(ctx.full_jid.clone());
         let peer_identity = Identity::from_jid(peer_full);
-        let mut matched_call_id = None;
-        for initiator_bare in [ctx_bare, peer_bare] {
-            let Ok(call_id) = scoped_call_id(&initiator_bare, &jingle.sid.0) else {
-                continue;
-            };
-            if !self.sfu.has_call_participant(&call_id, &sender_identity)
-                || !self.sfu.has_call_participant(&call_id, &peer_identity)
-            {
-                continue;
-            }
-            matched_call_id = Some(call_id);
-            break;
+
+        let candidates: Vec<CallId> = [ctx_bare, peer_bare]
+            .into_iter()
+            .filter_map(|initiator_bare| scoped_call_id(&initiator_bare, &jingle.sid.0).ok())
+            .collect();
+
+        // Case 1: the fully-live session — both parties registered.
+        if let Some(call_id) = candidates.iter().find(|call_id| {
+            self.sfu.has_call_participant(call_id, &sender_identity)
+                && self.sfu.has_call_participant(call_id, &peer_identity)
+        }) {
+            let _ = self
+                .sfu
+                .unregister_call_participant(call_id, &sender_identity);
+            let _ = self
+                .sfu
+                .unregister_call_participant(call_id, &peer_identity);
+            self.lock_pending_dm_invites().remove(call_id);
+            return self.route_unchanged(iq, peer, ctx);
         }
-        let Some(call_id) = matched_call_id else {
+
+        // Case 2: survivor terminate — the peer's registration is
+        // gone (webhook / reconciler sweep) and the sender is the
+        // only remaining party. Unregister the sender (revoking its
+        // JTIs) and ack per XEP-0166 §6.7 on the departed peer's
+        // behalf.
+        if let Some(call_id) = candidates.iter().find(|call_id| {
+            let participants = self.sfu.participants_for_call(call_id);
+            !participants.is_empty() && participants.iter().all(|p| p == &sender_identity)
+        }) {
+            let _ = self
+                .sfu
+                .unregister_call_participant(call_id, &sender_identity);
+            self.lock_pending_dm_invites().remove(call_id);
+            return terminate_ack(iq);
+        }
+
+        // Case 3: some candidate call is live but the sender+peer
+        // pairing is not part of it — a third party or a superseded
+        // responder probing/terminating someone else's call.
+        if candidates
+            .iter()
+            .any(|call_id| !self.sfu.participants_for_call(call_id).is_empty())
+        {
             return error_reply(
                 iq,
                 DefinedCondition::Forbidden,
                 "Jingle terminator is not a participant in this call",
             );
-        };
-        let _ = self
-            .sfu
-            .unregister_call_participant(&call_id, &sender_identity);
-        let _ = self
-            .sfu
-            .unregister_call_participant(&call_id, &peer_identity);
-        self.lock_pending_dm_invites().remove(&call_id);
-        self.route_unchanged(iq, peer, ctx)
+        }
+
+        // Case 4: fully-unknown session — XEP-0166 unknown-session.
+        unknown_session_reply(iq)
     }
 
     /// Forward the stanza verbatim with a sanitised `from` so the
@@ -880,12 +929,11 @@ fn unsupported_transports_termination(iq: &Iq, sid: &SessionId, from: &Jid) -> V
     ]
 }
 
-fn rewrite_content_transport(
-    content: &mut Content,
-    call_id: &CallId,
-    peer_identity: &Identity,
-    sfu: &dyn SfuService,
-) -> Result<(), RewriteError> {
+/// Validate that `content` carries the empty Waddle LiveKit transport
+/// placeholder (`urn:waddle:transports:livekit:0` in its `Request`
+/// form). Client-supplied issued credentials and foreign transports
+/// are rejected without minting anything.
+fn validate_transport_placeholder(content: &Content) -> Result<(), RewriteError> {
     let Some(Transport::Unknown(transport_elem)) = &content.transport else {
         return Err(RewriteError::UnsupportedTransport);
     };
@@ -896,24 +944,53 @@ fn rewrite_content_transport(
         .map_err(RewriteError::InvalidWaddleTransport)?;
     match parsed {
         WaddleLiveKitTransport::Issued(_) => Err(RewriteError::ClientSuppliedIssuedTransport),
-        WaddleLiveKitTransport::Request => {
-            let token = sfu
-                .issue_join_token(
-                    call_id,
-                    peer_identity,
-                    MediaCapabilities::full_participant(),
-                )
-                .map_err(RewriteError::SfuFailed)?;
-            let issued = WaddleLiveKitTransport::Issued(IssuedTransport {
-                url: token.url,
-                room: token.room,
-                identity: token.identity,
-                token: token.jwt,
-            });
-            content.transport = Some(Transport::Unknown(issued.to_element()));
-            Ok(())
-        }
+        WaddleLiveKitTransport::Request => Ok(()),
     }
+}
+
+/// Rewrite every `<content/>`'s transport placeholder with ONE
+/// freshly-issued LiveKit join token shared across all contents.
+///
+/// #1142: LiveKit's identity model is "one identity per participant";
+/// the audio/video split lives below the LiveKit layer, so all
+/// contents of a negotiation stanza must share the same credential.
+/// Minting per content burned one JTI per `<content/>` — a few
+/// two-content renegotiations pushed still-live JTIs out of the
+/// 16-slot per-participant FIFO, leaving them unrevocable on hangup.
+///
+/// Every placeholder is validated *before* the single mint so a
+/// malformed later content cannot leave an orphaned JTI in the
+/// tracker.
+fn rewrite_contents_transport(
+    contents: &mut [Content],
+    call_id: &CallId,
+    peer_identity: &Identity,
+    sfu: &dyn SfuService,
+) -> Result<(), RewriteError> {
+    for content in contents.iter() {
+        validate_transport_placeholder(content)?;
+    }
+    if contents.is_empty() {
+        return Ok(());
+    }
+    let token = sfu
+        .issue_join_token(
+            call_id,
+            peer_identity,
+            MediaCapabilities::full_participant(),
+        )
+        .map_err(RewriteError::SfuFailed)?;
+    let issued = WaddleLiveKitTransport::Issued(IssuedTransport {
+        url: token.url,
+        room: token.room,
+        identity: token.identity,
+        token: token.jwt,
+    });
+    let issued_elem = issued.to_element();
+    for content in contents.iter_mut() {
+        content.transport = Some(Transport::Unknown(issued_elem.clone()));
+    }
+    Ok(())
 }
 
 fn revoke_other_dm_participants(
@@ -941,6 +1018,49 @@ fn iq_set_jingle(iq: &Iq) -> Option<&Element> {
         }
         _ => None,
     }
+}
+
+/// Empty `<iq type='result'/>` acknowledging a `session-terminate`
+/// per XEP-0166 §6.7, emitted server-side when the addressed peer's
+/// registration is already gone (survivor terminate, #1131) and there
+/// is nobody left to forward the terminate to. `from` mirrors the
+/// stanza's `to` so the ack appears from the party the terminate was
+/// addressed to, matching the §6.7 example shape.
+fn terminate_ack(original: &Iq) -> Vec<OutboundEvent> {
+    let ack = Iq::Result {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        payload: None,
+    };
+    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        ack,
+    ))))]
+}
+
+/// `<item-not-found/>` + `<unknown-session xmlns='urn:xmpp:jingle:errors:1'/>`
+/// per the XEP-0166 error table: the stanza references a `sid` with no
+/// live session (duplicate terminate, terminate glare, long-dead
+/// session). Deliberately NOT `<forbidden/>` (#1131) — nothing was
+/// torn down and repeating the request changes nothing.
+fn unknown_session_reply(original: &Iq) -> Vec<OutboundEvent> {
+    let mut error = StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "en",
+        "unknown Jingle session",
+    );
+    error.other = Some(crate::xep::xep0166::unknown_session_condition());
+    let err = Iq::Error {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        error,
+        payload: None,
+    };
+    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        err,
+    ))))]
 }
 
 fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<OutboundEvent> {

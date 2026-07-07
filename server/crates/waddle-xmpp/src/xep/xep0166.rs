@@ -24,6 +24,20 @@ use std::collections::BTreeMap;
 
 pub const NS_JINGLE: &str = "urn:xmpp:jingle:1";
 
+/// XEP-0166 "Error Handling": namespace qualifying the Jingle-specific
+/// error condition elements (`<unknown-session/>`, `<out-of-order/>`,
+/// `<tie-break/>`, `<unsupported-info/>`).
+pub const NS_JINGLE_ERRORS: &str = "urn:xmpp:jingle:errors:1";
+
+/// Build the `<unknown-session xmlns='urn:xmpp:jingle:errors:1'/>`
+/// application-specific error condition. Per the XEP-0166 error table
+/// it accompanies the XMPP `<item-not-found/>` condition when a stanza
+/// references a `sid` unknown to the recipient (e.g. a
+/// session-terminate for a session that already ended).
+pub fn unknown_session_condition() -> minidom::Element {
+    minidom::Element::builder("unknown-session", NS_JINGLE_ERRORS).build()
+}
+
 /// Build a `<reason/>` element with no human-readable text.
 pub fn reason_element(reason: Reason) -> ReasonElement {
     ReasonElement {
@@ -90,6 +104,14 @@ mod tests {
             .find(|c| c.name() == "reason")
             .expect("<reason/> present");
         assert!(reason.children().any(|c| c.name() == "success"));
+    }
+
+    #[test]
+    fn unknown_session_condition_matches_xep_0166_error_table() {
+        let cond = unknown_session_condition();
+        assert_eq!(cond.name(), "unknown-session");
+        assert_eq!(cond.ns(), NS_JINGLE_ERRORS);
+        assert_eq!(NS_JINGLE_ERRORS, "urn:xmpp:jingle:errors:1");
     }
 
     #[test]

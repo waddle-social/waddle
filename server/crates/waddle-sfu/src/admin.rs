@@ -30,18 +30,14 @@ use url::Url;
 use crate::call::{CallId, Identity};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
+use crate::token::JWT_CLOCK_SKEW;
 
 /// TTL of every admin JWT minted by [`ReqwestLiveKitAdmin`]. Each
 /// admin call is a single HTTP round-trip; a 60-second TTL with `nbf`
-/// pre-dated by [`ADMIN_JWT_CLOCK_SKEW`] absorbs typical NTP skew
-/// without keeping a long-lived bearer token in flight.
+/// pre-dated by [`crate::token::JWT_CLOCK_SKEW`] absorbs typical NTP
+/// skew without keeping a long-lived bearer token in flight. The
+/// skew constant is shared with join-token minting (#1140).
 const ADMIN_JWT_TTL: Duration = Duration::seconds(60);
-
-/// Backdate `nbf` by this much when minting admin JWTs so a LiveKit
-/// pod whose wall clock is slightly ahead does not immediately
-/// reject a freshly-minted token with `token not yet valid`. Matches
-/// the slack LiveKit's own server SDKs apply.
-const ADMIN_JWT_CLOCK_SKEW: Duration = Duration::seconds(30);
 
 /// HTTP timeout for admin requests. Tight because the call sites are
 /// fire-and-forget from the teardown hot path: a stuck SFU must not
@@ -128,7 +124,7 @@ impl ReqwestLiveKitAdmin {
             // rotation events.
             sub: self.api_key.as_str().to_string(),
             iat: now.timestamp(),
-            nbf: (now - ADMIN_JWT_CLOCK_SKEW).timestamp(),
+            nbf: (now - JWT_CLOCK_SKEW).timestamp(),
             exp: (now + ADMIN_JWT_TTL).timestamp(),
             video: AdminGrant {
                 room: room.as_str().to_string(),
