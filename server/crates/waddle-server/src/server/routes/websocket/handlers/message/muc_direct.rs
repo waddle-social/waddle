@@ -108,7 +108,7 @@ async fn handle_muc_private_message(
         let mut routed = incoming.clone();
         routed.from = Some(jid::Jid::from(from_room_jid.clone()));
         routed.to = Some(jid::Jid::from(recipient.clone()));
-        canonicalize_muc_private_payloads(&mut routed, &room_jid);
+        canonicalize_muc_private_payloads(&mut routed);
         let _ = state
             .deps
             .protocol
@@ -252,18 +252,19 @@ fn build_mediated_decline_payload(
         .build()
 }
 
-fn canonicalize_muc_private_payloads(message: &mut Message, room_jid: &jid::BareJid) {
+fn canonicalize_muc_private_payloads(message: &mut Message) {
     message.payloads.retain(|payload| {
         if payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER)
             || payload.is("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
         {
             return false;
         }
+        // XEP-0359: stanza-ids are assigned by servers/rooms, never by
+        // senders. Strip every client-supplied stanza-id from a MUC private
+        // message so a client cannot inject a room-spoofing or otherwise
+        // misleading identifier — the server is the canonical source.
         if payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID) {
-            return payload
-                .attr("by")
-                .and_then(|raw| raw.parse::<jid::BareJid>().ok())
-                .is_none_or(|by| by != *room_jid);
+            return false;
         }
         true
     });

@@ -3726,6 +3726,30 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             )
             .build(),
     );
+    // A full-JID `by` for this room (room@service/nick) must also be stripped —
+    // it does not parse as a bare JID but resolves to the room.
+    message.payloads.push(
+        Element::builder("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+            .attr(
+                minidom::rxml::xml_ncname!("by").to_owned(),
+                format!("{room_jid}/alice"),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "spoofed-room-fulljid-stanza",
+            )
+            .build(),
+    );
+    // A malformed `by` must be stripped conservatively.
+    message.payloads.push(
+        Element::builder("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+            .attr(minidom::rxml::xml_ncname!("by").to_owned(), "!!not-a-jid!!")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "spoofed-malformed-stanza",
+            )
+            .build(),
+    );
     let responses =
         handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
     assert!(responses.is_empty(), "MUC PM routes asynchronously");
@@ -3761,14 +3785,18 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             .is_none(),
         "routed MUC PM must not preserve caller-supplied occupant-id: {xml}"
     );
-    let room_jid_string = room_jid.to_string();
+    let spoofed_ids = [
+        "spoofed-room-stanza",
+        "spoofed-room-fulljid-stanza",
+        "spoofed-malformed-stanza",
+    ];
     assert!(
         !routed.children().any(|child| {
             child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
-                && child.attr("by") == Some(room_jid_string.as_str())
-                && child.attr("id") == Some("spoofed-room-stanza")
+                && child.attr("id").is_some_and(|id| spoofed_ids.contains(&id))
         }),
-        "routed MUC PM must not preserve caller-supplied room stanza-id: {xml}"
+        "routed MUC PM must strip every caller-supplied room-scoped/malformed stanza-id \
+         (bare-JID, full-JID, and unparseable `by`): {xml}"
     );
 }
 

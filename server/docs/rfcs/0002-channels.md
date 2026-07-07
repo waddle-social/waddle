@@ -70,7 +70,6 @@ When a channel is created, the backend provisions a MUC room with:
   </field>
   <field var='muc#roomconfig_persistentroom'><value>1</value></field>
   <field var='muc#roomconfig_membersonly'><value>1</value></field>
-  <field var='muc#roomconfig_whois'><value>moderators</value></field>
   <field var='muc#roomconfig_enablelogging'><value>1</value></field>
 </x>
 ```
