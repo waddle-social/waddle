@@ -125,11 +125,16 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
   // must not leave badges stuck at zero until the next session.
   const inboxHydrateRetryDelaysMs = deps.inboxHydrateRetryDelaysMs ?? [2_000, 8_000];
   function hydrateInboxWithRetry(hydrate: () => Promise<boolean>) {
+    // Bound the chain to the session that started it: after a
+    // logout→re-login inside the backoff window the new session runs its
+    // own bootstrap — a stale chain firing into it would supersede that
+    // hydrate and burn its retry budget.
+    const ownerJid = connectionStore.session?.jid ?? null;
     void (async () => {
       if (await hydrate()) return;
       for (const delayMs of inboxHydrateRetryDelaysMs) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
-        if (!connectionStore.session) return;
+        if ((connectionStore.session?.jid ?? null) !== ownerJid || !connectionStore.session) return;
         if (await hydrate()) return;
       }
     })();

@@ -262,11 +262,14 @@ export function useDirectMessageConversations(
     );
     try {
       const inbox = await currentClient.fetchInbox();
+      // Superseded is success, not failure: a newer hydrate (or session)
+      // owns the inbox now — reporting `false` would make retry chains
+      // re-fetch and supersede each other in a loop.
       if (
         requestId !== inboxRequestId
         || currentClient !== xmppClient.value
         || currentSessionJid !== (session.value?.jid ?? null)
-      ) return false;
+      ) return true;
 
       const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
       mergeInboxConversations(directConversations);
