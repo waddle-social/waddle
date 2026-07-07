@@ -1015,6 +1015,17 @@ DB-stamped `detached_at` column (never a node-local clock), consistent with elem
 acquire-then-hydrate change closes for reads: an unscoped delete racing a second node's
 concurrent claim-scoped hydration of the same row would be a lost-write/phantom-expiry
 hazard, not merely a correctness nicety.
+>
+> **Amended in place (FIX 6d, council-adjudicated)**: this paragraph's premise did not
+> survive contact with the actual codebase — see **deviation 28**, ~950 lines below in
+> the deviations log, for the implementation-time correction: no existing unscoped
+> restore-time delete was found to claim-scope (issue #1098 deliberately hydrates
+> expired sessions rather than deleting them at restore time). Acquire-then-hydrate
+> claim-scopes the READ instead, and the claim-scoped SM-expiry janitor is the sole
+> deletion path. Left here, unedited below this note, as the originally-drafted design
+> intent; deviation 28 is the authoritative as-built record. (This paragraph previously
+> mis-cited itself as "deviation 27" from `core.rs`'s doc comment — corrected to 28,
+> since Slice 4's follow-up plumbing fix claimed 27 first.)
 
 **Reporter calling convention (FIX 4, forward reference)**: this slice (or a later one,
 per deviation 23's "Slice 5+" scoping) is where a genuine cross-node reporter — a node
@@ -1043,6 +1054,33 @@ path), `server/crates/waddle-server/src/pending_delivery/flush.rs` (claim-scoped
 sweep-flush for owned bare JIDs, per element 5's flush-poke/janitor split — this
 janitor is the *guaranteed* flush path, the flush poke remains the optimization).
 
+> **As-landed correction (FIX 3, council-adjudicated)**: "promotion executes inside the
+> Slice 4 fenced write path" understated the actual gap — Slice 4 fenced only
+> `SmPersistenceStorage` (the `sm_sessions`/`sm_unacked` tables); the `pending_delivery`
+> INSERT itself, issued from `sm_promotion/pending.rs::insert_pending`, ran completely
+> unfenced. The as-landed design: a new
+> `PendingDeliveryStorage::insert_fenced(row, origin_stream_id)` trait method (default
+> impl falls back to the unfenced `insert` — byte-identical for every non-clustered
+> implementation), overridden by `DatabasePendingDeliveryStorage` only when clustering
+> is enabled AND this storage's own database is co-located with the clustering global
+> database (`pending_delivery::open_for_cluster_mode`, mirroring
+> `sm_persistence::open_for_cluster_mode`'s identical co-location-then-construct
+> pattern one table over — a mismatch fails startup with the new
+> `PendingStorageError::ClusterColocationMismatch`, never a silent unfenced fallback
+> under a misconfigured co-location). The fenced path runs the `SELECT ... FOR SHARE`
+> against `clustering_claims` and the `pending_delivery` INSERT in one
+> `Database::begin()` transaction — the exact shape
+> `sm_persistence_fenced::PostgresFencedSmPersistence::assert_fenced` already
+> establishes, duplicated here (not shared via a generic helper) for the same
+> "the lock and the write it protects must share one connection, and this impl owns its
+> own inline fencing SQL" reason Slice 4's own design note gives. `origin_stream_id` is
+> threaded from `promote_session_unacked`'s `session.stream_id` through
+> `PromotionContext` into `insert_pending`, which now calls `insert_fenced` instead of
+> the bare `insert` unconditionally (the fallback default makes this a no-op behavior
+> change for every non-clustered deployment). A `NotOwner` result is treated exactly
+> like any other storage failure by the caller: `confirm_drained` is NOT called, the
+> durable SM row survives for the current (genuine) owner's own promotion pass.
+
 **`pending_delivery` schema additions** (summarized from the ADR Implementation Plan's
 Phase 3 section — which states the schema *"is specified in **one place** here to
 prevent dropping a column group"* — with element 5 as the underlying rationale):
@@ -1061,25 +1099,45 @@ current column set before adding).
 
 **Tests**: Postgres-gated: acquire-then-hydrate at startup claims only unclaimed/
 self-claimed rows; restore-time expired-row deletion only fires under the claim and
-evaluates the window against Postgres `now()`/DB-stamped `detached_at` (major fix 6);
-duplicate-promotion (double-janitor) prevention; the **guaranteed-flush janitor test,
-scoped to same-node delivery** (coordinator ruling, major fix 4 — the previous draft's
-"multi-node janitor flush" case smuggled in Phase-4 cross-node stanza routing, which
-this phase's own Non-goals exclude and which the ADR Implementation Plan assigns to
-Phase 4; see the Non-goals bullet above and deviation 14). The same-node version:
-sender's write lands in `pending_delivery` for a bare JID this node also owns and whose
-socket is local, and the janitor sweep delivers it within one sweep interval through the
-`UserActor`'s full delivery surface — proving the guaranteed path independent of the
-flush-poke optimization, without requiring a routed cross-node relay ask this phase
-does not otherwise need. Harness: extend `clustering_cluster_e2e.rs` with a
-claim-scoped-hydration scenario (two nodes, shared Postgres, kill one, assert the
-survivor's `restore_from_persistence` claims and hydrates only the dead node's orphaned
-sessions, not its own already-claimed ones twice). **Forward reference (deviation 21)**:
-this is also the first slice where a production `UserActor` acquires a real Postgres
-claim, so the harness's deferred **deposed-owner-with-live-socket** scenario (Slice 3's
-owner-veto path, exercised against a genuinely wedged, genuinely-claimed `UserActor` with
-a live socket) can land alongside this slice's own harness work, once
-`LocallyClaimedEntities` is wired to something non-empty here.
+evaluates the window against Postgres `now()`/DB-stamped `detached_at` (major fix 6,
+subject to the deviation 28 correction above); duplicate-promotion (double-janitor)
+prevention — landed as `pending_delivery::tests::insert_fenced_prevents_duplicate_promotion_across_claim_states`,
+council-adjudicated FIX 3: two nodes attempting to promote the same SM session's
+unacked queue under different claim states (one holding a now-stale/deposed claim, the
+other the current one) resolve to exactly one winner, the loser aborting fenced
+(`PendingStorageError::NotOwner`) before any write. **Amended (FIX 6b/6c, council-
+adjudicated)**:
+- The **guaranteed-flush janitor test, scoped to same-node delivery** (coordinator
+  ruling, major fix 4 — the previous draft's "multi-node janitor flush" case smuggled in
+  Phase-4 cross-node stanza routing, which this phase's own Non-goals exclude and which
+  the ADR Implementation Plan assigns to Phase 4; see the Non-goals bullet above and
+  deviation 14) is itself **deferred**, not landed this slice: its prerequisite —
+  claim-scoped `pending_delivery` sweep-flush for owned bare JIDs — was deferred
+  alongside deviation 35's nullable/unpopulated schema columns (no `UserActor`-claim
+  concept exists yet to scope the sweep to; see deviation 35). Bound to the same
+  Phase-4 entry as deviation 35 in "Carried risks / deferred to Phase 4," below.
+- The **multi-process kill-one hydration harness scenario** (extend
+  `clustering_cluster_e2e.rs`: two nodes, shared Postgres, kill one, assert the
+  survivor's targeted hydration claims and hydrates only the dead node's orphaned
+  sessions, not its own already-claimed ones twice) **moves to Slice 11's harness
+  capstone** — see that slice's text for the binding sentence. The **sweep-level**
+  guarantee (same claim-scoping behavior, one process, no multi-process harness
+  needed) is covered NOW by a landed Postgres-gated test:
+  `session_janitors::orphan_reaper_sweep_tests` exercises
+  `run_orphan_reaper_sweep` end-to-end — seeds a stale-owner claim + a persisted
+  session, sweeps, and asserts the expire CAS committed, the steal won, targeted
+  hydration (FIX 2's `hydrate_reclaimed`, not `restore_from_persistence` — see that
+  method's own doc comment on why it is startup-time-only) landed the session into
+  memory, and exactly-once behavior holds under a concurrent second sweep.
+
+**Forward reference (deviation 21, see also deviation 34 below)**: this slice's own
+Files list does NOT wire a production `UserActor`/`RoomActor` claim-acquisition call
+site — see deviation 34 for the correction to this paragraph's original forward
+reference, which incorrectly implied this slice was where it would land. The harness's
+deferred **deposed-owner-with-live-socket** scenario (Slice 3's owner-veto path,
+exercised against a genuinely wedged, genuinely-claimed `UserActor` with a live socket)
+remains carried forward — now bound explicitly to Phase 4's first slice that wires
+`UserActor` Postgres claims (see "Carried risks / deferred to Phase 4," below).
 
 **Dependencies (corrected — minor fix 18)**: Slice 4 (fenced SM persistence). The
 previous draft hard-depended this slice on Slice 3, but the orphan reaper uses
@@ -1567,6 +1625,17 @@ land together as this phase's harness-maturity capstone, matching the scoping ma
 durable `pending_delivery` fallback to exist (a single dead link between two of three
 nodes must degrade to that path, not fence).
 
+**Binding (FIX 6b, council-adjudicated)**: Slice 5's own Tests paragraph deferred its
+multi-process kill-one hydration scenario here — this is that scenario's landing slice.
+Extend `clustering_cluster_e2e.rs` with a claim-scoped-hydration harness case: two real
+processes, shared Postgres, kill one, assert the survivor's targeted hydration
+(`hydrate_reclaimed`, via the orphan reaper) claims and hydrates only the dead node's
+orphaned sessions, never re-hydrating its own already-claimed ones a second time. The
+single-process, sweep-level version of this same guarantee already landed in Slice 5
+itself (`session_janitors::orphan_reaper_sweep_tests`) — this harness case is the
+multi-process capstone proving the identical behavior holds across a real process kill,
+not merely within one process's own claim bookkeeping.
+
 **Files**: `server/crates/waddle-server/tests/clustering_cluster_e2e.rs` only.
 
 **Tests**: the two scaffolds themselves are the test deliverable.
@@ -1640,6 +1709,47 @@ concern).
   path (Slice 4) both add new call patterns against sqlx pools whose acquire/statement
   timeouts have never been tuned against this workload. Left as a Phase 4 (or
   production-rollout) tuning exercise once real load-shape data exists.
+- **Deposed-owner-with-live-socket harness scenario (`UserActor` variant) — bound to
+  Phase 4's first `UserActor`-Postgres-claims slice (FIX 6a, council-adjudicated).**
+  Deviation 21/34: this scenario requires a genuinely wedged, genuinely-claimed
+  `UserActor` with a live socket, contested via the steal-**intent** veto path (Slice 3)
+  — no slice in this phase's own breakdown (Slices 0-11) wires a production `UserActor`
+  claim-acquisition call site (Slice 5 wires only `sm_session`; Slices 6/7 wire
+  cross-node SM resume and `RoomActor` respectively). The `RoomActor` variant of this
+  same scenario is NOT carried here — it already lands in Slice 7, per that slice's own
+  text. Only the `UserActor` variant is deferred, to whichever Phase 4 slice first wires
+  `UserActor` claim acquisition.
+- **Inline post-fence reclaim vs. another node's concurrent resume (FIX 4, deviation
+  32, council-adjudicated) — residual window, not eliminated.** The re-registration
+  success path's inline reclaim of this node's own just-expired identity's `sm_session`
+  claims (`self_fence::reclaim_own_expired_claims`) can race a genuinely different
+  node's own `<resume/>`/claim-steal attempt for one of those same entities, landing in
+  the brief window between this node's fence and its own re-registration completing.
+  Not specially arbitrated: the ordinary epoch-fenced `steal_stale` CAS resolves it
+  exactly like any other concurrent-steal race (first commit wins, the loser retries
+  or fails cleanly) — this is the SAME mechanism every other concurrent-claim race in
+  this phase relies on, not a gap unique to the inline reclaim. Named here explicitly,
+  per the coordinator's ruling that residual windows be described honestly rather than
+  implied-closed by the "readiness gate now does real work" framing.
+- **Fail-open-detach orphan gap: unclaimed persisted rows invisible to the orphan
+  reaper until a restart-time restore (FIX 6e, council-adjudicated).** The orphan
+  reaper's candidate scan (`list_orphaned_sm_session_claims`) and the general
+  claim-scoped hydration path both operate over `clustering_claims` rows — a row that
+  was never claimed in the first place (the best-effort
+  `acquire_claim_store_entry_for_detach` call on detach failed, e.g. a transient
+  `ClaimStore` backend outage at the exact moment of detach) has no `clustering_claims`
+  row for any node to steal, dead or alive. Such a row is invisible to every claim-scoped
+  code path this phase adds — it is discovered only when this same node's own next
+  `restore_from_persistence` (a restart) re-attempts the claim for it and this time
+  succeeds, or never, if the node never restarts. `acquire_claim_store_entry_for_detach`
+  is deliberately best-effort by design (a stream id is a freshly minted UUID; risking
+  the unacked queue on a claim failure is worse than proceeding without a durable claim
+  record — see that function's own doc comment), so this gap is an accepted, narrow
+  consequence of that design choice, not a new hazard FIX 2/4/5 introduce. Left
+  unaddressed in Phase 3; a Phase 4 fix would need either a periodic full-table
+  reconciliation pass (re-introducing the unscoped-scan hazard Slice 5 otherwise
+  eliminates, so it would need its own claim-scoped design) or a durable
+  "detach acknowledged" marker distinct from the claim row itself.
 
 ## Hard-rule compliance notes
 
@@ -1971,3 +2081,205 @@ concern).
     `open_for_cluster_mode` falls back to the portable implementation exactly as
     before — the co-location invariant only binds the specific combination this
     phase's fenced impl actually requires.
+28. **Major fix 6's premise did not hold against the actual codebase** (Slice 5
+    implementation-time finding): no existing unscoped restore-time delete was found in
+    `restore_from_persistence` to "move behind the claim." Issue #1098 deliberately
+    hydrates expired sessions instead of deleting them at restore time, precisely so
+    their unacked queues still run the Q6 promote → confirm chain rather than being
+    silently discarded. Resolution: this slice does not add a new inline restore-time
+    delete (which would re-introduce the #1098 bug by deleting before promotion runs).
+    Acquire-then-hydrate claim-scopes the READ instead (a row is hydrated only when this
+    node's `ClaimStore::ensure_claimed` call for it succeeds), and the now claim-scoped
+    SM-expiry janitor (see deviation 30) is the sole deletion path for expired rows —
+    closing the ADR's actual hazard (an unscoped delete racing a second node's
+    claim-scoped hydration of the same row) without needing a delete that never existed.
+29. **The SM-session claim lifecycle is extended from "held only during the
+    claim_session → complete_claim resume window" to "held continuously while the
+    session sits in `sessions`"** (Slice 5 implementation-time finding, load-bearing for
+    acquire-then-hydrate to mean anything in a real cluster). Before this slice,
+    `InMemorySmSessionRegistry`'s `ClaimStore` claim was acquired only transiently during
+    a resume attempt (`claim_session`) and released again on every path that returned a
+    session to the `sessions` map or discarded it — correct in the single-node model,
+    where nothing else could ever contend for the same entity, but insufficient once a
+    second node's `restore_from_persistence`/orphan reaper can genuinely race for the
+    same row: a released claim on a session still sitting in this node's `sessions` map
+    is invisible to Postgres, so a second node could legitimately claim and hydrate a
+    duplicate in-memory copy. Landed changes, all in
+    `waddle-xmpp/src/stream_management/session_registry/{core.rs,claims.rs,trait_impl.rs}`:
+    - `trait_impl.rs::store_session` now acquires (`ensure_claimed`) the claim for every
+      freshly detached session before returning, via the new
+      `claims.rs::acquire_claim_store_entry_for_detach` (best-effort: a failure logs and
+      proceeds rather than risking the unacked queue, since a stream id is a freshly
+      minted UUID and a genuine collision is not expected in practice).
+    - `claim_session` switches from a bare `acquire` to `ensure_claimed` (FIX 1's
+      self-reacquire), since the entity is now typically already claimed by this exact
+      node from the detach step above; a genuinely foreign claim still correctly fails.
+    - `release_claim` no longer unconditionally releases the store entry: it releases
+      only when the session is NOT reinserted into `sessions` (expired, or absent from
+      `claimed_sessions`) — reinserting a still-owned, merely claim-attempt-aborted
+      session must keep the claim, not drop it.
+    - Every OTHER terminal removal from `sessions` (`take_session`,
+      `displace_stored_session_if_unclaimed`, `cleanup_expired`,
+      `invalidate_sessions_for_jid`'s plain-detached branch, `confirm_drained`) now also
+      releases the store entry — previously only `claimed_sessions` removals did, which
+      was correct under the old (transient-claim) model but leaked claims under the new
+      one.
+    - `InMemorySmSessionRegistry.node_identity` changes type from a plain `NodeIdentity`
+      snapshot to `SharedNodeIdentity` (`with_claim_store`'s signature changes to match),
+      mirroring `PostgresFencedSmPersistence`'s own Slice 4 follow-up plumbing fix — every
+      claim call site now reads `.current()` at the moment it needs the identity, so a
+      self-fence/re-registration mid-process-lifetime is observed immediately rather than
+      silently binding claim CAS calls to a stale, pre-fence `node_epoch` forever. Without
+      this, acquire-then-hydrate and the orphan reaper's self-reacquire path would be
+      subtly broken across every re-registration.
+    - Production wiring closed the loop: `server/http.rs::create_sm_session_registry` now
+      calls `.with_claim_store(claim_store, node_identity)` using
+      `ClusteringHandles::claim_pair()` — previously this call was never made in
+      production, so the registry silently stayed on the single-node
+      `InProcessClaimStore` default even with clustering enabled and the fenced
+      `SmPersistenceStorage` wired in, defeating acquire-then-hydrate entirely.
+30. **Fenced-cache eviction (carried debt (a)) closed via a new `SmPersistenceStorage`
+    trait method, not a `ClaimStore` hook**: `evict_claim_cache(&self, stream_id:
+    &SmSessionId)` (default no-op) lets `InMemorySmSessionRegistry` (which already holds
+    `Arc<dyn SmPersistenceStorage>`) notify the fenced impl to drop its per-stream epoch
+    cell on every claim-ending path, without `ClaimStore` needing to know about
+    `sm_persistence_fenced`'s private cache at all (a `ClaimStore`-level hook would have
+    had to be either generic over an opaque cache-key type or SM-specific on a
+    supposedly-entity-agnostic trait). `PostgresFencedSmPersistence` overrides it to
+    remove the cell; the portable impl keeps the default no-op (it has no such cache).
+31. **Real `LocallyClaimedEntities` (`clustering::local_claims::SmSessionLocalClaims`)
+    scoped to `EntityType::SmSession` only, wired via a fill-in-later cell**:
+    `start_if_enabled` must hand `run_node_lease` a `LocallyClaimedEntities` before the
+    SM session registry exists (the registry needs `ClusteringHandles` itself, which
+    `start_if_enabled` returns) — resolved with `SmSessionLocalClaims::new()` (empty,
+    identical observable behavior to `NoLocallyClaimedEntities` until wired) plus
+    `SmSessionLocalClaims::wire(registry)`, called once `server/http.rs::create_sm_session_registry`
+    builds the registry. `UserActor`/`RoomActor` claim acquisition is out of this
+    slice's Files list (the plan's own "Slices 5-7" framing) — `owned()` therefore never
+    reports either type. This is a **narrower** scope than a literal reading of "the
+    real `LocallyClaimedEntities`" might suggest, called out because it directly bears
+    on deviation 21 (below): the steal-intent veto scan stays exactly as vacuous in
+    production as it was under `NoLocallyClaimedEntities`, since steal-intents never
+    apply to `SmSession` claims at all (Slice 3 rule 1).
+32. **Deviation 19's "readiness clears on register + hysteresis alone" gap — closed in
+    substance by FIX 4 (council-adjudicated), superseding this deviation's original
+    "narrowly, not via a full owned-entity reclaim" framing.** The original design (as
+    first implemented): every entity this node owned before a self-fence is demoted
+    (forgotten locally, `ClaimStore` claim left untouched in Postgres) before the
+    re-registration retry loop even starts, so `local_claims.owned()` is already empty
+    by the time re-registration succeeds — nothing left in this process's own
+    bookkeeping to "re-acquire" by name. The closure called `NodeLeaseStore::expire` on
+    this node's own just-superseded identity (best-effort, bounded, mirroring
+    `mark_draining_bounded`) immediately before flipping readiness, making its dropped
+    claims eligible for the orphan reaper (deviation 33) as early as possible — but
+    readiness itself did not block on the reaper's own independent cadence actually
+    reclaiming anything.
+    **FIX 4's closure**: `run_node_lease`'s re-registration success path now does two
+    more things, still before `set_ready(true)`: (a) re-runs the `owned()`/`demote`
+    sweep a second time (a session may have detached and self-claimed under the STALE
+    pre-fence `live_identity` during the retry window itself — the original one-shot
+    sweep at fence-entry ran before that window even opened, so it structurally could
+    not have seen these); (b) calls a new bounded helper
+    (`self_fence::reclaim_own_expired_claims`) that lists this node's own just-expired
+    identity's orphaned `sm_session` claims (filtered client-side from
+    `list_orphaned_sm_session_claims`'s cluster-wide candidate set — never touching
+    another node's claims), `steal_stale(OwnerStale)`s each under the freshly
+    re-registered identity, and hydrates the winners via
+    `LocallyClaimedEntities::hydrate_reclaimed` (FIX 2's `hydrate_reclaimed` path, never
+    `restore_from_persistence`). This makes "claim re-acquisition" a real, inline action
+    this exact node takes for its own dropped claims, rather than purely delegating to
+    the reaper's independent 120s cadence — the reaper remains the backstop for every
+    OTHER node's genuinely dead claims (this inline step's owner filter never touches
+    those). **Residual window, named honestly (not eliminated)**: another node's
+    `<resume/>`/claim-steal attempt for one of these same entities, racing this node's
+    inline reclaim in the brief window between this node's fence and its own
+    re-registration completing, is not specially arbitrated here — the ordinary
+    epoch-CAS semantics (`steal_stale`'s epoch-fenced UPDATE) resolve it exactly as any
+    other concurrent-steal race does: whichever CAS commits first wins, the other
+    observes a stale epoch and retries/fails cleanly. See "Carried risks / deferred to
+    Phase 4," below, for this window named as its own entry.
+33. **Orphan reaper (element 9) reuses `restore_from_persistence` for its hydrate step
+    instead of re-deriving codec/expiry logic**: `NodeLeaseStore` gains
+    `list_orphaned_sm_session_claims` (a new, read-only, unlocked candidate scan over
+    `clustering_claims`/`clustering_nodes` using the identical owner-stale `NOT EXISTS`
+    predicate `steal_stale(OwnerStale)` already uses), returning `OrphanedSmSessionClaim
+    { entity, epoch, owner }`. `server::session_janitors::spawn_orphan_reaper_janitor`
+    (a new ninth janitor, 120s cadence) scans, commits `expire` on each stale owner
+    (element 9's ordering requirement), then `steal_stale(OwnerStale)`s what it can; on
+    any successful steal it re-runs `sm_session_registry.restore_from_persistence()`
+    rather than hand-rolling a promote-or-hydrate branch — a freshly-stolen claim
+    self-reacquires via `ensure_claimed`'s self-match (same node/epoch the reaper just
+    won under), so the existing, already-tested acquire-then-hydrate logic hydrates
+    exactly (and only) what this sweep just reclaimed, whether that means "immediately
+    eligible for the SM-expiry janitor's promote → confirm chain" (expired) or "hydrated
+    for a future local resume attempt" (not yet expired) — both outcomes the ADR's
+    "expire or promote" text names, obtained for free rather than re-derived. This
+    requires a second `Arc<dyn NodeLeaseStore>` handle on `ClusteringHandles`
+    (`node_lease`, feature-gated like `local_claims`) plus the configured `lease_ttl`
+    (`ClusteringHandles::lease_ttl`), since the janitor runs off `WebSocketState`, which
+    does not otherwise carry `ServerConfig`/`ClusteringNodeLeaseConfig`.
+34. **Deviation 21 (the deposed-owner-with-live-socket harness scenario) remains
+    deferred, NOT landed this slice** — correcting the plan's own forward reference
+    ("this is also the first slice where a production `UserActor` acquires a real
+    Postgres claim"). Slice 5's actual Files list touches only SM-session claim
+    acquisition (`session_registry`, the SM-expiry janitor, the new orphan reaper,
+    `sm_promotion`/`pending_delivery`) — no `UserActor`/`RoomActor` claim-acquisition
+    call site is in scope here (that is Slices 6/7's work, per the plan's own "Slices
+    5-7" framing elsewhere). **Correction (FIX 3, council-adjudicated)**: at the time
+    this deviation was first written, "`sm_promotion`/`pending_delivery`" here named
+    files the Q6 promotion path merely lives in — the Files list's own claim that
+    "promotion executes inside the Slice 4 fenced write path" was not yet true of the
+    `pending_delivery` insert itself (only `SmPersistenceStorage` was actually fenced;
+    the promotion write into `pending_delivery` remained unfenced, exactly the gap FIX
+    3's own trigger names). `sm_promotion`/`pending_delivery` are now genuinely
+    claim-fenced (`PendingDeliveryStorage::insert_fenced`, threaded from
+    `sm_promotion.rs`'s `PromotionContext::origin_stream_id`) — this parenthetical's
+    citation is accurate as of FIX 3, not merely aspirational. The deposed-owner-with-live-socket scenario is structurally
+    a steal-**intent** veto-path scenario (Slice 3), and steal-intents never apply to
+    `SmSession` claims at all (Slice 3 rule 1) — so it cannot be reconstructed against a
+    genuinely-claimed SM session either; it requires a genuinely-claimed `UserActor`,
+    full stop. Fabricating `UserActor` claim-acquisition wiring here, just to unblock
+    this one harness scenario, would pull forward a design decision (where in
+    `UserActor`'s lifecycle a claim is acquired/released, how demotion interacts with
+    actor supervision) that a later slice should make deliberately — the same
+    "don't pull work forward" principle this plan already applies to the Slice 10
+    drain boundary. Carried forward again, to land alongside whichever slice first wires
+    `UserActor` claim acquisition. **Binding (FIX 6a, council-adjudicated)**: that slice
+    does not exist within this phase's own slice breakdown (Slices 0-11 above) — it is
+    **Phase 4's first slice that wires `UserActor` Postgres claims**, named explicitly as
+    its own entry in "Carried risks / deferred to Phase 4," below, rather than left to
+    dangle on a slice number this phase never defines. Slice 7's `RoomActor`-variant
+    binding (this same scenario, one type over) is unaffected and stays exactly as
+    written in Slice 7's own text above — that binding already lands within this phase.
+35. **`pending_delivery`/`sm_unacked` element-5 schema additions land nullable and
+    unpopulated this slice** — `origin_stream_id`, `inbound_seq` (the recipient-scoped
+    dedup key, `(recipient/stream_id, origin_stream_id, inbound_seq)`, enforced by a new
+    partial `UNIQUE` index), and `pair_sequence` (the per-`(origin_stream_id,
+    recipient)` ordering counter). Schema only: no insert call site populates them yet.
+    Populating them requires threading the origin session's SM-ID/`h` value through
+    every `pending_delivery` insert path (Q6 promotion, direct offline-DM fallback, MUC
+    reflection fan-out) and building the per-pair ordering/gap-detection consumer that
+    reads them — machinery whose actual consumer (cross-node sticky-failover diversion)
+    is exactly what this phase's own Non-goals exclude (no cross-node stanza routing
+    GA; the cross-node janitor-flush leg is deferred to Phase 4). Landing the columns
+    now avoids a second migration once that machinery lands. For the same reason,
+    `pending_delivery/flush.rs`'s sweep-flush is **not** claim-scoped to owned bare JIDs
+    this slice: that scoping is a `UserActor`-claim concern (see deviation 34) which
+    does not exist yet either. The same-node guaranteed-flush test (element 9/element 5,
+    Tests list) is satisfied by the EXISTING `pending_delivery` per-row
+    claim/flush mechanism (`flushed_in_session`), which already routes through the
+    `UserActor`'s full delivery surface on the owning node — this slice adds no new
+    behavior there, since bare-JID ownership scoping has no `ClaimStore`-backed concept
+    to scope to yet.
+36. **Graceful drain is untouched this slice, confirmed against the plan's own Files
+    lists**: Slice 5's Files/Tests lists name `session_registry`, the SM-expiry janitor,
+    the new orphan reaper, `sm_promotion`/`pending.rs`, and `pending_delivery/flush.rs`
+    — none of `session_janitors.rs::spawn_graceful_shutdown_drain`, `server/mod.rs`'s
+    drain sequencing, or `ClaimStore::release_many` batching. Slice 10's own Files list
+    ("Dependencies: Slice 5... for 'final fenced writes' to mean anything") is the
+    slice that actually wires per-entity release-after-final-write into the drain path.
+    Slice 5 contributes only what already falls out of the claim-lifecycle work above:
+    a session's normal end-of-life paths (`confirm_drained`, `take_session`, etc.)
+    already release their `ClaimStore` claim as part of deviation 29's fix, so Slice
+    10's batching has a correct, already-tested single-entity release to batch — but no
+    drain-specific sequencing/batching/observability is added here.

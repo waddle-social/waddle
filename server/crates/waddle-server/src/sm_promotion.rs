@@ -152,6 +152,7 @@ pub async fn promote_session_unacked(
                     pending_storage,
                     original_receipt_fallback: entry.original_receipt_at,
                     server_domain,
+                    origin_stream_id: &session.stream_id,
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
@@ -508,6 +509,11 @@ struct PromotionContext<'a> {
     pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
     server_domain: &'a str,
+    /// The SM session whose unacked queue is being promoted (ADR-0017
+    /// Phase 3 Slice 5 FIX 3) — threaded down into
+    /// `pending::insert_pending`'s `insert_fenced` call so a cluster-fenced
+    /// storage can fence the write against this exact claim.
+    origin_stream_id: &'a str,
 }
 
 /// Promote a single typed [`xmpp_parsers::message::Message`] per the
@@ -621,6 +627,7 @@ async fn promote_one(
                             ctx.pending_storage,
                             ctx.original_receipt_fallback,
                             ctx.registry,
+                            ctx.origin_stream_id,
                         )
                         .await;
                     }
@@ -646,6 +653,7 @@ async fn promote_one(
         ctx.original_receipt_fallback,
         &message,
         ctx.registry,
+        ctx.origin_stream_id,
     )
     .await
 }

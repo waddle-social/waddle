@@ -27,7 +27,9 @@ use async_trait::async_trait;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use waddle_xmpp::ownership::{Entity, NodeIdentity};
+use waddle_xmpp::ownership::{
+    ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, StalePredicate,
+};
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
@@ -157,6 +159,23 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// reports as both currently claimed by this node *and* bearing an
     /// outstanding intent.
     async fn health_check(&self, entity: &Entity) -> bool;
+
+    /// Targeted-hydration hook for FIX 4's inline post-fence reclaim
+    /// (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated): given
+    /// entities this node's re-registration retry just re-won via
+    /// `steal_stale` (paired with the epoch the steal returned), hydrate
+    /// them into whatever local state this implementation backs.
+    ///
+    /// Implementations MUST honor the same discipline
+    /// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::hydrate_reclaimed`]
+    /// documents — never a table scan, never a blind insert — since this
+    /// is called from a node that is already back to serving live traffic
+    /// by the time it runs. Default no-op, mirroring [`Self::demote`]'s
+    /// own no-op default: correct for [`NoLocallyClaimedEntities`], which
+    /// owns nothing to hydrate.
+    async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
+        let _ = entities;
+    }
 }
 
 /// No claimed entities — see the trait doc for why this is the only
@@ -294,6 +313,14 @@ pub struct NodeLeaseRunConfig {
     pub connected_peers: ConnectedPeerCount,
     pub local_claims: Arc<dyn LocallyClaimedEntities>,
     pub readiness: ClusteringReadiness,
+    /// FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated):
+    /// the same `ClaimStore` handle every other clustering-aware call site
+    /// binds — never a second, independent store — used by the
+    /// re-registration success path to `steal_stale(OwnerStale)` this
+    /// node's own just-expired identity's SM-session claims back under
+    /// the freshly re-registered one, inline, rather than waiting out the
+    /// general orphan reaper's independent cadence.
+    pub claim_store: Arc<dyn ClaimStore>,
     /// Live, shared view of this node's current identity (ADR-0017 Phase 3
     /// Slice 4 follow-up plumbing note): [`run_node_lease`] calls
     /// [`waddle_xmpp::ownership::SharedNodeIdentity::set`] on it every
@@ -340,6 +367,115 @@ where
     }
 }
 
+/// Best-effort, time-bounded [`NodeLeaseStore::expire`] on this node's own
+/// just-superseded identity (ADR-0017 Phase 3 Slice 5, plan deviation #19)
+/// — see the call site's doc comment for the full rationale. A failure or
+/// timeout here is logged and ignored: the row still ages out naturally via
+/// its own lapsed heartbeat, so this is purely an acceleration, never a
+/// correctness requirement — nothing downstream depends on it succeeding.
+async fn expire_bounded<L>(lease: &L, identity: &NodeIdentity, lease_ttl: Duration)
+where
+    L: NodeLeaseStore + Send + Sync,
+{
+    match tokio::time::timeout(lease_ttl, lease.expire(identity, lease_ttl)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                node_id = %identity.node_id,
+                "clustering: failed to expire this node's own just-superseded identity; \
+                 orphaned claims still age out via the row's own lapsed heartbeat"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: expiring this node's own just-superseded identity timed out; \
+                 orphaned claims still age out via the row's own lapsed heartbeat"
+            );
+        }
+    }
+}
+
+/// FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated):
+/// reclaim `old_identity`'s own orphaned `sm_session` claims inline, under
+/// `fresh`, rather than waiting for the general orphan reaper's
+/// independent cadence to notice them. `list_orphaned_sm_session_claims`
+/// returns candidates cluster-wide (any node's dead claims); this function
+/// filters to exactly `old_identity` — this node's own just-superseded
+/// identity, provably dead because THIS loop is the one that just
+/// re-registered past it — so it never touches another node's genuinely
+/// dead claims (the general reaper remains the sole mechanism for those,
+/// preserving the "backstop for other nodes" carried-risk boundary FIX 4's
+/// own doc note names honestly).
+///
+/// Caller bounds this whole call against `config.lease_ttl` (mirroring
+/// every other control-plane call in [`run_node_lease`]); this function
+/// itself does not re-bound the individual `steal_stale`/hydrate calls —
+/// a slow-but-not-hung candidate set is expected to be small (this one
+/// node's own dropped claims only, not the cluster-wide set), so the
+/// outer deadline is sufficient.
+async fn reclaim_own_expired_claims<L>(
+    lease: &L,
+    claim_store: &dyn ClaimStore,
+    old_identity: &NodeIdentity,
+    fresh: &NodeIdentity,
+    local_claims: &dyn LocallyClaimedEntities,
+) where
+    L: NodeLeaseStore + Send + Sync,
+{
+    let candidates = match lease.list_orphaned_sm_session_claims().await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                node_id = %old_identity.node_id,
+                "clustering: inline post-fence reclaim: list_orphaned_sm_session_claims failed"
+            );
+            return;
+        }
+    };
+
+    let mut reclaimed: Vec<(Entity, ClaimEpoch)> = Vec::new();
+    for candidate in candidates {
+        if candidate.owner != *old_identity {
+            // Another node's genuinely dead claim — not this node's own
+            // just-superseded identity. Left for the general orphan
+            // reaper, exactly as element 9 describes; naming that
+            // boundary honestly (rather than silently widening this
+            // node's own inline reclaim to cover it) is the point of FIX
+            // 4's "residual window" carried-risk note.
+            continue;
+        }
+        match claim_store
+            .steal_stale(
+                &candidate.entity,
+                candidate.epoch,
+                StalePredicate::OwnerStale,
+                fresh,
+            )
+            .await
+        {
+            Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
+            Err(ClaimError::Conflict) => {
+                // The general orphan reaper (or another node) already
+                // reclaimed it first — safe, no-op.
+            }
+            Err(error) => {
+                tracing::warn!(
+                    entity_id = %candidate.entity.id,
+                    %error,
+                    "clustering: inline post-fence reclaim: steal_stale(OwnerStale) failed"
+                );
+            }
+        }
+    }
+
+    if !reclaimed.is_empty() {
+        local_claims.hydrate_reclaimed(&reclaimed).await;
+    }
+}
+
 /// Drive node-lease renewal, demotion reconciliation, isolation-aware
 /// self-fencing, and post-fence re-registration until `stop_token` fires.
 ///
@@ -383,13 +519,19 @@ where
 /// failure) was a row-leak wedge: `register`'s `INSERT ... ON CONFLICT
 /// (node_id) DO UPDATE` only refreshes an existing row when called
 /// repeatedly with the *same* `node_id` — called with a fresh `node_id`
-/// every time, it INSERTs a new phantom row per retry instead, and nothing
-/// in production ever expires node rows (`NodeLeaseStore::expire` has no
-/// production caller this slice), so `clustering_nodes` would grow without
-/// bound across a single sustained fence and permanently inflate every
-/// node's `count_other_live_nodes` — eventually making
-/// [`can_reacquire_claims`] impossible to satisfy again (a permanent
-/// not-ready wedge) and polluting the cluster-wide isolation heuristic.
+/// every time, it INSERTs a new phantom row per retry instead, and — at the
+/// time this fix landed (Slice 2) — nothing in production ever expired node
+/// rows (`NodeLeaseStore::expire` had no production caller yet), so
+/// `clustering_nodes` would grow without bound across a single sustained
+/// fence and permanently inflate every node's `count_other_live_nodes` —
+/// eventually making [`can_reacquire_claims`] impossible to satisfy again (a
+/// permanent not-ready wedge) and polluting the cluster-wide isolation
+/// heuristic. (ADR-0017 Phase 3 Slice 5: `expire` now has its first two
+/// production callers — this function's own `expire_bounded` call below,
+/// and the orphan reaper — but this FIX 1(a) reasoning is unaffected: both
+/// callers only ever expire an identity this loop or the reaper has
+/// independently proven dead, never the identity a phantom-row retry would
+/// have minted.)
 pub async fn run_node_lease<L>(
     lease: L,
     mut identity: NodeIdentity,
@@ -406,6 +548,7 @@ pub async fn run_node_lease<L>(
         local_claims,
         readiness,
         live_identity,
+        claim_store,
     } = run_config;
     // Seed the shared handle with the identity this loop starts under —
     // see `live_identity`'s doc comment and the `identity = fresh;`
@@ -733,15 +876,91 @@ pub async fn run_node_lease<L>(
                         .unwrap_or(usize::MAX);
                     let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
                     if can_reacquire_claims(other_live, reachable) {
+                        // ADR-0017 Phase 3 Slice 5 (plan deviation #19,
+                        // closed by FIX 4): the ADR's readiness gate is
+                        // "re-registration under a fresh node_id/node_epoch
+                        // **plus claim re-acquisition**." `local_claims` is
+                        // no longer vacuous (Slice 5's
+                        // `local_claims::SmSessionLocalClaims`), so the
+                        // conjunct must do real work here, not just be
+                        // documented as a future TODO.
+                        //
+                        // FIX 4(a): re-run the demote sweep ONE more time,
+                        // right before flipping readiness. The self-fenced
+                        // block's own sweep (above, at fence-entry) is a
+                        // one-shot snapshot of `local_claims.owned()` taken
+                        // BEFORE this retry loop even started — a session
+                        // that detached (and self-claimed, via
+                        // `acquire_claim_store_entry_for_detach`) during
+                        // the retry window did so under `live_identity`'s
+                        // STALE, pre-fence value (this loop only calls
+                        // `live_identity.set(fresh)` a few lines below, once
+                        // re-registration itself succeeds), so that
+                        // snapshot missed it entirely. Re-running the sweep
+                        // here catches anything acquired during that window
+                        // before this node ever claims to be ready again.
+                        for entity in local_claims.owned() {
+                            local_claims.demote(&entity).await;
+                        }
+
+                        // What "claim re-acquisition" can mean AT THIS
+                        // EXACT POINT: every entity this node owned before
+                        // the fence (and anything caught by the re-sweep
+                        // just above) is now demoted (forgotten locally,
+                        // never released in Postgres — FIX 3's "must
+                        // succeed even when Postgres is unreachable"
+                        // contract for `demote`), so `local_claims.owned()`
+                        // is empty and there is nothing left in THIS
+                        // process's bookkeeping to "re-acquire" by name.
+                        // What this node uniquely knows, that no other node
+                        // can assert as confidently, is that its OWN
+                        // just-superseded identity (`identity`, before the
+                        // reassignment below) is genuinely dead — so it
+                        // commits that knowledge to Postgres immediately
+                        // via `NodeLeaseStore::expire`.
+                        expire_bounded(&lease, &identity, config.lease_ttl).await;
+
+                        // FIX 4(b), council-adjudicated: rather than
+                        // leaving every one of this node's own dropped
+                        // claims to wait out the general orphan reaper's
+                        // independent 120s cadence, reclaim them inline,
+                        // right here, under the freshly re-registered
+                        // identity — bounded/deadline-armed like every
+                        // sibling control-plane call in this function. The
+                        // general reaper remains the backstop for every
+                        // OTHER node's genuinely dead claims (never
+                        // touched by this inline step — see
+                        // `reclaim_own_expired_claims`'s owner filter).
+                        // Scoped in its own block: `std::pin::pin!` binds a
+                        // local that lives to the end of its enclosing
+                        // block, not just this statement, and that local
+                        // borrows `identity`/`fresh` — the block ensures
+                        // those borrows end before `identity = fresh` below
+                        // reassigns `identity` (and moves `fresh`).
+                        let reclaim_timed_out = {
+                            let reclaim_future = std::pin::pin!(reclaim_own_expired_claims(
+                                &lease,
+                                claim_store.as_ref(),
+                                &identity,
+                                &fresh,
+                                local_claims.as_ref(),
+                            ));
+                            tokio::time::timeout(config.lease_ttl, reclaim_future)
+                                .await
+                                .is_err()
+                        };
+                        if reclaim_timed_out {
+                            tracing::warn!(
+                                node_id = %identity.node_id,
+                                "clustering: inline post-fence reclaim of this node's own \
+                                 just-expired identity's SM-session claims timed out; the \
+                                 general orphan reaper remains the backstop for these entities"
+                            );
+                        }
+
                         identity = fresh;
                         live_identity.set(identity.clone());
                         backoff.reset();
-                        // Readiness clears on register + hysteresis alone
-                        // this slice: no production `LocallyClaimedEntities`
-                        // exists yet, so the ADR's "plus claim
-                        // re-acquisition" conjunct is vacuous. Once Slice 4+
-                        // wires real claims, a claim-reacquisition wait MUST
-                        // land here, before this flip (plan deviation #19).
                         readiness.set_ready(true);
                         tracing::info!(
                             node_id = %identity.node_id,
@@ -871,7 +1090,6 @@ mod tests {
     // one level up (node lease instead of keypair-slot lease).
 
     use std::sync::atomic::{AtomicBool, AtomicU32};
-    use waddle_xmpp::ownership::{ClaimEpoch, ClaimError};
 
     struct FakeLease {
         heartbeat_result: std::sync::Mutex<Box<dyn FnMut() -> Result<bool, ClaimError> + Send>>,
@@ -1001,6 +1219,15 @@ mod tests {
                 .retain(|(e, _)| e != entity);
             Ok(1)
         }
+        async fn list_orphaned_sm_session_claims(
+            &self,
+        ) -> Result<Vec<crate::clustering::claims::OrphanedSmSessionClaim>, ClaimError> {
+            // Not exercised by this module's tests (the orphan reaper is
+            // tested against `PostgresClaimStore` directly, in
+            // `session_janitors.rs`/`claims.rs`); this fake never has
+            // orphaned candidates.
+            Ok(Vec::new())
+        }
     }
 
     fn identity() -> NodeIdentity {
@@ -1057,6 +1284,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1100,6 +1328,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1147,6 +1376,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1206,6 +1436,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1367,6 +1598,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1507,6 +1739,18 @@ mod tests {
         owned: Vec<Entity>,
         healthy: Arc<AtomicBool>,
         demoted: Arc<std::sync::Mutex<Vec<Entity>>>,
+        /// Every entity ever passed to `hydrate_reclaimed`, in call order —
+        /// lets FIX 4(b)'s inline-post-fence-reclaim test assert the
+        /// targeted-hydration hook actually fires. Defaults are wired via
+        /// `FakeLocalClaims::unhydrated()` for tests that don't care.
+        hydrated: Arc<std::sync::Mutex<Vec<Entity>>>,
+    }
+
+    impl FakeLocalClaims {
+        /// Shared empty `hydrated` sink for tests that don't assert on it.
+        fn unhydrated() -> Arc<std::sync::Mutex<Vec<Entity>>> {
+            Arc::new(std::sync::Mutex::new(Vec::new()))
+        }
     }
 
     #[async_trait]
@@ -1521,6 +1765,13 @@ mod tests {
 
         async fn health_check(&self, _entity: &Entity) -> bool {
             self.healthy.load(Ordering::SeqCst)
+        }
+
+        async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
+            self.hydrated
+                .lock()
+                .expect("lock")
+                .extend(entities.iter().map(|(entity, _epoch)| entity.clone()));
         }
     }
 
@@ -1541,6 +1792,7 @@ mod tests {
             owned: vec![entity.clone()],
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
+            hydrated: FakeLocalClaims::unhydrated(),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -1563,6 +1815,7 @@ mod tests {
                 local_claims,
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1602,6 +1855,7 @@ mod tests {
             // instead of waiting to be stolen from.
             healthy: Arc::new(AtomicBool::new(false)),
             demoted: Arc::clone(&demoted),
+            hydrated: FakeLocalClaims::unhydrated(),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -1624,6 +1878,7 @@ mod tests {
                 local_claims,
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1664,6 +1919,7 @@ mod tests {
             owned: vec![entity.clone()],
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
+            hydrated: FakeLocalClaims::unhydrated(),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -1686,6 +1942,7 @@ mod tests {
                 local_claims,
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
             },
         ));
 
@@ -1700,6 +1957,174 @@ mod tests {
             cleared_intents.lock().expect("lock").is_empty(),
             "the fake never records a zero-rows clear as a successful clear"
         );
+        stop_token.cancel();
+    }
+
+    // --- FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-
+    // adjudicated): the inline post-fence reclaim of this node's own
+    // just-expired identity's SM-session claims. Postgres-gated: exercises
+    // the real `PostgresClaimStore`/`NodeLeaseStore` CAS, not a fake
+    // double, because the whole point is proving `steal_stale(OwnerStale)`
+    // actually wins against a real `clustering_claims` row.
+
+    #[tokio::test]
+    async fn fix4_inline_post_fence_reclaim_hydrates_this_nodes_own_expired_sm_session_claims() {
+        use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+        use crate::db::{
+            Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE,
+        };
+        use waddle_xmpp::ownership::EntityType;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let db = Database::from_config(
+            "self-fence-fix4-reclaim-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+        let store = PostgresClaimStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure schema");
+        {
+            let conn = db.guard().await.expect("guard");
+            conn.execute("DELETE FROM clustering_claims", ())
+                .await
+                .expect("clean claims");
+            conn.execute("DELETE FROM clustering_nodes", ())
+                .await
+                .expect("clean nodes");
+        }
+
+        let initial_identity = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        store
+            .register(&initial_identity, None)
+            .await
+            .expect("register initial identity");
+
+        // Seed an SM-session claim owned by the identity that is about to
+        // self-fence — standing in for a session this node detached and
+        // self-claimed before the fence (deviation 29's "claim held
+        // continuously" invariant).
+        let entity = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            format!("stream-fix4-{}", uuid::Uuid::new_v4()),
+        );
+        store
+            .acquire(&entity, &initial_identity)
+            .await
+            .expect("seed sm_session claim owned by the initial identity");
+
+        let interval = Duration::from_millis(80);
+        let lease_ttl = Duration::from_millis(300);
+        let connected_peers = ConnectedPeerCount::new();
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let hydrated = FakeLocalClaims::unhydrated();
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: Vec::new(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            hydrated: Arc::clone(&hydrated),
+        });
+
+        let task_lease = PostgresClaimStore::new(db.clone());
+        let task_claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+        tokio::spawn(run_node_lease(
+            task_lease,
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    // Isolation fencing is not what this test drives — the
+                    // fence is forced directly via `expired = true`.
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(30),
+                    reregister_backoff_max: Duration::from_millis(60),
+                },
+                connected_peers: connected_peers.clone(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(
+                    initial_identity.clone(),
+                ),
+                claim_store: task_claim_store,
+            },
+        ));
+
+        assert!(readiness.is_ready(), "starts ready");
+
+        force_expire_row(&db, &initial_identity.node_id).await;
+        wait_until(
+            || !readiness.is_ready(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // Sole survivor (no other live node rows seeded): the
+        // re-acquisition hysteresis gate is trivially satisfied, so
+        // re-registration completes on its own backoff timer.
+        wait_until(
+            || readiness.is_ready(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // FIX 4(b): the inline reclaim must have hydrated exactly the
+        // entity this node's own just-expired identity held.
+        wait_until(
+            || !hydrated.lock().expect("lock").is_empty(),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            hydrated.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&entity),
+            "the inline post-fence reclaim must hydrate this node's own just-expired \
+             identity's sm_session claim, not leave it for the general reaper's slower cadence"
+        );
+
+        // The claims row must now show the FRESH re-registered identity as
+        // owner — `steal_stale(OwnerStale)` actually won against the real
+        // CAS, not just a fake double.
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT node_id FROM clustering_claims WHERE entity = ?",
+                crate::db_params![format!(
+                    "{}:{}",
+                    EntityType::SmSession.as_db_str(),
+                    entity.id
+                )],
+            )
+            .await
+            .expect("query claims row");
+        let owner_node_id: String = rows
+            .next()
+            .await
+            .expect("row present")
+            .expect("row present")
+            .get(0)
+            .expect("column present");
+        assert_ne!(
+            owner_node_id, initial_identity.node_id,
+            "the claim must be owned by the FRESH re-registered identity, not the expired one"
+        );
+
         stop_token.cancel();
     }
 }

@@ -308,6 +308,27 @@ pub trait SmPersistenceStorage: Send + Sync {
         let _ = stream_id;
         Ok(0)
     }
+
+    /// Evict any per-`stream_id` claim-epoch cache entry this implementation
+    /// keeps as a fencing side channel (ADR-0017 Phase 3 Slice 4's "Epoch
+    /// side channel" design note; Slice 5 debt (a)).
+    ///
+    /// Called by `InMemorySmSessionRegistry` (`session_registry/claims.rs`)
+    /// every time this node's `ClaimStore` claim for `stream_id` ends —
+    /// `release_claim`/`complete_claim`/`complete_claim_if_resumable`'s
+    /// terminal branches, and `invalidate_sessions_for_jid`'s removal of a
+    /// claimed session — so a cache keyed by stream_id never outlives the
+    /// claim it caches the epoch for. Default no-op: the portable
+    /// (single-node, in-memory) implementation has no such cache (its
+    /// `ClaimStore` is always `InProcessClaimStore`, which is cheap to call
+    /// directly on every write); only the Postgres-fenced implementation
+    /// (`waddle-server`'s `PostgresFencedSmPersistence`) overrides this to
+    /// actually remove the cached cell, so a subsequent fenced write for the
+    /// same stream_id after a fresh claim always re-derives its epoch rather
+    /// than reusing one issued under a claim this node no longer holds.
+    fn evict_claim_cache(&self, stream_id: &SmSessionId) {
+        let _ = stream_id;
+    }
 }
 
 /// In-memory implementation suitable for tests and as the structural

@@ -99,28 +99,29 @@
 //! `assert_fenced`'s own invalidation, which removes an *already-populated*
 //! cell from `claim_epochs` entirely once a live fencing check reveals the
 //! cached epoch is stale, forcing the next call to build a brand-new cell.
-//! Cells whose init failed (foreign owner) or whose session ends by any
-//! path other than `delete_session` are never evicted — slow, bounded-by-
-//! session-count map growth carried to Slice 5, which owns the claim
-//! lifecycle (acquire-then-hydrate / release-on-expiry) and must add the
-//! matching cache eviction.
 //!
-//! **Interim bootstrapping gap, recorded as a deviation (this slice does
-//! not close it — Slice 5 does):** nothing in production calls
-//! `SmPersistenceStorage` methods against a genuinely claim-scoped session
-//! yet (Slice 5 wires `restore_from_persistence`'s acquire-then-hydrate and
-//! the orphan reaper). Until then, the first fenced write for any given
-//! stream-id acquires a fresh claim (succeeds, since nothing else holds
-//! it), which is safe but means this slice lands **wired but functionally
-//! inert** in a real cluster: a session that outlives one process restart
-//! — a *fresh* node identity, not the one that created the row — still
-//! observes `AlreadyClaimed`/`NotOwner` on the new process's first write
-//! attempt for it (FIX 1's self-reacquire only fires for the *same*
-//! node/epoch, which a restart never is), because the fresh process has an
-//! empty cache and no path (yet) to steal back its own pre-restart claim.
-//! That reacquisition path is explicitly out of this slice's scope
-//! (ADR-0017 Phase 3 plan, deviation 19: readiness/claim-reacquisition on
-//! re-registration is itself a Slice-4-plus-onward follow-up).
+//! **Slice 5 debt (a), closed**: cells whose init failed (foreign owner)
+//! were already never inserted (the `OnceCell` stays uninitialized), and
+//! `assert_fenced`/`delete_session` already evicted a stale/deleted
+//! session's cell. What was missing — a session ending by any *other*
+//! terminal path (a normal resume completion, an explicit release, or a
+//! claim lost to `invalidate_sessions_for_jid`) never evicted its cell —
+//! is now closed via [`SmPersistenceStorage::evict_claim_cache`]
+//! (overridden below): `InMemorySmSessionRegistry`
+//! (`session_registry/claims.rs`) calls it on every terminal claim-ending
+//! path, so a cell never survives past the `ClaimStore` claim it caches the
+//! epoch for.
+//!
+//! **Interim bootstrapping gap, now closed (Slice 5)**: prior to this
+//! slice, nothing in production called `SmPersistenceStorage` methods
+//! against a genuinely claim-scoped session — `restore_from_persistence`
+//! hydrated unscoped, and no orphan reaper existed. Both now acquire a real
+//! `ClaimStore` claim before hydrating (`session_registry/core.rs`'s
+//! acquire-then-hydrate, `server/session_janitors.rs`'s orphan reaper), so
+//! a session that outlives a process restart is correctly re-claimed under
+//! the restarted process's fresh node identity via `ensure_claimed`'s
+//! self-reacquire path once that same node's own restore/reaper pass claims
+//! it — see those modules' doc comments for the full lifecycle.
 
 use std::sync::Arc;
 
@@ -308,6 +309,35 @@ impl PostgresFencedSmPersistence {
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
+            (),
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork,
+        // byte-identical to the portable impl's identical migration (see
+        // `sm_persistence/schema.rs`'s doc comment for the full rationale;
+        // nothing populates these columns yet). `ADD COLUMN IF NOT EXISTS`
+        // rather than folding into the `CREATE TABLE` text above: this
+        // impl is net-new (Slice 4), but the table may already exist from
+        // an earlier run of this exact impl before this column group
+        // landed, and `CREATE TABLE IF NOT EXISTS` is a no-op against an
+        // existing table.
+        for column_def in [
+            "origin_stream_id TEXT",
+            "inbound_seq BIGINT",
+            "pair_sequence BIGINT",
+        ] {
+            conn.execute(
+                &format!("ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS {column_def}"),
+                (),
+            )
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        }
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_unacked_dedup \
+             ON sm_unacked (stream_id, origin_stream_id, inbound_seq) \
+             WHERE origin_stream_id IS NOT NULL AND inbound_seq IS NOT NULL",
             (),
         )
         .await
@@ -865,6 +895,21 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    /// ADR-0017 Phase 3 Slice 5 debt (a): the module doc's "Epoch side
+    /// channel" section flagged that cells whose init failed, or whose
+    /// session ends by any path other than `delete_session`, were never
+    /// evicted — carried here explicitly. `InMemorySmSessionRegistry`
+    /// (`session_registry/claims.rs`) now calls this on every terminal
+    /// claim-ending path (`release_claim`, both `complete_claim*` success
+    /// branches, `invalidate_sessions_for_jid`), so a stream_id's cached
+    /// epoch never survives past the claim it was derived from — the next
+    /// fenced write for that stream_id (a fresh detach + claim, or a
+    /// different node's claim if this one no longer holds it) re-derives
+    /// its epoch from a clean cell instead of a stale one.
+    fn evict_claim_cache(&self, stream_id: &SmSessionId) {
+        self.claim_epochs.remove(stream_id);
     }
 }
 

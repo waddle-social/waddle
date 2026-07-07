@@ -52,7 +52,36 @@ mod stream_features;
 mod stream_management;
 
 pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
-    create_test_websocket_state_with_extension_manager(empty_extension_manager().await, None).await
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Build a test [`WebSocketState`] with clustering-enabled
+/// [`crate::clustering::ClusteringHandles`] and a caller-supplied SM-session
+/// registry (e.g. one backed by [`crate::sm_persistence_fenced::PostgresFencedSmPersistence`]
+/// pointed at the same Postgres database as the clustering claims tables) —
+/// used by `session_janitors.rs`'s orphan-reaper Postgres-gated end-to-end
+/// test, the only fixture that needs `state.deps.app_state.clustering_claims`
+/// populated and `state.deps.protocol.sm_session_registry` backed by a real
+/// durable, claim-fenced store rather than every other fixture in this
+/// module's plain in-memory default.
+#[cfg(feature = "clustering")]
+pub(crate) async fn create_test_websocket_state_with_clustering(
+    clustering: crate::clustering::ClusteringHandles,
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        None,
+        Some(clustering),
+        Some(sm_session_registry),
+    )
+    .await
 }
 
 /// Register a connection into BOTH the DashMap `ConnectionRegistry` and the
@@ -100,8 +129,13 @@ pub(crate) async fn register_test_connection(
 pub(crate) async fn create_test_websocket_state_with_sfu(
     sfu: Arc<dyn waddle_sfu::SfuService>,
 ) -> Arc<WebSocketState> {
-    create_test_websocket_state_with_extension_manager(empty_extension_manager().await, Some(sfu))
-        .await
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        Some(sfu),
+        None,
+        None,
+    )
+    .await
 }
 
 /// Recording fake: captures `(call_id, identity)` separately for each
@@ -229,6 +263,8 @@ pub(crate) async fn create_test_websocket_state_with_calls() -> Arc<WebSocketSta
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
         Some(fixture_call_sfu()),
+        None,
+        None,
     )
     .await
 }
@@ -251,6 +287,8 @@ async fn empty_extension_manager() -> Arc<ExtensionManager> {
 async fn create_test_websocket_state_with_extension_manager(
     extension_manager: Arc<ExtensionManager>,
     call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
+    clustering_override: Option<crate::clustering::ClusteringHandles>,
+    sm_session_registry_override: Option<Arc<InMemorySmSessionRegistry>>,
 ) -> Arc<WebSocketState> {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
@@ -262,7 +300,11 @@ async fn create_test_websocket_state_with_extension_manager(
     runner.run(db_pool.global()).await.expect("migrations");
 
     let server_config = ServerConfig::test_homeserver();
-    let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
+    let mut app_state_built = AppState::new(Arc::new(db_pool));
+    if let Some(clustering) = clustering_override {
+        app_state_built.clustering_claims = clustering;
+    }
+    let app_state = Arc::new(app_state_built);
     let mut auth_state_inner = AuthState::new(
         app_state.clone(),
         &server_config,
@@ -407,7 +449,8 @@ async fn create_test_websocket_state_with_extension_manager(
                     dnd_reader,
                     notification_activity,
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
-                    sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
+                    sm_session_registry: sm_session_registry_override
+                        .unwrap_or_else(|| Arc::new(InMemorySmSessionRegistry::new())),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),
                     caps_resolver: Arc::new(
                         crate::server::caps_resolution::CapsResolver::default(),

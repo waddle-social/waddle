@@ -13,8 +13,9 @@ use crate::server::routes::websocket::{
 };
 use crate::server::session_janitors::{
     spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor,
-    spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
-    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
+    spawn_orphan_reaper_janitor, spawn_pending_delivery_claim_janitor,
+    spawn_push_service_publish_job_janitor, spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
+    spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -226,6 +227,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     }
 
     spawn_sm_expiry_janitor(&websocket_state);
+    spawn_orphan_reaper_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_notification_outbox_janitor(&websocket_state);
     spawn_push_service_publish_job_janitor(&websocket_state);
@@ -593,7 +595,13 @@ async fn create_websocket_state(
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
-    let pending_delivery_storage = create_pending_delivery_storage(xmpp_config).await;
+    let pending_delivery_storage = create_pending_delivery_storage(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+    )
+    .await;
 
     let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
 
@@ -851,11 +859,23 @@ async fn create_sm_session_registry(
         )
         .await
         .expect("open SM persistence storage");
-    let sm_session_registry =
+    let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
         )
         .with_persistence(Arc::clone(&sm_persistence));
+    // ADR-0017 Phase 3 Slice 5: wire the SAME `ClaimStore`/live-identity
+    // pair `clustering::start_if_enabled` constructed (never a second,
+    // independent store) into the session registry's own claim
+    // bookkeeping — without this, `claim_session`/`restore_from_persistence`
+    // silently stay on the single-node `InProcessClaimStore` default even
+    // with clustering enabled and the fenced `SmPersistenceStorage` wired
+    // in above, defeating acquire-then-hydrate entirely. A `None` pair
+    // (clustering disabled, non-Postgres, or a build without the
+    // `clustering` feature) leaves today's single-node default untouched.
+    if let Some((claim_store, node_identity)) = clustering.claim_pair() {
+        sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
+    }
     if let Err(error) = sm_session_registry.restore_from_persistence().await {
         warn!(
             error = %error,
@@ -864,11 +884,26 @@ async fn create_sm_session_registry(
              until storage health is restored."
         );
     }
-    Arc::new(sm_session_registry)
+    let sm_session_registry = Arc::new(sm_session_registry);
+    // ADR-0017 Phase 3 Slice 5 (carried debt (b)): complete the
+    // `LocallyClaimedEntities` `clustering::start_if_enabled` handed to
+    // `self_fence::run_node_lease` empty — see
+    // `clustering::local_claims::SmSessionLocalClaims`'s doc comment for
+    // the full construction-order rationale. A no-op when clustering is
+    // disabled or this binary lacks the `clustering` feature
+    // (`clustering.local_claims` is `None`).
+    #[cfg(feature = "clustering")]
+    if let Some(local_claims) = &clustering.local_claims {
+        local_claims.wire(Arc::clone(&sm_session_registry));
+    }
+    sm_session_registry
 }
 
 async fn create_pending_delivery_storage(
     xmpp_config: &XmppConfig,
+    server_config: &ServerConfig,
+    clustering: &crate::clustering::ClusteringHandles,
+    global_db: &crate::db::Database,
 ) -> Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
     if pending_delivery_url.is_none() {
@@ -880,10 +915,20 @@ async fn create_pending_delivery_storage(
              for durable offline delivery (issue #209)."
         );
     }
+    // ADR-0017 Phase 3 Slice 5 FIX 3: cluster mode attaches claim-fenced
+    // Q6-promotion inserts; every other deployment shape (clustering
+    // disabled, non-Postgres, or a build without the `clustering` feature)
+    // keeps today's portable, unfenced path. All of that branching —
+    // including the co-location check against `global_db` — lives inside
+    // `open_for_cluster_mode` itself, mirroring `create_sm_session_registry`'s
+    // identical `sm_persistence::open_for_cluster_mode` call above.
     Arc::new(
-        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+        crate::pending_delivery::open_for_cluster_mode(
             pending_delivery_url.as_deref(),
             waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+            server_config.clustering.enabled,
+            clustering.claim_pair(),
+            global_db,
         )
         .await
         .expect("open pending_delivery storage"),

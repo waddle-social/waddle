@@ -4,6 +4,8 @@ mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
 
+use waddle_xmpp::ownership::{ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity};
+
 // ---------------------------------------------------------------------------
 // Database-backed PendingDeliveryStorage (issue #209, slice (b) production
 // backend).
@@ -77,11 +79,72 @@ pub struct DatabasePendingDeliveryStorage {
     /// inserts, so two writers can both pass the cap check). SQLite
     /// already serializes writers; this is portable defense.
     recipient_locks: std::sync::Arc<RecipientLockMap>,
+    /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): present only
+    /// when clustering is enabled AND this storage's `db` is co-located
+    /// with the clustering global database (checked once, before
+    /// construction, by [`open_for_cluster_mode`] — mirroring
+    /// `sm_persistence::open_for_cluster_mode`'s identical invariant for
+    /// `PostgresFencedSmPersistence`, one table over). `insert_fenced`
+    /// uses this to run the Q6 promotion insert under the origin SM
+    /// session's claim fence; `None` means this storage falls back to the
+    /// portable, unfenced `insert` path — correct for every
+    /// non-clustered/non-co-located deployment.
+    fencing: Option<PendingDeliveryFencing>,
+}
+
+/// Clustering context [`DatabasePendingDeliveryStorage::insert_fenced`]
+/// needs — the same `ClaimStore`/live-identity pair every other
+/// clustering-aware call site binds, never a second, independent store.
+#[derive(Clone)]
+struct PendingDeliveryFencing {
+    claim_store: std::sync::Arc<dyn ClaimStore>,
+    node_identity: SharedNodeIdentity,
+}
+
+/// Column values for one `pending_delivery` INSERT — the shared output of
+/// [`DatabasePendingDeliveryStorage::prepare_insert_row`], named rather
+/// than a bare tuple (clippy `type_complexity`) since both `insert` and
+/// `insert_fenced` destructure it.
+struct PreparedInsertRow {
+    row_id: String,
+    receipt_ms: i64,
+    kind: &'static str,
+    by: Option<String>,
+    sid: Option<String>,
+    xml: Option<String>,
+}
+
+/// Map a [`ClaimError`] to the [`PendingStorageError`] `insert_fenced`'s
+/// callers expect — mirrors
+/// `sm_persistence_fenced::claim_error_to_sm_persistence_error` exactly,
+/// one error type over: only a genuine ownership loss
+/// ([`ClaimError::AlreadyClaimed`]/[`ClaimError::Conflict`]) becomes
+/// [`PendingStorageError::NotOwner`]; a transient backend outage or a
+/// poisoned in-process lock must never masquerade as ownership loss.
+/// Matched exhaustively so a future `ClaimError` variant forces this
+/// mapping to be revisited.
+fn claim_error_to_pending_storage_error(error: ClaimError, entity: Entity) -> PendingStorageError {
+    match error {
+        ClaimError::AlreadyClaimed | ClaimError::Conflict => {
+            PendingStorageError::NotOwner { entity }
+        }
+        ClaimError::Backend(_) | ClaimError::Poisoned => {
+            PendingStorageError::Other(error.to_string())
+        }
+        // Defensive only: `ensure_claimed` never actually returns this
+        // variant — it is exclusive to the steal-intent path, which never
+        // applies to `EntityType::SmSession` claims (Slice 3 rule 1).
+        ClaimError::SmSessionExcludedFromStealIntent => {
+            PendingStorageError::Other(error.to_string())
+        }
+    }
 }
 
 impl DatabasePendingDeliveryStorage {
     /// Open a backing database (or in-memory fallback when no URL is
     /// supplied). Mirrors [`crate::inbox::DatabaseInboxStorage::open`].
+    /// Never fenced — see [`open_for_cluster_mode`] for the entry point
+    /// that attaches clustering fencing.
     pub async fn open(
         database_url: Option<&str>,
         quota: QuotaPolicy,
@@ -108,6 +171,7 @@ impl DatabasePendingDeliveryStorage {
             db,
             quota,
             recipient_locks: std::sync::Arc::new(RecipientLockMap::new()),
+            fencing: None,
         };
         schema::initialize(&storage).await?;
         info!(
@@ -115,6 +179,71 @@ impl DatabasePendingDeliveryStorage {
             "pending_delivery storage initialized (XEP-0160)"
         );
         Ok(storage)
+    }
+
+    /// Shared row-shape extraction for `insert`/`insert_fenced`: the row
+    /// id (freshly minted if the caller left it empty), the receipt
+    /// timestamp in ms, and the payload-kind/by/stanza-id/xml column
+    /// values. Factored out so the fenced and unfenced insert paths issue
+    /// byte-identical SQL parameters, never two independently-maintained
+    /// copies that could drift.
+    fn prepare_insert_row(row: &PendingRow) -> Result<PreparedInsertRow, PendingStorageError> {
+        let row_id = if row.id.as_str().is_empty() {
+            PendingRowId::fresh().as_str().to_string()
+        } else {
+            row.id.as_str().to_string()
+        };
+        let receipt_ms = row.original_receipt_at.timestamp_millis();
+        let (kind, by, sid, xml) = match &row.payload {
+            PendingPayload::Archived(stanza_id) => (
+                PAYLOAD_KIND_ARCHIVED,
+                // The decode side parses `archive_stanza_by` as a `BareJid`
+                // (XEP-0313 archives are scoped per bare JID, see
+                // `MamArchiveResolver::resolve` which narrows via
+                // `.to_bare()`). Narrow on write too so a `StanzaId.by` that
+                // happens to carry a resource cannot poison a row that
+                // `decode_row` would later refuse to parse.
+                Some(stanza_id.by.to_bare().to_string()),
+                Some(stanza_id.id.clone()),
+                None,
+            ),
+            PendingPayload::Transient(message) => {
+                let serialized = serialize_message(message)?;
+                (PAYLOAD_KIND_TRANSIENT, None, None, Some(serialized))
+            }
+        };
+        Ok(PreparedInsertRow {
+            row_id,
+            receipt_ms,
+            kind,
+            by,
+            sid,
+            xml,
+        })
+    }
+
+    /// Attach clustering fencing (ADR-0017 Phase 3 Slice 5 FIX 3):
+    /// `insert_fenced` then runs the Q6 promotion insert under the origin
+    /// SM session's claim fence instead of the unfenced portable path.
+    /// Infallible — the co-location invariant is [`open_for_cluster_mode`]'s
+    /// job, checked before this storage was ever opened; call this
+    /// directly only if you have already verified co-location yourself.
+    ///
+    /// `#[cfg(feature = "clustering")]`: its sole caller
+    /// ([`super::open_for_cluster_mode`]'s clustering-gated branch) is
+    /// itself feature-gated, so this would otherwise be dead code on a
+    /// build without the `clustering` Cargo feature.
+    #[cfg(feature = "clustering")]
+    pub(crate) fn with_cluster_fencing(
+        mut self,
+        claim_store: std::sync::Arc<dyn ClaimStore>,
+        node_identity: SharedNodeIdentity,
+    ) -> Self {
+        self.fencing = Some(PendingDeliveryFencing {
+            claim_store,
+            node_identity,
+        });
+        self
     }
 
     async fn execute(
@@ -166,30 +295,14 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .clone();
         let _guard = recipient_lock.lock().await;
 
-        let row_id = if row.id.as_str().is_empty() {
-            PendingRowId::fresh().as_str().to_string()
-        } else {
-            row.id.as_str().to_string()
-        };
-        let receipt_ms = row.original_receipt_at.timestamp_millis();
-        let (kind, by, sid, xml) = match &row.payload {
-            PendingPayload::Archived(stanza_id) => (
-                PAYLOAD_KIND_ARCHIVED,
-                // The decode side parses `archive_stanza_by` as a `BareJid`
-                // (XEP-0313 archives are scoped per bare JID, see
-                // `MamArchiveResolver::resolve` which narrows via
-                // `.to_bare()`). Narrow on write too so a `StanzaId.by` that
-                // happens to carry a resource cannot poison a row that
-                // `decode_row` would later refuse to parse.
-                Some(stanza_id.by.to_bare().to_string()),
-                Some(stanza_id.id.clone()),
-                None,
-            ),
-            PendingPayload::Transient(message) => {
-                let serialized = serialize_message(message)?;
-                (PAYLOAD_KIND_TRANSIENT, None, None, Some(serialized))
-            }
-        };
+        let PreparedInsertRow {
+            row_id,
+            receipt_ms,
+            kind,
+            by,
+            sid,
+            xml,
+        } = Self::prepare_insert_row(&row)?;
         // Atomic-with-quota INSERT: the WHERE clause runs in the same
         // SQL statement as the insert. Combined with the per-recipient
         // lock above this gives strict cap enforcement portably across
@@ -240,6 +353,139 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 .await?
             }
         };
+        if affected == 0 {
+            Ok(InsertOutcome::QuotaExceeded)
+        } else {
+            Ok(InsertOutcome::Inserted)
+        }
+    }
+
+    #[instrument(skip(self, row), fields(recipient = %row.recipient, origin_stream_id))]
+    async fn insert_fenced(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        // ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): no fencing
+        // context attached (clustering disabled, non-Postgres, or this
+        // storage's `db` failed the co-location check at construction) —
+        // fall back to the exact unfenced path, byte-identical to `insert`.
+        let Some(fencing) = &self.fencing else {
+            return self.insert(row).await;
+        };
+
+        let recipient_lock = self
+            .recipient_locks
+            .entry(row.recipient.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = recipient_lock.lock().await;
+
+        let entity = Entity::new(EntityType::SmSession, origin_stream_id.to_string());
+        let identity = fencing.node_identity.current();
+        // `ensure_claimed`, not a bare `acquire`: the caller (Q6 promotion)
+        // is running against a session this node's own claim lifecycle
+        // already holds (deviation 29's "claim held continuously while the
+        // session sits in `sessions`" invariant) — this is the ordinary
+        // self-reacquire case, exactly like
+        // `sm_persistence_fenced::claim_epoch_for`'s identical call one
+        // table over.
+        let epoch = fencing
+            .claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
+
+        let PreparedInsertRow {
+            row_id,
+            receipt_ms,
+            kind,
+            by,
+            sid,
+            xml,
+        } = Self::prepare_insert_row(&row)?;
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+
+        // Fencing check: identical shape to
+        // `sm_persistence_fenced::PostgresFencedSmPersistence::assert_fenced`
+        // — the first statement inside this transaction, on the SAME
+        // connection as the write it guards. A failed check aborts BEFORE
+        // any write: `tx` is dropped here (rolling back) rather than
+        // committed.
+        let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), origin_stream_id);
+        let mut fence_rows = tx
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![entity_key, identity.node_id.clone(), epoch.0],
+            )
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let held = fence_rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+            .is_some();
+        if !held {
+            return Err(PendingStorageError::NotOwner { entity });
+        }
+
+        // Same two INSERT shapes as `insert`, issued on `tx` instead of a
+        // pooled single-statement guard, so the fencing check and the
+        // write commit or roll back together.
+        let affected = match self.quota {
+            QuotaPolicy::Unlimited => tx
+                .execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+                    crate::db_params![
+                        row_id,
+                        row.recipient.to_string(),
+                        receipt_ms,
+                        kind,
+                        by,
+                        sid,
+                        xml,
+                    ],
+                )
+                .await
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?,
+            QuotaPolicy::CountCap { max_rows } => tx
+                .execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                     ) \
+                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL \
+                     WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
+                    crate::db_params![
+                        row_id,
+                        row.recipient.to_string(),
+                        receipt_ms,
+                        kind,
+                        by,
+                        sid,
+                        xml,
+                        row.recipient.to_string(),
+                        i64::from(max_rows),
+                    ],
+                )
+                .await
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?,
+        };
+
+        tx.commit()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+
         if affected == 0 {
             Ok(InsertOutcome::QuotaExceeded)
         } else {

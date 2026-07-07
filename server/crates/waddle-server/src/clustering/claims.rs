@@ -903,6 +903,38 @@ pub trait NodeLeaseStore: Send + Sync {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<u64, ClaimError>;
+
+    /// Candidate `EntityType::SmSession` claims owned by a stale node
+    /// (ADR-0017 Phase 3 Slice 5's orphan reaper, element 9): "any node may
+    /// steal such claims (fenced CAS) and then expire or promote them,
+    /// after first committing the expire CAS on the owner's `nodes` row."
+    /// This is the scan half — read-only and **unlocked** (an advisory
+    /// candidate list only; the reaper's subsequent `expire` +
+    /// `ClaimStore::steal_stale(OwnerStale)` calls are the actual
+    /// authority, exactly like every other candidate-then-CAS pattern in
+    /// this store). Scoped to `sm_session` only: `UserActor`/`RoomActor`
+    /// claim acquisition is out of this slice's scope (see
+    /// `clustering::local_claims`'s module doc), so there is nothing of
+    /// either other type to scan for yet.
+    ///
+    /// A row whose `entity` key does not decode cleanly against its own
+    /// `entity_type` column (the same data-integrity anomaly
+    /// [`decode_entity`] defensively rejects elsewhere) is skipped and
+    /// logged rather than silently mangled — mirrors
+    /// [`Self::owner_steal_intents`]'s handling.
+    async fn list_orphaned_sm_session_claims(
+        &self,
+    ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError>;
+}
+
+/// A candidate orphaned `sm_session` claim: its entity/epoch plus the
+/// (stale) owner currently on file for it. See
+/// [`NodeLeaseStore::list_orphaned_sm_session_claims`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedSmSessionClaim {
+    pub entity: Entity,
+    pub epoch: ClaimEpoch,
+    pub owner: NodeIdentity,
 }
 
 #[async_trait]
@@ -1217,6 +1249,58 @@ impl NodeLeaseStore for PostgresClaimStore {
                 db_err(error)
             })?;
         Ok(affected)
+    }
+
+    async fn list_orphaned_sm_session_claims(
+        &self,
+    ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // Same owner-stale `NOT EXISTS` predicate as `steal_stale`'s
+        // `OwnerStale` arm (element 4's "LEFT JOIN" predicate, realized as
+        // a correlated subquery) — read-only and unlocked here: this is a
+        // candidate scan, never itself the authority (see this method's
+        // trait doc comment).
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT entity, node_id, node_epoch, claim_epoch
+                FROM clustering_claims
+                WHERE entity_type = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes n
+                    WHERE n.node_id = clustering_claims.node_id
+                      AND NOT n.expired
+                      AND n.node_epoch = clustering_claims.node_epoch
+                  )
+                "#,
+                crate::db_params![EntityType::SmSession.as_db_str().to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        loop {
+            let Some(row) = rows.next().await.map_err(db_err)? else {
+                break;
+            };
+            let encoded: String = row.get(0).map_err(db_err)?;
+            let node_id: String = row.get(1).map_err(db_err)?;
+            let node_epoch: String = row.get(2).map_err(db_err)?;
+            let claim_epoch: i64 = row.get(3).map_err(db_err)?;
+            let Some(entity) = decode_entity(&encoded, EntityType::SmSession) else {
+                tracing::warn!(
+                    encoded_entity = %encoded,
+                    "list_orphaned_sm_session_claims: row's entity key does not decode \
+                     against the sm_session tag; skipping (data-integrity anomaly)"
+                );
+                continue;
+            };
+            out.push(OrphanedSmSessionClaim {
+                entity,
+                epoch: ClaimEpoch(claim_epoch),
+                owner: NodeIdentity::new(node_id, node_epoch),
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -2773,6 +2857,76 @@ mod tests {
         assert!(
             clears_won + steals_won <= ROUNDS,
             "sanity: cannot win more rounds than were run"
+        );
+    }
+    #[tokio::test]
+    async fn list_orphaned_sm_session_claims_scopes_to_sm_session_and_stale_owners() {
+        // ADR-0017 Phase 3 Slice 5, element 9: the orphan-reaper scan finds
+        // `sm_session` claims owned by a stale node, ignores fresh owners,
+        // and never surfaces a `UserActor`/`RoomActor` claim even under the
+        // exact same stale owner.
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+
+        let fresh_owner = node_identity();
+        seed_node(&store.db, &fresh_owner, false).await;
+        let fresh_entity = sm_entity("fresh-owner-stream");
+        store
+            .acquire(&fresh_entity, &fresh_owner)
+            .await
+            .expect("acquire under fresh owner");
+
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        let orphaned_entity = sm_entity("orphaned-stream");
+        let orphaned_epoch = store
+            .acquire(&orphaned_entity, &stale_owner)
+            .await
+            .expect("acquire under stale owner");
+        let non_sm_entity = Entity::new(EntityType::UserActor, "orphaned-user-actor".to_string());
+        store
+            .acquire(&non_sm_entity, &stale_owner)
+            .await
+            .expect("acquire a non-sm_session entity under the same stale owner");
+
+        let candidates = store
+            .list_orphaned_sm_session_claims()
+            .await
+            .expect("list_orphaned_sm_session_claims");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "exactly one candidate: the sm_session claim under the stale owner, \
+             excluding the fresh-owner claim and the non-sm_session claim"
+        );
+        assert_eq!(candidates[0].entity, orphaned_entity);
+        assert_eq!(candidates[0].epoch, orphaned_epoch);
+        assert_eq!(candidates[0].owner, stale_owner);
+
+        // Steal it, register the new owner as live, and confirm the scan
+        // no longer reports it.
+        let new_owner = node_identity();
+        seed_node(&store.db, &new_owner, false).await;
+        store
+            .steal_stale(
+                &orphaned_entity,
+                orphaned_epoch,
+                StalePredicate::OwnerStale,
+                &new_owner,
+            )
+            .await
+            .expect("steal_stale(OwnerStale) reclaims the orphaned claim");
+
+        let candidates_after = store
+            .list_orphaned_sm_session_claims()
+            .await
+            .expect("list_orphaned_sm_session_claims after steal");
+        assert!(
+            candidates_after.is_empty(),
+            "the reclaimed claim (now owned by a fresh, registered node) must no longer \
+             be reported as orphaned"
         );
     }
 }

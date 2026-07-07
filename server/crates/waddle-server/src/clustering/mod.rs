@@ -41,6 +41,12 @@ mod identity;
 /// the harness provisions schema via the production path.
 #[cfg(feature = "clustering")]
 pub mod lease;
+/// Real `LocallyClaimedEntities` backed by the SM session registry
+/// (ADR-0017 Phase 3 Slice 5, carried debt (b)). Public for the same reason
+/// as [`self_fence`]: the harness wires/drives it directly in the
+/// claim-scoped-hydration and deposed-owner scenarios.
+#[cfg(feature = "clustering")]
+pub mod local_claims;
 #[cfg(feature = "clustering")]
 mod metrics;
 /// Per-node supervised relay actor + client handle. Public: the multi-process
@@ -217,6 +223,36 @@ pub struct ClusteringHandles {
     /// handle `self_fence::run_node_lease` updates on every
     /// re-registration. See [`waddle_xmpp::ownership::SharedNodeIdentity`].
     pub node_identity: Option<waddle_xmpp::ownership::SharedNodeIdentity>,
+    /// ADR-0017 Phase 3 Slice 5 (carried debt (b)): the real
+    /// `LocallyClaimedEntities` handed to `run_node_lease`, constructed
+    /// empty (the SM session registry does not exist yet at
+    /// `start_if_enabled` time — it needs `ClusteringHandles` itself) and
+    /// completed by `server/http.rs::create_sm_session_registry` calling
+    /// [`local_claims::SmSessionLocalClaims::wire`] once the registry is
+    /// built. The one field on this otherwise-unconditionally-compiled
+    /// struct that IS feature-gated: its type
+    /// (`local_claims::SmSessionLocalClaims`) only exists behind
+    /// `clustering`, since it implements the also-feature-gated
+    /// `self_fence::LocallyClaimedEntities` trait. `None` whenever
+    /// clustering is disabled, mirroring `claim_store`/`node_identity`.
+    #[cfg(feature = "clustering")]
+    pub local_claims: Option<Arc<local_claims::SmSessionLocalClaims>>,
+    /// ADR-0017 Phase 3 Slice 5: a `NodeLeaseStore` handle for the orphan
+    /// reaper janitor (`server::session_janitors::spawn_orphan_reaper_janitor`),
+    /// which runs on its own periodic cadence outside `run_node_lease`'s
+    /// closure and therefore needs its own handle onto the same
+    /// `clustering_nodes`/`clustering_claims` tables — wraps the same
+    /// `Database` clone as `claim_store`/the node-lease loop's own store,
+    /// never a second independent one. Feature-gated for the same reason
+    /// as `local_claims`: `NodeLeaseStore` only exists behind `clustering`.
+    #[cfg(feature = "clustering")]
+    pub node_lease: Option<Arc<dyn claims::NodeLeaseStore>>,
+    /// The configured node-lease TTL (ADR-0017 element 4/Q6) — the orphan
+    /// reaper janitor needs this same value to bind into its `expire` calls
+    /// and has no other route to `ClusteringNodeLeaseConfig` (it runs off
+    /// `WebSocketState`, which does not otherwise carry `ServerConfig`).
+    #[cfg(feature = "clustering")]
+    pub lease_ttl: Option<std::time::Duration>,
 }
 
 impl ClusteringHandles {
@@ -319,9 +355,22 @@ pub async fn start_if_enabled(
         let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
             Arc::new(claims::PostgresClaimStore::new(db.clone()));
         let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(node_identity.clone());
+        // ADR-0017 Phase 3 Slice 5 (carried debt (b)): construct the real
+        // `LocallyClaimedEntities` empty now, hand the same `Arc` to both
+        // `run_node_lease` (below) and the returned handles — the SM
+        // session registry is wired into it later, once
+        // `server/http.rs::create_sm_session_registry` builds it (see
+        // `ClusteringHandles::local_claims`'s doc comment for the full
+        // construction-order rationale).
+        let local_claims = local_claims::SmSessionLocalClaims::new();
+        let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
+            Arc::new(claims::PostgresClaimStore::new(db.clone()));
         let handles = ClusteringHandles {
             claim_store: Some(claim_store_handle),
             node_identity: Some(live_identity.clone()),
+            local_claims: Some(Arc::clone(&local_claims)),
+            node_lease: Some(node_lease_handle),
+            lease_ttl: Some(config.node_lease.lease_ttl),
         };
 
         tokio::spawn(self_fence::run_node_lease(
@@ -333,9 +382,14 @@ pub async fn start_if_enabled(
                 lease_config: config.node_lease.clone(),
                 self_fence_config: config.self_fence.clone(),
                 connected_peers: handle.connected_peers.clone(),
-                local_claims: std::sync::Arc::new(self_fence::NoLocallyClaimedEntities),
+                local_claims,
                 readiness,
                 live_identity,
+                // FIX 4(b): the same `ClaimStore` view onto
+                // `clustering_claims` as `claim_store_handle` above —
+                // wraps the same `db` clone, never a second, independent
+                // store.
+                claim_store: Arc::new(claims::PostgresClaimStore::new(db.clone())),
             },
         ));
         Ok(handles)

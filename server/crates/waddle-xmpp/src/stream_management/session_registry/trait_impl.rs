@@ -24,7 +24,6 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // queues (issue #1097) — previously they were silently
         // dropped and their durable rows mirror-deleted.
         let mut displaced: Vec<DetachedSession> = Vec::new();
-        let mut claimed_evicted: Vec<String> = Vec::new();
         let count = {
             let mut sessions = self
                 .sessions
@@ -46,17 +45,21 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     displaced.push(existing.clone());
                 }
             }
-            // Every removal from `claimed_sessions` must release its
-            // `ClaimStore` entry (after the guards drop — release awaits),
-            // or the claim is stranded and the stream id can never be
-            // claimed again. Capture the evicted ids the retain below
-            // removes: same-stream re-store and jid-collision.
-            claimed_evicted.extend(
-                claimed
-                    .iter()
-                    .filter(|(id, existing)| *id == &stream_id || existing.jid == jid)
-                    .map(|(id, _)| id.clone()),
-            );
+            // FIX 1 (council-adjudicated, ADR-0017 Phase 3 Slice 5
+            // corrigenda): a `claimed_sessions` eviction here (same-stream
+            // re-store or jid-collision) does NOT release its `ClaimStore`
+            // entry — it flows through `displaced` above exactly like a
+            // plain `sessions` eviction, and its claim is released only by
+            // `confirm_drained`, after the caller's XEP-0198 §5 promotion
+            // succeeds and the durable row is actually deleted. Releasing
+            // eagerly here (the previous behavior) opened a window where a
+            // second node's `restore_from_persistence`/orphan reaper could
+            // observe the entity as unclaimed, hydrate its own in-memory
+            // copy, and then have the durable row deleted out from under it
+            // by this node's own later `confirm_drained` — the same
+            // double-ownership hazard acquire-then-hydrate exists to
+            // prevent, just reached via the eviction path instead of a
+            // release-before-delete race.
             sessions.retain(|existing_stream_id, existing| {
                 existing_stream_id == &stream_id || existing.jid != jid
             });
@@ -81,14 +84,6 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             sessions.insert(stream_id.clone(), session.clone());
             sessions.len()
         };
-        // The claimed evictions above ended those sessions' claims —
-        // release their `ClaimStore` entries now that the guards are
-        // dropped. Correct on the snapshot-failure path below too: the
-        // evictees re-enter `sessions` UNCLAIMED via the retry
-        // re-insertion, so the claim must not survive either way.
-        for evicted_id in &claimed_evicted {
-            self.release_claim_store_entry(evicted_id).await;
-        }
         // Durable rows for displaced sessions are deliberately NOT
         // deleted here. They follow the drain_expired/confirm_drained
         // persist-until-confirmed contract: the caller promotes each
@@ -97,6 +92,13 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // `confirm_drained` on success, which erases the rows. If the
         // process crashes before promotion, restore_from_persistence
         // rehydrates them and the SM-expiry janitor retries.
+        //
+        // FIX 1: this now includes former `claimed_sessions` evictions too
+        // — their `ClaimStore` claim stays held (re-entering `sessions` via
+        // the snapshot-failure retry path below keeps it, since a plain
+        // `sessions` entry is claim-backed under this slice's
+        // acquire-then-hydrate/acquire-on-detach invariant) until
+        // `confirm_drained` releases it after the durable delete commits.
 
         // `store_session` publishes the session in memory before its first
         // durable snapshot is written so the cleanup path can keep draining
@@ -139,6 +141,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             return Err(error);
         }
 
+        // ADR-0017 Phase 3 Slice 5: acquire (or self-reacquire) this node's
+        // `ClaimStore` claim for the just-detached session now that its
+        // durable snapshot has landed — see
+        // `claims.rs::acquire_claim_store_entry_for_detach`'s doc comment
+        // for the acquire-on-detach half of the acquire-then-hydrate
+        // invariant this slice establishes.
+        self.acquire_claim_store_entry_for_detach(&stream_id).await;
+
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
         Ok(displaced)
     }
@@ -166,24 +176,24 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             return Ok(None);
         }
         self.persist_delete_session(stream_id).await?;
-        let (removed, claimed_removed) = {
+        let (removed, detached_removed, claimed_removed) = {
             let mut sessions = self
                 .sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let removed = match sessions.remove(stream_id) {
+            let (removed, detached_removed) = match sessions.remove(stream_id) {
                 Some(session) => {
                     if session.is_expired() {
                         debug!(stream_id = %stream_id, "SM session found but expired");
-                        None
+                        (None, true)
                     } else {
                         debug!(stream_id = %stream_id, "Retrieved and removed SM session");
-                        Some(session)
+                        (Some(session), true)
                     }
                 }
                 None => {
                     debug!(stream_id = %stream_id, "SM session not found");
-                    None
+                    (None, false)
                 }
             };
             let claimed_removed = self
@@ -192,11 +202,18 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
                 .remove(stream_id)
                 .is_some();
-            (removed, claimed_removed)
+            (removed, detached_removed, claimed_removed)
         };
         // Removing a claimed copy ends that claim: release its
         // `ClaimStore` entry (after the guards drop — release awaits).
-        if claimed_removed {
+        // ADR-0017 Phase 3 Slice 5: a plain (non-claimed) `sessions` removal
+        // ends the claim too, REGARDLESS of the returned value's expiry
+        // (`detached_removed` tracks the actual map removal, not the
+        // filtered `removed` return value) — the durable row is already
+        // gone (`persist_delete_session` above), and a plain `sessions`
+        // entry is claim-backed under this slice's
+        // acquire-then-hydrate/acquire-on-detach invariant.
+        if claimed_removed || detached_removed {
             self.release_claim_store_entry(stream_id).await;
         }
         Ok(removed)
@@ -258,13 +275,21 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             // than aborting the whole sweep on a single bad row.
             // Restart-time expired-filter still drops anything that
             // slipped through.
-            if let Err(error) = self.persist_delete_session(stream_id).await {
-                debug!(
-                    stream_id = %stream_id,
-                    error = %error,
-                    "expired SM session: durable delete failed in cleanup; \
-                     restart-time expiry filter will drop the orphan"
-                );
+            match self.persist_delete_session(stream_id).await {
+                Ok(()) => {
+                    // ADR-0017 Phase 3 Slice 5: the durable row and the
+                    // in-memory entry are both gone — release the
+                    // `ClaimStore` claim this node held for it.
+                    self.release_claim_store_entry(stream_id).await;
+                }
+                Err(error) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        error = %error,
+                        "expired SM session: durable delete failed in cleanup; \
+                         restart-time expiry filter will drop the orphan"
+                    );
+                }
             }
         }
         Ok(removed)

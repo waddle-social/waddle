@@ -16,6 +16,7 @@ pub(super) async fn promote_as_transient(
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
     registry: &ConnectionRegistry,
+    origin_stream_id: &str,
 ) -> PromotedOutcome {
     let payload = PendingPayload::Transient(Box::new(message.clone()));
     insert_pending(
@@ -25,10 +26,24 @@ pub(super) async fn promote_as_transient(
         original_receipt_fallback,
         &message,
         registry,
+        origin_stream_id,
     )
     .await
 }
 
+/// Insert one Q6-promoted `pending_delivery` row.
+///
+/// `origin_stream_id` is the SM session whose unacked queue is being
+/// promoted (ADR-0017 Phase 3 Slice 5 FIX 3, council-adjudicated):
+/// element 9's locked text requires "promotion executes under the
+/// row-locked fenced epoch," so this calls
+/// [`PendingDeliveryStorage::insert_fenced`], not the bare `insert` — a
+/// cluster-fenced storage runs the write inside one transaction carrying
+/// the origin session's claim `SELECT ... FOR SHARE` fencing check
+/// (aborting with [`PendingStorageError::NotOwner`] before writing if this
+/// node no longer holds that claim); every non-fenced implementation
+/// (portable/SQLite, or clustering disabled) falls back to the identical
+/// unfenced `insert` path via `insert_fenced`'s own default impl.
 pub(super) async fn insert_pending(
     recipient: BareJid,
     payload: PendingPayload,
@@ -36,6 +51,7 @@ pub(super) async fn insert_pending(
     original_receipt_at: DateTime<Utc>,
     original_message: &xmpp_parsers::message::Message,
     registry: &ConnectionRegistry,
+    origin_stream_id: &str,
 ) -> PromotedOutcome {
     let row = PendingRow {
         id: PendingRowId::fresh(),
@@ -45,7 +61,7 @@ pub(super) async fn insert_pending(
         flushed_in_session: None,
         outbound_sequence: None,
     };
-    match pending_storage.insert(row).await {
+    match pending_storage.insert_fenced(row, origin_stream_id).await {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
         Ok(InsertOutcome::QuotaExceeded) => {
             // XEP-0160 §3 step 3 + RFC 6120 §8.3 — bounce
@@ -56,6 +72,23 @@ pub(super) async fn insert_pending(
             waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
             send_quota_bounce(original_message, &recipient, registry).await;
             PromotedOutcome::Bounced
+        }
+        Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity }) => {
+            // FIX 3: this node's claim on the origin SM session was lost
+            // (or never held) by the time the fenced write ran — another
+            // node's own janitor/reaper is (or is about to be) the real
+            // owner. Never confirm_drained on this outcome: the caller's
+            // typed match on `PromotedOutcome` must treat this the same as
+            // a storage failure so the durable SM row survives for that
+            // node's own promote/confirm pass, never dead-lettered here.
+            warn!(
+                recipient = %recipient,
+                %entity,
+                "Q6 promotion: pending_delivery insert_fenced observed a lost claim \
+                 (NotOwner); caller must NOT confirm_drained so the durable SM row \
+                 survives for the current owner's own promotion pass"
+            );
+            PromotedOutcome::StorageFailure
         }
         Err(error) => {
             warn!(

@@ -107,6 +107,88 @@ pub(super) async fn initialize(
             return Err(error);
         }
     }
+    // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork
+    // (PROPOSED column names/types, per the ADR Implementation Plan's "the
+    // schema is specified in one place here to prevent dropping a column
+    // group" instruction). Net-new on this table: the origin session's
+    // SM-ID (or a server-assigned per-stream id for non-SM origins) and its
+    // XEP-0198 inbound `h` value at the moment this stanza was ingested —
+    // together the recipient-scoped dedup key `(recipient_jid,
+    // origin_stream_id, inbound_seq)` — plus a per-`(origin_stream_id,
+    // recipient)` ordering sequence number for sticky-failover gap
+    // detection. All three stay NULL until a same-node/cross-node caller
+    // populates them (no insert call site does yet — see this migration's
+    // own doc note below); `original_receipt_at` (already present, above)
+    // already covers the XEP-0203 ingress-timestamp requirement.
+    //
+    // **Deferred, recorded as a deviation**: populating these columns
+    // requires threading the origin stream's id and `h` value through
+    // every `pending_delivery` insert call site (Q6 promotion, direct
+    // offline-DM fallback, MUC reflection fan-out) and building the
+    // per-pair ordering/gap-detection consumer — cross-node stanza
+    // ordering/dedup machinery the phase's own Non-goals exclude this
+    // phase (no cross-node stanza routing GA; the cross-node
+    // janitor-flush leg is deferred to Phase 4). Landing the columns now
+    // (nullable, unpopulated) avoids a second migration once that
+    // machinery lands, without pretending same-node-only Slice 5 needs
+    // them populated yet.
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS origin_stream_id TEXT"
+        }
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN origin_stream_id TEXT",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let msg = error.to_string().to_lowercase();
+        if msg.contains("duplicate column") || msg.contains("already exists") {
+            debug!("pending_delivery.origin_stream_id column already present");
+        } else {
+            return Err(error);
+        }
+    }
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS inbound_seq BIGINT"
+        }
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN inbound_seq INTEGER",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let msg = error.to_string().to_lowercase();
+        if msg.contains("duplicate column") || msg.contains("already exists") {
+            debug!("pending_delivery.inbound_seq column already present");
+        } else {
+            return Err(error);
+        }
+    }
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS pair_sequence BIGINT"
+        }
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN pair_sequence INTEGER",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let msg = error.to_string().to_lowercase();
+        if msg.contains("duplicate column") || msg.contains("already exists") {
+            debug!("pending_delivery.pair_sequence column already present");
+        } else {
+            return Err(error);
+        }
+    }
+    // Recipient-scoped dedup key (element 5, property 0: scoped by
+    // recipient, never table-global — a fan-out of one origin stanza to N
+    // recipients must insert N rows). Partial: only rows that actually
+    // carry both dedup dimensions participate — legacy/not-yet-populated
+    // rows (both NULL) never collide under this index regardless, but the
+    // `WHERE` clause makes that explicit rather than relying on Postgres's
+    // "NULLs are distinct" default.
+    storage
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_delivery_dedup \
+         ON pending_delivery (recipient_jid, origin_stream_id, inbound_seq) \
+         WHERE origin_stream_id IS NOT NULL AND inbound_seq IS NOT NULL",
+            (),
+        )
+        .await?;
     storage
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_delivery_recipient \
@@ -385,4 +467,57 @@ async fn delete_legacy_mam_query_frame_rows(
         .await
         .map_err(|error| PendingStorageError::Other(error.to_string()))?;
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod slice5_dedup_index_tests {
+    use crate::pending_delivery::database::{DatabasePendingDeliveryStorage, QuotaPolicy};
+
+    /// ADR-0017 Phase 3 Slice 5 / element 5: the recipient-scoped dedup
+    /// index (`idx_pending_delivery_dedup`) rejects a second row sharing
+    /// `(recipient_jid, origin_stream_id, inbound_seq)`, but a different
+    /// recipient with the SAME `(origin_stream_id, inbound_seq)` pair is
+    /// unconstrained (property 0: one origin stanza legitimately fans out
+    /// to many recipients). Exercises the migration directly via raw SQL
+    /// since no application call site populates these columns yet (see
+    /// this migration's own doc comment).
+    #[tokio::test]
+    async fn dedup_index_rejects_same_recipient_duplicate_but_allows_fan_out() {
+        let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+            .await
+            .expect("open in-memory storage (runs the migration)");
+
+        let insert_row = |row_id: &'static str, recipient: &'static str| {
+            let storage = &storage;
+            async move {
+                storage
+                    .execute(
+                        "INSERT INTO pending_delivery \
+                         (row_id, recipient_jid, original_receipt_at, payload_kind, \
+                          origin_stream_id, inbound_seq) \
+                         VALUES (?, ?, ?, 'transient', ?, ?)",
+                        crate::db_params![
+                            row_id.to_string(),
+                            recipient.to_string(),
+                            0i64,
+                            "origin-stream-1".to_string(),
+                            7i64,
+                        ],
+                    )
+                    .await
+            }
+        };
+
+        insert_row("row-1", "alice@example.com")
+            .await
+            .expect("first insert for alice succeeds");
+        insert_row("row-2", "alice@example.com").await.expect_err(
+            "a second row for the SAME recipient sharing (origin_stream_id, inbound_seq) \
+                 must violate the dedup unique index",
+        );
+        insert_row("row-3", "bob@example.com").await.expect(
+            "a DIFFERENT recipient sharing the same (origin_stream_id, inbound_seq) pair \
+                 must be allowed (fan-out property)",
+        );
+    }
 }

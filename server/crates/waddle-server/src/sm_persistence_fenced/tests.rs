@@ -8,6 +8,7 @@ use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
 use waddle_xmpp::ownership::{NodeIdentity, StalePredicate};
+use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
 
 fn full(s: &str) -> jid::FullJid {
@@ -792,4 +793,145 @@ async fn concurrent_first_writes_for_a_fresh_stream_id_both_succeed_exactly_one_
         .get(0)
         .expect("count column");
     assert_eq!(count, 1, "exactly one claims row must exist for the entity");
+}
+
+// ---------------------------------------------------------------------
+// ADR-0017 Phase 3 Slice 5: `InMemorySmSessionRegistry::restore_from_persistence`
+// acquire-then-hydrate, exercised against two simulated nodes sharing one
+// Postgres database (mirrors this module's own `fixture()` pattern, one
+// level up: two `PostgresFencedSmPersistence`/`InMemorySmSessionRegistry`
+// pairs instead of one).
+// ---------------------------------------------------------------------
+
+/// A second simulated node, sharing `f`'s underlying Postgres database
+/// (`claims_db`) but under its own fresh [`NodeIdentity`]/[`SharedNodeIdentity`]
+/// and its own [`PostgresFencedSmPersistence`]/[`InMemorySmSessionRegistry`]
+/// pair — exactly what a genuinely different process in the same cluster
+/// would look like.
+struct SecondNode {
+    registry: waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    identity: NodeIdentity,
+}
+
+async fn second_node(f: &Fixture) -> SecondNode {
+    let identity = node_identity();
+    let shared_identity = SharedNodeIdentity::new(identity.clone());
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(f.claims_db.clone()));
+    let fenced = PostgresFencedSmPersistence::open(
+        f.claims_db.clone(),
+        claim_store,
+        shared_identity.clone(),
+    )
+    .await
+    .expect("open second node's fenced SM persistence");
+    let registry_claim_store: Arc<dyn ClaimStore> =
+        Arc::new(PostgresClaimStore::new(f.claims_db.clone()));
+    let registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(std::sync::Arc::new(fenced))
+        .with_claim_store(registry_claim_store, shared_identity);
+    SecondNode { registry, identity }
+}
+
+#[tokio::test]
+async fn restore_from_persistence_hydrates_only_unclaimed_or_self_claimed_rows() {
+    let Some(f) = fixture().await else { return };
+    // `f.fenced` (bound to `f.identity`, "node A") claims+persists
+    // "stream-a" via its own normal write path — exactly how a real
+    // detach on node A would.
+    f.fenced
+        .upsert_session(fixture_session("stream-a"))
+        .await
+        .expect("node A claims and persists stream-a");
+
+    let node_b = second_node(&f).await;
+    // `node_b`'s own persistence claims+persists "stream-b" under node B's
+    // identity — self-claimed from B's perspective.
+    let persisted_b = node_b
+        .registry
+        .restore_from_persistence()
+        .await
+        .expect("first restore on node B (nothing self-claimed yet)");
+    assert_eq!(
+        persisted_b, 0,
+        "node B must not hydrate node A's still-live claim on stream-a"
+    );
+    assert_eq!(
+        node_b.registry.session_count().await,
+        0,
+        "stream-a must not appear in node B's in-memory view"
+    );
+
+    // Now genuinely self-claim a row under node B (mirrors a live detach
+    // happening on node B) and restore again.
+    let claim_store_b: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(f.claims_db.clone()));
+    let fenced_b_direct = PostgresFencedSmPersistence::open(
+        f.claims_db.clone(),
+        claim_store_b,
+        SharedNodeIdentity::new(node_b.identity.clone()),
+    )
+    .await
+    .expect("open a direct fenced handle sharing node B's identity");
+    fenced_b_direct
+        .upsert_session(fixture_session("stream-b"))
+        .await
+        .expect("node B claims and persists stream-b");
+
+    let persisted_b_second_pass = node_b
+        .registry
+        .restore_from_persistence()
+        .await
+        .expect("second restore on node B");
+    assert_eq!(
+        persisted_b_second_pass, 1,
+        "node B must self-reacquire and hydrate its own stream-b, still skipping stream-a"
+    );
+    assert!(
+        node_b
+            .registry
+            .peek_session("stream-b")
+            .await
+            .expect("peek stream-b")
+            .is_some(),
+        "stream-b (self-claimed) must be hydrated"
+    );
+    assert!(
+        node_b
+            .registry
+            .peek_session("stream-a")
+            .await
+            .expect("peek stream-a")
+            .is_none(),
+        "stream-a (claimed by node A) must never be hydrated by node B"
+    );
+
+    // A fresh registry instance under the SAME identity (simulating node
+    // B restarting) must self-reacquire stream-b again via
+    // `ensure_claimed`'s self-match — never spuriously conflict with its
+    // own pre-restart claim.
+    let claim_store_b2: Arc<dyn ClaimStore> =
+        Arc::new(PostgresClaimStore::new(f.claims_db.clone()));
+    let fenced_b2: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(
+            PostgresFencedSmPersistence::open(
+                f.claims_db.clone(),
+                claim_store_b2.clone(),
+                SharedNodeIdentity::new(node_b.identity.clone()),
+            )
+            .await
+            .expect("open node B's post-restart fenced handle"),
+        );
+    let registry_b2 = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(fenced_b2)
+        .with_claim_store(
+            claim_store_b2,
+            SharedNodeIdentity::new(node_b.identity.clone()),
+        );
+    let persisted_after_restart = registry_b2
+        .restore_from_persistence()
+        .await
+        .expect("restore after simulated restart");
+    assert_eq!(
+        persisted_after_restart, 1,
+        "node B's own restart must self-reacquire its own pre-restart claim on stream-b"
+    );
 }
