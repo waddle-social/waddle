@@ -100,7 +100,13 @@ async fn handle_muc_join_unlocked(
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
-    let mut retried_stale_admission = false;
+    // Resolver-derived first joins bump the admission revision, so a
+    // burst of concurrent first-time joiners can hit several stale
+    // revisions in a row — allow a few re-snapshots before giving up
+    // (each retry re-reads the current revision; convergence is
+    // guaranteed once admissions quiesce).
+    const MAX_STALE_ADMISSION_RETRIES: u32 = 3;
+    let mut stale_admission_retries = 0u32;
     // #1108: a room actor can be sealed+destroyed by the guarded
     // dormancy eviction between our registry lookup and the join ask.
     // The seal refuses the join with a typed retryable error (or the
@@ -469,8 +475,8 @@ async fn handle_muc_join_unlocked(
                     waddle_xmpp::muc::room_actor::RoomActorError::StaleAdmissionRevision,
                 ) = &error
                 {
-                    if !retried_stale_admission {
-                        retried_stale_admission = true;
+                    if stale_admission_retries < MAX_STALE_ADMISSION_RETRIES {
+                        stale_admission_retries += 1;
                         continue;
                     }
                     return vec![build_muc_presence_error_xml(
