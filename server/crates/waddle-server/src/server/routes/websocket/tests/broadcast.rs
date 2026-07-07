@@ -184,3 +184,106 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
         "a never-available session must not broadcast unavailable"
     );
 }
+
+fn make_detached_session(
+    jid: &FullJid,
+    presence_available: bool,
+) -> waddle_xmpp::stream_management::DetachedSession {
+    waddle_xmpp::stream_management::DetachedSession {
+        stream_id: "stale-stream".to_string(),
+        user_id: jid.to_bare().to_string(),
+        jid: jid.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![],
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    }
+}
+
+/// Detached-invalidation must apply the same presence-aware suppression
+/// rule as the unclean-disconnect path: a same-JID replacement that is
+/// merely REGISTERED (owner of the slot) but has never gone
+/// presence-available has broadcast nothing yet — if the detached
+/// session was available, subscribers still hold its stale available,
+/// so the unavailable MUST go out. Suppression is correct only once the
+/// replacement is itself presence-available.
+#[tokio::test]
+async fn detached_invalidation_broadcasts_unavailable_past_a_silent_replacement_owner() {
+    let state = create_test_websocket_state().await;
+    let dropped: FullJid = "alice@example.com/web".parse().expect("jid");
+    let sibling: FullJid = "alice@example.com/other".parse().expect("jid");
+
+    // A live available sibling resource observes the broadcast.
+    let (sib_tx, mut sib_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(sibling.clone(), sib_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&sibling, true, 0);
+
+    // The replacement is registered (and owns the slot) but has NOT
+    // sent available.
+    let (repl_tx, _repl_rx) = mpsc::channel::<OutboundStanza>(8);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(dropped.clone(), repl_tx);
+
+    // Invalidate the stale detached (available) session: the sibling
+    // must still receive the unavailable — the silent replacement has
+    // superseded nothing presence-wise.
+    let detached = make_detached_session(&dropped, true);
+    super::super::cleanup::cleanup_invalidated_detached_session(
+        state.as_ref(),
+        detached.clone(),
+        Some(&owner),
+    )
+    .await;
+    let received = tokio::time::timeout(std::time::Duration::from_millis(500), sib_rx.recv())
+        .await
+        .expect("a registered-but-silent replacement must not suppress the detached unavailable")
+        .expect("channel open");
+    let frame = stanza_to_xml(&received.stanza);
+    assert!(
+        frame.contains("unavailable") && frame.contains("alice@example.com/web"),
+        "expected unavailable despite the silent replacement owner, got {frame}"
+    );
+
+    // Companion: once the replacement is presence-available, the
+    // broadcast is suppressed.
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&dropped, true, 0);
+    super::super::cleanup::cleanup_invalidated_detached_session(
+        state.as_ref(),
+        detached,
+        Some(&owner),
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), sib_rx.recv())
+            .await
+            .is_err(),
+        "no unavailable may be broadcast while an available replacement is live"
+    );
+}

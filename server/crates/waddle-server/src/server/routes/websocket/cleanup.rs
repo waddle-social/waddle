@@ -684,17 +684,15 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .caps_resolver
             .drop_resource(&detached.jid);
     }
-    // Same replacement re-check as the unclean-disconnect path: a
-    // third same-JID session may have registered (and gone available)
-    // between the replacement-owner check above and now — a stale
-    // unavailable against its live available would pin subscribers on
-    // offline for an online JID.
-    broadcast_unavailable_if_no_replacement(
-        state,
-        &detached.jid,
-        detached.presence_available && !replacement_is_current_owner,
-    )
-    .await;
+    // Same rule as the unclean-disconnect path: the helper suppresses
+    // the broadcast ONLY when the current registry entry is
+    // presence-AVAILABLE. A replacement that merely OWNS the slot but
+    // never sent presence has broadcast nothing yet — suppressing here
+    // would pin subscribers on this detached session's stale available
+    // forever if the replacement stays silent. So we pass the detached
+    // session's own availability unchanged and let the helper decide.
+    broadcast_unavailable_if_no_replacement(state, &detached.jid, detached.presence_available)
+        .await;
     // MUC occupancy is keyed by FULL JID, so a live same-JID
     // replacement session shares the room occupancies this stale
     // detached session would evict — kicking the replacement out of
