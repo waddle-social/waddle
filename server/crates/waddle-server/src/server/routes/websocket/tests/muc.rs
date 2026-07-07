@@ -163,6 +163,105 @@ async fn muc_join_under_second_nick_returns_not_acceptable() {
     assert_eq!(room.find_nick_by_real_jid(&sender_jid), Some("alice"));
 }
 
+/// #1111 / XEP-0045 §7.2.9: joining a room that has reached its maximum
+/// number of occupants returns `<presence type='error'>` with
+/// `<error type='wait'><service-unavailable/></error>` from the
+/// requested room-nick to the joiner — never an empty reply that
+/// leaves the client stalled waiting for self-presence.
+#[tokio::test]
+async fn muc_join_full_room_returns_service_unavailable() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "full-room@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+
+    let room_actor = get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor");
+    let mut config = room_actor
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot")
+        .room
+        .config;
+    config.max_occupants = 1;
+    room_actor
+        .ask(UpdateConfig { config })
+        .await
+        .expect("room config update");
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert_eq!(
+        responses.len(),
+        1,
+        "exactly one error presence (never an empty reply): {responses:?}"
+    );
+    let error_presence = Element::from_str(&responses[0]).expect("error presence xml");
+    assert_eq!(error_presence.name(), "presence");
+    assert_eq!(error_presence.attr("type"), Some("error"));
+    assert_eq!(
+        error_presence.attr("from"),
+        Some(format!("{room_jid}/bob").as_str()),
+        "XEP-0045 §7.2.9: the error comes from the requested room-nick: {responses:?}"
+    );
+    assert_eq!(
+        error_presence.attr("to"),
+        Some(bob.to_string().as_str()),
+        "the error is addressed to the joining full JID: {responses:?}"
+    );
+    assert!(
+        error_presence
+            .get_child("x", "http://jabber.org/protocol/muc")
+            .is_some(),
+        "join-failure presence echoes <x xmlns='http://jabber.org/protocol/muc'/>: {responses:?}"
+    );
+    let error = error_presence
+        .get_child("error", "jabber:client")
+        .expect("typed error element");
+    assert_eq!(
+        error.attr("type"),
+        Some("wait"),
+        "XEP-0045 §7.2.9 max-users refusal uses error type='wait': {responses:?}"
+    );
+    assert_eq!(
+        error.attr("by"),
+        Some(room_jid.to_string().as_str()),
+        "the erroring entity is the room bare JID: {responses:?}"
+    );
+    assert!(
+        error
+            .get_child("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some(),
+        "XEP-0045 §7.2.9 max-users refusal uses <service-unavailable/>: {responses:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.occupant_count(), 1, "the full room admits no one");
+    assert_eq!(room.find_nick_by_real_jid(&bob), None);
+}
+
 /// #1134 / XEP-0045 §10.1.1: only the room creator receives Owner. The
 /// second user to join an unmanaged room must not be granted Owner —
 /// the created-bit comes from the registry, not from call-site
