@@ -190,6 +190,22 @@ pub enum ClusteringError {
     #[cfg(feature = "clustering")]
     #[error("clustering node-lease registration failed: {0}")]
     NodeLease(waddle_xmpp::ownership::ClaimError),
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 8 (council-adjudicated): the durable MUC
+    /// room store's own startup init (`ensure_schema`) failed. Fails
+    /// clustering startup entirely rather than continuing with entity
+    /// claims live but MUC room durability silently unprotected — a
+    /// `RoomActor` claim can move between nodes without this store, which
+    /// is exactly the unprotected-deposal hazard element 7 exists to close
+    /// (config/affiliations/subject would silently reset to defaults on
+    /// every steal), not a degraded-but-safe mode. Previously logged and
+    /// treated as non-fatal; corrected here to match the co-location
+    /// discipline every other clustering-durability store already enforces
+    /// at startup (`sm_persistence::open_for_cluster_mode`,
+    /// `pending_delivery::open_for_cluster_mode`).
+    #[cfg(feature = "clustering")]
+    #[error("clustering MUC durable store initialization failed: {0}")]
+    MucDurableStoreInit(waddle_xmpp::XmppError),
 }
 
 /// Derive the clustering subsystem's own cancellation scope from the
@@ -248,6 +264,29 @@ pub struct ClusteringHandles {
     /// clustering is disabled, mirroring `claim_store`/`node_identity`.
     #[cfg(feature = "clustering")]
     pub local_claims: Option<Arc<local_claims::SmSessionLocalClaims>>,
+    /// ADR-0017 Phase 3 Slice 7: the `RoomActor`-backed
+    /// `LocallyClaimedEntities` counterpart of `local_claims`, constructed
+    /// empty here (the MUC room registry does not exist yet at this point
+    /// in startup — it is spawned earlier, in `server/mod.rs`, mirroring
+    /// `local_claims`'s own construction-order note) and wired later by
+    /// `server/mod.rs` calling `RoomRegistry::wire_clustering_claims` /
+    /// `RoomLocalClaims::wire` once the registry handle is available. Also
+    /// the same `Arc` `RelayActor` answers `Demote` asks through (the
+    /// two-part demotion protocol's part (a) receiving side). `None`
+    /// under the same conditions `local_claims` is `None`.
+    #[cfg(feature = "clustering")]
+    pub room_local_claims: Option<Arc<local_claims::RoomLocalClaims>>,
+    /// ADR-0017 Phase 3 Slice 7: the durable MUC room ownership store —
+    /// the SAME `Arc` `server/mod.rs` hands to
+    /// `RoomRegistry::wire_clustering_claims` (never a second, independent
+    /// store) and the one `dispatch_to_room`'s fenced pre-fan-out backstop
+    /// reads directly. `None` under the exact same conditions
+    /// `local_claims` is `None` (clustering disabled, non-Postgres, a
+    /// build without the `clustering` feature, or — defensively — this
+    /// store's own `ensure_schema` failing at startup, logged but
+    /// non-fatal to the rest of clustering).
+    #[cfg(feature = "clustering")]
+    pub muc_durable_store: Option<Arc<dyn waddle_xmpp::muc::MucDurableStore>>,
     /// ADR-0017 Phase 3 Slice 5: a `NodeLeaseStore` handle for the orphan
     /// reaper janitor (`server::session_janitors::spawn_orphan_reaper_janitor`),
     /// which runs on its own periodic cadence outside `run_node_lease`'s
@@ -326,6 +365,41 @@ impl ClusteringHandles {
             None
         }
     }
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): hard-kill the
+    /// locally-claimed `RoomActor` for `room_jid`, mirroring the Demote
+    /// relay ask's exact receiving-side call
+    /// (`RelayActor`'s `Demote` handler calling
+    /// `room_local_claims.demote(&entity)`). Every mutation-handler call
+    /// site that observes `RoomMutationError::NotOwner`/an equivalent
+    /// per-message `NotOwner` variant calls this so the deposed actor
+    /// genuinely stops serving (hard `ActorRef::kill()`), instead of only
+    /// bouncing the one request that discovered the ownership loss and
+    /// leaving the actor to keep answering (and re-discovering the same
+    /// staleness) for every subsequent ask.
+    ///
+    /// A no-op when clustering is disabled, this binary lacks the
+    /// `clustering` Cargo feature, or `room_local_claims` was never wired
+    /// (defensive — `NotOwner` can only ever be produced when a durable
+    /// store, and therefore `room_local_claims`, is configured).
+    pub async fn demote_room_actor(&self, room_jid: &jid::BareJid) {
+        #[cfg(feature = "clustering")]
+        {
+            use self_fence::LocallyClaimedEntities as _;
+            let Some(room_local_claims) = &self.room_local_claims else {
+                return;
+            };
+            let entity = waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            );
+            room_local_claims.demote(&entity).await;
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            let _ = room_jid;
+        }
+    }
 }
 
 /// Conditionally start the clustering swarm subsystem.
@@ -374,6 +448,15 @@ pub async fn start_if_enabled(
         // applies. The swarm's `RelayActor` answers `RelayResumeSteal` asks
         // through this exact `Arc`.
         let resume_bridge = resume_bridge::ResumeStealBridge::new();
+        // ADR-0017 Phase 3 Slice 7: constructed empty for the same
+        // construction-order reason as `resume_bridge` — the MUC room
+        // registry doesn't exist yet at this point in startup (it is
+        // spawned before `start_if_enabled` runs, in `server/mod.rs`) —
+        // and wired later via `RoomRegistry::wire_clustering_claims`'s
+        // caller in `server/mod.rs`. The swarm's `RelayActor` answers
+        // `Demote` asks (the two-part demotion protocol's part (a))
+        // through this exact `Arc`.
+        let room_local_claims = local_claims::RoomLocalClaims::new();
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
@@ -381,7 +464,10 @@ pub async fn start_if_enabled(
             config,
             db,
             clustering_stop.clone(),
-            Arc::clone(&resume_bridge),
+            swarm::RelayBridges {
+                resume_bridge: Arc::clone(&resume_bridge),
+                room_local_claims: Arc::clone(&room_local_claims),
+            },
         )
         .await?;
         tracing::info!(
@@ -430,12 +516,46 @@ pub async fn start_if_enabled(
         // `ClusteringHandles::local_claims`'s doc comment for the full
         // construction-order rationale).
         let local_claims = local_claims::SmSessionLocalClaims::new();
+        // ADR-0017 Phase 3 Slice 7: `NodeLeaseRunConfig` takes exactly one
+        // `Arc<dyn LocallyClaimedEntities>` handle — `CombinedLocalClaims`
+        // dispatches across both concrete implementors by `entity_type`
+        // (see its own doc comment) rather than either one widening to
+        // know about the other's entities.
+        let combined_local_claims = local_claims::CombinedLocalClaims::new(
+            Arc::clone(&local_claims),
+            Arc::clone(&room_local_claims),
+        );
         let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
             Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        // ADR-0017 Phase 3 Slice 7: the durable MUC room store. Built here
+        // (not deferred to `server/mod.rs`) because it only needs `db`/
+        // `live_identity`/`clustering_stop` — all already in scope — unlike
+        // `room_local_claims` above, which genuinely must wait for the room
+        // registry to exist.
+        //
+        // FIX 8 (council-adjudicated): a failure to initialize is FATAL to
+        // clustering startup, not logged-and-continue. Claims live without
+        // this store means a `RoomActor` ownership move silently resets
+        // config/affiliations/subject to defaults — an unprotected
+        // deposal, not a degraded-but-safe fallback. Mirrors the co-location
+        // discipline `sm_persistence`/`pending_delivery`'s
+        // `open_for_cluster_mode` already enforce at startup for their own
+        // durability stores.
+        let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(
+            crate::muc_durable::PostgresMucRoomStore::open(
+                db.clone(),
+                live_identity.clone(),
+                clustering_stop.clone(),
+            )
+            .await
+            .map_err(ClusteringError::MucDurableStoreInit)?,
+        );
         let handles = ClusteringHandles {
             claim_store: Some(claim_store_handle),
             node_identity: Some(live_identity.clone()),
             local_claims: Some(Arc::clone(&local_claims)),
+            room_local_claims: Some(Arc::clone(&room_local_claims)),
+            muc_durable_store: Some(muc_durable_store),
             node_lease: Some(node_lease_handle),
             lease_ttl: Some(config.node_lease.lease_ttl),
             resume_bridge: Some(resume_bridge),
@@ -452,7 +572,7 @@ pub async fn start_if_enabled(
                 lease_config: config.node_lease.clone(),
                 self_fence_config: config.self_fence.clone(),
                 connected_peers: handle.connected_peers.clone(),
-                local_claims,
+                local_claims: combined_local_claims,
                 readiness,
                 live_identity,
                 // FIX 4(b): the same `ClaimStore` view onto

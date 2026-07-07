@@ -2997,3 +2997,440 @@ async fn health_check_replies_when_the_room_actor_is_idle() {
     let actor = spawn_room_actor().await;
     actor.ask(HealthCheck).await.expect("health check replies");
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the pre-mutation
+// fencing gate every durable-relevant mutation handler now runs.
+// ---------------------------------------------------------------------------
+
+/// A [`crate::muc::durable::MucDurableStore`] test double whose
+/// `check_fenced_fanout` result is controlled by the test, so
+/// `RoomActor::gate_mutation` can be exercised without a real Postgres
+/// backend. `save_*` calls always succeed (or, when `fail_persist` is
+/// set, always fail) — only the two-stage gate is under test here; the
+/// concrete Postgres fencing SQL itself is covered by
+/// `waddle-server::muc_durable`'s own Postgres-gated test suite.
+#[derive(Default)]
+struct FakeDurableStore {
+    /// `check_fenced_fanout`'s result: `Some(true)` = owned, `Some(false)`
+    /// = deposed, `None` = simulate a transient backend error (fails
+    /// open, per `gate_mutation`'s own contract).
+    fenced: std::sync::Mutex<Option<bool>>,
+    fail_persist: bool,
+    save_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeDurableStore {
+    fn owned() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            ..Default::default()
+        })
+    }
+
+    fn deposed() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(false)),
+            ..Default::default()
+        })
+    }
+
+    fn transient_failure() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(None),
+            ..Default::default()
+        })
+    }
+
+    fn owned_but_persist_fails() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            fail_persist: true,
+            save_calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn save_call_count(&self) -> usize {
+        self.save_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::muc::durable::MucDurableStore for FakeDurableStore {
+    fn load_room_state<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn save_config<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _waddle_id: &'a str,
+        _channel_id: &'a str,
+        _config: &'a RoomConfig,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        self.save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fail = self.fail_persist;
+        Box::pin(async move {
+            if fail {
+                Err(crate::XmppError::internal(
+                    "simulated transient persist failure",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn save_subject<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _subject: Option<&'a SubjectState>,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        self.save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fail = self.fail_persist;
+        Box::pin(async move {
+            if fail {
+                Err(crate::XmppError::internal(
+                    "simulated transient persist failure",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn save_affiliation<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _entry: &'a crate::muc::affiliation::AffiliationEntry,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        self.save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fail = self.fail_persist;
+        Box::pin(async move {
+            if fail {
+                Err(crate::XmppError::internal(
+                    "simulated transient persist failure",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn check_fenced_fanout<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, bool> {
+        let fenced = *self.fenced.lock().expect("lock");
+        Box::pin(async move {
+            match fenced {
+                Some(owned) => Ok(owned),
+                None => Err(crate::XmppError::internal(
+                    "simulated transient fencing failure",
+                )),
+            }
+        })
+    }
+}
+
+async fn spawn_room_actor_with_store(
+    store: std::sync::Arc<dyn crate::muc::durable::MucDurableStore>,
+) -> ActorRef<RoomActor> {
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(RestoreDurableRoomState { store })
+        .await
+        .expect("restore");
+    actor
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): restore fail-closed.
+// ---------------------------------------------------------------------------
+
+/// A [`crate::muc::durable::MucDurableStore`] test double whose
+/// `load_room_state` fails its first `fail_count` calls, then succeeds
+/// with a fixed [`crate::muc::durable::DurableRoomState`] carrying one
+/// `Outcast` (ban) affiliation entry — proving FIX 4's "no ban-list loss"
+/// requirement: the ban must still be applied once the store recovers,
+/// never silently dropped by the earlier failures.
+struct FlakyThenRecoveringStore {
+    fail_count: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    banned: BareJid,
+}
+
+impl FlakyThenRecoveringStore {
+    fn new(fail_count: usize, banned: BareJid) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fail_count,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            banned,
+        })
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
+    fn load_room_state<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fail_count = self.fail_count;
+        let banned = self.banned.clone();
+        Box::pin(async move {
+            if call < fail_count {
+                Err(crate::XmppError::internal(
+                    "simulated transient restore failure",
+                ))
+            } else {
+                Ok(Some(crate::muc::durable::DurableRoomState {
+                    waddle_id: "waddle-1".to_string(),
+                    channel_id: "channel-1".to_string(),
+                    config: RoomConfig {
+                        members_only: false,
+                        ..RoomConfig::default()
+                    },
+                    subject: None,
+                    affiliations: vec![crate::muc::affiliation::AffiliationEntry::new(
+                        banned,
+                        Affiliation::Outcast,
+                    )],
+                }))
+            }
+        })
+    }
+
+    fn save_config<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _waddle_id: &'a str,
+        _channel_id: &'a str,
+        _config: &'a RoomConfig,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save_subject<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _subject: Option<&'a SubjectState>,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save_affiliation<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _entry: &'a crate::muc::affiliation::AffiliationEntry,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+fn test_join_msg(nick: &str, sender: FullJid) -> JoinWithAffiliation {
+    JoinWithAffiliation {
+        sender_jid: sender,
+        nick: nick.to_string(),
+        effective_affiliation: Affiliation::None,
+        local_domain: "example.com".to_string(),
+        admission_revision: 0,
+    }
+}
+
+#[tokio::test]
+async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_with_no_ban_lost() {
+    let banned: BareJid = "banned@example.com".parse().expect("valid jid");
+    // Fails the initial `RestoreDurableRoomState` load AND the first
+    // in-line retry (calls 0 and 1); the SECOND retry (call 2) succeeds.
+    let store = FlakyThenRecoveringStore::new(2, banned.clone());
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(RestoreDurableRoomState {
+            store: store.clone(),
+        })
+        .await
+        .expect("restore ask itself always replies, even on a load failure");
+    assert_eq!(store.call_count(), 1, "the initial load attempted once");
+
+    // First join attempt: the inline retry (call 1) also fails — refused.
+    let first_attempt = actor
+        .ask(test_join_msg("alice", test_full_jid("alice")))
+        .await;
+    assert!(
+        matches!(
+            first_attempt,
+            Err(SendError::HandlerError(RoomActorError::RestorePending))
+        ),
+        "expected RestorePending, got: {first_attempt:?}"
+    );
+    assert_eq!(store.call_count(), 2);
+
+    // Second join attempt: the inline retry (call 2) succeeds — the join
+    // proceeds AND the ban restored from Postgres is genuinely in effect
+    // (not silently lost across the two earlier failures).
+    let banned_attempt = actor
+        .ask(test_join_msg("banned-nick", test_full_jid("banned")))
+        .await;
+    assert!(
+        matches!(
+            banned_attempt,
+            Err(SendError::HandlerError(
+                RoomActorError::JoinForbidden { .. }
+            ))
+        ),
+        "the restored ban must be enforced on the very join that recovered \
+         the restore, got: {banned_attempt:?}"
+    );
+    assert_eq!(store.call_count(), 3);
+
+    // A different, never-banned sender can now join normally too.
+    actor
+        .ask(test_join_msg("carol", test_full_jid("carol")))
+        .await
+        .expect("a non-banned sender joins normally once restore has recovered");
+}
+
+#[tokio::test]
+async fn update_config_gate_blocks_the_mutation_when_deposed() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let original = actor.ask(GetConfig).await.expect("ask").members_only;
+
+    let mut new_config = actor.ask(GetConfig).await.expect("ask");
+    new_config.members_only = !original;
+    let result = actor.ask(UpdateConfig { config: new_config }).await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "expected NotOwner, got: {result:?}"
+    );
+
+    let after = actor.ask(GetConfig).await.expect("ask").members_only;
+    assert_eq!(
+        after, original,
+        "a gated-out mutation must never have applied in-memory"
+    );
+}
+
+#[tokio::test]
+async fn update_config_gate_allows_the_mutation_when_owned() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let original = actor.ask(GetConfig).await.expect("ask").members_only;
+
+    let mut new_config = actor.ask(GetConfig).await.expect("ask");
+    new_config.members_only = !original;
+    actor
+        .ask(UpdateConfig { config: new_config })
+        .await
+        .expect("owned mutation must apply");
+
+    let after = actor.ask(GetConfig).await.expect("ask").members_only;
+    assert_ne!(after, original, "the mutation must have applied");
+}
+
+#[tokio::test]
+async fn update_config_gate_fails_open_on_a_transient_fencing_error() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::transient_failure()).await;
+    let original = actor.ask(GetConfig).await.expect("ask").members_only;
+
+    let mut new_config = actor.ask(GetConfig).await.expect("ask");
+    new_config.members_only = !original;
+    actor
+        .ask(UpdateConfig { config: new_config })
+        .await
+        .expect("a transient fencing failure must fail OPEN, not block the mutation");
+
+    let after = actor.ask(GetConfig).await.expect("ask").members_only;
+    assert_ne!(
+        after, original,
+        "fail-open means the mutation still applies despite the transient error"
+    );
+}
+
+#[tokio::test]
+async fn update_config_surfaces_a_typed_persist_failure_after_mutating() {
+    let store = FakeDurableStore::owned_but_persist_fails();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let original = actor.ask(GetConfig).await.expect("ask").members_only;
+
+    let mut new_config = actor.ask(GetConfig).await.expect("ask");
+    new_config.members_only = !original;
+    let result = actor.ask(UpdateConfig { config: new_config }).await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomMutationError::PersistFailed(_)))
+        ),
+        "expected PersistFailed, got: {result:?}"
+    );
+    assert_eq!(store.save_call_count(), 1);
+
+    // FIX 2: the in-memory mutation still committed (undoing it risks a
+    // worse inconsistency than leaving it applied-but-not-yet-durable) —
+    // only the caller's visibility into durable convergence changed.
+    let after = actor.ask(GetConfig).await.expect("ask").members_only;
+    assert_ne!(after, original, "the in-memory mutation still applies");
+}
+
+#[tokio::test]
+async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let jid: BareJid = "carol@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ChangeAffiliation {
+            jid: jid.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "expected NotOwner, got: {result:?}"
+    );
+
+    let affiliation = actor.ask(GetAffiliation { jid }).await.expect("ask");
+    assert_eq!(
+        affiliation,
+        Affiliation::None,
+        "a gated-out affiliation change must never have applied"
+    );
+}
+
+#[tokio::test]
+async fn set_subject_gate_blocks_the_mutation_when_deposed() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let setter: BareJid = "alice@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(SetSubject {
+            texts: RoomSubjectTexts::from_iter([(String::new(), "new subject".to_string())]),
+            setter,
+            setter_nick: "alice".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "expected NotOwner, got: {result:?}"
+    );
+}

@@ -188,6 +188,21 @@ impl MucRoom {
     pub fn has_owner(&self) -> bool {
         self.affiliation_list.has_owner()
     }
+
+    /// Replace the entire in-memory affiliation list with `entries`
+    /// (ADR-0017 Phase 3 Slice 7 restore-before-join path): used when a
+    /// freshly spawned or newly-claimed `RoomActor` restores durable
+    /// affiliation state from Postgres. Every occupant's role is
+    /// re-derived exactly like [`Self::set_affiliation`] — restore only
+    /// ever runs before any join for the current actor incarnation (see
+    /// `RoomActor`'s `RestoreDurableRoomState` handler), so
+    /// `self.occupants` is always empty at the point this runs, but the
+    /// re-derivation stays defensive if that invariant is ever violated.
+    pub fn restore_affiliations(&mut self, entries: Vec<affiliation::AffiliationEntry>) {
+        for entry in entries {
+            self.set_affiliation(entry.jid, entry.affiliation);
+        }
+    }
 }
 
 #[cfg(test)]

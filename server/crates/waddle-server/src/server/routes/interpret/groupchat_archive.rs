@@ -1,11 +1,64 @@
 use super::*;
+use waddle_xmpp::mam::MamStorageError;
+use waddle_xmpp::muc::RoomClaimFenceContext;
+
+/// Outcome of a groupchat archive write attempt (ADR-0017 Phase 3 Slice 7
+/// FIX 1, council-adjudicated). `OwnershipLost` is the fenced backstop
+/// firing: the caller MUST neither treat the message as archived NOR fan
+/// it out to occupants — mirroring `dispatch_to_room`'s own
+/// `check_fenced_fanout` `Ok(false)` handling one layer closer to the
+/// actual write.
+pub(super) enum ArchiveGroupchatOutcome {
+    Stored(ArchiveStoreResult),
+    /// Not an error: a chain-bug guard or a non-fencing storage failure
+    /// declined the write. The reflection still goes out (today's
+    /// pre-existing behavior, unchanged).
+    Skipped,
+    /// The fenced write observed that this node no longer holds the
+    /// room's ownership claim. The message was NOT archived; the caller
+    /// must also suppress fan-out and bounce the sender.
+    OwnershipLost,
+}
+
+/// ADR-0017 Phase 3 Slice 7 FIX 1: resolve the typed `(Entity, ClaimEpoch,
+/// node_id)` fencing context for `room`, the SAME mechanism
+/// `dispatch_to_room`'s own `check_fenced_fanout` pre-fan-out check reads
+/// from — threaded here rather than re-derived from a second, independent
+/// source. `None` whenever clustering is disabled, this binary lacks the
+/// `clustering` Cargo feature, or no durable store is configured for this
+/// room (matches `check_fenced_fanout`'s own `None`-means-unfenced
+/// contract): callers fall back to the portable, unfenced
+/// `MamStorage::store_message` path, byte-identical to pre-Slice-7
+/// behavior.
+pub(super) fn resolve_room_claim_fence(
+    deps: &Deps<'_>,
+    room: &BareJid,
+) -> Option<RoomClaimFenceContext> {
+    #[cfg(feature = "clustering")]
+    {
+        let state = deps.web_socket_state?;
+        let store = state
+            .deps
+            .app_state
+            .clustering_claims
+            .muc_durable_store
+            .as_ref()?;
+        store.current_claim_fence(room)
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (deps, room);
+        None
+    }
+}
 
 pub(super) async fn archive_groupchat_message(
     mam_storage: &Arc<dyn MamStorage>,
     room: &BareJid,
     message: &Message,
     sender_nickname_generation: u64,
-) -> Option<ArchiveStoreResult> {
+    fence: Option<&RoomClaimFenceContext>,
+) -> ArchiveGroupchatOutcome {
     let archive_clone = message.clone();
     let archive_id = match extract_room_stanza_id(&archive_clone, room) {
         Some(id) => id,
@@ -26,7 +79,7 @@ pub(super) async fn archive_groupchat_message(
                  skipping archive write because persisting an archive-only id would \
                  break the wire/archive stanza-id invariant (chain bug)"
             );
-            return None;
+            return ArchiveGroupchatOutcome::Skipped;
         }
     };
 
@@ -36,6 +89,7 @@ pub(super) async fn archive_groupchat_message(
         archive_clone,
         archive_id,
         sender_nickname_generation,
+        fence,
     )
     .await
 }
@@ -56,7 +110,8 @@ pub(super) async fn finish_archive_groupchat_message(
     archive_clone: Message,
     archive_id: String,
     sender_nickname_generation: u64,
-) -> Option<ArchiveStoreResult> {
+    fence: Option<&RoomClaimFenceContext>,
+) -> ArchiveGroupchatOutcome {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
     // groupchat messages don't materialize a fake empty body in the
@@ -88,7 +143,7 @@ pub(super) async fn finish_archive_groupchat_message(
             room = %room,
             "ArchiveGroupchat: missing from JID on reflection; dropping archive write"
         );
-        return None;
+        return ArchiveGroupchatOutcome::Skipped;
     };
     let room_jid_full = jid::Jid::from(room.clone());
     let stanza_id = archive_clone
@@ -114,8 +169,22 @@ pub(super) async fn finish_archive_groupchat_message(
         nickname_generation: Some(sender_nickname_generation),
     };
 
-    match mam_storage.store_message(room, &archived).await {
-        Ok(stored_id) => Some(ArchiveStoreResult {
+    // ADR-0017 Phase 3 Slice 7 FIX 1: the fenced variant when this room's
+    // claim fence is known (clustering enabled + Postgres) — the SAME
+    // `store_message`/`store_message_fenced` split
+    // `pending_delivery::insert_fenced` establishes one table over,
+    // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
+    // this insert.
+    let store_result = match fence {
+        Some(fence) => {
+            mam_storage
+                .store_message_fenced(room, &archived, fence)
+                .await
+        }
+        None => mam_storage.store_message(room, &archived).await,
+    };
+    match store_result {
+        Ok(stored_id) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
             rewrite: ArchiveIdRewrite::from_store_result(
                 jid::Jid::from(room.clone()),
                 archive_id,
@@ -123,13 +192,22 @@ pub(super) async fn finish_archive_groupchat_message(
             ),
             stored_id,
         }),
+        Err(MamStorageError::NotOwner { entity }) => {
+            warn!(
+                room = %room,
+                %entity,
+                "ArchiveGroupchat: fenced store failed — this node has been deposed; \
+                 not archiving, caller must also suppress fan-out"
+            );
+            ArchiveGroupchatOutcome::OwnershipLost
+        }
         Err(error) => {
             warn!(
                 room = %room,
                 %error,
                 "ArchiveGroupchat: store_message failed; dropping archive write"
             );
-            None
+            ArchiveGroupchatOutcome::Skipped
         }
     }
 }

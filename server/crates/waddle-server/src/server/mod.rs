@@ -200,6 +200,29 @@ pub async fn start_with_config(
     )
     .await?;
 
+    // ADR-0017 Phase 3 Slice 7: wire the real, clustering-backed claim
+    // store/identity/durable store into the room registry spawned above —
+    // construction-order note: the registry is spawned before
+    // `start_if_enabled` runs (it needs no clustering handles to exist),
+    // mirroring `local_claims`/`resume_bridge`'s identical fill-in-later
+    // cell pattern. A `None` claim pair (clustering disabled, non-Postgres,
+    // or a build without the `clustering` feature) leaves the registry's
+    // single-node defaults (`InProcessClaimStore`, no durable store)
+    // untouched — today's behavior, unchanged.
+    #[cfg(feature = "clustering")]
+    if let Some((claim_store, node_identity)) = clustering_handles.claim_pair() {
+        room_registry_handle
+            .wire_clustering_claims(
+                claim_store,
+                node_identity,
+                clustering_handles.muc_durable_store.clone(),
+            )
+            .await;
+        if let Some(room_local_claims) = &clustering_handles.room_local_claims {
+            room_local_claims.wire(room_registry_handle.clone());
+        }
+    }
+
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
@@ -223,8 +246,18 @@ pub async fn start_with_config(
         clustering_readiness,
         clustering_claims: clustering_handles,
     }));
-    let websocket_mam_storage =
-        create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;
+    // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
+    // the clustering global database and enable fenced groupchat-archive
+    // writes when clustering is live, mirroring the
+    // `sm_persistence`/`pending_delivery` `open_for_cluster_mode` gating
+    // already established for their own durability stores.
+    let websocket_mam_storage = create_websocket_mam_storage(
+        xmpp_config.mam_database_url.clone(),
+        server_config.clustering.enabled,
+        state.clustering_claims.claim_pair().is_some(),
+        db_pool.global(),
+    )
+    .await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server

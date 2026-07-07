@@ -87,6 +87,64 @@ pub(super) async fn dispatch_to_room(
         }
     };
 
+    // ADR-0017 Phase 3 Slice 7: the two-part demotion protocol's
+    // guaranteed backstop — a fenced `SELECT ... FOR SHARE` against this
+    // room's Postgres claim, run before any local fan-out (this is the
+    // actual production fan-out call site; the legacy
+    // `RoomActor::BuildGroupchatBroadcast` message this check was
+    // originally sketched against is superseded by this
+    // `GetRoomSnapshot`-based sans-I/O chain and carries no live
+    // production caller). `None` (clustering disabled, non-Postgres, or a
+    // build without the `clustering` feature) skips this entirely —
+    // single-node behavior, unchanged. A transient backend error fails
+    // open (logged, not blocking); only a definitive 0-rows result
+    // demotes.
+    #[cfg(feature = "clustering")]
+    if let Some(store) = &state.deps.app_state.clustering_claims.muc_durable_store {
+        match store.check_fenced_fanout(&room_jid).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    room = %room_jid,
+                    "DispatchToRoom: fenced ownership check observed 0 rows; this node has \
+                     been deposed — evicting the local room actor and bouncing the sender"
+                );
+                let _ = room_registry
+                    .ask(DestroyRoom {
+                        room_jid: room_jid.clone(),
+                    })
+                    .await;
+                let reply = build_message_error_reply(
+                    &incoming,
+                    &room_jid,
+                    &sender_full,
+                    resource_constraint_error(
+                        "This room's ownership recently moved to another node; please retry.",
+                    ),
+                );
+                match Stanza::Message(reply).to_element_string() {
+                    Ok(xml) => outcome.frames.push(xml),
+                    Err(error) => {
+                        warn!(
+                            room = %room_jid,
+                            %error,
+                            "DispatchToRoom: failed to serialize ownership-gap bounce reply"
+                        );
+                    }
+                }
+                return outcome;
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "DispatchToRoom: fenced ownership check failed (transient backend \
+                     error); failing open, not demoting"
+                );
+            }
+        }
+    }
+
     // 3. Managed-room owner override (announcements room admits
     //    server owners only). Pre-derived synchronously here so the
     //    chain's `OccupancyValidationHandler` can read

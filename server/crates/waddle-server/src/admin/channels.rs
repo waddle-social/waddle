@@ -2204,13 +2204,16 @@ async fn run_group_dm_rename(
     let previous_config = snapshot.room.config.clone();
     let mut config = previous_config.clone();
     config.name = args.name.clone().unwrap_or_default();
-    let updated_snapshot = actor
+    let updated_snapshot = match actor
         .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
             config: config.clone(),
             sender_jid: caller_full_jid.clone(),
         })
         .await
-        .map_err(group_dm_rename_update_error)?;
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Err(group_dm_rename_update_error(state, &args.room_jid, error).await),
+    };
     let expected_revision = updated_snapshot.config_revision;
     if find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none() {
         return Err(internal_err(
@@ -2575,7 +2578,9 @@ fn group_dm_shared_name(name: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-fn group_dm_rename_update_error(
+async fn group_dm_rename_update_error(
+    state: &AppState,
+    room_jid: &BareJid,
     error: kameo::error::SendError<
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember,
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError,
@@ -2596,6 +2601,20 @@ fn group_dm_rename_update_error(
                     "Only joined group-DM occupants can rename the room".to_string(),
                 ))))
             }
+            // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
+            // fenced pre-mutation gate observed this node has been
+            // deposed — the rename was NEVER APPLIED. Hard-kill the
+            // stale local actor (mirrors the Demote relay ask's own
+            // receiving-side call) and bounce with a recoverable,
+            // retry-able error, same flavor `dispatch_to_room`'s own
+            // ownership-gap bounce uses.
+            UpdateGroupDmConfigByMemberError::NotOwner => {
+                state.clustering_claims.demote_room_actor(room_jid).await;
+                unavailable("This room's ownership recently moved to another node; please retry.")
+            }
+            UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
+                "group-DM rename applied but durable persist failed: {detail}"
+            )),
         },
         error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),
     }

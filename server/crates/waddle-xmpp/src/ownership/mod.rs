@@ -48,8 +48,13 @@ use std::time::Duration;
 
 /// Closed set of claimable entity kinds (element 4). Serialized to `TEXT`
 /// only at the SQL boundary (`entity_type` column) — never compared or
-/// branched on as a bare string at call sites.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// branched on as a bare string at call sites. Also `Serialize`/
+/// `Deserialize` (ADR-0017 Phase 3 Slice 7) so [`Entity`] can travel
+/// wire-typed on the MUC Demote relay ask, the same way `SmSessionId`/
+/// `BareJid` already do on `RelayResumeSteal` — `serde`'s derived
+/// representation, not the SQL `as_db_str` encoding, which stays the
+/// SQL-boundary-only mapping its own doc comment describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EntityType {
     UserActor,
     RoomActor,
@@ -81,10 +86,35 @@ impl EntityType {
     }
 }
 
+/// Wire length bound on [`Entity::id`] (ADR-0017 Phase 3 Slice 7 FIX 9,
+/// council-adjudicated). Mirrors
+/// [`crate::pending_delivery::SM_SESSION_ID_MAX_LEN`]'s exact rationale one
+/// type over: `Entity` now travels wire-typed on the MUC Demote relay ask
+/// (deviation 60), which is NOT a stanza and so never passes through the
+/// bounded XML stanza codec — without a field-level bound of its own, a
+/// malicious (or buggy) allowlisted peer could ship a multi-MB `id`.
+/// Production ids are bare JIDs or room JIDs, far under this cap.
+pub const ENTITY_ID_MAX_LEN: usize = 128;
+
+/// [`Entity::id`] exceeded [`ENTITY_ID_MAX_LEN`] at deserialization.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("Entity id of {len} bytes exceeds the {ENTITY_ID_MAX_LEN}-byte wire bound")]
+pub struct EntityIdTooLong {
+    pub len: usize,
+}
+
 /// A claimable entity: its kind plus its non-secret identifier (a bare JID
 /// for `UserActor`, a room JID for `RoomActor`, the SM-ID for `SmSession`).
 /// Typed, never a bare `String` at call sites (typed-payloads hard rule).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 7) so this type can
+/// travel wire-typed on the MUC Demote relay ask. `Deserialize` is
+/// hand-written (below), not derived, so it can enforce [`ENTITY_ID_MAX_LEN`]
+/// on the `id` field — mirroring [`crate::pending_delivery::SmSessionId`]'s
+/// identical hand-written bound exactly, one type over (FIX 9). [`Self::new`]
+/// itself stays unvalidated, for the same reason `SmSessionId::new` does: every
+/// production caller mints ids far under the cap, and the wire boundary is
+/// where an untrusted length actually arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Entity {
     pub entity_type: EntityType,
     pub id: String,
@@ -96,6 +126,34 @@ impl Entity {
             entity_type,
             id: id.into(),
         }
+    }
+}
+
+/// Shadow of [`Entity`]'s wire shape used only to obtain a derived
+/// [`serde::Deserialize`] for the two fields, so the hand-written impl below
+/// does not have to hand-parse `entity_type` itself — only add the
+/// [`ENTITY_ID_MAX_LEN`] check `derive` cannot express.
+#[derive(serde::Deserialize)]
+struct RawEntity {
+    entity_type: EntityType,
+    id: String,
+}
+
+impl<'de> serde::Deserialize<'de> for Entity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawEntity::deserialize(deserializer)?;
+        if raw.id.len() > ENTITY_ID_MAX_LEN {
+            return Err(serde::de::Error::custom(EntityIdTooLong {
+                len: raw.id.len(),
+            }));
+        }
+        Ok(Self {
+            entity_type: raw.entity_type,
+            id: raw.id,
+        })
     }
 }
 
@@ -142,8 +200,11 @@ pub struct ClaimSnapshot {
 /// A claim's fencing generation. Every successful acquire/steal bumps this;
 /// a durable write's fencing check compares the epoch it was granted against
 /// the epoch currently on file, so a stale epoch can never authorize a
-/// write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// write. `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 7) so this type
+/// can travel wire-typed on the MUC Demote relay ask.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct ClaimEpoch(pub i64);
 
 /// A node's cluster identity, as seen by the claims CAS. Distinct from
@@ -473,6 +534,37 @@ mod tests {
     #[test]
     fn entity_type_from_db_str_rejects_unknown_values() {
         assert_eq!(EntityType::from_db_str("not-a-real-entity-type"), None);
+    }
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 9 (council-adjudicated): the wire
+    /// -deserialize bound on `Entity::id`, mirroring
+    /// `SmSessionId`'s identical boundary tests one type over.
+    #[test]
+    fn entity_deserialize_accepts_the_boundary_length() {
+        let id = "a".repeat(ENTITY_ID_MAX_LEN);
+        let json = serde_json::json!({ "entity_type": "RoomActor", "id": id }).to_string();
+        let entity: Entity =
+            serde_json::from_str(&json).expect("exactly at the cap must deserialize");
+        assert_eq!(entity.id.len(), ENTITY_ID_MAX_LEN);
+    }
+
+    #[test]
+    fn entity_deserialize_rejects_one_byte_over_the_cap() {
+        let id = "a".repeat(ENTITY_ID_MAX_LEN + 1);
+        let json = serde_json::json!({ "entity_type": "RoomActor", "id": id }).to_string();
+        let error = serde_json::from_str::<Entity>(&json)
+            .expect_err("one byte over the cap must be rejected");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
+    fn entity_deserialize_rejects_a_malicious_multi_kb_id() {
+        let id = "x".repeat(64 * 1024);
+        let json = serde_json::json!({ "entity_type": "RoomActor", "id": id }).to_string();
+        assert!(serde_json::from_str::<Entity>(&json).is_err());
     }
 
     #[test]

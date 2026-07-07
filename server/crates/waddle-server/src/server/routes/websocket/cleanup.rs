@@ -3,6 +3,7 @@ use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::LeaveOutcome;
+use waddle_xmpp::muc::room_registry_actor::RoomRegistryError;
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -656,23 +657,27 @@ pub(crate) async fn get_room_actor(
     }
 }
 
+/// ADR-0017 Phase 3 Slice 7 FIX 6 (council-adjudicated): returns the
+/// registry's typed `Err` rather than collapsing every failure (including
+/// `RoomRegistryError::ClaimHeldByAnotherNode`) into `None` — a caller that
+/// only sees `None` cannot distinguish "another node genuinely owns this
+/// room right now" (a conformant, recoverable `<resource-constraint/>`
+/// bounce per XEP-0045) from any other registry failure, and the MUC join
+/// path's previous `let Some(actor) = ... else { return vec![] }` silently
+/// dropped the join with NO presence reply at all in every such case.
 pub(crate) async fn get_or_create_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
     config: RoomConfig,
     waddle_id: String,
     channel_id: String,
-) -> Option<ActorRef<RoomActor>> {
-    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+) -> Result<ActorRef<RoomActor>, RoomRegistryError> {
+    RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .get_or_create_room(room_jid.clone(), waddle_id, channel_id, config)
         .await
-    {
-        Ok(actor) => Some(actor),
-        Err(error) => {
-            warn!(room = %room_jid, error = %error, "Failed to get or create room actor");
-            None
-        }
-    }
+        .inspect_err(|error| {
+            warn!(room = %room_jid, %error, "Failed to get or create room actor");
+        })
 }
 
 pub(crate) async fn list_room_jids(state: &WebSocketState) -> Vec<BareJid> {

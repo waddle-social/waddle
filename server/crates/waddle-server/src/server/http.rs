@@ -108,8 +108,38 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     Ok(())
 }
 
+/// ADR-0017 Phase 3 Slice 7 FIX 1 (council-adjudicated): open MAM storage
+/// for cluster mode, mirroring
+/// `pending_delivery::open_for_cluster_mode`'s/`sm_persistence::open_for_cluster_mode`'s
+/// identical co-location-then-construct pattern, one table over. Lives here
+/// (in `waddle-server`, not `waddle-xmpp` where `SqlxMamStorage` itself is
+/// defined) because the co-location mismatch error needs
+/// `crate::db::redact_database_url` — a `waddle-server`-only helper — and
+/// because the clustering global database URL only exists on this side of
+/// the crate boundary.
+///
+/// When clustering is enabled AND the resolved `database_url` is a
+/// Postgres DSN, the co-location invariant is checked BEFORE fencing is
+/// ever attached: the resolved URL must be an EXACT string match for
+/// `global_db.database_url()` (deliberately no DSN normalization, matching
+/// every sibling `open_for_cluster_mode`) — the fencing
+/// `SELECT ... FOR SHARE` `SqlxMamStorage::store_message_fenced` issues
+/// targets `clustering_claims`, which only exists in the clustering global
+/// database. A mismatch fails startup with
+/// [`waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch`]
+/// rather than silently fencing (or, on a build without this check,
+/// silently NOT fencing) against a table that may not exist wherever
+/// `database_url` actually points.
+///
+/// When clustering is disabled, `database_url` is not a
+/// `postgres://`/`postgresql://` DSN, or the clustering subsystem produced
+/// no live claim pair, this is exactly `SqlxMamStorage::open` + `quota` —
+/// no fencing attached, the unfenced path exactly as before.
 pub(crate) async fn create_websocket_mam_storage(
     database_url: Option<String>,
+    clustering_enabled: bool,
+    clustering_claim_pair_live: bool,
+    global_db: &crate::db::Database,
 ) -> Result<Arc<dyn MamStorage>> {
     if !cfg!(test) {
         ensure_mam_database_is_durable(
@@ -118,10 +148,43 @@ pub(crate) async fn create_websocket_mam_storage(
         )?;
     }
     let storage = match database_url.as_deref() {
-        Some(database_url) => SqlxMamStorage::open(database_url).await,
-        None => SqlxMamStorage::open_in_memory().await,
-    }
-    .map_err(|error| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}"))?;
+        Some(database_url) => {
+            let opened = SqlxMamStorage::open(database_url).await.map_err(|error| {
+                anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
+            })?;
+            #[cfg(feature = "clustering")]
+            {
+                let resolved_url = (database_url.starts_with("postgres://")
+                    || database_url.starts_with("postgresql://"))
+                .then_some(database_url);
+                if let (true, true, Some(resolved_url)) =
+                    (clustering_enabled, clustering_claim_pair_live, resolved_url)
+                {
+                    if resolved_url != global_db.database_url() {
+                        return Err(anyhow::anyhow!(
+                            waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
+                                mam_database_url: crate::db::redact_database_url(resolved_url),
+                                global_database_url: crate::db::redact_database_url(
+                                    global_db.database_url()
+                                ),
+                            }
+                        ));
+                    }
+                    opened.with_cluster_fencing(true)
+                } else {
+                    opened
+                }
+            }
+            #[cfg(not(feature = "clustering"))]
+            {
+                let _ = (clustering_enabled, clustering_claim_pair_live, global_db);
+                opened
+            }
+        }
+        None => SqlxMamStorage::open_in_memory().await.map_err(|error| {
+            anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
+        })?,
+    };
 
     Ok(Arc::new(storage))
 }

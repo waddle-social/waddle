@@ -801,6 +801,8 @@ mod orphan_reaper_sweep_tests {
             claim_store: Some(Arc::clone(&sweeper_claim_store)),
             node_identity: Some(sweeper_identity_handle.clone()),
             local_claims: None,
+            room_local_claims: None,
+            muc_durable_store: None,
             node_lease: Some(sweeper_node_lease),
             lease_ttl: Some(lease_ttl),
             resume_bridge: None,

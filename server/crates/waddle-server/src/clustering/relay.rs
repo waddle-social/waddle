@@ -20,8 +20,10 @@
 //! criteria); it is not wired into the stanza delivery path (Phase 4).
 
 use super::codec::RemoteStanza;
+use super::local_claims::RoomLocalClaims;
 use super::metrics;
 use super::resume_bridge::ResumeStealBridge;
+use super::self_fence::LocallyClaimedEntities;
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
@@ -31,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use waddle_xmpp::ownership::{ClaimEpoch, Entity};
 
 /// Bound on this node's own wait for a local force-detach to complete when
 /// answering a [`RelayResumeSteal`] ask (ADR-0017 Phase 3 Slice 6).
@@ -89,6 +92,10 @@ pub struct RelayActor {
     /// ADR-0017 Phase 3 Slice 6: this node's bridge to its own live
     /// `ConnectionRegistry`, answering [`RelayResumeSteal`] asks.
     resume_bridge: Arc<ResumeStealBridge>,
+    /// ADR-0017 Phase 3 Slice 7: this node's `RoomActor` claims, answering
+    /// [`Demote`] asks — the two-part demotion protocol's part (a)
+    /// receiving side.
+    room_local_claims: Arc<RoomLocalClaims>,
 }
 
 impl RelayActor {
@@ -96,11 +103,13 @@ impl RelayActor {
         node_id: NodeId,
         fault_injection: bool,
         resume_bridge: Arc<ResumeStealBridge>,
+        room_local_claims: Arc<RoomLocalClaims>,
     ) -> Self {
         Self {
             node_id,
             fault_injection,
             resume_bridge,
+            room_local_claims,
         }
     }
 }
@@ -242,6 +251,45 @@ impl Message<RelayResumeSteal> for RelayActor {
     }
 }
 
+/// Two-part demotion protocol, part (a) (ADR-0017 Phase 3 Slice 7, element
+/// 7): best-effort, acked notification sent by the node that just won a
+/// steal CAS to the node it stole `entity` from. `new_epoch` is carried
+/// for observability/logging only — the recipient does not need it to act
+/// (a hard local demote is unconditional and idempotent), but it lets a
+/// receiving node's log line show which epoch superseded its own.
+///
+/// Deliberately narrow, mirroring [`RelayResumeSteal`]'s exact shape: a
+/// small, wire-bounded, fully typed payload (an [`Entity`]/[`ClaimEpoch`],
+/// never raw strings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Demote {
+    pub entity: Entity,
+    pub new_epoch: ClaimEpoch,
+}
+
+/// Reply to [`Demote`]: always `Acked` — the recipient's local demote
+/// ([`super::self_fence::LocallyClaimedEntities::demote`]) is
+/// unconditional, idempotent, and infallible by contract (best-effort,
+/// must succeed even against a wedged actor). There is nothing for the
+/// asker to retry on, unlike [`RelayResumeStealReply`]'s multi-outcome
+/// shape — the guaranteed correctness backstop is the fenced pre-fan-out
+/// check, not this ask's outcome, so a richer reply would invite a caller
+/// to (wrongly) treat this ask as load-bearing for correctness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum DemoteReply {
+    Acked,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.demote.v1")]
+impl Message<Demote> for RelayActor {
+    type Reply = DemoteReply;
+
+    async fn handle(&mut self, msg: Demote, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.room_local_claims.demote(&msg.entity).await;
+        DemoteReply::Acked
+    }
+}
+
 /// Harness fault injection: crash the relay actor (simulating an unexpected
 /// stop, so the supervised respawn + same-name re-registration and the
 /// sender-side stale-ref recovery can be asserted cross-node). Inert unless
@@ -319,6 +367,7 @@ pub fn spawn_supervised(
     fault_injection: bool,
     stop_token: CancellationToken,
     resume_bridge: Arc<ResumeStealBridge>,
+    room_local_claims: Arc<RoomLocalClaims>,
 ) {
     tokio::spawn(async move {
         let name = relay_name(&node_id);
@@ -331,6 +380,7 @@ pub fn spawn_supervised(
                 node_id.clone(),
                 fault_injection,
                 Arc::clone(&resume_bridge),
+                Arc::clone(&room_local_claims),
             ));
             // Race registration against cancellation instead of plain
             // `.await`: kameo's swarm-command reply future panics
@@ -819,6 +869,55 @@ impl RelayHandle {
             Err(error) => Err(send_error(error)),
         }
     }
+
+    /// Two-part demotion protocol, part (a) (ADR-0017 Phase 3 Slice 7,
+    /// element 7): best-effort acked notification to the node `entity`
+    /// was just stolen from. Same stale-ref refresh-and-retry-once
+    /// behaviour and `stop_token`-raced cancellation-safety as
+    /// [`Self::resume_steal`]. Callers must treat any `Err` here as
+    /// purely informational (log and move on) — the guaranteed
+    /// correctness backstop is the fenced pre-fan-out check, never this
+    /// ask's outcome.
+    pub async fn demote(
+        &mut self,
+        entity: Entity,
+        new_epoch: ClaimEpoch,
+    ) -> Result<DemoteReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.demote_inner(entity, new_epoch) => result,
+        }
+    }
+
+    async fn demote_inner(
+        &mut self,
+        entity: Entity,
+        new_epoch: ClaimEpoch,
+    ) -> Result<DemoteReply, RelayAskError> {
+        let message = Demote { entity, new_epoch };
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_stale_ref_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
 }
 
 /// Transport-layer errors meaning the cached `RemoteActorRef` no longer names
@@ -926,6 +1025,7 @@ mod tests {
             NodeId::new("node-under-test".to_string()),
             false,
             resume_bridge,
+            RoomLocalClaims::new(),
         ));
 
         // Dispatch the resume-steal ask on its own task so it is genuinely

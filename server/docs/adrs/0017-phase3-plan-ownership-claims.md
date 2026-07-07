@@ -1365,6 +1365,29 @@ affiliation-list read/write), `room_registry.rs` / `room_registry_actor.rs` /
 `room_registry_handle.rs` (claim acquisition on `GetOrCreateRoom`), `subject.rs`
 (durable subject read on restore).
 
+**Files, amended (FIX 1–9 pass, deviations 65–73)**: `server/crates/waddle-xmpp/
+src/muc/durable.rs` (`RoomClaimFenceContext`, `current_claim_fence`),
+`server/crates/waddle-xmpp/src/mam/storage/{traits.rs,error.rs,sqlx_store/
+{mod.rs,write.rs,impls.rs}}` (`store_message_fenced`, `with_cluster_fencing`,
+`MamStorageError::{NotOwner,ClusterColocationMismatch}`),
+`server/crates/waddle-xmpp/src/ownership/mod.rs` (`Entity` hand-written
+`Deserialize`, `ENTITY_ID_MAX_LEN`), `server/crates/waddle-server/src/
+muc_durable.rs` (`current_claim_fence` impl), `server/crates/waddle-server/src/
+server/http.rs` (`create_websocket_mam_storage`'s co-location check),
+`server/crates/waddle-server/src/server/topology.rs`
+(`seed_initial_xmpp_topology`'s `ClaimHeldByAnotherNode` continue),
+`server/crates/waddle-server/src/server/routes/websocket/cleanup.rs`
+(`get_or_create_room_actor`'s typed `Result`), `server/crates/waddle-server/src/
+server/routes/websocket/handlers/presence/muc.rs` (join-path error mapping),
+`server/crates/waddle-server/src/server/routes/interpret/{groupchat_archive.rs,
+archive_groupchat_event.rs,room_system_message.rs,interpret.rs,
+groupchat_validation.rs}` (fenced archive write + ownership-lost batch
+suppression), `server/crates/waddle-xmpp/src/muc/room_registry_actor.rs`
+(`live_room` async + claim release), `server/crates/waddle-server/src/
+clustering/{local_claims.rs,mod.rs}` (`health_check` fix,
+`demote_room_actor`, `MucDurableStoreInit`), `server/crates/waddle-server/src/
+admin/channels.rs` (`group_dm_rename_update_error` demote wiring).
+
 **Tests**: Postgres-gated: fenced pre-fan-out SELECT returns 0 rows immediately after a
 steal commits (deposed owner's very next broadcast is blocked). Harness: room ownership
 steal restores config/affiliations/subject before the new owner accepts a join (this
@@ -1388,6 +1411,46 @@ statements; only `RoomActor`'s own claim acquire/steal/heartbeat traffic (via
 **Dependencies**: Slice 1 only (`ClaimStore` for `RoomActor` entities) — deliberately
 **not** dependent on Slices 4–6, so it can be worked in parallel by a separate
 contributor/session, per the scoping map's "D5 parallel-after-D1" ordering.
+
+**As landed (deviations 56–64, see the deviation log for full detail)**: occupant-roster
+durability is deferred (56, its sole consumer needs Phase-4 cross-node presence
+fan-out); the fenced pre-fan-out backstop lands in `waddle-server`'s
+`dispatch_to_room` (57 — `RoomActor::BuildGroupchatBroadcast` is legacy/superseded,
+not the live fan-out path) — **amended by the FIX 1–9 pass below: no longer the
+sole backstop, since the MAM archive write is now independently fenced too (65,
+retracting 58's "not implementable" claim)**; `LocallyClaimedEntities::owned()`
+widened to `async fn` for the actor-backed `RoomLocalClaims` implementor (59);
+`Entity`/`EntityType`/`ClaimEpoch` gained `Serialize`/`Deserialize` for the Demote
+ask's wire payload (60, `Entity::id` gained a matching wire-length bound in 73);
+claim acquisition + dead-owner re-election land in `RoomRegistryActor` with a new
+`ClaimHeldByAnotherNode` error for the live-foreign-owner case (61); the Demote ask
+(part (a) of the two-part demotion protocol) is implemented end-to-end, receiving
+side included, via a new `swarm::RelayBridges` bundle (62); the non-clustered path is
+confirmed byte-identical via `InProcessClaimStore` defaults, with the durable schema
+landed as `clustering_muc_rooms`/`clustering_muc_room_affiliations` (63); and the
+deposed-owner-with-live-socket `RoomActor` harness scenario lands in
+`clustering_cluster_e2e.rs`, reusing the restore-before-join mechanism itself as the
+wedge point (64).
+
+**Council-adjudicated FIX 1–9 pass, additionally landed (deviations 65–73, see the
+deviation log for full detail)**: the MAM groupchat archive insert is itself now
+fenced, atomically with a `SELECT ... FOR SHARE`, closing the residual dual-delivery
+race the original backstop design accepted (65); every durable-relevant `RoomActor`
+mutation handler gates on ownership BEFORE mutating and surfaces a non-ownership
+persist failure typed AFTER mutating, revising `MucDurableStore`'s fail-open
+contract (66); a dead/panicked `RoomActor`'s Postgres claim is released rather than
+orphaned, and `RoomLocalClaims::health_check` reports unhealthy (not healthy) when
+no live local actor exists for a claim this node believes it holds (67); a genuine
+`RestoreDurableRoomState` load failure fails closed — joins refuse until a bounded
+inline retry succeeds, never served against defaults (68); topology bootstrap
+treats a room claimed by another live node as a normal steady-state condition and
+keeps seeding the rest (69); the MUC join path no longer silently drops a join with
+no presence reply for any registry/actor failure (70); the three named
+kick/ban/members-only-eviction fan-out sites were traced and confirmed already
+covered by (66)'s mutation gating, with no independent fan-out needing its own
+fenced check (71); a `MucDurableStore` init failure is now fatal to clustering
+startup rather than logged-and-continued (72); and `Entity::id` gained the same
+wire-length bound `SmSessionId` already has (73).
 
 ---
 
@@ -1665,9 +1728,16 @@ itself (`session_janitors::orphan_reaper_sweep_tests`) — this harness case is 
 multi-process capstone proving the identical behavior holds across a real process kill,
 not merely within one process's own claim bookkeeping.
 
+**Binding (Slice 7 / deviation 70)**: the MUC join-bounce wire shape lands here too — a
+join against a foreign-owned room in the two-node harness must receive the conformant
+`<presence type='error'>` with `<resource-constraint/>` (`type='wait'` semantics), never
+a silent drop; asserting it over real processes proves what a doubles-based unit test
+cannot.
+
 **Files**: `server/crates/waddle-server/tests/clustering_cluster_e2e.rs` only.
 
-**Tests**: the two scaffolds themselves are the test deliverable.
+**Tests**: the two scaffolds themselves are the test deliverable, plus the two bound
+scenarios above (kill-one hydration; foreign-owned-room join bounce).
 
 **Dependencies**: Slice 2 (isolation fencing), Slice 5 (durable-queue fallback).
 
@@ -1779,6 +1849,19 @@ concern).
   reconciliation pass (re-introducing the unscoped-scan hazard Slice 5 otherwise
   eliminates, so it would need its own claim-scoped design) or a durable
   "detach acknowledged" marker distinct from the claim row itself.
+- **Informational note (FIX 1–9 pass, council-adjudicated): room passwords have NO
+  existing mechanism anywhere in this codebase, not merely an un-durable one.** A
+  codebase-wide search at the time of this pass found no XEP-0045 §10.1.2 password
+  field on `RoomConfig`, no password-check branch on join, and no password-related
+  column in the Slice 7 durable schema (`clustering_muc_rooms`) — the feature does
+  not exist pre- or post-Phase-3, in memory or durably. This matters for Phase 4's
+  planned GA outcast-denial/"password holds" gate (element 7, Phase 4 scope per
+  this plan's own exit-criteria text): that gate will need the room-password
+  *feature itself* designed and implemented from scratch (config field, join-time
+  check, wire error shape) before durability across a steal can be asserted for it
+  — Phase 3's `RoomConfig` durability round-trip (deviation 63's
+  `clustering_muc_rooms.config_json`) will carry a password field for free once one
+  exists on `RoomConfig`, but does not itself create the feature.
 
 ## Hard-rule compliance notes
 
@@ -2721,3 +2804,501 @@ same "as-landed" style, numbered onward from 43.
       in this suite (`fix1`, `fix6`, and the full Postgres-gated `xep0198_cross_node_resume.rs`
       suite) pass unmodified against the split API, since `attempt_cross_node_resume`
       itself is kept as a thin `prepare` + `finish` wrapper for exactly this reason.
+56. **Occupant-roster durability deferred out of Slice 7's landed scope
+    (implementation-time scope cut, as-landed).** Element 7's prose names
+    "occupant roster (real JID, nick, occupant-id)" alongside config/
+    affiliations/subject as durable state the owning `RoomActor` persists.
+    The locked spec quote this plan pins Slice 7 against, and the Tests
+    paragraph, both name only configuration/affiliations/subject — never
+    occupant roster. As landed, only those three are made durable
+    (`clustering_muc_rooms`/`clustering_muc_room_affiliations`, see
+    deviation 63). Occupant-roster persistence's sole consumer is a
+    *different* node's occupants observing service-shutdown presence for
+    occupants that node never itself saw join (element 7's "each
+    occupant's local node synthesizes ... unavailable presence ... to
+    every local occupant" bullet, and element 11's cross-node presence
+    fan-out) — machinery this phase's Non-goals exclude (no cross-node
+    stanza routing GA). Landing occupant-roster schema now, with no reader
+    until that machinery exists, would be schema-only churn — the same
+    "columns now, consumer later" tradeoff deviation 35 already accepts
+    explicitly elsewhere in this plan, applied here as a deferral instead
+    since even the schema shape depends on decisions (per-session vs.
+    per-nick, how multi-resource occupancy is modeled durably) that
+    Non-goals-excluded machinery should make deliberately. Deferred to
+    whichever slice first wires cross-node presence fan-out.
+57. **Code-research correction (this slice's own finding, not a
+    misattribution of an existing comment): the production groupchat
+    fan-out call site is `waddle-server`'s `routes/interpret/
+    room_dispatch.rs::dispatch_to_room`, not `RoomActor::
+    BuildGroupchatBroadcast`.** The #229 PR18 sans-I/O room-handler-chain
+    refactor superseded `BuildGroupchatBroadcast` with a `GetRoomSnapshot`-
+    based flow: `dispatch_to_room` fetches one `RoomChainSnapshot` and
+    builds/archives/routes every outbound stanza in `waddle-server` itself;
+    `BuildGroupchatBroadcast` survives only as dead-to-production code
+    exercised by `room_actor/tests.rs`'s own unit tests (confirmed by
+    `room_dispatch.rs`'s own comments: "replacing the legacy
+    `RoomActor::BuildGroupchatBroadcast` check," "avoids a second
+    `RoomActor::GetRoomSnapshot` round-trip per groupchat archive write").
+    The fenced pre-fan-out backstop (element 7, deviation 58) is therefore
+    wired into `dispatch_to_room`, immediately after its `GetRoomSnapshot`
+    ask succeeds and before the occupancy gate/archive/route pipeline runs
+    — not into `RoomActor`'s message handlers, which would guard a path no
+    live traffic takes. **Retracted/superseded by the council-adjudicated
+    FIX 1 pass (see deviation 65 below): `dispatch_to_room`'s standalone
+    check is no longer the SOLE backstop — the MAM archive write itself is
+    now also independently fenced, closing the residual race window this
+    deviation's own text originally accepted as permanent.**
+58. **RETRACTED (council-adjudicated FIX 1) — corrected below in
+    deviation 65.** This entry originally claimed "the MAM archive insert
+    doubles as the backstop when archiving is on" was not implementable
+    within Slice 7's Files list, reasoning that MAM storage
+    (`waddle-xmpp`'s `mam::storage::sqlx_store::write::store_message`)
+    "has no access to `waddle-server`'s `Database`/`Transaction` types,"
+    and therefore "cannot be made to share a transaction with a
+    `waddle-server`-side fencing SELECT." That reasoning was correct about
+    the specific mechanism it considered (sharing `waddle-server`'s
+    `Database`/`Transaction` abstraction across the crate boundary) but
+    incomplete: it did not consider that `SqlxMamStorage` already holds
+    its OWN raw `sqlx::PgPool` (in `waddle-xmpp`, the same crate the
+    `waddle_xmpp::ownership` fencing types already live in) and can run
+    its own native `sqlx::Transaction` combining a `SELECT ... FOR SHARE`
+    against `clustering_claims` with its own `INSERT` — no
+    `waddle-server`-side type ever needs to cross the boundary. FIX 1 (a
+    follow-up council-adjudicated pass over this same slice) implements
+    exactly that; see deviation 65 for the landed design. Left in place
+    (rather than deleted) so the deviation numbering stays stable and so
+    readers can see the corrected reasoning next to the original mistaken
+    claim it replaces.
+59. **`LocallyClaimedEntities::owned()` widened from a sync `fn` to an
+    `async fn` (`self_fence.rs`).** Slice 5's `SmSessionLocalClaims::owned`
+    reads a plain in-memory map (`InMemorySmSessionRegistry::
+    live_session_ids`), which is why the trait method was sync. `RoomActor`
+    ownership is bookkept inside `RoomRegistryActor`'s own actor state —
+    reachable only through its mailbox (`RoomRegistry::list_rooms`, an
+    actor ask) — so `RoomLocalClaims::owned` cannot implement a sync `fn`
+    without either a second, actor-external cache (a new synchronization
+    surface this plan's actor-model conventions avoid) or blocking on the
+    ask (illegal inside a sync fn). Widening the trait method to `async fn`
+    keeps the "local bookkeeping only, never a Postgres read" contract
+    intact — the ask is still pure in-memory, just actor-mediated — and is
+    a small, mechanical ripple: three call sites in `run_node_lease`
+    (`self_fence.rs`) gained `.await`, and every existing implementor
+    (`SmSessionLocalClaims`, `NoLocallyClaimedEntities`, the module's own
+    `FakeLocalClaims` test double) was updated to match with no behavior
+    change.
+60. **`Entity`/`EntityType`/`ClaimEpoch` (`waddle-xmpp::ownership`) gained
+    `Serialize`/`Deserialize` derives.** None of the three needed to cross
+    a wire boundary before this slice. The Demote relay ask (element 7's
+    two-part demotion protocol, part (a); deviation 62) carries
+    `Entity`/`ClaimEpoch` as its typed payload, mirroring exactly how
+    `RelayResumeSteal` (Slice 6) already carries `SmSessionId`/`BareJid`
+    wire-typed rather than as bare strings — a derive-only addition, no
+    behavior change to any existing `ClaimStore`/`EntityType` call site.
+61. **RoomActor claim acquisition, and re-election from a dead owner via
+    `steal_stale(OwnerStale)`, land in `RoomRegistryActor`'s
+    `GetOrCreateRoom`/`CreateRoom`/`CreateInstantRoom` handlers — a new
+    `RoomRegistryError::ClaimHeldByAnotherNode` variant covers the live-
+    foreign-owner case.** `ClaimStore::ensure_claimed` runs before every
+    spawn; on `AlreadyClaimed`, `current_claim` decides whether the
+    existing owner's own node lease is stale — if so,
+    `steal_stale(OwnerStale)` re-elects this node as owner (the concrete
+    "re-election" the slice title promises for the dead-owner case); if the
+    owner is genuinely live, `GetOrCreateRoom` refuses with
+    `ClaimHeldByAnotherNode` rather than attempting any cross-node
+    proxy/routing — cross-node MUC message/join proxying is the ADR's own
+    text (element 7's first sentence) but is explicitly Phase 4 scope per
+    this phase's Non-goals (no cross-node stanza routing GA). `RoomEntry`
+    (a new private type wrapping `ActorRef<RoomActor>` plus the
+    `ClaimEpoch` it was spawned/re-claimed under) replaces the bare
+    `ActorRef` in `RoomRegistryActor.rooms` so `DestroyRoom` can release
+    the exact epoch-scoped claim it holds (element 7's "graceful release").
+    Steal-intent-based re-election (the wedged-but-not-dead-owner path) has
+    no production reporter call site this phase, for the same "no
+    cross-node proxy exists to report one" reason deviation 21 already
+    names for the general steal-intent mechanism — the harness scenario
+    (deviation 64) seeds the intent row directly, mirroring Slice 3's own
+    dedicated tests.
+62. **The Demote relay ask's receiving side required threading
+    `Arc<RoomLocalClaims>` through `swarm::spawn`/`relay::spawn_supervised`/
+    `RelayActor::new`, bundled into a new `swarm::RelayBridges` struct
+    alongside `resume_bridge` (clippy `too_many_arguments` on `bring_up`
+    otherwise).** `RelayActor` answers a received `Demote { entity,
+    new_epoch }` ask by calling `room_local_claims.demote(&entity)`
+    directly — the identical hard-kill discipline the reconciliation/
+    veto path already uses, not a second demotion mechanism. `RoomLocalClaims`
+    is constructed empty at `clustering::start_if_enabled` time (mirroring
+    `local_claims`/`resume_bridge`'s exact fill-in-later-cell pattern: the
+    MUC room registry does not exist yet at that point in startup) and
+    wired later in `server/mod.rs` once the registry is spawned, via
+    `RoomRegistry::wire_clustering_claims`'s sibling call
+    `room_local_claims.wire(room_registry.clone())`. The Demote ask itself
+    (`Demote`/`DemoteReply` in `clustering::relay`, plus `RelayHandle::
+    demote`) mirrors `RelayResumeSteal`'s exact shape and cancellation-safe
+    `RelayHandle` pattern (Slice 6) per the plan's own instruction; its
+    reply is a bare `DemoteReply::Acked` (no multi-outcome enum like
+    `RelayResumeStealReply`'s) since the recipient's local demote is
+    unconditional/idempotent/infallible by contract — there is nothing for
+    the asker to branch on, and the guaranteed correctness backstop is the
+    fenced pre-fan-out check (deviation 57/58), never this ask's outcome.
+63. **Confirmed reading: durable MUC room ownership is entirely
+    clustering-gated, mirroring Slice 4's `SmPersistenceStorage` dispatcher
+    — SQLite/single-node keeps today's purely in-memory `RoomActor`/
+    `MucRoom` behavior byte-for-byte.** `RoomRegistryActor` always routes
+    claim acquisition through `ClaimStore` (per Q1's "ordinary single-node
+    code needs *some* `ClaimStore` in every build" rationale already
+    established for other entity types) — defaulting to
+    `InProcessClaimStore` + `NodeIdentity::local()`, which never denies a
+    same-process `GetOrCreateRoom` and is exercised by every pre-existing
+    `room_registry_actor` test unmodified — but the **durable** Postgres
+    tables/restore/fenced-backstop/Demote-ask machinery is wired only when
+    `clustering::start_if_enabled` produces a live claim pair (clustering
+    enabled, Postgres, the `clustering` Cargo feature compiled in), exactly
+    the same three-way gate `sm_persistence::open_for_cluster_mode`
+    already uses. Schema (PROPOSED, no ADR-locked DDL exists — following
+    the `clustering_` prefix + ensure-schema-on-the-store convention Slice
+    1's `clustering_nodes`/`clustering_claims` already establish, since no
+    proposed shape was given for Slice 7 specifically): `clustering_muc_rooms
+    (room_jid PK, waddle_id, channel_id, config_json, subject_json,
+    updated_at)` and `clustering_muc_room_affiliations (room_jid,
+    member_jid, affiliation, reason, granted_at, PK(room_jid,
+    member_jid))` — `RoomConfig`/`SubjectState` (already `Serialize`/
+    `Deserialize`) JSON-encoded into `TEXT` columns; `Affiliation` (a
+    closed five-variant enum) stored via a small `affiliation_to_db_str`/
+    `affiliation_from_db_str` pair mirroring `EntityType::as_db_str`/
+    `from_db_str`'s exact convention rather than a JSON blob.
+64. **The deposed-owner-with-live-socket harness scenario's `RoomActor`
+    variant lands in this slice (`tests/clustering_cluster_e2e.rs::
+    deposed_owner_with_live_socket_room_actor_scenario`), per the binding
+    this plan's own text already commits to (deviation 34: "the `RoomActor`
+    variant of this same scenario is NOT carried [to Phase 4] — it already
+    lands in Slice 7").** "Genuinely wedged" is produced by wiring a
+    `MucDurableStore` fake whose `load_room_state` future never resolves:
+    since `RestoreDurableRoomState` is the first message the room registry
+    enqueues into a freshly spawned actor's FIFO mailbox (this slice's own
+    restore-before-join ordering mechanism), the actor's mailbox loop is
+    genuinely, durably stuck processing it — reusing this slice's own
+    mechanism as the wedge point rather than inventing a synthetic one.
+    "Genuinely claimed" is a real `PostgresClaimStore`-backed claim, not a
+    fake. The steal-intent row is seeded directly via
+    `NodeLeaseStore::report_steal_intent`, not through a production
+    reporter call site — none exists this phase (deviation 61's own note),
+    mirroring Slice 3's own dedicated tests' identical shortcut. The test
+    asserts the wedged `RoomActor` is hard-killed (`ActorRef::is_alive() ==
+    false`) within `RoomLocalClaims::health_check`'s own bounded ask window
+    (`ROOM_HEALTH_CHECK_TIMEOUT`, 5s) plus one heartbeat interval of
+    scheduling slack — not literally "one heartbeat interval" wall-clock,
+    since the veto scan's health-check-fails branch is dominated by that
+    per-ask timeout, not by how often the scan itself runs.
+
+### Council-adjudicated FIX 1–9 pass over the landed Slice 7 implementation
+
+The following deviations (65–73) record a second council-adjudicated review
+pass over Slice 7 as landed (deviations 56–64 above), fixing nine numbered
+findings (FIX 1–9) against the actual code, not a re-plan. Deviations 57/58
+above are corrected in place (see their own retraction text) rather than
+duplicated here.
+
+65. **FIX 1 (critical) — the MAM groupchat archive insert is now itself
+    fenced, closing deviation 58's residual race window.** New
+    `MamStorage::store_message_fenced(archive_jid, message, fence:
+    &RoomClaimFenceContext)` (default impl falls back to
+    `store_message`, byte-identical for the portable/in-memory/SQLite
+    backends and every non-clustering deployment). `SqlxMamStorage`
+    gains a `fencing_enabled: bool` field, set via a new
+    `with_cluster_fencing(bool)` builder (a no-op unless the backend is
+    Postgres); the co-location check itself (this storage's resolved
+    database URL must EXACT-string-match the clustering global database
+    URL) lives in `waddle-server`'s `create_websocket_mam_storage`
+    (`server/http.rs`) — not inside `SqlxMamStorage::open_for_cluster_mode`
+    as the pending_delivery/sm_persistence precedent would suggest —
+    because the redaction helper the mismatch error needs
+    (`crate::db::redact_database_url`) and the clustering global
+    database URL only exist on the `waddle-server` side of the crate
+    boundary; a mismatch fails startup with a new
+    `MamStorageError::ClusterColocationMismatch`, mirroring
+    `PendingStorageError`'s identical variant one table over.
+    `MamStorageError` also gains `NotOwner { entity: Entity }`.
+
+    The fencing SELECT and the archive `INSERT` now run inside ONE
+    `sqlx::Transaction` opened directly against `SqlxMamStorage`'s own
+    `PgPool` (`mam::storage::sqlx_store::write::store_message_fenced`) —
+    this is the correction to deviation 58's reasoning: no
+    `waddle-server`-side `Database`/`Transaction` type ever needs to
+    cross the crate boundary, because the fencing types
+    (`waddle_xmpp::ownership::{Entity, ClaimEpoch}`) already live in
+    `waddle-xmpp`, the same crate `SqlxMamStorage` lives in. The
+    origin-id dedup pre-check still runs against the plain pool exactly
+    as the unfenced path does (it only reads already-committed rows, so
+    it needs no transactional isolation from this write).
+
+    The typed `(Entity, ClaimEpoch, node_id)` fencing context is
+    threaded, not re-derived: a new
+    `MucDurableStore::current_claim_fence(room_jid) -> Option<RoomClaimFenceContext>`
+    method exposes the exact triple `check_fenced_fanout`/`assert_fenced`
+    already resolve from `PostgresMucRoomStore`'s `claim_epochs` cache.
+    `groupchat_archive.rs`'s `resolve_room_claim_fence` reads this at
+    both call sites that persist a groupchat archive write
+    (`archive_groupchat_event.rs` — the production `ArchiveGroupchat`
+    interpreter arm — and `room_system_message.rs`'s server-authored
+    system-message archive write), and threads it into
+    `store_message_fenced`.
+
+    On `NotOwner`, the message is neither archived nor fanned out: for
+    `room_system_message.rs` this is a single early return (its fan-out
+    loop is the only fan-out for that message); for the interpreter's
+    `ArchiveGroupchat` arm, `interpret_with_depth` gained an
+    `ownership_lost` flag that suppresses every remaining event in the
+    SAME dispatch batch — safe because the locked Q7 chain order always
+    runs the archive handler before the reflector fan-out handler, so
+    `ArchiveGroupchat` is always processed before any `RouteToConnection`
+    for the same message — and pushes the same
+    `<resource-constraint/>`-type=wait bounce `dispatch_to_room`'s own
+    pre-fan-out check uses (`resource_constraint_error`, ungated from
+    `#[cfg(feature = "clustering")]` since it now has a second,
+    unconditionally-compiled caller).
+
+    Tests: a Postgres-gated round-trip in `waddle-server::muc_durable`'s
+    test module (`mam_store_message_fenced_blocks_the_deposed_owners_next_archive_write`)
+    proves the current owner's fenced write succeeds, a steal is
+    observed by `current_claim_fence`, and the deposed owner's next
+    fenced write returns `NotOwner` with no row committed.
+66. **FIX 2 (critical) — every durable-relevant `RoomActor` mutation
+    handler now runs a two-stage gate: verify ownership BEFORE mutating,
+    surface a non-ownership persist failure typed AFTER mutating.**
+    `RoomActor::gate_mutation()` runs the same fenced
+    `check_fenced_fanout` pre-check `dispatch_to_room` uses; `Ok(true)`
+    (or no durable store configured) lets the mutation proceed
+    unchanged, `Ok(false)` returns `NotOwner` BEFORE any in-memory
+    mutation runs, and a transient fencing-check error fails OPEN (not
+    blocking), mirroring `dispatch_to_room`'s identical "only a
+    definitive 0-rows result demotes" rule. `persist_config`/
+    `persist_subject`/`persist_affiliation` now return
+    `Result<(), DurablePersistError>` instead of silently swallowing a
+    failure — this is the corrected fail-open contract documented on
+    `MucDurableStore` itself (see that trait's doc comment).
+
+    All nine listed handlers (`UpdateConfig`, `RollbackConfigIfRevision`,
+    `UpdateGroupDmConfigByMember`, `SetSubject`, `ChangeAffiliation`,
+    `ApplyAdminItems`, `ApplyAffiliationChange`,
+    `EnforceMembersOnlyAffiliations`, `ReconcileChannelBackedRoom`) call
+    `gate_mutation()` first and propagate `PersistFailed`/`NotOwner`
+    typed. Three already returned a per-message `Result<_, E>`
+    (`AdminApplyError` for `ApplyAdminItems`/`ApplyAffiliationChange`,
+    `UpdateGroupDmConfigByMemberError` for `UpdateGroupDmConfigByMember`)
+    and gained `NotOwner`/`PersistFailed` variants plus
+    `From<RoomMutationError>`/`From<DurablePersistError>` impls so the
+    handler bodies use plain `?`; the other six (previously bare
+    `u64`/`bool`/`()`/`Vec<(FullJid, Presence)>` replies) had their
+    `Reply` type wrapped in `Result<_, RoomMutationError>`. Two batch
+    handlers (`ApplyAdminItems`'s affiliation-set branch,
+    `EnforceMembersOnlyAffiliations`) do NOT abort mid-loop on a persist
+    failure (earlier items in the same batch have already mutated
+    `self.room`, so aborting would silently drop the presence
+    notifications describing already-applied kicks/bans) — they finish
+    the batch, then return the first failure typed; this means the
+    batch's presence-update payload is lost from the immediate reply in
+    that rare path (a narrow, accepted tradeoff of the existing
+    either/or `Result` reply shape, not something this fix redesigns
+    further).
+
+    Call-site coverage (council-adjudicated scope boundary, honestly
+    recorded): every actor-side handler is gated. On the `waddle-server`
+    call-site side, ONE representative site
+    (`admin/channels.rs::group_dm_rename_update_error`, the
+    `UpdateGroupDmConfigByMember` rename path) is fully wired end-to-end
+    — `NotOwner` triggers `ClusteringHandles::demote_room_actor` (new
+    method, below) and bounces with a `service-unavailable`/wait
+    condition. The remaining ~20 call sites (11 for `ChangeAffiliation`
+    across `admin/channels.rs`, `session_janitors.rs`,
+    `group_dm_invite.rs`, `muc_admin.rs`; the `UpdateConfig`/
+    `RollbackConfigIfRevision`/`SetSubject`/`EnforceMembersOnlyAffiliations`/
+    `ApplyAdminItems`/`ApplyAffiliationChange` sites) already route
+    through each file's generic `send_err`-style mapper, which correctly
+    surfaces `NotOwner`/`PersistFailed` as a typed `internal-server-error`
+    bounce (never silent success, never a panic) but does NOT additionally
+    call `demote_room_actor` at those sites. Wiring the demote call into
+    all ~20 remaining sites individually is flagged as follow-up
+    hardening, not landed in this pass — the correctness property this
+    fix's core mechanism guarantees (a mutation is never silently applied
+    or silently reported successful after ownership loss) holds at every
+    site regardless; only the "also hard-kill the stale actor from this
+    ask's own call site" hardening (as opposed to the actor eventually
+    being killed by its OWN health-check veto or a subsequent mutation
+    attempt) is incomplete.
+
+    Tests: seven new `room_actor::tests` cases (a `FakeDurableStore` test
+    double controlling `check_fenced_fanout`'s result) prove
+    `UpdateConfig`/`ChangeAffiliation`/`SetSubject` block on `NotOwner`
+    with no in-memory mutation, `UpdateConfig` applies normally when
+    owned, fails OPEN on a transient fencing error, and surfaces
+    `PersistFailed` typed while still applying in-memory (undoing it
+    would risk a worse inconsistency than leaving it applied-but-not-yet-
+    durable).
+67. **FIX 3 (high) — orphaned claim on actor panic/death, and the
+    corresponding health-check blind spot, are both closed.**
+    `RoomRegistryActor::live_room` is now `async` (was sync): its
+    dead-actor branch captures the entry's `ClaimEpoch` BEFORE
+    `self.rooms.remove`, then calls the same `release_room_claim`
+    `DestroyRoom`'s handler already uses — previously the dead-actor
+    branch removed the entry with NO release at all, permanently
+    orphaning the Postgres claim (the registry's own record of the epoch
+    needed to release it was gone the instant `rooms.remove` ran). The
+    six call sites (`GetRoom`, `GetOrCreateRoom`, `CreateInstantRoom`,
+    `CreateRoom`, `RoomExists`, `ListRooms`) gained `.await`.
+
+    `RoomLocalClaims::health_check` (`waddle-server::clustering::
+    local_claims`) now reports UNHEALTHY, never healthy, when
+    `registry.get_room` returns `Ok(None)` or `Err(_)` — previously both
+    were treated as "nothing to report unhealthy about" (`true`), which
+    meant a wedged/gone room's owner-veto entry could indefinitely block
+    another node's legitimate steal-intent for an entity this process can
+    no longer act on at all.
+
+    Tests: `room_registry_actor::tests::ownership_claims_tests::
+    dead_actor_detection_releases_the_orphaned_claim` (kill the actor,
+    trigger `live_room` via `GetRoom`, assert the claim store shows the
+    claim released AND that a different node identity can now acquire
+    it); three new `local_claims::tests` cases prove `health_check` is
+    unhealthy with no live actor, healthy for a live one, and that
+    `demote` hard-kills the actor (polled via `ActorRef::is_alive()`,
+    since `kill()`'s `abort_handle.abort()` takes effect at the task's
+    next yield point, not synchronously).
+68. **FIX 4 (high) — `RestoreDurableRoomState`'s genuine load failure now
+    fails closed: joins are refused until a retry succeeds, never served
+    against caller-supplied defaults.** New `RoomActor` field
+    `restore_state: DurableRestoreState` (`Ready` | `Pending`, private,
+    default `Ready`). `RestoreDurableRoomState`'s `Err` arm (a real
+    backend error, distinct from `Ok(None)`'s legitimate "brand new room"
+    case, which still proceeds as before) sets `Pending` instead of
+    logging-and-continuing with the caller-supplied initial config.
+    `JoinWithAffiliation` calls a new `ensure_restored_before_join()`
+    first: `Ready` is a no-op; `Pending` runs ONE bounded inline retry
+    against the same store — success applies the restored state and
+    flips back to `Ready`, letting THIS join proceed immediately; a
+    repeated failure returns a new `RoomActorError::RestorePending` and
+    leaves `Pending` for the next join attempt to retry again. New
+    disco/join-error mapping in `handlers/presence/muc.rs`: `RestorePending`
+    bounces `<error type='wait'><resource-constraint/></error>`,
+    matching FIX 6's shape.
+
+    Test: `room_actor::tests::
+    join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_with_no_ban_lost`
+    — a `FlakyThenRecoveringStore` fails the initial load and the first
+    retry, then succeeds on the second retry with a durable state
+    carrying one `Outcast` (ban) affiliation entry; asserts the first two
+    join attempts are refused, the THIRD `load_room_state` call (the one
+    that recovers) is the same join attempt that both admits normal
+    senders and correctly enforces the restored ban — proving no
+    ban-list loss across the two earlier failures, not merely "no
+    longer wedged."
+69. **FIX 5 (high) — `bootstrap_fresh_xmpp_topology`'s room-creation loop
+    no longer aborts the entire seed (and, via its own caller's `?`, the
+    `seed_spaces_admin_affiliations` step too) on the first
+    already-claimed-elsewhere room.** `seed_initial_xmpp_topology`'s
+    `GetOrCreateRoom` loop (`server/topology.rs`) now matches
+    `RoomRegistryError::ClaimHeldByAnotherNode` specifically and
+    `continue`s (logs at `info!`, treats it as "owned elsewhere, normal
+    steady state" — exactly the condition every node after the first to
+    seed topology hits for every already-seeded room) instead of
+    propagating it via `?`; every other error still fails startup as
+    before. The bookmarks-backfill loop later in the same function, and
+    `seed_spaces_admin_affiliations` in the caller
+    (`bootstrap_fresh_xmpp_topology`), both still run regardless.
+
+    Test:
+    `topology::tests::bootstrap_completes_the_rest_of_the_seed_when_one_room_is_claimed_elsewhere`
+    pre-claims the "chat" managed channel's room under a foreign
+    `NodeIdentity` (via a directly-wired `InProcessClaimStore`, no
+    Postgres needed) before calling `bootstrap_fresh_xmpp_topology`,
+    then asserts it returns `Ok(())`, a DIFFERENT channel's room
+    ("github-actions") was still created, and the claimed-elsewhere
+    room's claim is untouched (still the foreign node's).
+70. **FIX 6 (high) — the MUC join path no longer silently drops joins
+    with no presence reply at all.** `get_or_create_room_actor`
+    (`server/routes/websocket/cleanup.rs`) now returns
+    `Result<ActorRef<RoomActor>, RoomRegistryError>` instead of
+    collapsing every failure (including `ClaimHeldByAnotherNode`) into
+    `None` — every existing call site (all but one are test call sites
+    using `.expect(...)`, which resolves identically against both
+    `Option::expect`/`Result::expect`) needed no changes. The production
+    join path (`handlers/presence/muc.rs::handle_muc_join_unlocked`)
+    replaces its previous `let Some(actor) = ... else { return vec![] }`
+    (a silent drop) with a match: `ClaimHeldByAnotherNode` bounces
+    `<error type='wait'><resource-constraint/></error>` (this phase does
+    not wire cross-node MUC proxying — Phase 4 — so this is the
+    conformant, retry-able response); any other registry error bounces
+    `<internal-server-error/>` typed rather than silently dropping. The
+    join-error match's own previous catch-all (`warn!(...); return
+    vec![]`) is likewise replaced with a typed `<internal-server-error/>`
+    bounce — no remaining `RoomActorError`/`SendError` variant may
+    silently drop a join, matching this fix's "no silent join drops"
+    intent broadly, not just for the two originally-named cases.
+    Test: the bounce logic is code-verified; the presence-error WIRE
+    shape (`type='wait'` + `<resource-constraint/>`) is asserted over
+    real processes in Slice 11's harness capstone (a foreign-owned-room
+    join against a two-node cluster), where it proves strictly more than
+    a doubles-based unit test could — carried there deliberately, not
+    dropped.
+71. **FIX 7 (medium) — backstop coverage traced, not additionally coded:
+    every named fan-out site is already gated by FIX 2's mutation
+    gating, with no independent fan-out found.** Kick/ban role-change
+    presence (`admin/channels.rs`'s `run_kick`/
+    `sync_private_kick_affiliation_revocation`/the admin-V2
+    set-affiliation path, at the plan's named `~3607/3637/3822` sites)
+    all read their presence-update payload (`applied.presence_updates`)
+    from the `Ok(applied)` arm of an `ApplyAdminItems`/
+    `ApplyAffiliationChange` ask — every `Err` path (including the new
+    `NotOwner`) returns/propagates before that binding exists, so the
+    fan-out cannot fire when the gated mutation was refused. The
+    members-only-eviction presence loop
+    (`handlers/iq/muc_owner_config.rs` `~262`) reads its `updates` from
+    either `EnforceMembersOnlyAffiliations` (gated) or `EnforceMembersOnly`
+    (NOT in FIX 2's nine-handler list — it only evicts occupants based on
+    already-in-memory affiliations and never itself writes durable state,
+    so it was correctly out of scope) via `?`, so the loop is
+    unreachable on either ask's failure. No additional fenced-check
+    helper was needed at any of the three named sites. Deviation 57's
+    "sole backstop, unconditionally" wording is amended (in place, see
+    that deviation's own retraction text) to reflect that the MAM write
+    itself is now also fenced (deviation 65) — `dispatch_to_room`'s
+    standalone check remains a real, still-necessary backstop (it blocks
+    the ENTIRE fan-out pipeline, not just the archive write), but it is
+    no longer accurately described as the sole one.
+72. **FIX 8 (medium) — `PostgresMucRoomStore::open` failing at
+    `clustering::start_if_enabled` time is now FATAL to clustering
+    startup, not logged-and-continue.** New
+    `ClusteringError::MucDurableStoreInit(XmppError)` variant;
+    `start_if_enabled`'s durable-store construction changed from
+    `match ... { Ok(store) => Some(Arc::new(store)), Err(error) => {
+    warn!(...); None } }` to `.map_err(ClusteringError::MucDurableStoreInit)?`.
+    Rationale: claims live without this store means a `RoomActor`
+    ownership move silently resets config/affiliations/subject to
+    defaults on the next steal — an unprotected deposal, not a
+    degraded-but-safe fallback — mirroring the co-location discipline
+    `sm_persistence`/`pending_delivery`'s own `open_for_cluster_mode`
+    already enforce at startup for their own durability stores. No
+    dedicated test added (triggering a genuine `ensure_schema` failure
+    against a live, correctly-permissioned throwaway Postgres is not
+    practical without a deliberately broken/read-only role fixture);
+    the type-level `?` propagation is the same level of verification
+    the sibling `ClusteringError::NodeLease` fatal-startup path already
+    relies on (also untested at this granularity).
+73. **FIX 9 (medium) — `Entity::id` gained the same hand-written,
+    length-bounded `Deserialize` `SmSessionId` already has.** New
+    `ownership::ENTITY_ID_MAX_LEN = 128` (mirroring
+    `SM_SESSION_ID_MAX_LEN`'s identical rationale: the MUC Demote relay
+    ask's `Entity` payload is not a stanza, so it never passes through
+    the bounded XML stanza codec) and `EntityIdTooLong` error type.
+    `Entity`'s derived `Deserialize` is replaced with a hand-written impl
+    that deserializes through a private `RawEntity` shadow struct (to
+    reuse the derived `EntityType` deserialization) and rejects an
+    over-length `id` with `EntityIdTooLong`; `Entity::new` itself stays
+    unvalidated, matching `SmSessionId::new`'s identical "the wire
+    boundary is where an untrusted length actually arrives" rationale.
+    Three boundary tests mirror `SmSessionId`'s exactly (accepts exactly
+    at the cap, rejects one byte over, rejects a malicious multi-KB
+    value). This makes deviation 60's "`Entity`... gained
+    `Serialize`/`Deserialize`... mirroring exactly how `RelayResumeSteal`
+    already carries `SmSessionId`/`BareJid` wire-typed" parity claim
+    actually true — previously `Entity::id` had no bound at all, unlike
+    the `SmSessionId` it was compared to.

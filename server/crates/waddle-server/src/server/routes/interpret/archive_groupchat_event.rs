@@ -1,19 +1,31 @@
 use super::*;
 
+/// Outcome of the [`OutboundEvent::ArchiveGroupchat`] interpreter arm
+/// (ADR-0017 Phase 3 Slice 7 FIX 1, council-adjudicated). `OwnershipLost`
+/// carries the pre-built bounce reply the caller pushes to `outcome.frames`
+/// AND uses as the signal to suppress every remaining event in this same
+/// dispatch batch (the archive handler always runs before the reflector
+/// fan-out handler in the locked Q7 chain order, so this is reached before
+/// any `RouteToConnection` fan-out for the same message).
+pub(super) enum ArchiveGroupchatEventOutcome {
+    Rewrite(Option<ArchiveIdRewrite>),
+    OwnershipLost(Box<Message>),
+}
+
 pub(super) async fn archive_groupchat_event(
     deps: &Deps<'_>,
     room: BareJid,
     sender: FullJid,
     message: Box<Message>,
     sender_nickname_generation: u64,
-) -> Option<ArchiveIdRewrite> {
+) -> ArchiveGroupchatEventOutcome {
     let Some(mam_storage) = deps.mam_storage else {
         debug!(
             room = %room,
             sender = %sender,
             "ArchiveGroupchat: no mam_storage in Deps; skipping (test fixture?)"
         );
-        return None;
+        return ArchiveGroupchatEventOutcome::Rewrite(None);
     };
     // Per XEP-0313 §5.1.3 the eligibility check ran inside
     // `MucArchiveHandler` before this event was emitted —
@@ -25,13 +37,34 @@ pub(super) async fn archive_groupchat_event(
     // we don't pay a second `RoomActor::GetRoomSnapshot`
     // round-trip per archive write (Copilot review on
     // PR #279).
-    let archive_id =
-        match archive_groupchat_message(mam_storage, &room, &message, sender_nickname_generation)
-            .await
-        {
-            Some(id) => id,
-            None => return None,
-        };
+    //
+    // ADR-0017 Phase 3 Slice 7 FIX 1: resolve the SAME typed fencing
+    // context `dispatch_to_room`'s own pre-fan-out check reads, so the
+    // fenced archive write below agrees with it by construction.
+    let fence = resolve_room_claim_fence(deps, &room);
+    let archive_id = match archive_groupchat_message(
+        mam_storage,
+        &room,
+        &message,
+        sender_nickname_generation,
+        fence.as_ref(),
+    )
+    .await
+    {
+        ArchiveGroupchatOutcome::Stored(result) => result,
+        ArchiveGroupchatOutcome::Skipped => return ArchiveGroupchatEventOutcome::Rewrite(None),
+        ArchiveGroupchatOutcome::OwnershipLost => {
+            let bounce = build_message_error_reply(
+                &message,
+                &room,
+                &sender,
+                resource_constraint_error(
+                    "This room's ownership recently moved to another node; please retry.",
+                ),
+            );
+            return ArchiveGroupchatEventOutcome::OwnershipLost(Box::new(bounce));
+        }
+    };
     debug!(
         room = %room,
         archive_id = %archive_id.stored_id,
@@ -51,7 +84,7 @@ pub(super) async fn archive_groupchat_event(
         &message,
     )
     .await;
-    archive_id.rewrite
+    ArchiveGroupchatEventOutcome::Rewrite(archive_id.rewrite)
 }
 
 async fn update_groupchat_link_preview_refs(

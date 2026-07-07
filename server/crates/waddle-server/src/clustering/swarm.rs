@@ -108,7 +108,7 @@ pub async fn spawn(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: CancellationToken,
-    resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
+    relay_bridges: RelayBridges,
 ) -> Result<SwarmHandle, SwarmError> {
     // Parse and validate the listen multiaddrs first, before building any
     // transport or touching the process-global `ActorSwarm` — fail fast on bad
@@ -147,7 +147,7 @@ pub async fn spawn(
         keypair,
         listen_addrs,
         &stop_token,
-        resume_bridge,
+        relay_bridges,
     )
     .await
     {
@@ -174,6 +174,20 @@ pub async fn spawn(
     }
 }
 
+/// Per-node relay bridges bundled into one bring-up parameter (clippy
+/// `too_many_arguments`): the cross-node XEP-0198 resume live-steal
+/// handshake bridge (ADR-0017 Phase 3 Slice 6) and the MUC Demote ask's
+/// local-claims bridge (Slice 7). Both are constructed empty at
+/// `start_if_enabled` time — their respective registries don't exist yet
+/// at that point in startup — and wired later once those registries are
+/// built; see each field's own doc comment upstream
+/// (`ClusteringHandles::resume_bridge`/`room_local_claims`) for the full
+/// construction-order rationale.
+pub struct RelayBridges {
+    pub resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
+    pub room_local_claims: Arc<super::local_claims::RoomLocalClaims>,
+}
+
 /// The fallible remainder of swarm bring-up after the keypair-slot lease:
 /// allowlist load, transport/behaviour build, global `ActorSwarm` install,
 /// listeners, event loop, supervised relay, and the node-id file. Split out
@@ -185,8 +199,12 @@ async fn bring_up(
     keypair: Keypair,
     listen_addrs: Vec<Multiaddr>,
     stop_token: &CancellationToken,
-    resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
+    relay_bridges: RelayBridges,
 ) -> Result<SwarmHandle, SwarmError> {
+    let RelayBridges {
+        resume_bridge,
+        room_local_claims,
+    } = relay_bridges;
     let local_peer_id = keypair.public().to_peer_id();
 
     // Peer authorization (ADR element 3): load the enrolled peer set before
@@ -290,6 +308,7 @@ async fn bring_up(
         config.fault_injection,
         stop_token.clone(),
         resume_bridge,
+        room_local_claims,
     );
 
     let handle = SwarmHandle {
@@ -944,7 +963,10 @@ mod tests {
             &config,
             &db,
             stop.clone(),
-            crate::clustering::resume_bridge::ResumeStealBridge::new(),
+            RelayBridges {
+                resume_bridge: crate::clustering::resume_bridge::ResumeStealBridge::new(),
+                room_local_claims: crate::clustering::local_claims::RoomLocalClaims::new(),
+            },
         )
         .await
         .expect("swarm brings up cleanly");
@@ -1014,7 +1036,10 @@ mod tests {
             &config,
             &db,
             CancellationToken::new(),
-            crate::clustering::resume_bridge::ResumeStealBridge::new(),
+            RelayBridges {
+                resume_bridge: crate::clustering::resume_bridge::ResumeStealBridge::new(),
+                room_local_claims: crate::clustering::local_claims::RoomLocalClaims::new(),
+            },
         )
         .await
         .expect_err("invalid addr rejected");

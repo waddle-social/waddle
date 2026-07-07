@@ -574,7 +574,12 @@ async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     // the SAME router/app instance, not just the not-ready direction.
     let readiness_handle = state.clustering_readiness.clone();
     let server_config = ServerConfig::test_homeserver();
-    let mam_storage = http::create_websocket_mam_storage(None).await.unwrap();
+    let test_global_db = crate::db::Database::in_memory("test-mam-global")
+        .await
+        .expect("test global db");
+    let mam_storage = http::create_websocket_mam_storage(None, false, false, &test_global_db)
+        .await
+        .unwrap();
     let pubsub_database_storage = Arc::new(
         crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
             .await
@@ -819,7 +824,12 @@ async fn test_seed_fixed_test_account_replaces_existing_credentials() {
 async fn test_app() -> Router {
     let state = create_test_state().await;
     let server_config = ServerConfig::test_homeserver();
-    let mam_storage = http::create_websocket_mam_storage(None).await.unwrap();
+    let test_global_db = crate::db::Database::in_memory("test-mam-global")
+        .await
+        .expect("test global db");
+    let mam_storage = http::create_websocket_mam_storage(None, false, false, &test_global_db)
+        .await
+        .unwrap();
     let pubsub_database_storage = Arc::new(
         crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
             .await

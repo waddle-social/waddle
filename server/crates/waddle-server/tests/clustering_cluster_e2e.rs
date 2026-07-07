@@ -375,7 +375,10 @@ async fn cluster_exit_criteria_end_to_end() {
         &config,
         &db,
         stop.clone(),
-        waddle_server::clustering::resume_bridge::ResumeStealBridge::new(),
+        swarm::RelayBridges {
+            resume_bridge: waddle_server::clustering::resume_bridge::ResumeStealBridge::new(),
+            room_local_claims: waddle_server::clustering::local_claims::RoomLocalClaims::new(),
+        },
     )
     .await
     .expect("test-process swarm joins the mesh");
@@ -919,6 +922,231 @@ async fn cross_node_resume_live_steal_handshake() {
 
     drop(server_a);
     drop(server_b);
+}
+
+/// ADR-0017 Phase 3 Slice 7 (deviation 21/34, council-adjudicated): the
+/// deposed-owner-with-live-socket harness scenario's `RoomActor` variant —
+/// bound to this slice per the phase plan's own text ("the `RoomActor`
+/// variant of this same scenario is NOT carried [to Phase 4] — it already
+/// lands in Slice 7"). The `UserActor` variant remains deferred to
+/// whichever Phase 4 slice first wires `UserActor` Postgres claims
+/// (deviation 34) — no production `UserActor` claim-acquisition call site
+/// exists in this phase.
+///
+/// Scenario: a genuinely wedged, genuinely-claimed `RoomActor` (this node
+/// really holds its Postgres claim via `PostgresClaimStore`), contested via
+/// the steal-intent veto path (Slice 3, element 4's "Unwedge" text) —
+/// proving the veto scan's health-check-fails branch reaches a real
+/// `RoomActor` through `RoomLocalClaims`, not just `self_fence.rs`'s own
+/// `FakeLocalClaims` unit tests. "Genuinely wedged" is produced by wiring
+/// a `MucDurableStore` whose `load_room_state` future never resolves: the
+/// room registry enqueues `RestoreDurableRoomState` as the very first
+/// message in the freshly spawned actor's FIFO mailbox (element 7's
+/// restore-before-join ordering), so the actor's mailbox loop is
+/// genuinely, durably stuck processing it — exactly the "wedged, not
+/// merely slow" precondition the veto scan's health-check-fails branch
+/// requires, reusing this slice's own restore mechanism as the wedge
+/// point rather than a synthetic one.
+///
+/// No cross-node proxy/production steal-intent reporter exists this phase
+/// (Slice 3's `report_steal_intent` has no production caller until a
+/// future slice wires cross-node MUC routing), so — mirroring Slice 3's
+/// own dedicated tests — this harness seeds the steal-intent row directly
+/// via `NodeLeaseStore::report_steal_intent` rather than faking a
+/// production reporter call site that does not exist yet.
+///
+/// Runs the REAL `self_fence::run_node_lease` loop (not a reimplementation)
+/// against real Postgres, with a short heartbeat interval, and asserts the
+/// wedged `RoomActor` is hard-killed within one heartbeat interval of the
+/// intent being seeded — "reconciliation conflict-closes within one
+/// heartbeat interval," the exact bound element 4's veto-scan text
+/// promises.
+#[tokio::test]
+async fn deposed_owner_with_live_socket_room_actor_scenario() {
+    use std::future::pending;
+    use std::pin::Pin;
+    use waddle_server::clustering::claims::NodeLeaseStore as _;
+    use waddle_server::clustering::local_claims::RoomLocalClaims;
+    use waddle_server::clustering::self_fence::{
+        self, ConnectedPeerCount, LocallyClaimedEntities, NodeLeaseRunConfig,
+    };
+    use waddle_server::clustering::ClusteringReadiness;
+    use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
+    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::room_actor::HealthCheck;
+    use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
+        return;
+    };
+    let _guard = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&url).await;
+    reset_node_lease_tables(&db).await;
+    db.guard()
+        .await
+        .expect("guard")
+        .execute("DELETE FROM clustering_steal_intents", ())
+        .await
+        .expect("clean steal intents");
+
+    // A `MucDurableStore` whose `load_room_state` never resolves — the
+    // wedge point, per this test's own doc comment.
+    struct HangingDurableStore;
+    impl MucDurableStore for HangingDurableStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            Box::pin(pending()) as Pin<Box<_>>
+        }
+
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a RoomConfig,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let identity = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let node_lease_store = PostgresClaimStore::new(db.clone());
+    node_lease_store
+        .register(&identity, None)
+        .await
+        .expect("register node lease");
+    let claim_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(PostgresClaimStore::new(db.clone()));
+
+    let occupant_id_secret =
+        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+            .expect("valid test occupant-id secret");
+    let room_registry =
+        RoomRegistry::spawn("muc.example.com".to_string(), occupant_id_secret, None);
+    room_registry
+        .wire_clustering_claims(
+            std::sync::Arc::clone(&claim_store),
+            SharedNodeIdentity::new(identity.clone()),
+            Some(std::sync::Arc::new(HangingDurableStore)),
+        )
+        .await;
+
+    let room_local_claims = RoomLocalClaims::new();
+    room_local_claims.wire(room_registry.clone());
+
+    let room_jid: jid::BareJid = format!("wedged-{}@muc.example.com", uuid::Uuid::new_v4())
+        .parse()
+        .expect("valid room JID");
+    let actor_ref = room_registry
+        .get_or_create_room(
+            room_jid.clone(),
+            "w-1".to_string(),
+            "c-1".to_string(),
+            RoomConfig::default(),
+        )
+        .await
+        .expect("get_or_create_room genuinely claims and spawns the room");
+
+    // Confirm genuinely wedged before proceeding: a bounded health-ask
+    // must fail to complete (the actor's mailbox loop is stuck processing
+    // `RestoreDurableRoomState`, ahead of `HealthCheck` in its FIFO
+    // mailbox).
+    let health = actor_ref
+        .ask(HealthCheck)
+        .mailbox_timeout(Duration::from_millis(300))
+        .reply_timeout(Duration::from_millis(300))
+        .await;
+    assert!(
+        health.is_err(),
+        "the room actor must be genuinely wedged for this scenario to be meaningful"
+    );
+
+    // Seed the steal-intent (Slice 3's veto path) from a distinct
+    // "reporter" identity — mirroring Slice 3's own dedicated tests, since
+    // no production reporter call site exists for RoomActor claims yet.
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    let reporter = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    node_lease_store
+        .report_steal_intent(&entity, &reporter)
+        .await
+        .expect("report steal intent");
+
+    // Drive the REAL node-lease loop with a short heartbeat interval so
+    // the veto scan's next tick is imminent.
+    let heartbeat_interval = Duration::from_millis(200);
+    let stop_token = CancellationToken::new();
+    let local_claims: std::sync::Arc<dyn LocallyClaimedEntities> = room_local_claims;
+    let live_identity = SharedNodeIdentity::new(identity.clone());
+    tokio::spawn(self_fence::run_node_lease(
+        node_lease_store,
+        identity,
+        stop_token.clone(),
+        NodeLeaseRunConfig {
+            pod_template_hash: None,
+            lease_config: ClusteringNodeLeaseConfig {
+                heartbeat_interval,
+                lease_ttl: Duration::from_secs(30),
+            },
+            self_fence_config: ClusteringSelfFenceConfig::default(),
+            connected_peers: ConnectedPeerCount::new(),
+            local_claims,
+            readiness: ClusteringReadiness::new(),
+            live_identity,
+            claim_store,
+        },
+    ));
+
+    // The veto scan's next tick must observe the health-check failure and
+    // proactively demote (hard-kill) the wedged room actor —
+    // "reconciliation conflict-closes within one heartbeat interval" once
+    // the health-ask itself resolves. `RoomLocalClaims::health_check`'s own
+    // bounded ask (`ROOM_HEALTH_CHECK_TIMEOUT`, 5s in production) is the
+    // dominant term, not the heartbeat interval itself (which only governs
+    // how promptly the scan *starts*) — the deadline below accounts for
+    // that bound plus one heartbeat interval of scheduling slack.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8) + heartbeat_interval;
+    loop {
+        if !actor_ref.is_alive() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the wedged, genuinely-claimed RoomActor was never hard-killed by the \
+             veto scan within the expected window"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    stop_token.cancel();
 }
 
 /// DEFERRED (Phase 3): a single dead link between two of three nodes degrades

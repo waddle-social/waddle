@@ -105,8 +105,12 @@ impl ConnectedPeerCount {
 #[async_trait]
 pub trait LocallyClaimedEntities: Send + Sync {
     /// Every entity this process currently believes it owns, from local
-    /// bookkeeping only — never a Postgres read.
-    fn owned(&self) -> Vec<Entity>;
+    /// bookkeeping only — never a Postgres read. `async` (ADR-0017 Phase 3
+    /// Slice 7 widening) because an actor-backed implementor (`RoomActor`'s
+    /// registry) can only be queried through its own mailbox — the
+    /// enumeration itself is still pure in-memory bookkeeping, never a
+    /// Postgres round-trip.
+    async fn owned(&self) -> Vec<Entity>;
 
     /// Demote local state for an entity Postgres no longer attributes to
     /// this node (claim stolen, or this node's own claim row is gone).
@@ -184,7 +188,7 @@ pub struct NoLocallyClaimedEntities;
 
 #[async_trait]
 impl LocallyClaimedEntities for NoLocallyClaimedEntities {
-    fn owned(&self) -> Vec<Entity> {
+    async fn owned(&self) -> Vec<Entity> {
         Vec::new()
     }
 
@@ -667,7 +671,7 @@ pub async fn run_node_lease<L>(
                 break;
             }
 
-            let owned = local_claims.owned();
+            let owned = local_claims.owned().await;
             let reconcile_future = std::pin::pin!(lease.reconcile(&identity, &owned));
             let reconcile_result = tokio::select! {
                 biased;
@@ -831,7 +835,7 @@ pub async fn run_node_lease<L>(
 
         // Self-fenced (either trigger): stop serving before the lease
         // becomes stealable, then flip client-facing readiness.
-        for entity in local_claims.owned() {
+        for entity in local_claims.owned().await {
             local_claims.demote(&entity).await;
         }
         readiness.set_ready(false);
@@ -899,7 +903,7 @@ pub async fn run_node_lease<L>(
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
-                        for entity in local_claims.owned() {
+                        for entity in local_claims.owned().await {
                             local_claims.demote(&entity).await;
                         }
 
@@ -1755,7 +1759,7 @@ mod tests {
 
     #[async_trait]
     impl LocallyClaimedEntities for FakeLocalClaims {
-        fn owned(&self) -> Vec<Entity> {
+        async fn owned(&self) -> Vec<Entity> {
             self.owned.clone()
         }
 

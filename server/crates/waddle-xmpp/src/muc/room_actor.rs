@@ -146,6 +146,96 @@ pub enum AdminApplyError {
     CannotModifyPrivilegedRole,
     #[error("{0}")]
     PermissionDenied(String),
+    /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
+    /// pre-mutation fencing gate ([`RoomActor::gate_mutation`]) observed
+    /// that this node no longer holds the room's ownership claim. The
+    /// mutation this ask requested was NEVER APPLIED. The caller MUST
+    /// trigger `RoomLocalClaims::demote` for this room so the deposed
+    /// actor stops serving, and surface a conformant, recoverable error
+    /// to the requester (mirroring `dispatch_to_room`'s
+    /// `<resource-constraint/>` bounce).
+    #[error("this room's ownership has moved to another node")]
+    NotOwner,
+    /// FIX 2: the fenced gate passed (or was skipped, single-node), the
+    /// in-memory mutation was applied, but the best-effort durable
+    /// persist afterwards failed for a reason OTHER than ownership loss
+    /// (a transient backend outage). Previously silently logged and
+    /// swallowed; FIX 2 revises that contract for affiliation-mutating
+    /// operations — the caller is told the durable side did not
+    /// converge rather than reporting bare success.
+    #[error("durable persist failed after the in-memory mutation committed: {0}")]
+    PersistFailed(String),
+}
+
+impl From<RoomMutationError> for AdminApplyError {
+    fn from(error: RoomMutationError) -> Self {
+        match error {
+            RoomMutationError::NotOwner => AdminApplyError::NotOwner,
+            RoomMutationError::PersistFailed(detail) => AdminApplyError::PersistFailed(detail),
+        }
+    }
+}
+
+impl From<DurablePersistError> for AdminApplyError {
+    fn from(error: DurablePersistError) -> Self {
+        match error {
+            DurablePersistError::Failed(detail) => AdminApplyError::PersistFailed(detail),
+        }
+    }
+}
+
+/// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): typed outcome of
+/// the two-stage durability gate every durable-relevant `RoomActor`
+/// mutation handler (`UpdateConfig`, `RollbackConfigIfRevision`,
+/// `UpdateGroupDmConfigByMember`, `SetSubject`, `ChangeAffiliation`,
+/// `ApplyAdminItems`, `ApplyAffiliationChange`,
+/// `EnforceMembersOnlyAffiliations`, `ReconcileChannelBackedRoom`) now
+/// runs:
+///
+/// 1. **Before mutating**: [`RoomActor::gate_mutation`] runs the SAME
+///    fenced `check_fenced_fanout` pre-check
+///    `dispatch_to_room`'s pre-fan-out backstop uses one layer up.
+///    `NotOwner` here means the in-memory mutation NEVER RAN — the
+///    caller must not report success, must trigger
+///    `RoomLocalClaims::demote`, and must surface a conformant,
+///    recoverable error to whatever requested the mutation.
+/// 2. **After mutating**: the best-effort `persist_*` write can still
+///    fail for a reason OTHER than ownership loss (a transient DB
+///    outage). This was previously silently logged and swallowed
+///    (`muc/durable.rs`'s old fail-open doc contract, corrected by this
+///    fix). `PersistFailed` surfaces that failure typed instead — the
+///    in-memory mutation has already committed by this point (undoing
+///    it risks a worse inconsistency than leaving it applied-but-
+///    not-yet-durable), but the caller now knows the durable side did
+///    not converge and can retry or surface a typed error rather than
+///    reporting bare success.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum RoomMutationError {
+    #[error("this room's ownership has moved to another node")]
+    NotOwner,
+    #[error("durable persist failed after the in-memory mutation committed: {0}")]
+    PersistFailed(String),
+}
+
+/// FIX 2: typed outcome of a best-effort durable `save_*` call inside
+/// [`RoomActor::persist_config`]/[`RoomActor::persist_subject`]/
+/// [`RoomActor::persist_affiliation`]. Wraps the underlying
+/// [`crate::XmppError`]'s rendered detail — the backend/fencing failure
+/// text is opaque past this boundary, mirroring every other typed error
+/// in this codebase that carries an opaque backend detail string inside a
+/// named variant (`PendingStorageError::Other`, `MamStorageError::Database`).
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum DurablePersistError {
+    #[error("durable persist failed: {0}")]
+    Failed(String),
+}
+
+impl From<DurablePersistError> for RoomMutationError {
+    fn from(error: DurablePersistError) -> Self {
+        match error {
+            DurablePersistError::Failed(detail) => RoomMutationError::PersistFailed(detail),
+        }
+    }
 }
 
 impl OccupantInfo {
@@ -191,6 +281,36 @@ pub struct RoomActor {
     /// bare actor; pre-hydration mutations fall back to the plain
     /// prune, which is the fail-closed direction).
     membership_source: Option<std::sync::Arc<dyn super::affiliation::DurableMembershipSource>>,
+    /// Durable ownership state store (ADR-0017 Phase 3 Slice 7), received
+    /// in [`RestoreDurableRoomState`] — the first message the room
+    /// registry enqueues after spawning/re-claiming this actor when a
+    /// store is configured. `None` in single-node/non-clustering
+    /// deployments, matching today's purely in-memory behavior exactly.
+    /// Every config/subject/affiliation-mutating handler best-effort
+    /// persists through this handle when it is `Some`.
+    durable_store: Option<std::sync::Arc<dyn super::durable::MucDurableStore>>,
+    /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): whether this
+    /// actor incarnation's durable restore genuinely completed. See
+    /// [`DurableRestoreState`]'s own doc comment.
+    restore_state: DurableRestoreState,
+}
+
+/// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): fail-closed
+/// tracking for [`RestoreDurableRoomState`]. `Ready` (the default) means
+/// either no durable store is configured (single-node/non-clustering —
+/// today's behavior, unchanged) or the restore genuinely completed
+/// (`Ok(Some(_))` applied, or `Ok(None)` — a legitimately brand-new room
+/// with nothing to restore). `Pending` means the initial load hit a
+/// genuine backend error: joins are refused (a typed, recoverable bounce)
+/// until [`RoomActor::ensure_restored_before_join`]'s bounded inline retry
+/// succeeds — never silently served with the caller-supplied defaults,
+/// which would look exactly like a legitimate empty new room while
+/// actually discarding every ban/member/owner grant on record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DurableRestoreState {
+    #[default]
+    Ready,
+    Pending,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -220,6 +340,18 @@ pub enum RoomActorError {
     /// repo-wide `<internal-server-error/>` emission sites.
     #[error("groupchat broadcast preparation failed: {0}")]
     BroadcastFailed(String),
+    /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): the initial
+    /// [`RestoreDurableRoomState`] load failed (a genuine backend error,
+    /// NOT the `Ok(None)` "brand new room" case) and a retry — run inline
+    /// on this very join attempt — failed again. Joins are refused until a
+    /// later attempt's retry succeeds, rather than risk serving with
+    /// defaulted config/affiliations/subject and silently losing every
+    /// ban/member/owner grant actually on record. Maps to a conformant,
+    /// recoverable `<error type='wait'><resource-constraint/></error>`
+    /// (the caller's join path), mirroring `dispatch_to_room`'s identical
+    /// ownership-gap bounce.
+    #[error("durable room-state restore has not yet completed; retry")]
+    RestorePending,
 }
 
 impl RoomActor {
@@ -232,7 +364,173 @@ impl RoomActor {
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
             membership_source: None,
+            durable_store: None,
+            restore_state: DurableRestoreState::Ready,
         }
+    }
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
+    /// pre-mutation ownership gate every durable-relevant mutation handler
+    /// runs BEFORE touching in-memory state. `Ok(())` when unfenced (no
+    /// durable store configured — single-node/non-clustering, byte
+    /// -identical to today) or when the fenced check confirms this node
+    /// still holds the claim. `Err(RoomMutationError::NotOwner)` when the
+    /// fenced check observes 0 rows — the caller MUST NOT mutate.
+    ///
+    /// A transient backend failure fails OPEN for the gate itself
+    /// (mirroring `dispatch_to_room`'s identical "a transient fencing
+    /// -check failure never demotes, only a definitive 0-rows result
+    /// does" rule) — only a definitive fencing failure blocks the
+    /// mutation; an unreachable Postgres must not itself wedge every
+    /// mutating admin action.
+    async fn gate_mutation(&self) -> Result<(), RoomMutationError> {
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(());
+        };
+        match store.check_fenced_fanout(&self.room.room_jid).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    "mutation gate observed ownership loss; refusing to mutate"
+                );
+                Err(RoomMutationError::NotOwner)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "mutation gate fencing check failed transiently; failing open \
+                     (not blocking the mutation)"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): the
+    /// fail-closed join gate. `Ok(())` when this incarnation's durable
+    /// restore is already known-good (`DurableRestoreState::Ready` — the
+    /// overwhelmingly common case). When `Pending` (the initial
+    /// [`RestoreDurableRoomState`] load failed), runs ONE bounded inline
+    /// retry against the same store before deciding: success applies the
+    /// restored state (if any) and flips back to `Ready`, letting this
+    /// join proceed; a repeated failure returns
+    /// `Err(RoomActorError::RestorePending)` and leaves the state
+    /// `Pending` for the next join attempt to retry again. Never serves a
+    /// join against defaulted config/affiliations/subject while a
+    /// genuine restore failure is unresolved.
+    async fn ensure_restored_before_join(&mut self) -> Result<(), RoomActorError> {
+        if self.restore_state == DurableRestoreState::Ready {
+            return Ok(());
+        }
+        let Some(store) = self.durable_store.clone() else {
+            // Defensive: `Pending` is only ever set from inside the
+            // `RestoreDurableRoomState` handler, which always also sets
+            // `durable_store = Some(..)` in the same message. Treat a
+            // missing store as nothing-to-restore rather than wedging
+            // every future join on an invariant violation.
+            self.restore_state = DurableRestoreState::Ready;
+            return Ok(());
+        };
+        match store.load_room_state(&self.room.room_jid).await {
+            Ok(Some(state)) => {
+                self.room.waddle_id = state.waddle_id;
+                self.room.channel_id = state.channel_id;
+                self.room.config = state.config;
+                self.room.subject = state.subject;
+                self.room.restore_affiliations(state.affiliations);
+                self.restore_state = DurableRestoreState::Ready;
+                Ok(())
+            }
+            Ok(None) => {
+                self.restore_state = DurableRestoreState::Ready;
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable room-state restore retry failed again; refusing this \
+                     join attempt (fail-closed, FIX 4)"
+                );
+                Err(RoomActorError::RestorePending)
+            }
+        }
+    }
+
+    /// Best-effort durable persist of the current config (ADR-0017 Phase 3
+    /// Slice 7, FIX 2 revision): a persistence error is logged AND
+    /// returned typed — the in-memory mutation the caller already applied
+    /// remains authoritative for this actor incarnation regardless, but
+    /// the caller now learns the durable side did not converge (see
+    /// [`DurablePersistError`]'s doc comment for why this is no longer
+    /// silently swallowed).
+    async fn persist_config(&self) -> Result<(), DurablePersistError> {
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(());
+        };
+        store
+            .save_config(
+                &self.room.room_jid,
+                &self.room.waddle_id,
+                &self.room.channel_id,
+                &self.room.config,
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable room-config persist failed (in-memory config remains \
+                     authoritative for this actor incarnation; surfaced typed to caller)"
+                );
+                DurablePersistError::Failed(error.to_string())
+            })
+    }
+
+    /// Best-effort durable persist of the current subject. See
+    /// [`Self::persist_config`]'s FIX 2 rationale.
+    async fn persist_subject(&self) -> Result<(), DurablePersistError> {
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(());
+        };
+        store
+            .save_subject(&self.room.room_jid, self.room.subject.as_ref())
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable room-subject persist failed (surfaced typed to caller)"
+                );
+                DurablePersistError::Failed(error.to_string())
+            })
+    }
+
+    /// Best-effort durable persist of one affiliation-list entry. See
+    /// [`Self::persist_config`]'s FIX 2 rationale.
+    async fn persist_affiliation(
+        &self,
+        jid: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<(), DurablePersistError> {
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(());
+        };
+        let entry = super::affiliation::AffiliationEntry::new(jid.clone(), affiliation);
+        store
+            .save_affiliation(&self.room.room_jid, &entry)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    jid = %jid,
+                    %error,
+                    "durable room-affiliation persist failed (surfaced typed to caller)"
+                );
+                DurablePersistError::Failed(error.to_string())
+            })
     }
 
     /// Drop a JID from the spawn-time hydrated durable-recipient
@@ -373,6 +671,74 @@ impl kameo::message::Message<HydrateDurableRecipients> for RoomActor {
     }
 }
 
+/// Restore this room actor incarnation's durable configuration,
+/// affiliation list, and subject from Postgres before accepting any join
+/// (ADR-0017 Phase 3 Slice 7, element 7's locked text: the new owner
+/// "restores configuration, affiliations, and subject from Postgres
+/// before accepting any join").
+///
+/// The room registry enqueues this as the first message after
+/// spawning/re-claiming a `RoomActor` whenever a [`super::durable::
+/// MucDurableStore`] is configured — before [`HydrateDurableRecipients`]
+/// and before the actor ref is handed to any caller. Because the mailbox
+/// is FIFO and the actor processes messages sequentially, no
+/// [`occupancy_handlers::JoinWithAffiliation`] for this incarnation can
+/// ever observe a not-yet-restored room — mirroring exactly the ordering
+/// guarantee [`HydrateDurableRecipients`]'s own doc comment already
+/// relies on for durable membership.
+///
+/// Fail-open on load errors (mirrors [`HydrateDurableRecipients`]): a
+/// brand new room with no durable row yet simply keeps the
+/// caller-supplied initial config, matching today's pre-Slice-7 behavior
+/// exactly when no `MucDurableStore` is configured at all (single-node /
+/// non-clustering deployments never send this message).
+pub struct RestoreDurableRoomState {
+    pub store: std::sync::Arc<dyn super::durable::MucDurableStore>,
+}
+
+impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RestoreDurableRoomState,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match msg.store.load_room_state(&self.room.room_jid).await {
+            Ok(Some(state)) => {
+                self.room.waddle_id = state.waddle_id;
+                self.room.channel_id = state.channel_id;
+                self.room.config = state.config;
+                self.room.subject = state.subject;
+                self.room.restore_affiliations(state.affiliations);
+                self.restore_state = DurableRestoreState::Ready;
+            }
+            Ok(None) => {
+                // No durable row yet — brand new room, nothing to restore.
+                self.restore_state = DurableRestoreState::Ready;
+            }
+            Err(error) => {
+                // ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated):
+                // fail CLOSED, not open. Serving with the caller-supplied
+                // defaults here would look exactly like a legitimate,
+                // brand-new empty room to every occupant while actually
+                // discarding whatever ban/member/owner grants are on
+                // record in Postgres. Joins are refused (see
+                // `Self::ensure_restored_before_join`) until a later
+                // retry succeeds.
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable room-state restore failed; refusing joins until a retry \
+                     succeeds (fail-closed, FIX 4 — previously fail-open)"
+                );
+                self.restore_state = DurableRestoreState::Pending;
+            }
+        }
+        self.durable_store = Some(msg.store);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -501,17 +867,19 @@ pub struct UpdateConfig {
 }
 
 impl kameo::message::Message<UpdateConfig> for RoomActor {
-    type Reply = u64;
+    type Reply = Result<u64, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: UpdateConfig,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         self.room.config = msg.config;
         self.config_revision = self.config_revision.saturating_add(1);
         self.admission_revision = self.admission_revision.saturating_add(1);
-        self.config_revision
+        self.persist_config().await?;
+        Ok(self.config_revision)
     }
 }
 
@@ -524,7 +892,7 @@ pub struct RollbackConfigIfRevision {
 }
 
 impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
-    type Reply = bool;
+    type Reply = Result<bool, RoomMutationError>;
 
     async fn handle(
         &mut self,
@@ -532,12 +900,14 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.config_revision != msg.expected_revision {
-            return false;
+            return Ok(false);
         }
+        self.gate_mutation().await?;
         self.room.config = msg.config;
         self.config_revision = self.config_revision.saturating_add(1);
         self.admission_revision = self.admission_revision.saturating_add(1);
-        true
+        self.persist_config().await?;
+        Ok(true)
     }
 }
 
@@ -556,6 +926,34 @@ pub enum UpdateGroupDmConfigByMemberError {
     NotMember,
     #[error("sender is not a joined group-DM occupant")]
     NotOccupant,
+    /// ADR-0017 Phase 3 Slice 7 FIX 2: see [`AdminApplyError::NotOwner`]'s
+    /// doc comment — identical contract, one message type over.
+    #[error("this room's ownership has moved to another node")]
+    NotOwner,
+    /// FIX 2: see [`AdminApplyError::PersistFailed`]'s doc comment.
+    #[error("durable persist failed after the in-memory mutation committed: {0}")]
+    PersistFailed(String),
+}
+
+impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
+    fn from(error: RoomMutationError) -> Self {
+        match error {
+            RoomMutationError::NotOwner => UpdateGroupDmConfigByMemberError::NotOwner,
+            RoomMutationError::PersistFailed(detail) => {
+                UpdateGroupDmConfigByMemberError::PersistFailed(detail)
+            }
+        }
+    }
+}
+
+impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
+    fn from(error: DurablePersistError) -> Self {
+        match error {
+            DurablePersistError::Failed(detail) => {
+                UpdateGroupDmConfigByMemberError::PersistFailed(detail)
+            }
+        }
+    }
 }
 
 impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
@@ -584,9 +982,11 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         if !sender_is_occupant {
             return Err(UpdateGroupDmConfigByMemberError::NotOccupant);
         }
+        self.gate_mutation().await?;
         self.room.config = msg.config;
         self.config_revision = self.config_revision.saturating_add(1);
         self.admission_revision = self.admission_revision.saturating_add(1);
+        self.persist_config().await?;
         Ok(RoomSnapshot {
             room: self.room.clone(),
             config_revision: self.config_revision,
@@ -609,15 +1009,18 @@ pub struct SetSubject {
 }
 
 impl kameo::message::Message<SetSubject> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: SetSubject,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         self.room
             .set_subject(msg.texts, msg.setter, msg.setter_nick, msg.set_at);
+        self.persist_subject().await?;
+        Ok(())
     }
 }
 
@@ -674,24 +1077,27 @@ pub struct ChangeAffiliation {
 }
 
 impl kameo::message::Message<ChangeAffiliation> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: ChangeAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if self
             .room
-            .set_affiliation(msg.jid, msg.affiliation)
+            .set_affiliation(msg.jid.clone(), msg.affiliation)
             .is_some()
         {
             self.admission_revision = self.admission_revision.saturating_add(1);
+            self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
         }
+        Ok(())
     }
 }
 

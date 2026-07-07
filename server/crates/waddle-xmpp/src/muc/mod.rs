@@ -11,6 +11,7 @@
 
 pub mod admin;
 pub mod affiliation;
+pub mod durable;
 pub mod messages;
 pub mod owner;
 pub mod pin;
@@ -30,6 +31,7 @@ pub use admin::{
     is_role_change_query, parse_admin_query, AdminItem, AdminQuery, AffiliationChangeResult,
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
 };
+pub use durable::{DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext};
 pub use messages::{
     create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
     OutboundMucMessage,

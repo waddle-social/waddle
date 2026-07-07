@@ -15,10 +15,24 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::affiliation::DurableMembershipSource;
-use super::room_actor::{HydrateDurableRecipients, RoomActor};
+use super::durable::MucDurableStore;
+use super::room_actor::{HydrateDurableRecipients, RestoreDurableRoomState, RoomActor};
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
+use crate::ownership::{
+    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    SharedNodeIdentity, StalePredicate,
+};
 use crate::xep::xep0421::OccupantIdSecret;
+
+/// A locally-spawned room's actor ref plus the Postgres claim epoch this
+/// node acquired/won it under (ADR-0017 Phase 3 Slice 7). The epoch
+/// travels with the actor ref so [`RoomRegistryActor::DestroyRoom`] can
+/// release the exact claim this incarnation holds.
+struct RoomEntry {
+    actor_ref: ActorRef<RoomActor>,
+    claim_epoch: ClaimEpoch,
+}
 
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
@@ -26,7 +40,7 @@ use crate::xep::xep0421::OccupantIdSecret;
 /// so no external synchronisation is needed.
 #[derive(Actor)]
 pub struct RoomRegistryActor {
-    rooms: HashMap<BareJid, ActorRef<RoomActor>>,
+    rooms: HashMap<BareJid, RoomEntry>,
     poisoned_rooms: HashSet<BareJid>,
     muc_domain: String,
     /// Per-deployment XEP-0421 occupant-id HMAC key. Forwarded to every
@@ -38,6 +52,25 @@ pub struct RoomRegistryActor {
     /// deployments/tests without a durable membership store; such
     /// rooms fall back to session-observed affiliations only.
     membership_source: Option<Arc<dyn DurableMembershipSource>>,
+    /// Entity-ownership claim store (ADR-0017 Phase 3 Slice 7). Defaults
+    /// to [`InProcessClaimStore`] — the single-node fallback — so every
+    /// existing construction site (tests, single-node deployments)
+    /// behaves exactly as before: a `GetOrCreateRoom` on the only node
+    /// that could ever contend for the entity always succeeds
+    /// immediately. Replaced with the real `PostgresClaimStore`-backed
+    /// handle by [`WireClusteringClaims`] once clustering is configured
+    /// (construction-order note: the room registry is spawned before
+    /// `clustering::start_if_enabled` runs, mirroring the `local_claims`/
+    /// `resume_bridge` fill-in-later cell pattern).
+    claim_store: Arc<dyn ClaimStore>,
+    /// This node's claim identity. Defaults to [`NodeIdentity::local`] —
+    /// meaningless but harmless for [`InProcessClaimStore`], which never
+    /// checks cross-node identity. Replaced by [`WireClusteringClaims`].
+    node_identity: SharedNodeIdentity,
+    /// Durable room-state store (ADR-0017 Phase 3 Slice 7): `None` in
+    /// single-node/non-clustering deployments, matching today's purely
+    /// in-memory room behavior exactly. Wired by [`WireClusteringClaims`].
+    durable_store: Option<Arc<dyn MucDurableStore>>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -58,6 +91,16 @@ pub enum RoomRegistryError {
     /// request never entered processing.
     #[error("room registry unavailable")]
     Unavailable,
+    /// ADR-0017 Phase 3 Slice 7: `entity`'s Postgres claim is held by
+    /// another, currently-live node, and this slice does not wire
+    /// cross-node MUC message/join proxying (the ADR's own text names it
+    /// as part of the design, but Phase 3's Non-goals exclude cross-node
+    /// stanza routing GA — that lands in Phase 4). A live foreign owner
+    /// therefore cannot be joined/created from this node yet; a dead
+    /// owner's claim is instead stolen automatically (re-election) and
+    /// never surfaces this variant.
+    #[error("room {0}'s ownership claim is held by another live node")]
+    ClaimHeldByAnotherNode(BareJid),
 }
 
 impl RoomRegistryActor {
@@ -70,6 +113,9 @@ impl RoomRegistryActor {
             muc_domain,
             occupant_id_secret,
             membership_source: None,
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            durable_store: None,
         }
     }
 
@@ -81,13 +127,121 @@ impl RoomRegistryActor {
         self
     }
 
+    /// Acquire this room's Postgres claim (ADR-0017 Phase 3 Slice 7),
+    /// stealing from a dead owner (re-election) when the current owner's
+    /// own node lease is no longer fresh. Returns the epoch this node now
+    /// holds the claim under.
+    ///
+    /// A live foreign owner (steal not applicable) is reported as
+    /// [`RoomRegistryError::ClaimHeldByAnotherNode`] rather than
+    /// attempted via any cross-node proxy — see that variant's doc
+    /// comment for why that is out of this slice's scope.
+    async fn acquire_room_claim(
+        &self,
+        room_jid: &BareJid,
+    ) -> Result<ClaimEpoch, RoomRegistryError> {
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let identity = self.node_identity.current();
+        match self.claim_store.ensure_claimed(&entity, &identity).await {
+            Ok(epoch) => Ok(epoch),
+            Err(ClaimError::AlreadyClaimed) => {
+                self.steal_from_dead_owner(&entity, room_jid, &identity)
+                    .await
+            }
+            Err(error) => {
+                warn!(room = %room_jid, %error, "room claim acquisition failed");
+                Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()))
+            }
+        }
+    }
+
+    /// The re-election path: `entity`'s claim is held by another node —
+    /// steal it if (and only if) that node's own liveness lease is no
+    /// longer fresh (element 7's "steal after owner death").
+    async fn steal_from_dead_owner(
+        &self,
+        entity: &Entity,
+        room_jid: &BareJid,
+        identity: &NodeIdentity,
+    ) -> Result<ClaimEpoch, RoomRegistryError> {
+        let snapshot = match self.claim_store.current_claim(entity).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) | Err(_) => {
+                return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()))
+            }
+        };
+        if snapshot.owner_lease_fresh {
+            return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()));
+        }
+        match self
+            .claim_store
+            .steal_stale(
+                entity,
+                snapshot.claim_epoch,
+                StalePredicate::OwnerStale,
+                identity,
+            )
+            .await
+        {
+            Ok(new_epoch) => {
+                info!(
+                    room = %room_jid,
+                    previous_owner = %snapshot.owner.node_id,
+                    "re-elected room ownership from a dead owner"
+                );
+                self.notify_previous_owner_demoted(room_jid, &snapshot.owner, new_epoch);
+                Ok(new_epoch)
+            }
+            Err(_) => Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone())),
+        }
+    }
+
+    /// Two-part demotion protocol, part (a) (element 7): fire a
+    /// best-effort, detached Demote notification at the node this room
+    /// was just stolen from. Never awaited by the caller — the
+    /// guaranteed backstop is the fenced pre-fan-out check
+    /// `waddle-server`'s `dispatch_to_room` runs independently.
+    fn notify_previous_owner_demoted(
+        &self,
+        room_jid: &BareJid,
+        previous_owner: &NodeIdentity,
+        new_epoch: ClaimEpoch,
+    ) {
+        let Some(store) = self.durable_store.clone() else {
+            return;
+        };
+        let room_jid = room_jid.clone();
+        let previous_owner = previous_owner.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store
+                .notify_previous_owner_demoted(
+                    &room_jid,
+                    &previous_owner.node_id,
+                    &previous_owner.node_epoch,
+                    new_epoch,
+                )
+                .await
+            {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "best-effort Demote notification to the previous owner failed \
+                     (the guaranteed fenced pre-fan-out backstop is unaffected)"
+                );
+            }
+        });
+    }
+
     /// Spawn a `RoomActor` for the given room and insert it into the map.
     ///
-    /// When a [`DurableMembershipSource`] is configured, a
-    /// [`HydrateDurableRecipients`] message is enqueued as the very
-    /// first item in the fresh actor's FIFO mailbox *before* the actor
-    /// ref is handed to any caller, so every later `GetRoomSnapshot`
-    /// observes the hydrated durable-recipient set (#1135).
+    /// When a [`MucDurableStore`] is configured, a
+    /// [`RestoreDurableRoomState`] message is enqueued first (element 7:
+    /// restore configuration/affiliations/subject before accepting any
+    /// join), followed by [`HydrateDurableRecipients`] when a
+    /// [`DurableMembershipSource`] is configured — both before the actor
+    /// ref is handed to any caller, so every later message this
+    /// incarnation processes observes fully-hydrated state (#1135's
+    /// established FIFO-mailbox ordering guarantee, extended here).
     ///
     /// Returns a reference to the spawned actor.
     async fn spawn_room(
@@ -96,9 +250,26 @@ impl RoomRegistryActor {
         waddle_id: String,
         channel_id: String,
         config: RoomConfig,
+        claim_epoch: ClaimEpoch,
     ) -> ActorRef<RoomActor> {
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
         let actor_ref = RoomActor::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
+        if let Some(store) = &self.durable_store {
+            store.record_claim_epoch(&room_jid, claim_epoch);
+            if let Err(error) = actor_ref
+                .tell(RestoreDurableRoomState {
+                    store: Arc::clone(store),
+                })
+                .await
+            {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "failed to enqueue durable room-state restore for freshly \
+                     spawned/re-claimed room actor"
+                );
+            }
+        }
         if let Some(source) = &self.membership_source {
             if let Err(error) = actor_ref
                 .tell(HydrateDurableRecipients {
@@ -114,21 +285,41 @@ impl RoomRegistryActor {
                 );
             }
         }
-        self.rooms.insert(room_jid, actor_ref.clone());
+        self.rooms.insert(
+            room_jid,
+            RoomEntry {
+                actor_ref: actor_ref.clone(),
+                claim_epoch,
+            },
+        );
         actor_ref
     }
 
-    fn live_room(
+    /// ADR-0017 Phase 3 Slice 7 FIX 3 (council-adjudicated): `async` (not
+    /// sync) so the dead-actor branch can release the Postgres claim
+    /// before returning. Previously this removed the dead entry from
+    /// `self.rooms` WITHOUT releasing its Postgres claim at all — an
+    /// orphaned claim: Postgres kept attributing the room to this node
+    /// (which no longer has a live actor for it, or any record of the
+    /// epoch needed to release it, once `self.rooms.remove` ran) until
+    /// this node's own liveness lease eventually looked stale to another
+    /// node's `OwnerStale` steal. This capture-then-release closes that
+    /// gap: the claim epoch is read BEFORE the entry is removed, and
+    /// [`Self::release_room_claim`] runs on it — the exact same
+    /// best-effort, epoch-gated release [`DestroyRoom`]'s handler already
+    /// uses for the graceful-destroy path.
+    async fn live_room(
         &mut self,
         room_jid: &BareJid,
     ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
         if self.poisoned_rooms.contains(room_jid) {
             return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
         }
-        if let Some(actor_ref) = self.rooms.get(room_jid) {
-            if actor_ref.is_alive() {
-                return Ok(Some(actor_ref.clone()));
+        if let Some(entry) = self.rooms.get(room_jid) {
+            if entry.actor_ref.is_alive() {
+                return Ok(Some(entry.actor_ref.clone()));
             }
+            let claim_epoch = entry.claim_epoch;
             self.rooms.remove(room_jid);
             self.poisoned_rooms.insert(room_jid.clone());
             warn!(
@@ -136,9 +327,67 @@ impl RoomRegistryActor {
                 "Detected dead RoomActor; failing fast to avoid silent room state loss"
             );
             metrics::record_actor_restart("room_actor", "detected_dead_actor_fail_fast");
+            // FIX 3: release BEFORE returning the error — a dead actor
+            // whose claim is never released is a genuinely orphaned
+            // claim (this node holds it in Postgres but has no way left
+            // to act on it), not merely a "fail fast and let the caller
+            // retry" situation.
+            self.release_room_claim(room_jid, claim_epoch).await;
             return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
         }
         Ok(None)
+    }
+
+    /// Best-effort release of `room_jid`'s Postgres claim (dormancy
+    /// eviction / explicit destroy, element 7's "graceful release").
+    /// Epoch-gated and best-effort per [`ClaimStore::release`]'s own
+    /// contract — a claim already stolen out from under this node is a
+    /// no-op, not an error.
+    async fn release_room_claim(&self, room_jid: &BareJid, claim_epoch: ClaimEpoch) {
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let identity = self.node_identity.current();
+        if let Err(error) = self
+            .claim_store
+            .release(&entity, &identity, claim_epoch)
+            .await
+        {
+            warn!(room = %room_jid, %error, "failed to release room ownership claim");
+        }
+        if let Some(store) = &self.durable_store {
+            store.forget_claim_epoch(room_jid);
+        }
+    }
+}
+
+/// Wire the real, clustering-backed claim store/identity/durable store
+/// into an already-spawned registry (ADR-0017 Phase 3 Slice 7).
+///
+/// Construction-order note: `clustering::start_if_enabled` (which
+/// produces the real `ClaimStore`/`MucDurableStore`) runs *after* the
+/// room registry is spawned in `server/mod.rs`, mirroring the exact
+/// chicken-and-egg the `local_claims`/`resume_bridge` fill-in-later cells
+/// already solve for Slices 5/6 — here realized as a message instead of
+/// an `OnceLock`, since a kameo actor's state is only mutable through its
+/// own mailbox. Sent once, before any client traffic can reach
+/// `GetOrCreateRoom` (the HTTP/WebSocket listeners start after this
+/// point in `server/mod.rs`).
+pub struct WireClusteringClaims {
+    pub claim_store: Arc<dyn ClaimStore>,
+    pub node_identity: SharedNodeIdentity,
+    pub durable_store: Option<Arc<dyn MucDurableStore>>,
+}
+
+impl kameo::message::Message<WireClusteringClaims> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: WireClusteringClaims,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.claim_store = msg.claim_store;
+        self.node_identity = msg.node_identity;
+        self.durable_store = msg.durable_store;
     }
 }
 
@@ -155,7 +404,7 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
     type Reply = Result<Option<ActorRef<RoomActor>>, RoomRegistryError>;
 
     async fn handle(&mut self, msg: GetRoom, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.live_room(&msg.room_jid)
+        self.live_room(&msg.room_jid).await
     }
 }
 
@@ -175,15 +424,22 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
         msg: GetOrCreateRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
+        if let Some(actor_ref) = self.live_room(&msg.room_jid).await? {
             debug!(room = %msg.room_jid, "Room already exists");
             return Ok(actor_ref);
         }
 
+        let claim_epoch = self.acquire_room_claim(&msg.room_jid).await?;
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
         self.poisoned_rooms.remove(&msg.room_jid);
         Ok(self
-            .spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config)
+            .spawn_room(
+                msg.room_jid,
+                msg.waddle_id,
+                msg.channel_id,
+                msg.config,
+                claim_epoch,
+            )
             .await)
     }
 }
@@ -201,7 +457,7 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
         msg: CreateInstantRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
+        if let Some(actor_ref) = self.live_room(&msg.room_jid).await? {
             return Ok(actor_ref);
         }
 
@@ -219,9 +475,10 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
             ..RoomConfig::default()
         };
 
+        let claim_epoch = self.acquire_room_claim(&msg.room_jid).await?;
         self.poisoned_rooms.remove(&msg.room_jid);
         Ok(self
-            .spawn_room(msg.room_jid, waddle_id, channel_id, config)
+            .spawn_room(msg.room_jid, waddle_id, channel_id, config, claim_epoch)
             .await)
     }
 }
@@ -242,14 +499,21 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
         msg: CreateRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.live_room(&msg.room_jid)?.is_some() {
+        if self.live_room(&msg.room_jid).await?.is_some() {
             return Err(RoomRegistryError::RoomAlreadyExists(msg.room_jid));
         }
 
+        let claim_epoch = self.acquire_room_claim(&msg.room_jid).await?;
         info!(room = %msg.room_jid, "Creating new room");
         self.poisoned_rooms.remove(&msg.room_jid);
         let actor_ref = self
-            .spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config)
+            .spawn_room(
+                msg.room_jid,
+                msg.waddle_id,
+                msg.channel_id,
+                msg.config,
+                claim_epoch,
+            )
             .await;
         Ok(actor_ref)
     }
@@ -270,8 +534,21 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         msg: DestroyRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let removed_room = self.rooms.remove(&msg.room_jid).is_some();
+        let removed_entry = self.rooms.remove(&msg.room_jid);
+        let removed_room = removed_entry.is_some();
         let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
+        // ADR-0017 Phase 3 Slice 7: release the Postgres claim on every
+        // terminal path (explicit destroy, dormancy-eviction sweep) —
+        // "graceful release" per element 7. A poisoned-only removal (the
+        // actor died and was already detected by `live_room`) has no
+        // known epoch to release; the claim is instead reclaimed by
+        // another node's `OwnerStale` steal once this node's own liveness
+        // lease is what it takes to look stale (bounded residual gap,
+        // same class as FIX 6e's fail-open-detach gap).
+        if let Some(entry) = removed_entry {
+            self.release_room_claim(&msg.room_jid, entry.claim_epoch)
+                .await;
+        }
         if removed_room || removed_poison {
             info!(room = %msg.room_jid, "Destroyed room");
             true
@@ -295,7 +572,7 @@ impl kameo::message::Message<RoomExists> for RoomRegistryActor {
         msg: RoomExists,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        Ok(self.live_room(&msg.room_jid)?.is_some())
+        Ok(self.live_room(&msg.room_jid).await?.is_some())
     }
 }
 
@@ -330,7 +607,7 @@ impl kameo::message::Message<ListRooms> for RoomRegistryActor {
         let room_ids: Vec<BareJid> = self.rooms.keys().cloned().collect();
         let mut live_rooms = Vec::with_capacity(room_ids.len());
         for room_jid in room_ids {
-            match self.live_room(&room_jid) {
+            match self.live_room(&room_jid).await {
                 Ok(Some(_)) => live_rooms.push(room_jid),
                 Ok(None) | Err(RoomRegistryError::RoomActorStateLost(_)) => {
                     // Ignore stale/dead rooms in discovery listing; per-room

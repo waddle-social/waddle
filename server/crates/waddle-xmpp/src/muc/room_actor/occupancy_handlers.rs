@@ -26,6 +26,11 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): refuse to
+        // admit a join while this incarnation's durable restore is
+        // unresolved (a genuine backend failure, not a legitimate brand
+        // -new room) — see `RoomActor::ensure_restored_before_join`.
+        self.ensure_restored_before_join().await?;
         if msg.admission_revision != self.admission_revision {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
@@ -431,13 +436,15 @@ pub struct ReconcileChannelBackedRoom {
 }
 
 impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), super::RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: ReconcileChannelBackedRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
+        self.gate_mutation().await?;
         let instant_name = msg.room_jid.node().map(|node| node.to_string());
         let mut desired_config = msg.desired_config;
         desired_config.description = self.room.config.description.clone();
@@ -449,5 +456,7 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         self.room.waddle_id = msg.waddle_id;
         self.room.channel_id = msg.channel_id;
         self.room.config = desired_config;
+        self.persist_config().await?;
+        Ok(())
     }
 }

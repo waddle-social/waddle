@@ -241,10 +241,54 @@ async fn handle_muc_join_unlocked(
                     })
                     .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
-                let Some(actor) =
-                    get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
-                else {
-                    return vec![];
+                let actor = match get_or_create_room_actor(
+                    state,
+                    room_jid,
+                    config,
+                    waddle_id,
+                    channel_id,
+                )
+                .await
+                {
+                    Ok(actor) => actor,
+                    // ADR-0017 Phase 3 Slice 7 FIX 6 (council-adjudicated):
+                    // another node genuinely, currently owns this room's
+                    // claim — this phase does not wire cross-node MUC
+                    // proxying (Phase 4), so the conformant response is a
+                    // recoverable, retry-able XEP-0045 join bounce, never a
+                    // silent drop.
+                    Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+                        return vec![build_muc_presence_error_xml(
+                            room_jid,
+                            &nick,
+                            sender_jid,
+                            StanzaError::new(
+                                ErrorType::Wait,
+                                DefinedCondition::ResourceConstraint,
+                                "en",
+                                "This room's ownership is currently held by another node; \
+                                 please retry.",
+                            ),
+                        )];
+                    }
+                    Err(error) => {
+                        warn!(
+                            room = %room_jid,
+                            %error,
+                            "Failed to get or create room actor for MUC join"
+                        );
+                        return vec![build_muc_presence_error_xml(
+                            room_jid,
+                            &nick,
+                            sender_jid,
+                            StanzaError::new(
+                                ErrorType::Wait,
+                                DefinedCondition::InternalServerError,
+                                "en",
+                                "Failed to get or create the room.",
+                            ),
+                        )];
+                    }
                 };
                 (actor, managed_channel.is_none())
             }
@@ -329,8 +373,45 @@ async fn handle_muc_join_unlocked(
                         StanzaError::new(error_type, condition, "en", message),
                     )];
                 }
+                // ADR-0017 Phase 3 Slice 7 FIX 4/FIX 6 (council-adjudicated):
+                // this incarnation's durable restore has not (yet) resolved
+                // — a genuine backend failure, not a legitimate empty new
+                // room. Bounce with the same conformant, recoverable
+                // condition the ownership-claim bounce above uses, so the
+                // client retries rather than silently never joining.
+                if matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::RestorePending
+                    )
+                ) {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::ResourceConstraint,
+                            "en",
+                            "This room's durable state has not finished loading; please retry.",
+                        ),
+                    )];
+                }
+                // FIX 6: no remaining error variant may silently drop the
+                // join with no presence reply at all — bounce typed
+                // instead of the previous bare `return vec![]`.
                 warn!(room = %room_jid, nick = %nick, error = ?error, "Failed to join MUC room");
-                return vec![];
+                return vec![build_muc_presence_error_xml(
+                    room_jid,
+                    &nick,
+                    sender_jid,
+                    StanzaError::new(
+                        ErrorType::Wait,
+                        DefinedCondition::InternalServerError,
+                        "en",
+                        "Failed to join the room.",
+                    ),
+                )];
             }
         };
 

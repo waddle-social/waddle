@@ -221,7 +221,7 @@ async fn seed_initial_xmpp_topology(
     for channel_record in &persisted_channels {
         let room_jid = waddle_xmpp::managed_room_jid(&channel_record.id, &services.muc)
             .map_err(|error| anyhow::anyhow!("invalid seeded room JID: {error}"))?;
-        room_registry
+        match room_registry
             .ask(GetOrCreateRoom {
                 room_jid: room_jid.clone(),
                 waddle_id: if channel_record.channel_type
@@ -246,12 +246,33 @@ async fn seed_initial_xmpp_topology(
                 },
             })
             .await
-            .map_err(|error| {
-                anyhow::anyhow!(
+        {
+            Ok(_) => {}
+            // ADR-0017 Phase 3 Slice 7 FIX 5 (council-adjudicated): another
+            // node genuinely, currently owns this room's claim — a normal
+            // steady-state condition once any node in the cluster has
+            // already seeded topology, NOT a startup failure. Log and
+            // continue seeding the REST of the channels/spaces/bookmarks;
+            // previously this `?` aborted the entire function (and, via
+            // its own caller's `?`, `seed_spaces_admin_affiliations` too)
+            // on the very first already-claimed-elsewhere room.
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_),
+            )) => {
+                tracing::info!(
+                    channel = %channel_record.id,
+                    room = %room_jid,
+                    "topology seed: room's ownership claim is held by another live node; \
+                     owned elsewhere, continuing with the rest of the seed"
+                );
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
                     "failed to create managed room actor for {}: {error}",
                     channel_record.id
-                )
-            })?;
+                ));
+            }
+        }
     }
 
     for channel in INITIAL_MANAGED_CHANNELS {
@@ -362,7 +383,104 @@ async fn seed_spaces_admin_affiliations(
 
 #[cfg(test)]
 mod tests {
-    use super::INITIAL_MANAGED_CHANNELS;
+    use super::{
+        bootstrap_fresh_xmpp_topology, AppState, XmppServiceDomains, INITIAL_MANAGED_CHANNELS,
+    };
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use std::sync::Arc;
+    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    fn test_services() -> XmppServiceDomains {
+        XmppServiceDomains {
+            muc: "muc.example.com".to_string(),
+            spaces: "spaces@pubsub.example.com".to_string(),
+            upload: "upload.example.com".to_string(),
+            extensions: "extensions.example.com".to_string(),
+            push: "push.example.com".to_string(),
+            community: "community.example.com".to_string(),
+        }
+    }
+
+    /// ADR-0017 Phase 3 Slice 7 FIX 5 (council-adjudicated): a room
+    /// genuinely, currently claimed by another live node is a normal
+    /// steady-state condition (any node after the first to seed topology
+    /// hits this for every already-seeded room), NOT a startup failure —
+    /// the rest of the seed (other channels, spaces admin affiliations,
+    /// bookmarks backfill) must still complete.
+    #[tokio::test]
+    async fn bootstrap_completes_the_rest_of_the_seed_when_one_room_is_claimed_elsewhere() {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        let state = Arc::new(AppState::new(Arc::new(db_pool)));
+        let services = test_services();
+
+        // Pre-claim the "chat" managed channel's room under a foreign,
+        // live node identity BEFORE bootstrap runs — models "another node
+        // already seeded/owns this room."
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let foreign = NodeIdentity::new("foreign-node", "foreign-epoch");
+        let chat_room_jid =
+            waddle_xmpp::managed_room_jid("chat", &services.muc).expect("valid room jid");
+        let chat_entity = Entity::new(EntityType::RoomActor, chat_room_jid.to_string());
+        claim_store
+            .acquire(&chat_entity, &foreign)
+            .await
+            .expect("foreign pre-claim");
+
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "this-node",
+                    "this-epoch",
+                )),
+                durable_store: None,
+            })
+            .await
+            .expect("wire clustering claims");
+
+        let pubsub_storage = state.pubsub_storage.clone();
+        let room_registry = state.room_registry.clone();
+        let result =
+            bootstrap_fresh_xmpp_topology(&state, pubsub_storage, &services, &room_registry).await;
+        assert!(
+            result.is_ok(),
+            "bootstrap must complete despite one room being claimed elsewhere: {result:?}"
+        );
+
+        // A DIFFERENT channel's room must still have been created —
+        // proving the loop continued past the claimed-elsewhere room
+        // instead of aborting the whole function.
+        let github_room_jid =
+            waddle_xmpp::managed_room_jid("github-actions", &services.muc).expect("valid room jid");
+        let github_entity = Entity::new(EntityType::RoomActor, github_room_jid.to_string());
+        assert!(
+            claim_store
+                .current_claim(&github_entity)
+                .await
+                .expect("current_claim")
+                .is_some(),
+            "a non-claimed-elsewhere channel's room must still have been created"
+        );
+
+        // The claimed-elsewhere room's claim must be untouched — still
+        // the foreign node's, never silently reassigned.
+        let chat_claim = claim_store
+            .current_claim(&chat_entity)
+            .await
+            .expect("current_claim")
+            .expect("still claimed");
+        assert_eq!(chat_claim.owner, foreign);
+    }
 
     #[test]
     fn initial_managed_channels_include_github_actions_alert_room() {

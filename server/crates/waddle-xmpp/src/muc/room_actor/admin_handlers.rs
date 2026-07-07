@@ -296,8 +296,22 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         msg: ApplyAdminItems,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): verify
+        // ownership BEFORE any of this batch's role/affiliation changes
+        // are applied — a `NotOwner` here means NONE of this ask's items
+        // were applied (the gate runs before the first mutation below).
+        self.gate_mutation().await?;
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
         let mut removed_by_moderation: Vec<FullJid> = Vec::new();
+        // FIX 2: a persist failure partway through this batch must not
+        // abort the loop early — earlier items in the same batch have
+        // already mutated `self.room` (bans/kicks remove occupants), so
+        // aborting mid-loop would silently drop the presence
+        // notifications describing changes that already committed
+        // in-memory. Collect the first failure and keep applying the
+        // rest of the batch; surface it as a typed error only after the
+        // full batch (and its presence updates) has been computed.
+        let mut persist_failure: Option<super::DurablePersistError> = None;
         let mut occupants_to_kick: Vec<String> = Vec::new();
         let mut needs_rehydration = false;
         if is_role_change_query(&msg.items) {
@@ -511,6 +525,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     self.prune_durable_recipient_if_removed(&target_jid, new_affiliation);
                 if target_current_affiliation != new_affiliation {
                     self.admission_revision = self.admission_revision.saturating_add(1);
+                    if let Err(error) = self.persist_affiliation(&target_jid, new_affiliation).await
+                    {
+                        persist_failure.get_or_insert(error);
+                    }
                 }
                 presence_updates.extend(applied.presence_updates);
                 removed_by_moderation.extend(applied.removed_by_moderation);
@@ -525,6 +543,9 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             // space-entitled member must not lose fan-out (see
             // `RoomActor::refresh_durable_recipients_from_source`).
             self.refresh_durable_recipients_from_source().await;
+        }
+        if let Some(error) = persist_failure {
+            return Err(error.into());
         }
         Ok(AdminItemsApplied {
             presence_updates,
@@ -547,6 +568,8 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         msg: ApplyAffiliationChange,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
+        self.gate_mutation().await?;
         let previous_affiliation = self.room.get_affiliation(&msg.jid);
         let updates = apply_affiliation_change(
             &mut self.room,
@@ -559,6 +582,7 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if previous_affiliation != msg.affiliation {
             self.admission_revision = self.admission_revision.saturating_add(1);
+            self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
@@ -586,13 +610,16 @@ pub struct EnforceMembersOnlyAffiliations {
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
-    type Reply = Vec<(FullJid, Presence)>;
+    type Reply = Result<Vec<(FullJid, Presence)>, super::RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: EnforceMembersOnlyAffiliations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating
+        // any affiliation in this batch.
+        self.gate_mutation().await?;
         let affiliations: BTreeMap<BareJid, Affiliation> = msg.affiliations.into_iter().collect();
         let occupied_jids: Vec<BareJid> = self
             .room
@@ -601,18 +628,36 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .map(|occupant| occupant.real_jid.to_bare())
             .collect();
         let mut needs_rehydration = false;
+        // FIX 2: same batch-persist-failure handling as `ApplyAdminItems`
+        // — don't abort mid-loop (earlier iterations already mutated
+        // `self.room`), collect the first failure and surface it typed
+        // only after the full batch has run.
+        let mut persist_failure: Option<super::DurablePersistError> = None;
         for jid in occupied_jids {
             let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
             needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
-            if self.room.set_affiliation(jid, affiliation).is_some() {
+            if self
+                .room
+                .set_affiliation(jid.clone(), affiliation)
+                .is_some()
+            {
                 self.admission_revision = self.admission_revision.saturating_add(1);
+                if let Err(error) = self.persist_affiliation(&jid, affiliation).await {
+                    persist_failure.get_or_insert(error);
+                }
             }
         }
         if needs_rehydration {
             // R1: see `RoomActor::refresh_durable_recipients_from_source`.
             self.refresh_durable_recipients_from_source().await;
         }
-        enforce_members_only(&mut self.room, &self.occupant_id_secret)
+        if let Some(error) = persist_failure {
+            return Err(error.into());
+        }
+        Ok(enforce_members_only(
+            &mut self.room,
+            &self.occupant_id_secret,
+        ))
     }
 }
 

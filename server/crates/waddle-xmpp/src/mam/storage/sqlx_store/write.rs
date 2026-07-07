@@ -11,6 +11,7 @@ use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPa
 use xmpp_parsers::message::MessageType;
 
 use crate::mam::storage::MamStorageError;
+use crate::muc::RoomClaimFenceContext;
 
 use super::decode::{encode_nickname_generation, encode_rich_payload};
 use super::MamDatabaseBackend;
@@ -153,6 +154,149 @@ pub(super) async fn store_message(
     }
 
     debug!(archive_id = %archive_id, "Message stored in MAM archive");
+    Ok(archive_id)
+}
+
+/// Fenced variant of [`store_message`] (ADR-0017 Phase 3 Slice 7 FIX 1,
+/// council-adjudicated): the `SELECT ... FOR SHARE` fencing check against
+/// `clustering_claims` runs INSIDE the same transaction as the archive
+/// insert, so a steal committing between `dispatch_to_room`'s own
+/// standalone pre-fan-out check and this write can never land a phantom
+/// archived row under a claim this node no longer holds.
+///
+/// The origin-id dedup pre-check (idempotency for retried sends) runs
+/// against the plain pool, exactly as [`store_message`] already does it —
+/// it only ever reads already-committed rows, so it needs no transactional
+/// isolation from this write; only the fencing-check-then-insert pair needs
+/// one-transaction atomicity, which this function provides. Postgres-only:
+/// fencing is never enabled for a SQLite backend (clustering is
+/// Postgres-only per ADR-0017 element 1 — see
+/// `SqlxMamStorage::with_cluster_fencing`), so the non-Postgres arm here is
+/// defensive only.
+pub(super) async fn store_message_fenced(
+    backend: &MamDatabaseBackend,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+    fence: &RoomClaimFenceContext,
+) -> Result<String, MamStorageError> {
+    let MamDatabaseBackend::Postgres(pool) = backend else {
+        return store_message(backend, archive_jid, message).await;
+    };
+
+    let rich_payload = encode_rich_payload(message)?;
+    let origin_dedup_fingerprint = message
+        .origin_id
+        .as_ref()
+        .map(|_| origin_dedup_fingerprint(message, rich_payload.as_deref()));
+
+    if let Some(existing_archive_id) = find_existing_origin_id_match(
+        backend,
+        archive_jid,
+        message,
+        rich_payload.as_deref(),
+        origin_dedup_fingerprint.as_deref(),
+    )
+    .await?
+    {
+        return Ok(existing_archive_id);
+    }
+
+    let archive_id = if message.id.is_empty() {
+        Uuid::now_v7().to_string()
+    } else {
+        message.id.clone()
+    };
+    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
+    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
+    let archive_jid_str = archive_jid.to_string();
+    let from_jid_str = message.from.to_string();
+    let to_jid_str = message.to.to_string();
+    let reply_to_id_bind = message.reply.as_ref().map(|r| r.id.as_str());
+    let reply_to_jid_owned: Option<String> = message
+        .reply
+        .as_ref()
+        .and_then(|r| r.to.as_ref())
+        .map(|jid| jid.to_string());
+
+    let mut tx = pool.begin().await?;
+
+    // Fencing check: the exact `SELECT ... FOR SHARE` shape
+    // `muc_durable::PostgresMucRoomStore::assert_fenced`/
+    // `sm_persistence_fenced::assert_fenced`/`pending_delivery`'s
+    // `insert_fenced` already establish — the first statement inside this
+    // transaction, on the SAME connection as the write it guards. A failed
+    // check rolls back BEFORE any write.
+    let entity_key = format!(
+        "{}:{}",
+        fence.entity.entity_type.as_db_str(),
+        fence.entity.id
+    );
+    let held = sqlx::query(
+        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND claim_epoch = $3 FOR SHARE",
+    )
+    .bind(&entity_key)
+    .bind(&fence.node_id)
+    .bind(fence.epoch.0)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !held {
+        // Roll back explicitly rather than relying on drop — the fencing
+        // failure is the expected, correctness-critical path here, not an
+        // error worth masking behind an implicit rollback-on-drop.
+        let _ = tx.rollback().await;
+        return Err(MamStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        });
+    }
+
+    let mut query = QueryBuilder::<Postgres>::new(
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_fingerprint) ",
+    );
+    query.push_values(std::iter::once(()), |mut builder, _| {
+        builder
+            .push_bind(&archive_id)
+            .push_bind(archive_jid_str.as_str())
+            .push_bind(message.timestamp)
+            .push_bind(from_jid_str.as_str())
+            .push_bind(to_jid_str.as_str())
+            .push_bind(message.body.as_deref())
+            .push_bind(message.stanza_id.as_ref().map(|s| s.id.as_str()))
+            .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
+            .push_bind(reply_to_id_bind)
+            .push_bind(reply_to_jid_owned.as_deref())
+            .push_bind(message.origin_id.as_ref().map(|o| o.id.as_str()))
+            .push_bind(message_type)
+            .push_bind(message.stanza_xml.as_deref())
+            .push_bind(rich_payload.as_deref())
+            .push_bind(nickname_generation)
+            .push_bind(
+                message
+                    .thread
+                    .as_ref()
+                    .and_then(|t| t.parent.as_ref())
+                    .map(|p| p.as_str()),
+            )
+            .push_bind(origin_dedup_fingerprint.as_deref());
+    });
+    if let Err(error) = query.build().execute(&mut *tx).await {
+        let _ = tx.rollback().await;
+        if let Some(existing_archive_id) = find_existing_origin_id_match(
+            backend,
+            archive_jid,
+            message,
+            rich_payload.as_deref(),
+            origin_dedup_fingerprint.as_deref(),
+        )
+        .await?
+        {
+            return Ok(existing_archive_id);
+        }
+        return Err(error.into());
+    }
+    tx.commit().await?;
+
+    debug!(archive_id = %archive_id, "Message stored in MAM archive (fenced)");
     Ok(archive_id)
 }
 

@@ -33,13 +33,15 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use super::affiliation::DurableMembershipSource;
+use super::durable::MucDurableStore;
 use super::room_actor::RoomActor;
 use super::room_registry_actor::{
     CreateInstantRoom, CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
-    RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
+use crate::ownership::{ClaimStore, SharedNodeIdentity};
 use crate::xep::xep0421::OccupantIdSecret;
 
 /// Explicit bounded mailbox capacity for the `RoomRegistryActor`.
@@ -340,6 +342,32 @@ impl RoomRegistry {
         "room_count",
         RoomCount
     );
+
+    /// Wire the real clustering-backed claim store/identity/durable store
+    /// into this already-spawned registry (ADR-0017 Phase 3 Slice 7). See
+    /// [`WireClusteringClaims`]'s doc comment for the construction-order
+    /// rationale. Fire-and-forget (`tell`, not `ask`): a failure here
+    /// (mailbox saturated/actor stopped) is logged, not surfaced, since
+    /// the caller (server startup) has no fallback action to take beyond
+    /// what a `warn!` already communicates to the operator.
+    pub async fn wire_clustering_claims(
+        &self,
+        claim_store: Arc<dyn ClaimStore>,
+        node_identity: SharedNodeIdentity,
+        durable_store: Option<Arc<dyn MucDurableStore>>,
+    ) {
+        if let Err(error) = self
+            .inner
+            .tell(WireClusteringClaims {
+                claim_store,
+                node_identity,
+                durable_store,
+            })
+            .await
+        {
+            warn!(%error, "failed to wire clustering claims into the room registry");
+        }
+    }
 
     /// Test-only: route a never-returning message through the same instrumented
     /// path as the public methods, so the reply-timeout → typed-error mapping is
