@@ -18,8 +18,6 @@ pub const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 pub const STREAMS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
 /// Stream Management namespace (XEP-0198, version 3)
 pub const SM: &str = "urn:xmpp:sm:3";
-/// Instant Stream Resumption namespace (XEP-0397)
-pub const ISR: &str = "urn:xmpp:isr:0";
 /// Roster versioning stream feature (RFC 6121)
 pub const ROSTERVER: &str = "urn:xmpp:features:rosterver";
 /// Entity capabilities namespace (XEP-0115)

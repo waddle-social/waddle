@@ -406,7 +406,6 @@ async fn create_test_websocket_state_with_extension_manager(
                     dnd_projection,
                     dnd_reader,
                     notification_activity,
-                    isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),
                     caps_resolver: Arc::new(

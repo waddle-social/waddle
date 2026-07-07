@@ -657,32 +657,6 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
 }
 
 #[tokio::test]
-async fn websocket_isr_token_request_returns_token() {
-    let (_server, mut client) = setup().await;
-
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="get" id="ws-isr-token"><token-request xmlns="urn:xmpp:isr:0"/></iq>"#,
-        )
-        .await
-        .expect("send ISR token request");
-    let response = client
-        .recv_matching(|frame| frame.contains("ws-isr-token"))
-        .await
-        .expect("ISR token response");
-    assert!(
-        response.contains("type='result'") || response.contains("type='result'"),
-        "expected ISR token result, got: {response}"
-    );
-    assert!(
-        response.contains("urn:xmpp:isr:0") && response.contains("token"),
-        "expected ISR token payload, got: {response}"
-    );
-
-    let _ = client.close().await;
-}
-
-#[tokio::test]
 async fn websocket_user_and_channel_search_return_results() {
     let (_server, mut client) = setup().await;
 
