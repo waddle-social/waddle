@@ -12,7 +12,6 @@ use waddle_xmpp::{
         push_service_features, spaces_service_features, upload_service_features, DiscoItem,
         Feature, Identity,
     },
-    isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
         build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
         is_mam_query_form_request, parse_mam_query, ArchivedMessage, ArchivedModeration,
@@ -89,7 +88,6 @@ pub(crate) mod errors;
 mod extension_forms;
 mod extension_route_items;
 mod full_jid_forward;
-mod isr_token;
 mod jingle_muji_gate;
 mod last_activity;
 mod link_preview_lookup;
@@ -137,7 +135,6 @@ use extension_forms::{
 };
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::route_full_jid_iq;
-use isr_token::handle_isr_token_request_iq;
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
@@ -296,11 +293,6 @@ pub async fn handle_iq_with_conn_state(
         && iq.to().is_some_and(|to| to.domain().as_str() == muc_domain)
     {
         return handle_muc_self_ping_iq(&iq, state, phase.bound_jid(), response_from, response_to)
-            .await;
-    }
-
-    if is_isr_token_request(&iq) {
-        return handle_isr_token_request_iq(&iq, state, authenticated_session, phase.bound_jid())
             .await;
     }
 

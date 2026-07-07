@@ -1,284 +1,360 @@
+//! [`IsrTokenStore`] trait + [`InMemoryIsrTokenStore`] (ADR-0017 Phase 3
+//! Slice 8, Q8 resolution).
+//!
+//! Mirrors the `ClaimStore` split (ADR-0017 Phase 3 Slice 1, Q1): the trait
+//! plus the trivial single-node implementation live here, unconditionally
+//! compiled; the Postgres-backed, fenced implementation
+//! (`PostgresIsrTokenStore`) lives downstream in
+//! `waddle-server::clustering::isr`, gated `#[cfg(feature = "clustering")]`.
+//!
+//! **`InMemoryIsrTokenStore` is never advertised in production** — ADR-0017
+//! Phase 3 Slice 8's compounding decision (Q8) gates XEP-0397 advertisement
+//! on `clustering.enabled && Postgres`, full stop. This type exists so the
+//! trait has a real single-node implementor (matching `InProcessClaimStore`'s
+//! role for `ClaimStore`) and so unit tests can exercise the trait contract
+//! without a live Postgres instance, not because single-node ISR is a
+//! supported deployment shape.
+
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
-use tracing::{debug, warn};
+use async_trait::async_trait;
+use subtle::ConstantTimeEq;
 
-use super::{IsrToken, DEFAULT_TOKEN_VALIDITY_SECS, MAX_TOKEN_VALIDITY_SECS};
+use crate::ownership::{ClaimEpoch, NodeIdentity};
 
-/// ISR token store for managing resumption tokens.
+/// A freshly issued or rotated ISR token (ADR-0017 Phase 3 Slice 8,
+/// XEP-0397). The token string itself is a secret credential — never
+/// compared with `==`; see [`IsrTokenStore::consume`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedIsrToken {
+    pub token: String,
+    pub mechanism: String,
+}
+
+/// Outcome of a fenced [`IsrTokenStore::consume`] attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IsrConsumeOutcome {
+    /// The presented token matched (compared in constant time). The old
+    /// token row was destroyed and a fresh one rotated in, atomically, in
+    /// the same fencing transaction (XEP-0397 "Successful Stream
+    /// Resumption": the server's success reply MUST include a *new* ISR
+    /// token). `rotated` is the value actually committed — never a
+    /// pre-commit guess.
+    Matched { rotated: IssuedIsrToken },
+    /// A token row EXISTED for this SM-ID, but the presented token did not
+    /// match the stored one, or the stored token's pinned mechanism did not
+    /// match the mechanism the caller is presenting it under. Per
+    /// XEP-0397's anti-brute-force MUST, the row was already destroyed
+    /// unconditionally before this variant is returned — this is a genuine
+    /// wrong-token attempt against a real ISR-enabled session, so the
+    /// caller MUST additionally destroy the SM session state the SM-ID
+    /// identified (council-adjudicated FIX 3, ADR-0017 Phase 3 Slice 8).
+    Mismatched,
+    /// No token row existed for this SM-ID at all — either this session
+    /// never opted into ISR (no `<isr-enable/>` was ever issued for it), or
+    /// a previous attempt already consumed/destroyed it. Nothing was
+    /// touched: no row existed to delete (council-adjudicated FIX 1's
+    /// phantom-delete guard — a concurrent loser's blocked read observes
+    /// exactly this after the winner's commit, per Postgres's
+    /// delete-not-update row-lock semantics; see
+    /// `PostgresIsrTokenStore::consume`'s doc comment). The caller MUST
+    /// return the failure WITHOUT destroying any session state
+    /// (council-adjudicated FIX 3): an ISR-authenticate attempt against a
+    /// resumable-but-never-ISR-enabled session, or a replay of an
+    /// already-consumed attempt, must not destroy anything.
+    NoSuchToken,
+}
+
+/// [`IsrTokenStore`] failures. Typed per the repo's typed-payloads hard
+/// rule — never a bare `String` masquerading as structured data.
+#[derive(Debug, thiserror::Error)]
+pub enum IsrTokenStoreError {
+    /// The backing store's own error, converted to its `Display` text (the
+    /// same necessary exception `ClaimError::Backend` documents: a
+    /// Postgres-backed implementation's richly-typed error cannot be named
+    /// from this unconditionally-compiled crate without an illegal reverse
+    /// dependency).
+    #[error("ISR token store backend error: {0}")]
+    Backend(String),
+    /// The caller's claimed fencing epoch no longer holds the SM-session
+    /// claim (ADR-0017 Phase 3 Slice 8's locked spec: consume runs inside
+    /// the SAME epoch-fenced transaction as the SM claim's own
+    /// `SELECT ... FOR SHARE`). The caller lost ownership of the entity
+    /// mid-flight; no token row is touched.
+    #[error("SM-session claim fencing check failed: caller no longer holds this claim")]
+    NotOwner,
+    /// In-process bookkeeping lock was poisoned by a panicking holder.
+    #[error("ISR token store internal lock poisoned")]
+    Poisoned,
+}
+
+/// Postgres-authoritative, epoch-fenced ISR token storage (ADR-0017 Phase 3
+/// Slice 8, element 10). See the module doc for the trait/impl split
+/// rationale.
 ///
-/// This store maintains the mapping between tokens and session state.
-/// It provides thread-safe access and automatic expiration handling.
-#[derive(Debug)]
-pub struct IsrTokenStore {
-    /// Tokens indexed by token string
-    tokens: RwLock<HashMap<String, IsrToken>>,
-    /// Default token validity in seconds
-    default_validity: u64,
-    /// Maximum number of tokens to store (prevents unbounded growth)
-    max_tokens: usize,
-}
+/// [`consume`](Self::consume) is the locked-spec operation: fetch the
+/// token row by the non-secret `sm_id` key (never by token), compare the
+/// stored token against `presented_token` in Rust with a constant-time
+/// primitive, and only then delete — all inside one epoch-fenced
+/// transaction bound to `me`/`mine`'s currently-held SM-session claim.
+/// Matching the token in a SQL `WHERE` clause is explicitly banned as a
+/// timing oracle; every implementation of this trait must honor that ban.
+#[async_trait]
+pub trait IsrTokenStore: Send + Sync {
+    /// Create the backing schema if it does not exist. Idempotent.
+    async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError>;
 
-impl Default for IsrTokenStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IsrTokenStore {
-    /// Create a new token store with default settings.
-    pub fn new() -> Self {
-        Self {
-            tokens: RwLock::new(HashMap::new()),
-            default_validity: DEFAULT_TOKEN_VALIDITY_SECS,
-            max_tokens: 10000,
-        }
-    }
-
-    /// Create a token store with custom settings.
-    pub fn with_config(default_validity_secs: u64, max_tokens: usize) -> Self {
-        Self {
-            tokens: RwLock::new(HashMap::new()),
-            default_validity: default_validity_secs.min(MAX_TOKEN_VALIDITY_SECS),
-            max_tokens,
-        }
-    }
-
-    /// Create and store a new token for a session.
-    pub fn create_token(&self, user_id: String, jid: jid::BareJid) -> IsrToken {
-        let token = IsrToken::new(user_id, jid, self.default_validity);
-        self.store_token(token.clone());
-        token
-    }
-
-    /// Create and store a token with SM state.
-    pub fn create_token_with_sm(
+    /// Mint and store a fresh token for `sm_id`, pinned to `mechanism`
+    /// (XEP-0397's "mechanism pinning", element 10: the entities involved
+    /// MUST only use or allow this mechanism when performing ISR with the
+    /// returned token). Overwrites any existing token for this SM-ID —
+    /// issuance is a fresh `<isr-enable/>`, never a rotation of an existing
+    /// token; rotation is [`consume`](Self::consume)'s job.
+    async fn issue(
         &self,
-        user_id: String,
-        jid: jid::BareJid,
-        sm_stream_id: String,
-        inbound_count: u32,
-        outbound_count: u32,
-    ) -> IsrToken {
-        let token = IsrToken::with_sm_state(
-            user_id,
-            jid,
-            self.default_validity,
-            sm_stream_id,
-            inbound_count,
-            outbound_count,
-        );
-        self.store_token(token.clone());
-        token
-    }
+        sm_id: &str,
+        mechanism: &str,
+    ) -> Result<IssuedIsrToken, IsrTokenStoreError>;
 
-    /// Store a token in the store.
-    fn store_token(&self, token: IsrToken) {
-        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
-            warn!("ISR token store write lock was poisoned, recovering");
-            e.into_inner()
-        });
+    /// Fenced, single-use, constant-time consume. See the trait-level doc
+    /// for the locked spec this must implement exactly.
+    async fn consume(
+        &self,
+        sm_id: &str,
+        presented_token: &[u8],
+        mechanism: &str,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<IsrConsumeOutcome, IsrTokenStoreError>;
 
-        // Clean up expired tokens if we're at capacity
-        if tokens.len() >= self.max_tokens {
-            self.cleanup_expired_internal(&mut tokens);
-        }
-
-        // If still at capacity, remove oldest token
-        if tokens.len() >= self.max_tokens {
-            if let Some(oldest_key) = tokens
-                .iter()
-                .min_by_key(|(_, t)| t.created_at)
-                .map(|(k, _)| k.clone())
-            {
-                tokens.remove(&oldest_key);
-            }
-        }
-
-        debug!(token_id = %&token.token[..token.token.len().min(8)], "Storing ISR token");
-        tokens.insert(token.token.clone(), token);
-    }
-
-    /// Validate and retrieve a token.
+    /// Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): reap token
+    /// rows older than `max_age`. A row is minted per `<isr-enable/>` and
+    /// is never reaped by the ordinary [`consume`](Self::consume) path
+    /// alone — a token issued but never resumed (or whose SM session is
+    /// later expired/reaped by some other path with no cascade hook back
+    /// to this store) would otherwise sit in `clustering_isr_tokens`
+    /// forever. Returns the number of rows deleted.
     ///
-    /// Returns the token if valid, or None if expired/not found.
-    /// The token is NOT removed - use `consume_token` to remove after successful resume.
-    pub fn validate_token(&self, token_str: &str) -> Option<IsrToken> {
-        let tokens = self.tokens.read().unwrap_or_else(|e| {
-            warn!("ISR token store read lock was poisoned, recovering");
-            e.into_inner()
-        });
+    /// [`InMemoryIsrTokenStore`]'s implementation is a no-op returning `0`:
+    /// per this module's own doc comment it is never advertised/exercised
+    /// in production (ISR requires `clustering.enabled && Postgres`), so
+    /// nothing ever accumulates there worth sweeping, and it tracks no
+    /// issuance timestamp to sweep by in the first place.
+    async fn sweep_expired(&self, max_age: std::time::Duration) -> Result<u64, IsrTokenStoreError>;
+}
 
-        match tokens.get(token_str) {
-            Some(token) => {
-                if token.is_expired() {
-                    debug!(token_id = %&token_str[..token_str.len().min(8)], "ISR token expired");
-                    None
-                } else {
-                    debug!(token_id = %&token_str[..token_str.len().min(8)], "ISR token valid");
-                    Some(token.clone())
-                }
-            }
-            None => {
-                debug!(token_id = %&token_str[..token_str.len().min(8)], "ISR token not found");
-                None
-            }
-        }
+/// Trivial single-node [`IsrTokenStore`]. See the module doc: never
+/// advertised in production (ISR requires `clustering.enabled && Postgres`),
+/// kept for trait-contract symmetry and unit testing only.
+#[derive(Debug, Default)]
+pub struct InMemoryIsrTokenStore {
+    tokens: RwLock<HashMap<String, IssuedIsrToken>>,
+}
+
+impl InMemoryIsrTokenStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl IsrTokenStore for InMemoryIsrTokenStore {
+    async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
+        // No backing schema — in-memory only.
+        Ok(())
     }
 
-    /// Consume (remove) a token after successful resumption.
-    ///
-    /// This prevents token reuse.
-    pub fn consume_token(&self, token_str: &str) -> Option<IsrToken> {
-        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
-            warn!("ISR token store write lock was poisoned, recovering");
-            e.into_inner()
-        });
-        let token = tokens.remove(token_str);
-
-        if token.is_some() {
-            debug!(token_id = %&token_str[..token_str.len().min(8)], "ISR token consumed");
-        }
-
-        token
-    }
-
-    /// Update SM state for an existing token.
-    pub fn update_sm_state(&self, token_str: &str, inbound: u32, outbound: u32) -> bool {
-        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
-            warn!("ISR token store write lock was poisoned, recovering");
-            e.into_inner()
-        });
-
-        if let Some(token) = tokens.get_mut(token_str) {
-            token.update_sm_state(inbound, outbound);
-            debug!(
-                token_id = %&token_str[..token_str.len().min(8)],
-                inbound = inbound,
-                outbound = outbound,
-                "Updated ISR token SM state"
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Refresh a token, returning a new token with extended validity.
-    ///
-    /// The old token is invalidated and a new one is created.
-    pub fn refresh_token(&self, old_token_str: &str) -> Option<IsrToken> {
-        // First validate and get the old token
-        let old_token = {
-            let tokens = self.tokens.read().unwrap_or_else(|e| {
-                warn!("ISR token store read lock was poisoned, recovering");
-                e.into_inner()
-            });
-            tokens.get(old_token_str).cloned()
+    async fn issue(
+        &self,
+        sm_id: &str,
+        mechanism: &str,
+    ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
+        let issued = IssuedIsrToken {
+            token: super::generate_isr_token(),
+            mechanism: mechanism.to_string(),
         };
+        let mut tokens = self
+            .tokens
+            .write()
+            .map_err(|_| IsrTokenStoreError::Poisoned)?;
+        tokens.insert(sm_id.to_string(), issued.clone());
+        Ok(issued)
+    }
 
-        match old_token {
-            Some(old) if !old.is_expired() => {
-                // Create new token with same session info
-                let new_token = IsrToken::with_sm_state(
-                    old.user_id,
-                    old.jid,
-                    self.default_validity,
-                    old.sm_stream_id.unwrap_or_default(),
-                    old.sm_inbound_count,
-                    old.sm_outbound_count,
-                );
-
-                // Store new token
-                self.store_token(new_token.clone());
-
-                // Remove old token
-                {
-                    let mut tokens = self.tokens.write().unwrap_or_else(|e| {
-                        warn!("ISR token store write lock was poisoned, recovering");
-                        e.into_inner()
-                    });
-                    tokens.remove(old_token_str);
-                }
-
-                debug!(
-                    old_token = %&old_token_str[..old_token_str.len().min(8)],
-                    new_token = %&new_token.token[..new_token.token.len().min(8)],
-                    "Refreshed ISR token"
-                );
-
-                Some(new_token)
-            }
-            Some(_) => {
-                warn!(token_id = %&old_token_str[..old_token_str.len().min(8)], "Cannot refresh expired ISR token");
-                None
-            }
-            None => {
-                warn!(token_id = %&old_token_str[..old_token_str.len().min(8)], "Cannot refresh unknown ISR token");
-                None
-            }
+    async fn consume(
+        &self,
+        sm_id: &str,
+        presented_token: &[u8],
+        mechanism: &str,
+        // No node-liveness table exists for the single-node case (mirrors
+        // `InProcessClaimStore`'s own module doc): there is only one node,
+        // so fencing is a no-op here rather than a meaningful check.
+        _me: &NodeIdentity,
+        _mine: ClaimEpoch,
+    ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
+        let mut tokens = self
+            .tokens
+            .write()
+            .map_err(|_| IsrTokenStoreError::Poisoned)?;
+        // Council-adjudicated FIX 1/FIX 3: distinguish "no row at all"
+        // (never opted in / already consumed) from "a row existed but
+        // didn't match" (genuine wrong-token attempt) — mirroring
+        // `PostgresIsrTokenStore::consume`'s same guard.
+        let Some(stored) = tokens.remove(sm_id) else {
+            return Ok(IsrConsumeOutcome::NoSuchToken);
+        };
+        // Constant-time comparison (ADR-0017 Phase 3 Slice 8, element 10):
+        // never `==` on the secret token bytes. The mechanism pin is
+        // non-secret metadata, compared plainly.
+        let matches = stored.mechanism == mechanism
+            && bool::from(stored.token.as_bytes().ct_eq(presented_token));
+        if !matches {
+            // Already removed above — destroyed unconditionally, per the
+            // XEP's anti-brute-force MUST.
+            return Ok(IsrConsumeOutcome::Mismatched);
         }
+        let rotated = IssuedIsrToken {
+            token: super::generate_isr_token(),
+            mechanism: mechanism.to_string(),
+        };
+        tokens.insert(sm_id.to_string(), rotated.clone());
+        Ok(IsrConsumeOutcome::Matched { rotated })
     }
 
-    /// Remove all tokens for a specific user identifier (e.g., on logout).
-    pub fn revoke_tokens_for_user_id(&self, user_id: &str) {
-        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
-            warn!("ISR token store write lock was poisoned, recovering");
-            e.into_inner()
-        });
-        let initial_count = tokens.len();
-        tokens.retain(|_, t| t.user_id != user_id);
-        let removed = initial_count - tokens.len();
-
-        if removed > 0 {
-            debug!(user_id = %user_id, removed = removed, "Revoked ISR tokens for user");
-        }
-    }
-
-    /// Clean up expired tokens.
-    pub fn cleanup_expired(&self) {
-        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
-            warn!("ISR token store write lock was poisoned, recovering");
-            e.into_inner()
-        });
-        self.cleanup_expired_internal(&mut tokens);
-    }
-
-    /// Internal cleanup helper (requires write lock already held).
-    fn cleanup_expired_internal(&self, tokens: &mut HashMap<String, IsrToken>) {
-        let initial_count = tokens.len();
-        tokens.retain(|_, t| !t.is_expired());
-        let removed = initial_count - tokens.len();
-
-        if removed > 0 {
-            debug!(removed = removed, "Cleaned up expired ISR tokens");
-        }
-    }
-
-    /// Get the number of active tokens.
-    pub fn token_count(&self) -> usize {
-        self.tokens
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("ISR token store read lock was poisoned, recovering");
-                e.into_inner()
-            })
-            .len()
+    async fn sweep_expired(
+        &self,
+        _max_age: std::time::Duration,
+    ) -> Result<u64, IsrTokenStoreError> {
+        // See the trait method's doc comment: never advertised/exercised in
+        // production, and this store tracks no issuance timestamp to sweep
+        // by — a no-op, not a partial implementation of a real sweep.
+        Ok(0)
     }
 }
 
-/// Shared ISR token store that can be used across connections.
-pub type SharedIsrTokenStore = Arc<IsrTokenStore>;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Create a new shared ISR token store.
-pub fn create_shared_store() -> SharedIsrTokenStore {
-    Arc::new(IsrTokenStore::new())
-}
+    fn identity() -> NodeIdentity {
+        NodeIdentity::local()
+    }
 
-/// Create a shared store with custom configuration.
-pub fn create_shared_store_with_config(
-    validity_secs: u64,
-    max_tokens: usize,
-) -> SharedIsrTokenStore {
-    Arc::new(IsrTokenStore::with_config(validity_secs, max_tokens))
+    #[tokio::test]
+    async fn issue_then_consume_with_matching_token_rotates() {
+        let store = InMemoryIsrTokenStore::new();
+        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let outcome = store
+            .consume(
+                "sm-1",
+                issued.token.as_bytes(),
+                "PLAIN",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        let IsrConsumeOutcome::Matched { rotated } = outcome else {
+            panic!("expected Matched, got {outcome:?}");
+        };
+        assert_ne!(rotated.token, issued.token);
+    }
+
+    #[tokio::test]
+    async fn consume_with_wrong_token_is_mismatched_and_destroys_the_row() {
+        let store = InMemoryIsrTokenStore::new();
+        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let outcome = store
+            .consume(
+                "sm-1",
+                b"not-the-token",
+                "PLAIN",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
+
+        // The row is gone — a second consume attempt with the ORIGINAL
+        // (correct) token now finds no row at all (FIX 3: distinct from
+        // the genuine-mismatch outcome above), proving destruction happened.
+        let second = store
+            .consume(
+                "sm-1",
+                issued.token.as_bytes(),
+                "PLAIN",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        assert_eq!(second, IsrConsumeOutcome::NoSuchToken);
+    }
+
+    #[tokio::test]
+    async fn consume_is_single_use() {
+        let store = InMemoryIsrTokenStore::new();
+        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let first = store
+            .consume(
+                "sm-1",
+                issued.token.as_bytes(),
+                "PLAIN",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        assert!(matches!(first, IsrConsumeOutcome::Matched { .. }));
+
+        // The OLD token no longer works, even though a rotated token now
+        // exists under the same sm_id — a genuine mismatch (a row DOES
+        // exist), not `NoSuchToken`.
+        let replay = store
+            .consume(
+                "sm-1",
+                issued.token.as_bytes(),
+                "PLAIN",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        assert_eq!(replay, IsrConsumeOutcome::Mismatched);
+    }
+
+    #[tokio::test]
+    async fn consume_with_no_issued_token_is_no_such_token() {
+        let store = InMemoryIsrTokenStore::new();
+        let outcome = store
+            .consume(
+                "no-such-sm-id",
+                b"anything",
+                "PLAIN",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        assert_eq!(outcome, IsrConsumeOutcome::NoSuchToken);
+    }
+
+    #[tokio::test]
+    async fn consume_pins_the_mechanism() {
+        let store = InMemoryIsrTokenStore::new();
+        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let outcome = store
+            .consume(
+                "sm-1",
+                issued.token.as_bytes(),
+                "SCRAM-SHA-256",
+                &identity(),
+                ClaimEpoch(0),
+            )
+            .await
+            .expect("consume");
+        assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
+    }
 }

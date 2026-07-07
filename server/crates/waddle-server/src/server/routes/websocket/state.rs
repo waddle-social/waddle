@@ -264,8 +264,6 @@ pub struct ProtocolServices {
     /// outbound message commits, and XEP-0045 presence events; read
     /// by the T1 push-gate evaluator (`notification_outbox`).
     pub notification_activity: Arc<crate::notification_activity::NotificationActivityStore>,
-    /// XEP-0397 Instant Stream Resumption token store.
-    pub isr_token_store: waddle_xmpp::isr::SharedIsrTokenStore,
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,

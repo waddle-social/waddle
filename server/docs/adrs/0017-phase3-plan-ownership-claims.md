@@ -26,7 +26,11 @@ exclusive table access. Land the `nodes`/`claims`/`steal_intents` schema and the
 contract from ADR element 4, the Postgres-fenced `SmPersistenceStorage` split from element
 1, cross-node XEP-0198 resume via claim-steal (element 8), durable MUC ownership with
 re-election (element 7), and a cluster-correct XEP-0397 ISR store (element 10) — or leave
-ISR unadvertised, per the Phase 0 removal, if the store does not ship with it.
+ISR unadvertised if the store does not ship with it. **Corrected premise (FIX 8,
+council-adjudicated)**: ISR was never removed by an earlier phase — before this slice it
+was advertised **unconditionally and non-conformantly** (the wrong namespace,
+`urn:xmpp:isr:0`, and a bare `<isr/>` element with no `<mechanisms>` child, gated on
+nothing). This slice is the first to gate the advertisement and fix its wire shape.
 
 ## Non-goals (Phase 4 exclusions)
 
@@ -289,11 +293,14 @@ Postgres path into the live resume flow, exactly as before — but Slice 8 addit
 `handlers/iq/mod.rs` (`is_isr_token_request` check and the `:302-303` call), and delete
 `websocket_isr_token_request_returns_token` from `xep0054_0049_0191_ws.rs`, replacing
 token issuance with the XEP-0397-conformant inline `<isr-enable/>`/`<isr-enabled/>`
-flow on `<enable/>`/`<enabled/>`. Single-node ISR remains unadvertised exactly as
-Phase 0 left it (`clustering.enabled && Postgres` gate, per above). This is a
-scope-narrowing deviation from a literal reading of ADR element 10 (which does not
-textually restrict ISR to clustered deployments) **and** a conformance-driven
-retirement of shipped code, both called out again in the deviations list.
+flow on `<enable/>`/`<enabled/>`. Single-node ISR remains unadvertised under this
+slice's own `clustering.enabled && Postgres` gate (per above) — not, as an earlier
+draft of this text incorrectly claimed, a re-imposition of a Phase 0 removal (FIX 8,
+council-adjudicated correction): ISR was previously advertised unconditionally and
+non-conformantly, never removed. This is a scope-narrowing deviation from a literal
+reading of ADR element 10 (which does not textually restrict ISR to clustered
+deployments) **and** a conformance-driven retirement of shipped code, both called out
+again in the deviations list.
 
 ## Slice breakdown
 
@@ -1581,7 +1588,9 @@ detached session state and claim are destroyed); token rotation on success (a se
 consume with the old token fails; delete+insert commit atomically — a crash injected
 between them must roll both back, never leaving a deleted-but-unrotated state, per the
 one-transaction rule above); the IQ path is gone (a `token-request` IQ now yields
-`service-unavailable`, not a token). ISR advertisement itself: a test asserting disco/
+`feature-not-implemented` — corrected per deviation 79 and the actual landed test,
+matching this repo's real unhandled-IQ catch-all condition, not `service-unavailable` —
+not a token). ISR advertisement itself: a test asserting disco/
 stream-features omit `<isr/>` unless `clustering.enabled && Postgres`.
 
 **Dependencies**: Slice 4 (fenced SM persistence — ISR consume rides the SM claim's
@@ -1882,10 +1891,12 @@ concern).
   XEP-0397 ISR (Slice 8) each get a dedicated Rust test suite landing in the same PR as
   their behavior, per the rule and per the ADR's own Implementation Plan text
   ("Every phase that changes XEP behavior carries that XEP's dedicated Rust test suite
-  in the same PR"). XEP-0397's stream-features/disco advertisement is re-added **only**
+  in the same PR"). XEP-0397's stream-features/disco advertisement is gated **only**
   once the Postgres store ships with this testable behavior (Slice 8) — if Slice 8 slips
-  out of this phase for any reason, ISR stays unadvertised exactly as Phase 0 left it,
-  never advertised-but-untested.
+  out of this phase for any reason, ISR stays unadvertised (FIX 8: not, as previously
+  drafted here, a reversion to a "Phase 0 removal" — it was never removed, only
+  previously advertised unconditionally and non-conformantly), never
+  advertised-but-untested.
 - **Postgres-only, feature-gated where the ADR requires it.** `clustering/claims.rs`,
   `clustering/isr.rs`, and `clustering/self_fence.rs` are `#[cfg(feature =
   "clustering")]`, consistent with every other Phase 2 clustering module. The
@@ -3302,3 +3313,215 @@ duplicated here.
     already carries `SmSessionId`/`BareJid` wire-typed" parity claim
     actually true — previously `Entity::id` had no bound at all, unlike
     the `SmSessionId` it was compared to.
+74. **Code-research correction (Slice 8 implementation, changes the
+    premise): no SASL2 (XEP-0388, `urn:xmpp:sasl:2`) implementation exists
+    anywhere in this codebase — not partial, not misplaced, genuinely
+    absent.** Slice 8's own text flagged locating "the SASL2/ISR
+    wire-handling call site" as "an open item to locate during Slice 8
+    implementation, not a blocking gap" — that framing assumed a SASL2
+    envelope already existed somewhere to be found. A full-repo grep
+    (excluding `target/`/`xeps/`) for `sasl:2`, `Sasl2`, `SASL2`,
+    `bind2`, `authenticate` turned up zero hits outside this slice's own
+    new code; the only pre-existing auth surface is SASL1
+    (`urn:ietf:params:xml:ns:xmpp-sasl`: PLAIN/SCRAM-SHA-256/OAUTHBEARER,
+    `waddle-xmpp/src/auth/mod.rs` +
+    `waddle-server/.../websocket/sasl.rs`). Building general XEP-0388
+    (mechanism negotiation via an `<authentication/>` stream feature,
+    `<challenge/>`/`<response/>` multi-round exchanges, Bind 2/CSI inline
+    negotiation, channel binding) is a multi-day undertaking of its own
+    and out of proportion to "wire up ISR" — see deviation 75 for the
+    narrowed scope this plan actually ships.
+75. **Deliberately narrow, ISR-only SASL2 surface, not general XEP-0388**
+    (scope-narrowing deviation, forced by 74). This slice implements
+    exactly one `<authenticate xmlns='urn:xmpp:sasl:2'
+    mechanism='PLAIN'>` shape: an `<initial-response>` (SASL PLAIN,
+    `\0<bare-jid>\0<ISR-token>` — the token stands in for the password,
+    per XEP-0397's own "pinned mechanism" design) plus an inline
+    `<inst-resume with-isr-token='true'>` wrapping a XEP-0198
+    `<resume/>`. `PLAIN` is the only pinned mechanism this implementation
+    supports (not the XEP's own recommended `HT-SHA-256-ENDP`, which this
+    codebase has no implementation of at all — PLAIN is the only
+    supported SASL1 mechanism whose wire shape carries a bare password
+    field an opaque token can stand in for). `with-isr-token='false'`
+    (traditional-credential ISR) and any `<authenticate/>` without an
+    inline `<inst-resume/>` (general SASL2 login) are rejected at the
+    parser layer (`waddle_xmpp::protocol::frame::parse_frame`'s new
+    `"authenticate"` root, `ParseError::MalformedIsrAuthenticate`) before
+    ever reaching a handler. `<success/>` still carries
+    XEP-0388's `<authorization-identifier/>` for conformance, even though
+    XEP-0397's own (SASL1-vintage) examples omit it. **Addendum
+    (council-adjudicated, FIX 8c)**: XEP-0388 itself says implementations
+    "SHOULD NOT" support PLAIN as a general SASL2 mechanism — this slice's
+    use of PLAIN is not that; the "password" field this mechanism carries
+    is never a real, reusable password, it is a single-use, 256-bit-entropy
+    ISR token, generated fresh per `<isr-enable/>`, destroyed on first use
+    (match or mismatch) and rotated on every successful resume, and the
+    exchange only ever happens over an already-TLS-protected transport.
+    None of PLAIN's usual risk profile (a long-lived, reusable, human
+    -chosen secret transiting in the clear if TLS is absent) applies here.
+    Separately, this slice deliberately does **not** advertise a general
+    `urn:xmpp:sasl:2` authentication stream feature at all — only the
+    narrow `<authenticate mechanism='PLAIN'>` + inline `<inst-resume/>`
+    shape `waddle_xmpp::protocol::frame::parse_frame` recognizes is
+    reachable. This is intentional, not an oversight: ISR's entire purpose
+    is to let a fresh connection skip the ordinary SASL negotiation
+    round-trip, so advertising a general SASL2 authentication capability
+    this codebase doesn't otherwise implement would invite exactly the
+    "build a second, incomplete auth stack" scope creep deviation 74's own
+    finding warns against.
+76. **Cross-node ISR resume: wired, not deferred (council-adjudicated FIX
+    2 — retracts and replaces this deviation's original text)**. The
+    original draft of this deviation recorded cross-node ISR resume as
+    out of scope for this slice, collapsing a local-claim miss straight to
+    the failed-token failure path. FIX 2 wires it: `isr_resume.rs`'s
+    `Ok(None)` branch now calls the SAME cancellable
+    `prepare_cross_node_resume`/`finish_cross_node_steal` machinery
+    `handle_sm_resume` uses (Slice 6), via a new shared helper,
+    `stream_management::attempt_cross_node_resume_raced` — extracted from
+    `handle_sm_resume`'s own inline cancellation-safe race so both resume
+    paths share one implementation of that invariant rather than risking a
+    second, subtly different one. The consume's own epoch fence (bound to
+    whichever node just won the cross-node steal) requires no change: it
+    already binds to "whichever claim/epoch this call currently holds,"
+    which is exactly the freshly-won claim after a successful steal. The
+    phase plan's own Slice 8 "Dependencies" line ("Slice 6 (resume
+    machinery ISR piggybacks on)") is now fully realized.
+77. **`consume`'s token-row `SELECT` uses `FOR UPDATE`, not a bare read**
+    (implementation-time finding via this slice's own concurrent
+    -double-consume test, which failed under real parallel execution
+    before this fix and passed after). The locked spec's `FOR SHARE`
+    lock is on `clustering_claims` (the SM-session claim fence) —
+    `FOR SHARE` is a *shared* lock and does not by itself serialize two
+    concurrent `consume` calls against the same `clustering_isr_tokens`
+    row (both could read the same not-yet-deleted row before either
+    commits). `SELECT token, mechanism FROM clustering_isr_tokens WHERE
+    sm_id = ? FOR UPDATE` closes this: the second concurrent transaction
+    blocks until the first commits (or rolls back) and then observes the
+    row's post-commit state. This does not touch the "never match the
+    token in a SQL WHERE clause" ban — `FOR UPDATE` only changes locking
+    semantics for the same `sm_id`-keyed predicate; the token itself is
+    still compared only in Rust, via `subtle::ConstantTimeEq`.
+78. **`IsrTokenStore` trait + `InMemoryIsrTokenStore`
+    (`waddle-xmpp/src/isr/store.rs`) / `PostgresIsrTokenStore`
+    (`waddle-server/src/clustering/isr.rs`)** executed exactly per Q8's
+    revised decision, mirroring the `ClaimStore` split. `issue`/`consume`
+    are the only two trait methods (no separate `validate`/`refresh`/
+    `revoke` surface from the pre-Slice-8 `IsrTokenStore` struct — none
+    of that surface had any conformant caller to serve).
+79. **IQ-issuance retirement executed exactly per the inventory**:
+    `handlers/iq/isr_token.rs` deleted; its `mod`/`use`/dispatch entries
+    in `handlers/iq/mod.rs` deleted; `build_isr_token_error`/
+    `build_isr_token_result`/`is_isr_token_request`/the old `IsrToken`
+    struct and its `format!`-based XML helpers all deleted (not
+    repurposed — nothing conformant needed their shape).
+    `websocket_isr_token_request_returns_token`
+    (`tests/xep0054_0049_0191_ws.rs`) replaced with
+    `websocket_legacy_isr_token_request_iq_is_gone`, asserting the old
+    `token-request` IQ now falls through to the unhandled-IQ catch-all
+    (`feature-not-implemented`), matching this repo's actual catch-all
+    condition rather than `service-unavailable`.
+80. **Namespace corrected in place**: `waddle_xmpp::ns::ISR` (and its
+    `waddle_xmpp::isr::ISR_NS` re-export) changed from the pre-Slice-8
+    `urn:xmpp:isr:0` to the XEP-fact-checked `https://xmpp.org/extensions/isr/0`.
+    No back-compat alias — the old value was never a form XEP-0397
+    actually specifies (an `htpps` vendored-source typo, not an alternate
+    valid spelling).
+81. **`ClusteringHandles::isr_token_store()` doubles as the single
+    availability predicate** for both the stream-features/disco
+    advertisement gate and the `<isr-enable/>`/ISR-resume handlers'
+    "is ISR actually usable right now" check — not a separate
+    `clustering.enabled && Postgres` config read. This means the
+    advertised capability and the wired behavior are structurally
+    incapable of drifting apart (the same accessor gates both), at the
+    cost of the predicate's name not literally mentioning Postgres.
+82. **`<isr-enable/>`/`<isr-enabled/>` land as new optional fields on the
+    existing `SmEnable`/`SmEnabled` stanza types**
+    (`isr_enable_mechanism: Option<String>` /
+    `isr_token: Option<String>` + `with_isr_token`), not a new nonza
+    type — `<isr-enable/>` is genuinely an inline child of `<enable/>`
+    per the XEP, not a sibling top-level element.
+83. **Resume-impossible branch simplification**: `handle_sm_resume`'s own
+    "handled count too high" case is a hard protocol violation that
+    closes the connection outright; the ISR resume path instead maps
+    *both* "handled count too high" and "replay window gone" onto
+    XEP-0397's single `<success/>`+`<inst-resume-failed/>` branch
+    (different XEP-0198 `<failed/>` conditions:
+    `unexpected-request` vs. `resource-constraint`), releasing (not
+    destroying) the claim either way. This matches the XEP's own text
+    ("the initiating entity MAY continue with normal session
+    establishment") more closely than hard-closing the connection would,
+    and keeps the ISR resume path from ever needing a
+    connection-closing exit once the token has already been validated.
+84. **Council-adjudicated FIX 1 — `consume`'s delete is now gated on
+    `stored.is_some()`, closing a concurrent phantom-delete (critical,
+    verified against a live Postgres)**. The pre-fix `consume` ran its
+    `DELETE FROM clustering_isr_tokens WHERE sm_id = ?` unconditionally,
+    immediately after the `SELECT ... FOR UPDATE` and before ever checking
+    whether that `SELECT` found a row. Under a genuine concurrent double
+    -consume (two callers presenting the same, still-valid token), the
+    losing transaction's `FOR UPDATE` blocks on the winner's row lock;
+    once the winner commits its `DELETE` (rotation is delete-then-insert,
+    never an `UPDATE` of the same row), Postgres's own documented
+    row-locking semantics mean the loser's blocked read observes **no
+    row at all** once unblocked — even though a new row sharing the same
+    `sm_id` primary key value now exists, because that row is a distinct
+    tuple the loser's already-in-flight query was never watching. The
+    pre-fix code's unconditional delete, reached via this exact `None`
+    path, still issued the same `DELETE ... WHERE sm_id = ?` — which,
+    since the winner's freshly-rotated row matches that predicate,
+    deleted the WINNER'S row. The loser's caller (`isr_resume.rs`) would
+    then treat its own (formerly) `Mismatched` outcome as a genuine
+    wrong-token attack and destroy the winner's just-resumed session —
+    reproduced against a live Postgres before this fix. The fix: if
+    `stored.is_none()`, commit read-only and return immediately (FIX 3's
+    new `NoSuchToken`, below) without touching the table; only when
+    `stored.is_some()` does the delete/compare/conditional-rotation
+    sequence run, unchanged from before. This is a partial, not total,
+    reconciliation with element 10's literal "compare... and only then
+    performs the delete" text (conformance finding 8): the delete is now
+    conditioned on a compare-worthy precondition existing, but the actual
+    `DELETE` statement still precedes the Rust-side comparison in program
+    order (deliberately — see `clustering/isr.rs`'s own doc comment for
+    why splitting the delete into two call sites gains nothing).
+85. **Council-adjudicated FIX 3 — `IsrConsumeOutcome` gains a third
+    variant, `NoSuchToken`, narrowing the destroy blast radius to genuine
+    wrong-token attempts.** Before this fix, `Mismatched` covered three
+    distinct cases indiscriminately: no token row ever existed (never
+    opted into ISR, or already consumed), a real row existed but the
+    presented token didn't match it, or the pinned mechanism didn't
+    match — and `isr_resume.rs` destroyed the SM session's claimed state
+    (`complete_claim`) for all three. XEP-0397's anti-brute-force MUST
+    only actually requires destruction for the middle case (a genuine
+    failed-token attempt against a real ISR-enabled session); the other
+    two describe a session that was never meaningfully "ISR-authenticated
+    against" at all. `NoSuchToken` now covers the no-row case
+    specifically (both fixed stores — `InMemoryIsrTokenStore` and
+    `PostgresIsrTokenStore` — mirror the same distinction); `Mismatched`
+    is reserved for a row that genuinely existed and didn't match.
+    `isr_resume.rs` destroys on `Mismatched` only, and on `NoSuchToken`
+    fails with the same `not-authorized` SASL2 condition but releases the
+    claim back to the resumable pool instead, exactly like its own
+    identity-mismatch rejection. This also happens to be the correct
+    outcome for FIX 1's concurrent loser (which now genuinely observes no
+    row, not a stale read of the winner's replacement).
+86. **Council-adjudicated FIX 4 — a bounded TTL sweep, not a cross-crate
+    cascade, reaps orphaned `clustering_isr_tokens` rows.** A row is
+    minted per `<isr-enable/>` and, absent this fix, was never reaped
+    except by an ordinary `consume` (match or mismatch) — a token issued
+    but never resumed, or whose SM session claim is later
+    expired/reaped elsewhere with no hook back to this table, would sit
+    forever. A cascade off the SM session claim's own release/reap paths
+    was considered and rejected: those paths live in
+    `waddle_xmpp::stream_management` (cross-node-generic, no clustering
+    dependency), while `IsrTokenStore` is `waddle-server`-local and
+    Postgres-only — coupling them would break the same crate-boundary
+    separation `ClaimStore`/`IsrTokenStore`'s own trait split exists to
+    preserve. Instead: `IsrTokenStore` gains a `sweep_expired(max_age)`
+    trait method (a no-op returning `0` for `InMemoryIsrTokenStore`, which
+    tracks no issuance timestamp and is never exercised in production
+    anyway); `PostgresIsrTokenStore::sweep_expired` deletes rows whose
+    existing `created_at` column predates `max_age`, mirroring
+    `lease.rs`'s own `(? || ' milliseconds')::interval` TTL idiom; and
+    `session_janitors.rs`'s existing orphan-reaper sweep calls it once per
+    tick, bounded by its own timeout, alongside the claim-steal sweep it
+    already runs.

@@ -43,6 +43,8 @@ mod disco_trace;
 mod dispatch;
 mod frame_parsing;
 mod iq;
+#[cfg(feature = "clustering")]
+mod isr_resume;
 mod messages;
 mod misc;
 mod muc;
@@ -448,7 +450,6 @@ async fn create_test_websocket_state_with_extension_manager(
                     dnd_projection,
                     dnd_reader,
                     notification_activity,
-                    isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: sm_session_registry_override
                         .unwrap_or_else(|| Arc::new(InMemorySmSessionRegistry::new())),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),

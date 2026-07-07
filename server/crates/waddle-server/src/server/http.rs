@@ -711,7 +711,6 @@ async fn create_websocket_state(
                 dnd_projection,
                 dnd_reader,
                 notification_activity,
-                isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,
                 caps_resolver,

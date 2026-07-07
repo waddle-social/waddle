@@ -1,6 +1,7 @@
 use super::*;
 use super::{
     frame_backstop::{run_with_backstop, StanzaBackstop},
+    isr_resume::handle_isr_resume_authenticate,
     parse_errors::{is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
     sasl::{handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response},
@@ -101,7 +102,13 @@ async fn handle_xmpp_frame_impl(
         InboundFrame::Open => {
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_xml(domain);
-            let features_element = build_stream_features_for_phase(phase);
+            let isr_available = state
+                .deps
+                .app_state
+                .clustering_claims
+                .isr_token_store()
+                .is_some();
+            let features_element = build_stream_features_for_phase(phase, isr_available);
             *stream_open_sent = true;
             vec![open_element, features_element]
         }
@@ -140,6 +147,45 @@ async fn handle_xmpp_frame_impl(
             // the client's next <open/> is answered, no response header
             // exists for the new stream, so the graceful-shutdown arm
             // must not send a <stream:error> (§4.9.1.2).
+            if phase.is_authenticated() {
+                *stream_open_sent = false;
+            }
+            responses
+        }
+
+        InboundFrame::IsrResumeAuthenticate {
+            mechanism,
+            initial_response,
+            resume,
+        } => {
+            // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR resume, like SASL
+            // <auth>/<response> above, is only legal before this transport
+            // has its own SASL/bind lifecycle already established — it
+            // performs authentication itself, inline.
+            if !phase.allows_sasl_auth() {
+                warn!(phase = ?phase, "ISR resume authenticate received in invalid phase");
+                return vec![sasl_failure_xml("not-authorized")];
+            }
+            let ctx = SmCtx {
+                phase,
+                sm_state,
+                authenticated_session,
+                carbons_enabled,
+                presence_available,
+                presence_show,
+                presence_status,
+                presence_priority,
+                pending_resume_stream_id,
+                pending_resume_h,
+                suppress_sm_record_next_batch,
+                roster_interested,
+                blocklist_interested,
+            };
+            let responses =
+                handle_isr_resume_authenticate(mechanism, initial_response, resume, state, ctx)
+                    .await;
+            // RFC 6120 §6.4.6 / XEP-0388: successful authentication restarts
+            // the stream — same rule the SASL1 <auth>/<response> arms apply.
             if phase.is_authenticated() {
                 *stream_open_sent = false;
             }

@@ -656,8 +656,16 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
     let _ = client.close().await;
 }
 
+/// ADR-0017 Phase 3 Slice 8 (IQ-issuance retirement): the pre-Slice-8
+/// `urn:xmpp:isr:0` `<token-request/>` IQ was a XEP-0397 conformance
+/// violation (the XEP mints tokens exclusively via the inline
+/// `<isr-enable/>`/`<isr-enabled/>` exchange on `<enable/>`/`<enabled/>`,
+/// never a standalone IQ). That handler, its dispatch, and its builders
+/// have been deleted outright — this IQ now falls through to the server's
+/// ordinary unhandled-IQ catch-all (`feature-not-implemented`), exactly
+/// like any other IQ payload this server does not recognize.
 #[tokio::test]
-async fn websocket_isr_token_request_returns_token() {
+async fn websocket_legacy_isr_token_request_iq_is_gone() {
     let (_server, mut client) = setup().await;
 
     client
@@ -665,18 +673,18 @@ async fn websocket_isr_token_request_returns_token() {
             r#"<iq xmlns="jabber:client" type="get" id="ws-isr-token"><token-request xmlns="urn:xmpp:isr:0"/></iq>"#,
         )
         .await
-        .expect("send ISR token request");
+        .expect("send legacy ISR token-request IQ");
     let response = client
         .recv_matching(|frame| frame.contains("ws-isr-token"))
         .await
-        .expect("ISR token response");
+        .expect("IQ error response");
     assert!(
-        response.contains("type='result'") || response.contains("type='result'"),
-        "expected ISR token result, got: {response}"
+        response.contains("type='error'"),
+        "expected an error reply for the retired IQ path, got: {response}"
     );
     assert!(
-        response.contains("urn:xmpp:isr:0") && response.contains("token"),
-        "expected ISR token payload, got: {response}"
+        response.contains("feature-not-implemented"),
+        "expected feature-not-implemented (the unhandled-IQ catch-all), got: {response}"
     );
 
     let _ = client.close().await;

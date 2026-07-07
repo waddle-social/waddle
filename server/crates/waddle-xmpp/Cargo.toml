@@ -59,6 +59,7 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }
+subtle = { workspace = true }
 pbkdf2 = { version = "0.13", features = ["hmac"] }
 
 # Web Push crypto (RFC 8291 aes128gcm + RFC 8292 VAPID JWT signing)

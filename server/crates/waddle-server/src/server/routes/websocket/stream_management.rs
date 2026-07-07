@@ -231,12 +231,68 @@ async fn handle_sm_enable(
         );
     }
 
-    info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
-    if enable.resume {
-        vec![SmEnabled::with_resume(stream_id, max).to_xml()]
+    // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR token issuance rides this same
+    // `<enable/>`/`<enabled/>` exchange inline (`<isr-enable/>`/
+    // `<isr-enabled/>`) — never a standalone IQ (the retired conformance
+    // violation). Minted only when the client asked for one AND ISR is
+    // actually available (`clustering.enabled && Postgres`, Q8's gate,
+    // the same `isr_token_store().is_some()` check the stream-features/
+    // disco advertisement uses) AND the requested mechanism is the one
+    // this implementation pins ISR to AND (council-adjudicated FIX 7) the
+    // client actually asked for a resumable stream (`enable.resume`) — a
+    // non-resumable `<enable/>` has no XEP-0198 `previd` an ISR resume
+    // could ever reference, so minting a token for one is permanently
+    // unconsumable dead weight. Any other combination silently omits
+    // `<isr-enabled/>` — a client that asks anyway without having seen the
+    // (gated) advertisement, or without `resume='true'`, simply doesn't
+    // get a token, exactly as if the server had never announced the
+    // capability.
+    let isr_token = if !enable.resume {
+        if enable.isr_enable_mechanism.is_some() {
+            debug!(
+                stream_id = %stream_id,
+                "ISR enable requested on a non-resumable <enable/>; ignoring (FIX 7)"
+            );
+        }
+        None
     } else {
-        vec![SmEnabled::new(stream_id).to_xml()]
+        match enable.isr_enable_mechanism.as_deref() {
+            Some(mechanism) if mechanism == waddle_xmpp::isr::ISR_PINNED_MECHANISM => {
+                match state.deps.app_state.clustering_claims.isr_token_store() {
+                    Some(isr_token_store) => {
+                        match isr_token_store.issue(&stream_id, mechanism).await {
+                            Ok(issued) => Some(issued.token),
+                            Err(error) => {
+                                warn!(stream_id = %stream_id, %error, "ISR token issuance failed");
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            }
+            Some(mechanism) => {
+                warn!(
+                    stream_id = %stream_id,
+                    mechanism = %mechanism,
+                    "ISR enable requested an unsupported pinned mechanism; ignoring"
+                );
+                None
+            }
+            None => None,
+        }
+    };
+
+    info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
+    let mut enabled = if enable.resume {
+        SmEnabled::with_resume(stream_id, max)
+    } else {
+        SmEnabled::new(stream_id)
+    };
+    if let Some(token) = isr_token {
+        enabled = enabled.with_isr_token(token);
     }
+    vec![enabled.to_xml()]
 }
 
 /// Outcome of racing [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::prepare_cross_node_resume`]
@@ -247,9 +303,11 @@ async fn handle_sm_enable(
 /// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::finish_cross_node_steal`],
 /// always runs to completion once reached — see `cross_node_resume.rs`'s
 /// module doc "Cancellation boundary" section for why racing the whole
-/// attempt was unsound). Kept local to this module — a `waddle-server`-only
-/// concern, not part of `waddle-xmpp`'s registry API.
-enum CrossNodeAttemptOutcome {
+/// attempt was unsound). `pub(super)`: shared with
+/// [`super::isr_resume::handle_isr_resume_authenticate`] (council-adjudicated
+/// FIX 2, ADR-0017 Phase 3 Slice 8) via [`attempt_cross_node_resume_raced`] —
+/// a `waddle-server`-only concern, not part of `waddle-xmpp`'s registry API.
+pub(super) enum CrossNodeAttemptOutcome {
     /// The attempt reached a terminal outcome (successfully or with an
     /// error) before shutdown fired, OR `finish_cross_node_steal` ran (it
     /// is never raced, so it always reaches this variant once started).
@@ -280,6 +338,73 @@ enum PrepareRaceOutcome {
         >,
     ),
     ReadyToSteal(waddle_xmpp::stream_management::StealTicket),
+}
+
+/// Attempt cross-node XEP-0198 resume for `stream_id`, verifying `bare_jid`
+/// (the caller's already-established identity — SASL-authenticated in the
+/// ordinary `<resume/>` case, or decoded from the SASL2 PLAIN
+/// `<initial-response>` in the ISR-resume case) against whatever cross-node
+/// claim/persisted snapshot is found. Races only the cancellable
+/// `prepare_cross_node_resume` half against this node's graceful-shutdown
+/// token (FIX A/deviation 47's rewrite) — `finish_cross_node_steal` always
+/// runs to completion once reached; see `cross_node_resume.rs`'s module doc,
+/// "Cancellation boundary" section, for why racing the whole attempt is
+/// unsound.
+///
+/// Shared by [`handle_sm_resume`] (ordinary XEP-0198 `<resume/>`) and
+/// [`super::isr_resume::handle_isr_resume_authenticate`] (XEP-0397 ISR
+/// resume, council-adjudicated FIX 2, ADR-0017 Phase 3 Slice 8): both need
+/// the identical cancellation-safe cross-node machinery, and this is the
+/// single place it is raced against shutdown — ISR resume reuses it rather
+/// than reinventing a second, possibly-subtly-different implementation of
+/// the same cancellation-safety invariant.
+pub(super) async fn attempt_cross_node_resume_raced(
+    state: &WebSocketState,
+    stream_id: &str,
+    bare_jid: &BareJid,
+) -> CrossNodeAttemptOutcome {
+    let handshake_budget = state
+        .deps
+        .app_state
+        .clustering_claims
+        .resume_handshake_timeout()
+        // Unreachable in practice: a `None` budget only occurs when
+        // clustering is disabled/not compiled in, in which case
+        // `prepare_cross_node_resume` itself short-circuits to `NotFound`
+        // before ever consulting this budget.
+        .unwrap_or(std::time::Duration::ZERO);
+    let shutdown_token = state.deps.shutdown.stop_token();
+    let prepared = tokio::select! {
+        biased;
+        _ = shutdown_token.cancelled() => PrepareRaceOutcome::ShutdownAbandoned,
+        result = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .prepare_cross_node_resume(stream_id, bare_jid, handshake_budget) => {
+            match result {
+                Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::Terminal(outcome)) => {
+                    PrepareRaceOutcome::Terminal(Ok(outcome))
+                }
+                Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::ReadyToSteal(ticket)) => {
+                    PrepareRaceOutcome::ReadyToSteal(ticket)
+                }
+                Err(error) => PrepareRaceOutcome::Terminal(Err(error)),
+            }
+        }
+    };
+    match prepared {
+        PrepareRaceOutcome::ShutdownAbandoned => CrossNodeAttemptOutcome::ShutdownAbandoned,
+        PrepareRaceOutcome::Terminal(result) => CrossNodeAttemptOutcome::Completed(result),
+        PrepareRaceOutcome::ReadyToSteal(ticket) => CrossNodeAttemptOutcome::Completed(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .finish_cross_node_steal(ticket)
+                .await,
+        ),
+    }
 }
 
 async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'_>) -> Vec<String> {
@@ -354,52 +479,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             // `waddle_xmpp::stream_management::session_registry`'s
             // `cross_node_resume.rs` module doc, "Cancellation boundary".
             let cross_node = if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
-                let handshake_budget = state
-                    .deps
-                    .app_state
-                    .clustering_claims
-                    .resume_handshake_timeout()
-                    // Unreachable in practice: a `None` budget only occurs
-                    // when clustering is disabled/not compiled in, in which
-                    // case `prepare_cross_node_resume` itself short-circuits
-                    // to `NotFound` before ever consulting this budget.
-                    .unwrap_or(std::time::Duration::ZERO);
-                let shutdown_token = state.deps.shutdown.stop_token();
-                let prepared = tokio::select! {
-                    biased;
-                    _ = shutdown_token.cancelled() => PrepareRaceOutcome::ShutdownAbandoned,
-                    result = state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .prepare_cross_node_resume(&resume.previd, bare_jid, handshake_budget) => {
-                        match result {
-                            Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::Terminal(outcome)) => {
-                                PrepareRaceOutcome::Terminal(Ok(outcome))
-                            }
-                            Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::ReadyToSteal(ticket)) => {
-                                PrepareRaceOutcome::ReadyToSteal(ticket)
-                            }
-                            Err(error) => PrepareRaceOutcome::Terminal(Err(error)),
-                        }
-                    }
-                };
-                Some(match prepared {
-                    PrepareRaceOutcome::ShutdownAbandoned => {
-                        CrossNodeAttemptOutcome::ShutdownAbandoned
-                    }
-                    PrepareRaceOutcome::Terminal(result) => {
-                        CrossNodeAttemptOutcome::Completed(result)
-                    }
-                    PrepareRaceOutcome::ReadyToSteal(ticket) => CrossNodeAttemptOutcome::Completed(
-                        state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .finish_cross_node_steal(ticket)
-                            .await,
-                    ),
-                })
+                Some(attempt_cross_node_resume_raced(state, &resume.previd, bare_jid).await)
             } else {
                 None
             };
