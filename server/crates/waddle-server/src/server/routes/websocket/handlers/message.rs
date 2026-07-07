@@ -16,10 +16,12 @@ use waddle_xmpp::protocol::ConnectionPhase;
 mod dm_pin;
 mod group_dm_invite;
 mod link_preview_stamp;
+mod muc_direct;
 
 use dm_pin::{handle_dm_pin_message, handle_dm_pin_retraction_cascade};
 use group_dm_invite::handle_group_dm_mediated_invite;
 use link_preview_stamp::consume_link_preview_request;
+use muc_direct::handle_muc_direct_message;
 
 /// Thin transport adapter that drives the sans-I/O dispatcher
 /// (#229 PR16 + PR18). Every `<message/>` stanza arriving on the
@@ -122,6 +124,9 @@ pub async fn handle_message(
                 vec![]
             }
         };
+    }
+    if let Some(frames) = handle_muc_direct_message(&incoming, state, &bound_jid).await {
+        return frames;
     }
 
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(

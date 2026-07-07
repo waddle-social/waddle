@@ -12,8 +12,8 @@ use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::RoomRegistry;
 use xml::{
-    build_muc_conflict_presence_xml, build_muc_presence_error_xml, build_muc_self_unavailable_xml,
-    create_presence_stanza,
+    build_muc_conflict_presence_xml, build_muc_join_presence_stanza, build_muc_presence_error_xml,
+    build_muc_self_unavailable_xml,
 };
 pub(super) use xml::{build_muc_join_presence_xml, MucJoinPresence};
 
@@ -38,6 +38,17 @@ pub async fn handle_muc_join(
         authenticated_session,
     )
     .await
+}
+
+fn room_is_nonanonymous(anonymity: waddle_xmpp::muc::RoomAnonymity) -> bool {
+    anonymity.is_nonanonymous()
+}
+
+fn disclose_real_jid_to_role(
+    anonymity: waddle_xmpp::muc::RoomAnonymity,
+    recipient_role: Role,
+) -> bool {
+    anonymity.discloses_real_jids_to_role(recipient_role)
 }
 
 /// Best-effort resolver-affiliation sync into an EXISTING live room
@@ -632,7 +643,13 @@ async fn handle_muc_join_unlocked(
                 affiliation: existing.affiliation,
                 role: existing.role,
                 real_jid: &existing.jid,
+                disclose_real_jid: disclose_real_jid_to_role(
+                    join_outcome.room_anonymity,
+                    join_outcome.new_occupant_role,
+                ),
                 include_self_status: false,
+                room_created: false,
+                include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
                 muji: existing.muji.as_ref(),
                 in_call: existing.in_call,
             }));
@@ -650,7 +667,13 @@ async fn handle_muc_join_unlocked(
                     affiliation: extra.affiliation,
                     role: extra.role,
                     real_jid: &extra.jid,
+                    disclose_real_jid: disclose_real_jid_to_role(
+                        join_outcome.room_anonymity,
+                        join_outcome.new_occupant_role,
+                    ),
                     include_self_status: false,
+                    room_created: false,
+                    include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
                     muji: extra.muji.as_ref(),
                     in_call: extra.in_call,
                 }));
@@ -666,15 +689,24 @@ async fn handle_muc_join_unlocked(
         if !join_outcome.is_same_bare_multi_session_join && !join_outcome.is_existing_session_rejoin
         {
             for existing in &join_outcome.existing_occupants {
-                let presence_stanza = create_presence_stanza(
-                    state,
+                let presence_stanza = build_muc_join_presence_stanza(MucJoinPresence {
+                    occupant_id_secret: &state.deps.occupant_id_secret,
                     room_jid,
-                    &nick,
-                    sender_jid,
-                    &existing.jid,
-                    join_outcome.new_occupant_affiliation,
-                    join_outcome.new_occupant_role,
-                );
+                    nick: &nick,
+                    to_jid: &existing.jid,
+                    affiliation: join_outcome.new_occupant_affiliation,
+                    role: join_outcome.new_occupant_role,
+                    real_jid: sender_jid,
+                    disclose_real_jid: disclose_real_jid_to_role(
+                        join_outcome.room_anonymity,
+                        existing.role,
+                    ),
+                    include_self_status: false,
+                    room_created: false,
+                    include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
+                    muji: None,
+                    in_call: waddle_xmpp::xep::InCallPresenceState::default(),
+                });
                 let stanza = Stanza::Presence(presence_stanza);
                 let _outcome = state
                     .deps
@@ -693,7 +725,13 @@ async fn handle_muc_join_unlocked(
             affiliation: join_outcome.new_occupant_affiliation,
             role: join_outcome.new_occupant_role,
             real_jid: sender_jid,
+            disclose_real_jid: disclose_real_jid_to_role(
+                join_outcome.room_anonymity,
+                join_outcome.new_occupant_role,
+            ),
             include_self_status: true,
+            room_created: created_instant_room,
+            include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
             muji: self_muji,
             in_call: self_in_call,
         }));
@@ -718,7 +756,13 @@ async fn handle_muc_join_unlocked(
                 affiliation: existing.affiliation,
                 role: existing.role,
                 real_jid: &existing.jid,
+                disclose_real_jid: disclose_real_jid_to_role(
+                    join_outcome.room_anonymity,
+                    join_outcome.new_occupant_role,
+                ),
                 include_self_status: true,
+                room_created: false,
+                include_nonanonymous_status: room_is_nonanonymous(join_outcome.room_anonymity),
                 muji: existing.muji.as_ref(),
                 in_call: existing.in_call,
             }));
@@ -773,7 +817,7 @@ pub async fn handle_muc_leave(
             state, room_jid, sender_jid,
         );
         return vec![build_muc_self_unavailable_xml(
-            state, room_jid, nick, sender_jid,
+            state, room_jid, nick, sender_jid, true,
         )];
     };
 
@@ -792,13 +836,13 @@ pub async fn handle_muc_leave(
                 state, room_jid, sender_jid,
             );
             return vec![build_muc_self_unavailable_xml(
-                state, room_jid, nick, sender_jid,
+                state, room_jid, nick, sender_jid, true,
             )];
         }
         Err(error) => {
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
             return vec![build_muc_self_unavailable_xml(
-                state, room_jid, nick, sender_jid,
+                state, room_jid, nick, sender_jid, true,
             )];
         }
     };
@@ -831,6 +875,7 @@ pub async fn handle_muc_leave(
         room_jid,
         &outcome.nick,
         sender_jid,
+        outcome.room_anonymity.is_nonanonymous(),
     )];
     super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
     response

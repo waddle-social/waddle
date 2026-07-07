@@ -8,7 +8,10 @@ pub(crate) struct MucJoinPresence<'a> {
     pub(crate) affiliation: Affiliation,
     pub(crate) role: Role,
     pub(crate) real_jid: &'a FullJid,
+    pub(crate) disclose_real_jid: bool,
     pub(crate) include_self_status: bool,
+    pub(crate) room_created: bool,
+    pub(crate) include_nonanonymous_status: bool,
     /// Optional XEP-0272 `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
     /// payload to append to the resulting presence stanza. Used by
     /// the join-replay path to surface "in call" indicators for
@@ -41,15 +44,20 @@ pub(super) fn build_muc_join_presence_stanza(
         .with_resource_str(params.nick)
         .unwrap_or_else(|_| params.to_jid.clone());
     let real_bare = params.real_jid.to_bare();
+    let visible_real_jid = params.disclose_real_jid.then_some(params.real_jid);
     let mut presence = waddle_xmpp::muc::build_occupant_presence(
         &from_jid,
         params.to_jid,
         params.affiliation,
         params.role,
-        params.include_self_status,
+        waddle_xmpp::muc::MucPresenceStatus {
+            is_self: params.include_self_status,
+            room_created: params.room_created,
+            include_nonanonymous_status: params.include_nonanonymous_status,
+        },
         &waddle_xmpp::xep::xep0421::OccupantIdentity {
             bare_jid: &real_bare,
-            real_jid: Some(params.real_jid),
+            real_jid: visible_real_jid,
             secret: params.occupant_id_secret,
         },
     );
@@ -147,6 +155,7 @@ pub(super) fn build_muc_self_unavailable_xml(
     room_jid: &BareJid,
     nick: &str,
     sender_jid: &FullJid,
+    include_nonanonymous_status: bool,
 ) -> String {
     let from_jid = room_jid
         .clone()
@@ -158,7 +167,7 @@ pub(super) fn build_muc_self_unavailable_xml(
         &from_jid,
         sender_jid,
         Affiliation::Member,
-        true,
+        waddle_xmpp::muc::MucPresenceStatus::new(true, include_nonanonymous_status),
         &waddle_xmpp::xep::xep0421::OccupantIdentity {
             bare_jid: &sender_bare,
             real_jid: Some(sender_jid),
@@ -166,31 +175,4 @@ pub(super) fn build_muc_self_unavailable_xml(
         },
     );
     stanza_to_xml(&Stanza::Presence(presence))
-}
-
-/// Create a presence stanza for MUC. Used by the join-broadcast
-/// path to announce a new occupant to existing occupants — that
-/// new occupant has no `<muji/>` advertisement yet, so the
-/// extension slot is always `None` here.
-pub(super) fn create_presence_stanza(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-    nick: &str,
-    real_jid: &FullJid,
-    to_jid: &FullJid,
-    affiliation: Affiliation,
-    role: Role,
-) -> xmpp_parsers::presence::Presence {
-    build_muc_join_presence_stanza(MucJoinPresence {
-        occupant_id_secret: &state.deps.occupant_id_secret,
-        room_jid,
-        nick,
-        to_jid,
-        affiliation,
-        role,
-        real_jid,
-        include_self_status: false,
-        muji: None,
-        in_call: waddle_xmpp::xep::InCallPresenceState::default(),
-    })
 }

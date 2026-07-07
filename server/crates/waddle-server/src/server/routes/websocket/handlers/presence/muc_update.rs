@@ -307,6 +307,17 @@ pub(super) async fn try_handle_muc_presence_update(
     // bogus `<x xmlns='muc#user'>` items.
     let mut responses = Vec::new();
     for recipient in &outcome.update.recipients {
+        let disclose_real_jid = outcome
+            .update
+            .recipient_roles
+            .iter()
+            .find(|(jid, _)| jid == recipient)
+            .is_some_and(|(_, role)| {
+                outcome
+                    .update
+                    .room_anonymity
+                    .discloses_real_jids_to_role(*role)
+            });
         for entry in &reflected_entries {
             // XEP-0045 §7.1: sessions sharing the owner bare JID
             // receive status-110 for that occupant presence. Muji
@@ -315,7 +326,7 @@ pub(super) async fn try_handle_muc_presence_update(
             let owner_bare = entry.owner_jid.to_bare();
             let identity = OccupantIdentity {
                 bare_jid: &owner_bare,
-                real_jid: Some(entry.owner_jid),
+                real_jid: disclose_real_jid.then_some(entry.owner_jid),
                 secret: &state.deps.occupant_id_secret,
             };
             let is_self = recipient.to_bare() == owner_bare;
@@ -325,7 +336,10 @@ pub(super) async fn try_handle_muc_presence_update(
                 recipient,
                 outcome.update.sender_affiliation,
                 outcome.update.sender_role,
-                is_self,
+                waddle_xmpp::muc::MucPresenceStatus::new(
+                    is_self,
+                    outcome.update.room_anonymity.is_nonanonymous(),
+                ),
                 &identity,
             );
 

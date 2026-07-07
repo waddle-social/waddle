@@ -161,8 +161,9 @@ pub(super) async fn handle_muc_admin_iq(
             )];
         }
     };
-    let is_admin = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
-        || matches!(context.role, waddle_xmpp::Role::Moderator);
+    let has_admin_affiliation =
+        matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
+    let is_admin = has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
     if !is_admin {
         return vec![build_iq_error_xml_typed(
             iq.id(),
@@ -210,6 +211,14 @@ pub(super) async fn handle_muc_admin_iq(
                 &items,
             ))];
         }
+        if !has_admin_affiliation {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                forbidden_iq_error("Operation not permitted."),
+            )];
+        }
         let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
         let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
             snapshot
@@ -247,6 +256,14 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             bad_request_iq_error("Malformed MUC admin set item."),
+        )];
+    }
+    if !is_role_change_query(&items) && !has_admin_affiliation {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            forbidden_iq_error("Operation not permitted."),
         )];
     }
     let affiliation_updates: Vec<(BareJid, Affiliation)> = if is_role_change_query(&items) {

@@ -81,7 +81,14 @@ fn join_presence(affiliation: Affiliation, role: Role) -> Presence {
     let bare_jid = bare(&from);
     let secret = secret();
     let identity = identity(&bare_jid, Some(&to), &secret);
-    build_occupant_presence(&from, &to, affiliation, role, false, &identity)
+    build_occupant_presence(
+        &from,
+        &to,
+        affiliation,
+        role,
+        waddle_xmpp::muc::MucPresenceStatus::new(false, true),
+        &identity,
+    )
 }
 
 fn update_presence(seed: Presence, affiliation: Affiliation, role: Role) -> Presence {
@@ -90,7 +97,15 @@ fn update_presence(seed: Presence, affiliation: Affiliation, role: Role) -> Pres
     let bare_jid = bare(&from);
     let secret = secret();
     let identity = identity(&bare_jid, Some(&to), &secret);
-    build_occupant_presence_update(&seed, &from, &to, affiliation, role, false, &identity)
+    build_occupant_presence_update(
+        &seed,
+        &from,
+        &to,
+        affiliation,
+        role,
+        waddle_xmpp::muc::MucPresenceStatus::new(false, true),
+        &identity,
+    )
 }
 
 // ── XEP-0045 authority remains carried by `<x muc#user>` ─────────────

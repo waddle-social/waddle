@@ -72,6 +72,14 @@ pub fn build_config_form(room: &MucRoom) -> Element {
             Field::boolean("muc#roomconfig_enablelogging", room.config.enable_logging)
                 .with_label("Enable Room Logging"),
         )
+        .add_field(
+            Field::new("muc#roomconfig_whois", FieldType::ListSingle)
+                .with_label("Who May Discover Real JIDs?")
+                .with_value(room.config.anonymity.as_roomconfig_whois())
+                .add_option(FieldOption::with_label("Anyone", "anyone"))
+                .add_option(FieldOption::with_label("Moderators Only", "moderators"))
+                .add_option(FieldOption::with_label("Nobody", "none")),
+        )
         .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
         .add_field(
             Field::new(FIELD_PIN_PERMISSION, FieldType::ListSingle)

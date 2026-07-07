@@ -3645,6 +3645,418 @@ async fn handle_message_direct_with_sample_extension_payload_preserves_payload_f
 }
 
 #[tokio::test]
+async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "pm-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+        room_jid
+            .clone()
+            .with_resource_str("bob")
+            .expect("target occupant jid"),
+    )));
+    message.type_ = XmppMessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id("muc-pm-1".to_string()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "private through the room".to_string(),
+    );
+    message.payloads.push(
+        Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .append(
+                Element::builder("item", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        "mallory@example.com/web",
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(responses.is_empty(), "MUC PM routes asynchronously");
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("target occupant receives routed MUC PM");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let routed = Element::from_str(&xml).expect("routed MUC PM XML");
+    assert_eq!(routed.name(), "message");
+    assert_eq!(
+        routed.attr("from"),
+        Some(format!("{room_jid}/alice").as_str())
+    );
+    assert_eq!(routed.attr("to"), Some(bob_jid.to_string().as_str()));
+    assert_eq!(routed.attr("type"), Some("chat"));
+    assert!(
+        xml.contains("private through the room"),
+        "body is preserved: {xml}"
+    );
+    let muc_user = routed
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("XEP-0045 §7.5 PM should carry the muc#user marker");
+    assert!(
+        muc_user
+            .get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .is_none(),
+        "routed MUC PM must not preserve caller-supplied muc#user metadata: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn muc_private_message_rejects_non_occupant_sender() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "pm-authz-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+    let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+        room_jid
+            .clone()
+            .with_resource_str("bob")
+            .expect("target occupant jid"),
+    )));
+    message.type_ = XmppMessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id("muc-pm-nonoccupant".to_string()));
+
+    let responses = handle_message_for_test(state.as_ref(), &mallory_jid, None, message).await;
+    assert_eq!(
+        responses.len(),
+        1,
+        "non-occupant PM response: {responses:?}"
+    );
+    assert!(responses[0].contains("not-acceptable"));
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "non-occupant PM must not be routed to the target"
+    );
+}
+
+#[tokio::test]
+async fn muc_private_message_rejects_client_authored_inbox_payload_before_routing() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "pm-payload-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+        room_jid
+            .clone()
+            .with_resource_str("bob")
+            .expect("target occupant jid"),
+    )));
+    message.type_ = XmppMessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id(
+        "muc-pm-waddle-payload".to_string(),
+    ));
+    message
+        .payloads
+        .push(Element::builder("entry", waddle_xmpp::xep::NS_WADDLE_INBOX).build());
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert_eq!(
+        responses.len(),
+        1,
+        "payload rejection response: {responses:?}"
+    );
+    assert!(responses[0].contains("bad-request"));
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "rejected PM must not be routed to the target"
+    );
+}
+
+#[tokio::test]
+async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "decline-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    let (alice_tx, mut alice_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &alice_jid, alice_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+    while alice_rx.try_recv().is_ok() {}
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    alice_jid.to_bare().to_string(),
+                )
+                .append(
+                    Element::builder("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .append("too busy")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert!(
+        responses.is_empty(),
+        "mediated decline routes asynchronously"
+    );
+
+    let outbound = alice_rx
+        .try_recv()
+        .expect("inviter receives mediated decline");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let mediated = Element::from_str(&xml).expect("mediated decline XML");
+    assert_eq!(mediated.name(), "message");
+    assert_eq!(mediated.attr("from"), Some(room_jid.to_string().as_str()));
+    assert_eq!(mediated.attr("to"), Some(alice_jid.to_string().as_str()));
+    let decline = mediated
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .and_then(|x| x.get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER))
+        .expect("decline payload");
+    assert_eq!(decline.attr("from"), Some("hecate@example.com"));
+    assert_eq!(
+        decline
+            .get_child("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .map(|reason| reason.text()),
+        Some("too busy".to_string())
+    );
+    assert!(
+        decline.attr("to").is_none(),
+        "mediated decline rewrites to='…' into from='decliner': {xml}"
+    );
+}
+
+#[tokio::test]
+async fn muc_mediated_decline_to_full_jid_is_forwarded_to_that_inviter_resource() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "decline-full-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    let (alice_tx, mut alice_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &alice_jid, alice_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+    while alice_rx.try_recv().is_ok() {}
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    alice_jid.to_string(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-full-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert!(
+        responses.is_empty(),
+        "mediated decline routes asynchronously"
+    );
+
+    let outbound = alice_rx
+        .try_recv()
+        .expect("full-JID inviter resource receives mediated decline");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let mediated = Element::from_str(&xml).expect("mediated decline XML");
+    assert_eq!(mediated.attr("from"), Some(room_jid.to_string().as_str()));
+    assert_eq!(mediated.attr("to"), Some(alice_jid.to_string().as_str()));
+    let decline = mediated
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .and_then(|x| x.get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER))
+        .expect("decline payload");
+    assert_eq!(decline.attr("from"), Some("hecate@example.com"));
+}
+
+#[tokio::test]
+async fn muc_mediated_decline_to_non_occupant_is_rejected() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "decline-spoof-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    let (mallory_tx, mut mallory_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &mallory_jid, mallory_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    mallory_jid.to_bare().to_string(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
+    message.id = Some(xmpp_parsers::message::Id("decline-spoof-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert_eq!(
+        responses.len(),
+        1,
+        "spoofed decline response: {responses:?}"
+    );
+    assert!(responses[0].contains("item-not-found"));
+    assert!(
+        mallory_rx.try_recv().is_err(),
+        "decline must not be mediated to non-occupants"
+    );
+}
+
+#[tokio::test]
 async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resources() {
     let state = create_test_websocket_state().await;
     let sender_jid: FullJid = "bob@example.com/phone".parse().expect("sender jid");

@@ -4,8 +4,8 @@ use jid::{BareJid, FullJid};
 use kameo::message::Context;
 
 use super::{
-    JoinExistingOccupant, JoinOutcome, LeaveOutcome, PresenceUpdateOutcome, RoomActor,
-    RoomActorError,
+    affiliation_overflows_full_room, JoinExistingOccupant, JoinOutcome, LeaveOutcome,
+    PresenceUpdateOutcome, RoomActor, RoomActorError,
 };
 use crate::muc::RoomConfig;
 use crate::types::Affiliation;
@@ -129,7 +129,12 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 }
             }
         }
-        if self.room.is_full() && !is_existing_session_rejoin && !is_same_bare_multi_session_join {
+        let joining_affiliation = self.room.get_affiliation(&msg.sender_jid.to_bare());
+        if self.room.is_full()
+            && !is_existing_session_rejoin
+            && !is_same_bare_multi_session_join
+            && !affiliation_overflows_full_room(joining_affiliation)
+        {
             return Err(RoomActorError::RoomFull);
         }
 
@@ -165,6 +170,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let new_occupant_role = new_occupant.role;
         let occupant_count = self.room.occupant_count();
         let room_jid = self.room.room_jid.clone();
+        let room_anonymity = self.room.config.anonymity;
         // #1108: every successful admission bumps the occupancy
         // revision so a dormancy probe taken before this join can no
         // longer authorize a destroy.
@@ -178,6 +184,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             new_occupant_role,
             occupant_count,
             room_jid,
+            room_anonymity,
             is_same_bare_multi_session_join,
             is_existing_session_rejoin,
             subject_state,
@@ -238,6 +245,18 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
             .filter(|jid| *jid != msg.sender_jid)
             .collect();
+        let remaining_occupant_roles: Vec<(FullJid, crate::types::Role)> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .filter(|jid| *jid != msg.sender_jid)
+                    .map(|jid| (jid, occupant.role))
+            })
+            .collect();
         let cleared_muji_state = self
             .room
             .muji_state
@@ -274,6 +293,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         };
         let occupant_count = self.room.occupant_count();
         let is_persistent = self.room.config.persistent;
+        let room_anonymity = self.room.config.anonymity;
         let occupancy_revision = self.occupancy_revision;
         Ok(Some(LeaveOutcome {
             nick,
@@ -281,12 +301,14 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             role,
             leaving_room_jid,
             remaining_occupants,
+            remaining_occupant_roles,
             removed_last_session,
             cleared_muji_state,
             remaining_muji,
             remaining_muji_sessions,
             remaining_nick_real_jid,
             occupant_count,
+            room_anonymity,
             is_persistent,
             occupancy_revision,
         }))
@@ -313,11 +335,23 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
         let sender_role = sender_occupant.role;
         let sender_affiliation = sender_occupant.affiliation;
         let room_jid = self.room.room_jid.clone();
+        let room_anonymity = self.room.config.anonymity;
         let recipients = self
             .room
             .occupants
             .values()
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .collect();
+        let recipient_roles = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(|jid| (jid, occupant.role))
+            })
             .collect();
         Ok(Some(PresenceUpdateOutcome {
             sender_nick,
@@ -325,7 +359,9 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
             sender_role,
             sender_affiliation,
             room_jid,
+            room_anonymity,
             recipients,
+            recipient_roles,
         }))
     }
 }
@@ -384,11 +420,23 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
         let sender_role = sender_occupant.role;
         let sender_affiliation = sender_occupant.affiliation;
         let room_jid = self.room.room_jid.clone();
+        let room_anonymity = self.room.config.anonymity;
         let recipients = self
             .room
             .occupants
             .values()
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .collect();
+        let recipient_roles = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(|jid| (jid, occupant.role))
+            })
             .collect();
         // Bind the call advertisement to the specific session that
         // emitted it so a partial-session leave (one resource of a
@@ -404,7 +452,9 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
                 sender_role,
                 sender_affiliation,
                 room_jid,
+                room_anonymity,
                 recipients,
+                recipient_roles,
             },
             sender_muji: muji_state.sender_muji,
             active_muji: muji_state.room_muji,
@@ -431,11 +481,23 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         let sender_affiliation = sender_occupant.affiliation;
         let muji_state = self.room.clear_muji_presence(&sender_nick, &msg.sender_jid);
         let room_jid = self.room.room_jid.clone();
+        let room_anonymity = self.room.config.anonymity;
         let recipients = self
             .room
             .occupants
             .values()
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .collect();
+        let recipient_roles = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(|jid| (jid, occupant.role))
+            })
             .collect();
         Ok(Some(MujiPresenceUpdateOutcome {
             update: PresenceUpdateOutcome {
@@ -444,7 +506,9 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
                 sender_role,
                 sender_affiliation,
                 room_jid,
+                room_anonymity,
                 recipients,
+                recipient_roles,
             },
             sender_muji: muji_state.sender_muji,
             active_muji: muji_state.room_muji,

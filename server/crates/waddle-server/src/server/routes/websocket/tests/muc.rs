@@ -173,9 +173,11 @@ async fn muc_join_full_room_returns_service_unavailable() {
     let state = create_test_websocket_state().await;
     let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let carol_session = create_test_session(state.as_ref(), "carol").await;
     let room_jid: BareJid = "full-room@muc.example.com".parse().expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let carol: FullJid = "carol@example.com/web".parse().expect("carol jid");
 
     handle_muc_join(
         state.as_ref(),
@@ -260,6 +262,54 @@ async fn muc_join_full_room_returns_service_unavailable() {
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
     assert_eq!(room.occupant_count(), 1, "the full room admits no one");
     assert_eq!(room.find_nick_by_real_jid(&bob), None);
+
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: carol.to_bare(),
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("carol admin affiliation");
+    let admin_responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &carol,
+        "carol",
+        None,
+        &Some(carol_session),
+    )
+    .await;
+    let admin_self = admin_responses
+        .iter()
+        .filter_map(|xml| Element::from_str(xml).ok())
+        .find(|presence| {
+            presence
+                .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .is_some_and(|x| {
+                    x.children()
+                        .any(|child| child.name() == "status" && child.attr("code") == Some("110"))
+                })
+        })
+        .expect("admin self-presence response");
+    assert_ne!(
+        admin_self.attr("type"),
+        Some("error"),
+        "XEP-0045 §7.2.9 requires owner/admin affiliations to be admitted beyond a full room: {admin_responses:?}"
+    );
+    let admin_item = admin_self
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .and_then(|x| x.get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER))
+        .expect("admin muc item");
+    assert_eq!(admin_item.attr("affiliation"), Some("admin"));
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.occupant_count(),
+        2,
+        "privileged overflow join should admit the admin beyond max_occupants"
+    );
+    assert_eq!(room.find_nick_by_real_jid(&carol), Some("carol"));
 }
 
 /// #1134 / XEP-0045 §10.1.1: only the room creator receives Owner. The
@@ -286,14 +336,30 @@ async fn second_joiner_of_unmanaged_room_is_not_owner() {
     )
     .await;
     let alice_presence = Element::from_str(&alice_responses[0]).expect("alice presence");
+    let muc_user_ns = waddle_xmpp::muc::presence::NS_MUC_USER;
     let alice_item = alice_presence
-        .get_child("x", "http://jabber.org/protocol/muc#user")
-        .and_then(|x| x.get_child("item", "http://jabber.org/protocol/muc#user"))
+        .get_child("x", muc_user_ns)
+        .and_then(|x| x.get_child("item", muc_user_ns))
         .expect("alice muc item");
     assert_eq!(
         alice_item.attr("affiliation"),
         Some("owner"),
         "the creator gets Owner (XEP-0045 §10.1.1)"
+    );
+    let alice_status_codes: Vec<&str> = alice_presence
+        .get_child("x", muc_user_ns)
+        .expect("alice muc user payload")
+        .children()
+        .filter(|child| child.name() == "status")
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        alice_status_codes.contains(&"110"),
+        "the creator's reflected presence is self-presence: {alice_responses:?}"
+    );
+    assert!(
+        alice_status_codes.contains(&"201"),
+        "XEP-0045 §10.1.1 requires status 201 on the creator's self-presence: {alice_responses:?}"
     );
 
     let bob_responses = handle_muc_join(
@@ -311,22 +377,31 @@ async fn second_joiner_of_unmanaged_room_is_not_owner() {
         .filter_map(|xml| Element::from_str(xml).ok())
         .find(|el| {
             el.name() == "presence"
-                && el
-                    .get_child("x", "http://jabber.org/protocol/muc#user")
-                    .is_some_and(|x| {
-                        x.children()
-                            .any(|c| c.name() == "status" && c.attr("code") == Some("110"))
-                    })
+                && el.get_child("x", muc_user_ns).is_some_and(|x| {
+                    x.children()
+                        .any(|c| c.name() == "status" && c.attr("code") == Some("110"))
+                })
         })
         .expect("bob self presence");
     let bob_item = bob_self
-        .get_child("x", "http://jabber.org/protocol/muc#user")
-        .and_then(|x| x.get_child("item", "http://jabber.org/protocol/muc#user"))
+        .get_child("x", muc_user_ns)
+        .and_then(|x| x.get_child("item", muc_user_ns))
         .expect("bob muc item");
     assert_ne!(
         bob_item.attr("affiliation"),
         Some("owner"),
         "a later joiner is not the creator and must not be Owner (#1134)"
+    );
+    let bob_status_codes: Vec<&str> = bob_self
+        .get_child("x", muc_user_ns)
+        .expect("bob muc user payload")
+        .children()
+        .filter(|child| child.name() == "status")
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        !bob_status_codes.contains(&"201"),
+        "status 201 is only for the creating join: {bob_responses:?}"
     );
 }
 
@@ -1553,7 +1628,7 @@ async fn native_muc_admin_membership_grant_allows_optional_nick() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        &Some(alice_session.clone()),
         &ready,
     )
     .await;
@@ -1658,6 +1733,139 @@ async fn native_muc_admin_get_role_list_accepts_role_without_nick() {
     assert!(responses[0].contains("role='moderator'"));
     assert!(responses[0].contains("affiliation='none'"));
     assert!(responses[0].contains("jid='bob@example.com/web'"));
+}
+
+#[tokio::test]
+async fn native_muc_admin_moderator_cannot_retrieve_affiliation_list() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "admin-affiliation-list-authz@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let bob_ready = ready_phase(&bob_jid);
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session.clone()),
+    )
+    .await;
+
+    let actor = get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor");
+    actor
+        .ask(ApplyAdminItems {
+            sender_jid: alice_jid.clone(),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: waddle_xmpp::Role::Moderator,
+            items: vec![waddle_xmpp::muc::AdminItem {
+                jid: None,
+                nick: Some("bob".to_string()),
+                affiliation: None,
+                role: Some(waddle_xmpp::Role::Moderator),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("owner grants temporary moderator role");
+
+    let role_list_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "moderator-role-list",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(
+                        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "moderator")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let role_responses = handle_iq(
+        &role_list_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(bob_session.clone()),
+        &bob_ready,
+    )
+    .await;
+    assert_eq!(role_responses.len(), 1, "role response: {role_responses:?}");
+    assert!(role_responses[0].contains("type='result'"));
+    assert!(role_responses[0].contains("nick='bob'"));
+
+    let affiliation_list_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "moderator-affiliation-list",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(
+                        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                            .attr(
+                                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                                "owner",
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let affiliation_responses = handle_iq(
+        &affiliation_list_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(bob_session),
+        &bob_ready,
+    )
+    .await;
+    assert_eq!(
+        affiliation_responses.len(),
+        1,
+        "affiliation response: {affiliation_responses:?}"
+    );
+    assert!(affiliation_responses[0].contains("type='error'"));
+    assert!(
+        affiliation_responses[0].contains("forbidden"),
+        "XEP-0045 §9.5/§9.8 affiliation-list retrieval is owner/admin-affiliation only: {affiliation_responses:?}"
+    );
 }
 
 #[tokio::test]
@@ -2223,6 +2431,371 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
     )
     .await;
     assert!(responses[0].contains("project@muc.example.com"));
+}
+
+#[tokio::test]
+async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+
+    let room_jid: BareJid = "config-broadcast@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let ready = ready_phase(&alice_jid);
+
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob_jid.clone(), bob_tx);
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_roomname",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("Config Broadcast")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_enablelogging",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("0")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_whois",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("moderators")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let owner_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "owner-config-broadcast",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                    .append(submit_form)
+                    .build(),
+            )
+            .build(),
+    );
+
+    let responses = handle_iq(
+        &owner_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session.clone()),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+    assert!(responses[0].contains("type='result'"));
+
+    let broadcast = bob_rx
+        .try_recv()
+        .expect("Bob receives XEP-0045 config-change notification");
+    let xml = stanza_to_xml(&broadcast.stanza);
+    let message = Element::from_str(&xml).expect("config-change message XML");
+    assert_eq!(message.name(), "message");
+    assert_eq!(message.attr("from"), Some(room_jid.to_string().as_str()));
+    assert_eq!(message.attr("to"), Some(bob_jid.to_string().as_str()));
+    assert_eq!(message.attr("type"), Some("groupchat"));
+    let user_x = message
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("muc#user payload");
+    let status_codes: Vec<&str> = user_x
+        .children()
+        .filter(|child| child.name() == "status")
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        status_codes.contains(&"171"),
+        "XEP-0045 §10.2.1 logging disabled status missing: {xml}"
+    );
+    assert!(
+        status_codes.contains(&"173"),
+        "XEP-0045 §10.2.1 semi-anonymous status missing: {xml}"
+    );
+    assert!(
+        status_codes.contains(&"104"),
+        "XEP-0045 §10.2.1 non-privacy config status missing: {xml}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.config.anonymity,
+        waddle_xmpp::muc::RoomAnonymity::SemiAnonymous,
+        "muc#roomconfig_whois submit should persist as typed room anonymity"
+    );
+
+    let owner_get = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "owner-config-broadcast-get",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER).build())
+            .build(),
+    );
+    let get_responses = handle_iq(
+        &owner_get,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert_eq!(
+        get_responses.len(),
+        1,
+        "owner get response: {get_responses:?}"
+    );
+    let owner_result = Element::from_str(&get_responses[0]).expect("owner get result XML");
+    let form = owner_result
+        .get_child("query", waddle_xmpp::muc::NS_MUC_OWNER)
+        .and_then(|query| query.get_child("x", waddle_xmpp::muc::DATA_FORMS_NS))
+        .expect("owner config form");
+    let whois_field = form
+        .children()
+        .find(|field| {
+            field.name() == "field"
+                && field.ns() == waddle_xmpp::muc::DATA_FORMS_NS
+                && field.attr("var") == Some("muc#roomconfig_whois")
+        })
+        .expect("whois field");
+    assert_eq!(
+        whois_field
+            .get_child("value", waddle_xmpp::muc::DATA_FORMS_NS)
+            .map(|value| value.text()),
+        Some("moderators".to_string())
+    );
+}
+
+#[tokio::test]
+async fn semi_anonymous_muc_join_presence_hides_real_jids_from_participants() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let charlie_session = create_test_session(state.as_ref(), "charlie").await;
+
+    let room_jid: BareJid = "semi-anon-presence@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let charlie_jid: FullJid = "charlie@example.com/web".parse().expect("charlie jid");
+    let ready = ready_phase(&alice_jid);
+
+    let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(8);
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice_jid.clone(), alice_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob_jid.clone(), bob_tx);
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while alice_rx.try_recv().is_ok() {}
+    while bob_rx.try_recv().is_ok() {}
+
+    let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_whois",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("moderators")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let owner_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "semi-anon-submit",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                    .append(submit_form)
+                    .build(),
+            )
+            .build(),
+    );
+    let responses = handle_iq(
+        &owner_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+    assert!(responses[0].contains("type='result'"));
+    while alice_rx.try_recv().is_ok() {}
+    while bob_rx.try_recv().is_ok() {}
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &charlie_jid,
+        "charlie",
+        None,
+        &Some(charlie_session),
+    )
+    .await;
+    let expected_from = format!("{room_jid}/charlie");
+    let alice_presence = loop {
+        let outbound = alice_rx
+            .try_recv()
+            .expect("moderator receives Charlie join broadcast");
+        let xml = stanza_to_xml(&outbound.stanza);
+        let element = Element::from_str(&xml).expect("moderator presence XML");
+        if element.name() == "presence" && element.attr("from") == Some(expected_from.as_str()) {
+            break element;
+        }
+    };
+    let bob_presence = loop {
+        let outbound = bob_rx
+            .try_recv()
+            .expect("participant receives Charlie join broadcast");
+        let xml = stanza_to_xml(&outbound.stanza);
+        let element = Element::from_str(&xml).expect("participant presence XML");
+        if element.name() == "presence" && element.attr("from") == Some(expected_from.as_str()) {
+            break element;
+        }
+    };
+
+    let alice_x = alice_presence
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("moderator muc#user payload");
+    let alice_item = alice_x
+        .get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("moderator item");
+    let charlie_full = charlie_jid.to_string();
+    assert_eq!(alice_item.attr("jid"), Some(charlie_full.as_str()));
+    assert!(
+        !alice_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
+        "semi-anonymous moderator disclosure must not include non-anonymous status 100"
+    );
+
+    let bob_x = bob_presence
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("participant muc#user payload");
+    let bob_item = bob_x
+        .get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("participant item");
+    assert!(
+        bob_item.attr("jid").is_none(),
+        "semi-anonymous rooms must hide real JIDs from non-moderators"
+    );
+    assert!(
+        !bob_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
+        "semi-anonymous participant presence must not include status 100"
+    );
 }
 
 #[tokio::test]
