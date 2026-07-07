@@ -2,7 +2,8 @@ use super::*;
 use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
-use waddle_xmpp::muc::room_actor::LeaveOutcome;
+use waddle_xmpp::muc::room_actor::{LeaveOutcome, SealGuard};
+use waddle_xmpp::muc::room_registry_actor::RoomAcquisition;
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -160,18 +161,38 @@ pub(crate) async fn maybe_evict_empty_room(
     if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
         return;
     }
-    if destroy_room_actor(state, room_jid).await {
+    // #1108: revision-guarded destroy. The registry asks the room actor
+    // to seal itself only if it is still empty at the occupancy revision
+    // captured by this leave — a join admitted after the leave bumps the
+    // revision and the destroy refuses instead of orphaning the fresh
+    // occupant.
+    let destroyed = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .destroy_room_if_inactive(
+            room_jid.clone(),
+            outcome.occupancy_revision,
+            SealGuard::EmptyNonPersistent,
+        )
+        .await
+    {
+        Ok(destroyed) => destroyed,
+        Err(error) => {
+            warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
+            false
+        }
+    };
+    if destroyed {
         debug!(
             room = %room_jid,
             "Evicted empty non-persistent MUC room from registry"
         );
     } else {
         // Either the room was already absent (race with another leave
-        // path) or `destroy_room_actor` logged a registry-ask failure.
-        // Either way we don't want to fail the user's leave on this.
+        // path), a new occupant was admitted after this leave, or the
+        // registry ask failed (logged). Either way we don't want to
+        // fail the user's leave on this.
         debug!(
             room = %room_jid,
-            "Eviction round-trip returned false; registry already cleared or ask failed (logged)"
+            "Guarded eviction returned false; room re-admitted an occupant, was already cleared, or ask failed (logged)"
         );
     }
 }
@@ -647,18 +668,23 @@ pub(crate) async fn get_room_actor(
     }
 }
 
+/// Get or create the room via the registry. The returned
+/// [`RoomAcquisition`] carries the registry-authoritative created-bit
+/// (#1134): only the caller that observes `RoomCreation::Created`
+/// actually created the room and may grant itself the XEP-0045
+/// §10.1.1 creator Owner.
 pub(crate) async fn get_or_create_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
     config: RoomConfig,
     waddle_id: String,
     channel_id: String,
-) -> Option<ActorRef<RoomActor>> {
+) -> Option<RoomAcquisition> {
     match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .get_or_create_room(room_jid.clone(), waddle_id, channel_id, config)
         .await
     {
-        Ok(actor) => Some(actor),
+        Ok(acquisition) => Some(acquisition),
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to get or create room actor");
             None
@@ -738,7 +764,8 @@ mod eviction_tests {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
 
         let alice = full_jid("alice@example.com/r1");
         room_actor
@@ -851,7 +878,8 @@ mod eviction_tests {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("create instant room");
+            .expect("create instant room")
+            .actor_ref;
 
         let alice = full_jid("alice@example.com/r1");
         let bob = full_jid("bob@example.com/r1");

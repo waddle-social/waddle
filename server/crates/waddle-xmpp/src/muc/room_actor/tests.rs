@@ -157,7 +157,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
         .ask(JoinWithAffiliation {
             sender_jid: alice.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -168,7 +168,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
         .ask(JoinWithAffiliation {
             sender_jid: alice,
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -372,7 +372,7 @@ async fn membership_revocation_in_members_only_room_ejects_occupant_with_status_
         .ask(JoinWithAffiliation {
             sender_jid: alice.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
         })
@@ -799,7 +799,7 @@ async fn affiliation_batch_validation_happens_before_members_only_ejection() {
         .ask(JoinWithAffiliation {
             sender_jid: alice.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
         })
@@ -859,7 +859,7 @@ async fn stale_admission_revision_returns_retryable_error_without_joining() {
         .ask(JoinWithAffiliation {
             sender_jid: alice.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::None,
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -885,7 +885,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_laptop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -895,7 +895,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_phone.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -948,7 +948,7 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_laptop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -958,7 +958,7 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_phone.clone(),
             nick: "alice-phone".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -997,7 +997,7 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
         .ask(JoinWithAffiliation {
             sender_jid: alice.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -1034,7 +1034,7 @@ async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none(
         .ask(JoinWithAffiliation {
             sender_jid: alice.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -1227,7 +1227,13 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
 #[tokio::test]
 async fn is_dormant_true_for_fresh_empty_room() {
     let actor = spawn_room_actor().await;
-    assert!(actor.ask(crate::muc::room_actor::IsDormant).await.unwrap());
+    assert!(
+        actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant
+    );
 }
 
 #[tokio::test]
@@ -1242,7 +1248,13 @@ async fn is_dormant_false_while_occupants_present() {
         })
         .await
         .expect("join");
-    assert!(!actor.ask(crate::muc::room_actor::IsDormant).await.unwrap());
+    assert!(
+        !actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant
+    );
 }
 
 #[tokio::test]
@@ -1257,9 +1269,272 @@ async fn is_dormant_false_when_affiliation_is_set() {
         .await
         .expect("change affiliation");
     assert!(
-        !actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        !actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
         "in-memory affiliation grants must keep the room non-dormant \
          so eviction does not drop them"
+    );
+}
+
+/// #1110: a resolver-derived member affiliation (the one every managed
+/// join writes via the authz resolver) is reconstructible on the next
+/// join by construction, so it must NOT pin the room actor in memory
+/// forever. After the last such member leaves, the room is dormant and
+/// the dormancy janitor may reap it.
+#[tokio::test]
+async fn is_dormant_true_after_resolver_derived_member_leaves() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("resolver-derived member join");
+    actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    assert!(
+        actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
+        "a resolver-derived member affiliation is re-derived on the next \
+         join, so it must not block dormancy after the last leave — \
+         otherwise every managed room lives forever (#1110)"
+    );
+}
+
+/// #1134 defense-in-depth: XEP-0045 §10.1.1 — only the room creator
+/// gets Owner. Even if two racing first-joins both arrive claiming
+/// `CreatorOwner` (both call sites believed they created the room),
+/// the room actor grants Owner only while no owner exists yet; the
+/// loser joins with no affiliation of their own.
+#[tokio::test]
+async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
+    // Instant rooms (the only rooms whose join carries CreatorOwner)
+    // are open and non-persistent — see CreateInstantRoom.
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: false,
+        persistent: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+
+    let alice_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::CreatorOwner,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("creator join");
+    assert_eq!(
+        alice_outcome.new_occupant_affiliation,
+        Affiliation::Owner,
+        "the first creator-join gets Owner (XEP-0045 §10.1.1)"
+    );
+
+    let bob_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob,
+            nick: "bob".to_string(),
+            affiliation_grant: JoinAffiliationGrant::CreatorOwner,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("racing second creator-join");
+    assert_ne!(
+        bob_outcome.new_occupant_affiliation,
+        Affiliation::Owner,
+        "a second racing 'creator' join must NOT also get Owner \
+         (XEP-0045 §10.1.1: only the creator; #1134)"
+    );
+}
+
+/// #1107 part 1: a FULL JID that already occupies the room under nick
+/// A must not be admitted under nick B — that created a second
+/// occupancy whose leave-cleanup only removed one, leaving a permanent
+/// ghost. Waddle locks nicknames to identity, so per XEP-0045 §7.6 the
+/// request is denied with `<not-acceptable/>` (type='cancel') rather
+/// than performing a §7.6 nick change.
+#[tokio::test]
+async fn same_full_jid_joining_under_second_nick_is_rejected() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("first join");
+
+    let result = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice-again".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await;
+    assert!(
+        matches!(
+            &result,
+            Err(SendError::HandlerError(
+                RoomActorError::OccupantAlreadyJoinedUnderDifferentNick { current_nick, .. }
+            )) if current_nick == "alice"
+        ),
+        "the same full JID under a second nick must be refused, not \
+         admitted as a ghost occupant (#1107); got: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("count"),
+        1,
+        "no second occupancy was created"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert_eq!(snapshot.find_nick_by_real_jid(&alice), Some("alice"));
+}
+
+/// #1107 part 2: disconnect cleanup must remove EVERY occupancy held
+/// by the full JID, not just the first-found nick. The two-nick state
+/// is constructed via the unguarded legacy `Join` message (mirroring
+/// pre-fix ghosts); after `LeaveByRealJid` no occupancy of the JID may
+/// survive, and the remaining-occupant fan-out set is exactly the
+/// other occupants.
+#[tokio::test]
+async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+
+    for nick in ["alice", "alice-ghost"] {
+        actor
+            .ask(Join {
+                nick: nick.to_string(),
+                real_jid: alice.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("legacy join");
+    }
+    actor
+        .ask(Join {
+            nick: "bob".to_string(),
+            real_jid: bob.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("bob join");
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 3);
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("leave")
+        .expect("outcome");
+
+    assert_eq!(
+        outcome.occupant_count, 1,
+        "every occupancy of the leaving full JID is removed — \
+         only bob remains (#1107)"
+    );
+    assert!(outcome.removed_last_session);
+    assert_eq!(
+        outcome.remaining_occupants,
+        vec![bob.clone()],
+        "the leave fan-out set contains only the other occupants — \
+         never a dead session of the leaver"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert!(
+        snapshot.find_nick_by_real_jid(&alice).is_none(),
+        "no ghost occupancy survives for the disconnected full JID"
+    );
+    assert_eq!(snapshot.find_nick_by_real_jid(&bob), Some("bob"));
+
+    // Rejoin + disconnect converges: counts stay correct.
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("rejoin");
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 2);
+    actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("second leave")
+        .expect("outcome");
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
+/// #1110 counterpart: an explicit grant (here a XEP-0045 §9.1 ban)
+/// is in-memory only, so it MUST keep blocking dormancy after every
+/// occupant leaves — otherwise the ban would evaporate on eviction.
+#[tokio::test]
+async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("join");
+    actor
+        .ask(ChangeAffiliation {
+            jid: "banned@example.com".parse().expect("bare jid"),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban");
+    actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    assert!(
+        !actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
+        "an explicit ban is memory-only; evicting the room would let \
+         the banned user back in, so the room must stay non-dormant"
     );
 }
 
@@ -1282,7 +1557,11 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
         .expect("leave")
         .expect("outcome");
     assert!(
-        actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .unwrap()
+            .dormant,
         "an empty room with no subject/pins/affiliations is dormant \
          and safe for the room dormancy janitor to reap"
     );
@@ -1961,7 +2240,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
         .ask(JoinWithAffiliation {
             sender_jid: desktop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -1971,7 +2250,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
         .ask(JoinWithAffiliation {
             sender_jid: mobile.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2010,7 +2289,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
         .ask(JoinWithAffiliation {
             sender_jid: desktop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2020,7 +2299,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
         .ask(JoinWithAffiliation {
             sender_jid: mobile.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2064,7 +2343,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
         .ask(JoinWithAffiliation {
             sender_jid: bob,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2108,7 +2387,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
         .ask(JoinWithAffiliation {
             sender_jid: desktop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2118,7 +2397,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
         .ask(JoinWithAffiliation {
             sender_jid: mobile.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2138,7 +2417,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
         .ask(JoinWithAffiliation {
             sender_jid: bob,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2305,7 +2584,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
         .ask(JoinWithAffiliation {
             sender_jid: carol,
             nick: "carol".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2378,7 +2657,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
         .ask(JoinWithAffiliation {
             sender_jid: bob,
             nick: "bob".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2431,7 +2710,7 @@ async fn leaving_occupant_clears_muji_state() {
         .ask(JoinWithAffiliation {
             sender_jid: carol,
             nick: "carol".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2461,7 +2740,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
         .ask(JoinWithAffiliation {
             sender_jid: desktop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2471,7 +2750,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
         .ask(JoinWithAffiliation {
             sender_jid: mobile.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2520,7 +2799,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
         .ask(JoinWithAffiliation {
             sender_jid: carol,
             nick: "carol".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2552,7 +2831,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
         .ask(JoinWithAffiliation {
             sender_jid: desktop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2562,7 +2841,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
         .ask(JoinWithAffiliation {
             sender_jid: mobile.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2592,7 +2871,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
         .ask(JoinWithAffiliation {
             sender_jid: carol,
             nick: "carol".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2620,7 +2899,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
         .ask(JoinWithAffiliation {
             sender_jid: desktop.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2630,7 +2909,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
         .ask(JoinWithAffiliation {
             sender_jid: mobile.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2674,7 +2953,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
         .ask(JoinWithAffiliation {
             sender_jid: carol,
             nick: "carol".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2704,7 +2983,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid_resource("alice", "desktop"),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2714,7 +2993,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid_resource("alice", "mobile"),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2761,7 +3040,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid_resource("alice", "desktop"),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2771,7 +3050,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid_resource("alice", "mobile"),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2814,7 +3093,7 @@ async fn non_removing_admin_changes_report_no_moderation_removals() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid("alice"),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2860,7 +3139,7 @@ async fn admin_set_error_after_ban_item_must_not_partially_apply() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid("victim"),
             nick: "victim".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })
@@ -2935,7 +3214,7 @@ async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
         .ask(JoinWithAffiliation {
             sender_jid: test_full_jid("victim"),
             nick: "victim".to_string(),
-            effective_affiliation: Affiliation::Member,
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
         })

@@ -29,8 +29,8 @@ use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_conte
 use waddle_extensions::ExtensionConfig;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_actor::{
-    ApplyAdminItems, ChangeAffiliation, GetConfig, GetSnapshot, JoinWithAffiliation, SetSubject,
-    UpdateConfig,
+    ApplyAdminItems, ChangeAffiliation, GetConfig, GetSnapshot, JoinAffiliationGrant,
+    JoinWithAffiliation, SetSubject, UpdateConfig,
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Affiliation;

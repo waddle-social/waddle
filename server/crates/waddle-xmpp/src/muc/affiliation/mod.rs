@@ -23,7 +23,7 @@ mod membership;
 mod resolver;
 
 pub use config::{FederatedAffiliationConfig, FederatedPermissionPolicy};
-pub use list::{AffiliationChange, AffiliationEntry, AffiliationList};
+pub use list::{AffiliationChange, AffiliationEntry, AffiliationList, AffiliationProvenance};
 pub use membership::{DurableMembershipFuture, DurableMembershipSource};
 pub use resolver::{AffiliationResolver, AppStateAffiliationResolver};
 

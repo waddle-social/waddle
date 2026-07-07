@@ -49,6 +49,13 @@ async fn handle_muc_join_unlocked(
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let mut retried_stale_admission = false;
+    // #1108: a room actor can be sealed+destroyed by the guarded
+    // dormancy eviction between our registry lookup and the join ask.
+    // The seal refuses the join with a typed retryable error (or the
+    // ask fails outright on the stopped actor); one retry re-runs the
+    // registry lookup, which respawns the room — the join must never
+    // be silently dropped.
+    let mut retried_dead_room = false;
     loop {
         let managed_channel = match get_managed_channel_for_room(state, room_jid).await {
             Ok(channel) => channel,
@@ -72,6 +79,14 @@ async fn handle_muc_join_unlocked(
             match actor.ask(GetSnapshot).await {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
+                    if !retried_dead_room
+                        && !matches!(&error, kameo::error::SendError::HandlerError(_))
+                    {
+                        // Room actor destroyed between lookup and
+                        // snapshot (#1108) — retry via the registry.
+                        retried_dead_room = true;
+                        continue;
+                    }
                     warn!(room = %room_jid, error = ?error, "Failed to snapshot MUC room before join");
                     return vec![build_muc_presence_error_xml(
                         room_jid,
@@ -241,28 +256,36 @@ async fn handle_muc_join_unlocked(
                     })
                     .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
-                let Some(actor) =
+                let Some(acquisition) =
                     get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
                 else {
                     return vec![];
                 };
-                (actor, managed_channel.is_none())
+                // #1134: the created-bit is registry-authoritative —
+                // the registry's serialized handler makes exactly one
+                // racing first-join the creator. Inferring it from "no
+                // actor existed when we looked" gave Owner to every
+                // racer.
+                let created = acquisition.creation
+                    == waddle_xmpp::muc::room_registry_actor::RoomCreation::Created;
+                (acquisition.actor_ref, managed_channel.is_none() && created)
             }
         };
 
-        let effective_affiliation = if created_instant_room {
-            Affiliation::Owner
+        let affiliation_grant = if created_instant_room {
+            // XEP-0045 §10.1.1: only the actual room creator gets Owner.
+            JoinAffiliationGrant::CreatorOwner
         } else if let Some(affiliation) = managed_affiliation {
-            affiliation
+            JoinAffiliationGrant::Resolver(affiliation)
         } else {
-            Affiliation::None
+            JoinAffiliationGrant::Unaffiliated
         };
 
         let join_outcome = match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: sender_jid.clone(),
                 nick: nick.clone(),
-                effective_affiliation,
+                affiliation_grant,
                 local_domain: domain.clone(),
                 admission_revision,
             })
@@ -270,6 +293,34 @@ async fn handle_muc_join_unlocked(
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                // #1108: sealed-for-destruction room actor, or an ask
+                // against an already-stopped actor. Retry once through
+                // the registry, which respawns the room; never drop the
+                // join silently.
+                let room_gone = matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+                    )
+                ) || !matches!(&error, kameo::error::SendError::HandlerError(_));
+                if room_gone {
+                    if !retried_dead_room {
+                        retried_dead_room = true;
+                        continue;
+                    }
+                    warn!(room = %room_jid, nick = %nick, error = ?error, "MUC join failed twice against a destroyed room actor");
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "Room was evicted while joining; please retry.",
+                        ),
+                    )];
+                }
                 let nick_collision = matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
@@ -284,6 +335,36 @@ async fn handle_muc_join_unlocked(
                         "MUC nick collision; returning conflict"
                     );
                     return vec![build_muc_conflict_presence_xml(room_jid, &nick, sender_jid)];
+                }
+                if let kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
+                        current_nick,
+                        ..
+                    },
+                ) = &error
+                {
+                    // #1107 / XEP-0045 §7.6: nicknames are locked to
+                    // identity; a session already in the room under
+                    // another nick is refused with <not-acceptable/>
+                    // instead of being admitted as a ghost occupancy.
+                    warn!(
+                        room = %room_jid,
+                        nick = %nick,
+                        current_nick = %current_nick,
+                        sender = %sender_jid,
+                        "MUC join under second nick refused (nicknames locked)"
+                    );
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Cancel,
+                            DefinedCondition::NotAcceptable,
+                            "en",
+                            "You are already in this room under a different nickname.",
+                        ),
+                    )];
                 }
                 if let kameo::error::SendError::HandlerError(
                     waddle_xmpp::muc::room_actor::RoomActorError::StaleAdmissionRevision,

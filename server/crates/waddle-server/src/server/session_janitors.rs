@@ -1121,8 +1121,8 @@ pub(crate) struct DormancySweepCounts {
 pub(crate) async fn sweep_dormant_rooms_once(
     websocket_state: &WebSocketState,
 ) -> DormancySweepCounts {
-    use waddle_xmpp::muc::room_actor::IsDormant;
-    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, ListRooms, RoomCount};
+    use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
+    use waddle_xmpp::muc::room_registry_actor::{DestroyRoomIfInactive, ListRooms, RoomCount};
     let mut counts = DormancySweepCounts::default();
     let rooms = match websocket_state
         .deps
@@ -1163,7 +1163,7 @@ pub(crate) async fn sweep_dormant_rooms_once(
         // only skip its own check — timeout lands in the existing
         // warn-and-skip arm, treating the room as not-dormant (never reap
         // on uncertainty).
-        let is_dormant = match actor.ask(IsDormant).reply_timeout(REAPER_ASK_TIMEOUT).await {
+        let status = match actor.ask(IsDormant).reply_timeout(REAPER_ASK_TIMEOUT).await {
             Ok(value) => value,
             Err(error) => {
                 warn!(
@@ -1174,15 +1174,22 @@ pub(crate) async fn sweep_dormant_rooms_once(
                 continue;
             }
         };
-        if !is_dormant {
+        if !status.dormant {
             continue;
         }
+        // #1108: destruction is revision-guarded — the registry asks the
+        // room actor to seal itself only if it is still dormant at the
+        // probed occupancy revision (checked inside the room actor's
+        // serialized mailbox), so a join that landed after the probe
+        // above refuses the destroy instead of being orphaned.
         match websocket_state
             .deps
             .protocol
             .room_registry
-            .ask(DestroyRoom {
+            .ask(DestroyRoomIfInactive {
                 room_jid: room_jid.clone(),
+                expected_occupancy_revision: status.occupancy_revision,
+                guard: SealGuard::Dormant,
             })
             .await
         {
@@ -1195,7 +1202,7 @@ pub(crate) async fn sweep_dormant_rooms_once(
                 warn!(
                     room = %room_jid,
                     error = ?error,
-                    "room dormancy janitor: DestroyRoom ask failed; will retry next pass"
+                    "room dormancy janitor: DestroyRoomIfInactive ask failed; will retry next pass"
                 );
             }
         }
@@ -1489,8 +1496,11 @@ mod room_dormancy_tests {
     use super::sweep_dormant_rooms_once;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::muc::{
-        room_actor::{ChangeAffiliation, Join, LeaveByRealJid},
-        room_registry_actor::{CreateRoom, RoomCount},
+        room_actor::{
+            ChangeAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant, JoinWithAffiliation,
+            LeaveByRealJid,
+        },
+        room_registry_actor::{CreateRoom, GetOrCreateRoom, RoomCount},
         RoomConfig,
     };
     use waddle_xmpp_core::{Affiliation, Role};
@@ -1632,6 +1642,129 @@ mod room_dormancy_tests {
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1);
         assert_eq!(counts.remaining, 0);
+    }
+
+    /// #1110: a resolver-derived member affiliation (written by every
+    /// managed-channel join) must NOT pin the room in the registry —
+    /// once the last member leaves, the sweep evicts the room. Before
+    /// the fix this leaked one room actor per ever-visited channel.
+    #[tokio::test]
+    async fn sweep_evicts_room_with_only_resolver_derived_affiliation() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("resolver-graced");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create");
+        let alice = full_jid("alice@example.com/r1");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("resolver-derived member join");
+        actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave")
+            .expect("outcome");
+
+        let counts = sweep_dormant_rooms_once(&state).await;
+        assert_eq!(
+            counts.evicted, 1,
+            "resolver-derived affiliations are re-derived on the next \
+             join and must not block dormancy eviction (#1110)"
+        );
+        assert_eq!(counts.remaining, 0);
+    }
+
+    /// #1110: eviction of a resolver-affiliated room is lossless — a
+    /// rejoin re-spawns the room through the registry and the resolver
+    /// re-applies the member affiliation.
+    #[tokio::test]
+    async fn rejoin_after_dormancy_eviction_re_resolves_affiliation() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("re-resolved");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create");
+        let alice = full_jid("alice@example.com/r1");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("first join");
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+            })
+            .await
+            .expect("leave")
+            .expect("outcome");
+        let counts = sweep_dormant_rooms_once(&state).await;
+        assert_eq!(counts.evicted, 1, "room evicted while dormant");
+
+        // Rejoin: the registry re-spawns a fresh actor and the join
+        // path re-applies the resolver-derived affiliation.
+        let respawned = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("respawn room")
+            .actor_ref;
+        respawned
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("rejoin after eviction");
+        let occupant = respawned
+            .ask(GetOccupantByJid { jid: alice })
+            .await
+            .expect("occupant lookup")
+            .expect("alice is an occupant again");
+        assert_eq!(
+            occupant.affiliation,
+            Affiliation::Member,
+            "the resolver-derived member affiliation is re-applied on rejoin"
+        );
     }
 }
 
