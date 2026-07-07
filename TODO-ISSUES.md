@@ -18,7 +18,7 @@ Bundles marked `[one PR]` touch the same files and should land together.
 | #472 | Rescope — HATS conflation fixed + test-pinned; residual = XEP-0050 hat CRUD + durable hat store |
 | #231 | Park — only non-anonymous rooms exist; occupant-id authz branch not needed until semi-anon ships |
 | #317 | Verify then likely close — presence/DND epic (ADR-010) shipped; residual is custom status = #366 |
-| #945 | Keep open until SFU lane B done (residue = #1127/#1128/#1130/#1131), then close |
+| #945 | Keep open until the four issues that gate it (#1127/#1128/#1130/#1131, each "Relates to #945") are done, then close. Lane B's other items (#1129/#1140/#1142) are general SFU hygiene, not #945-gating |
 | #1017 | Keep open until recording chain (#1023 → #1031 → #1033) lands, then close |
 
 ## Tier 1 — Criticals (start immediately)
@@ -44,7 +44,7 @@ Bundles marked `[one PR]` touch the same files and should land together.
 7. #1140 — backdate join-token `nbf` for clock skew. S.
 
 ### Lane C — Push server reliability + conformance
-1. #1123 + #1124 + #1126 `[one PR]` — duplicate/spurious push trio: partial-success retry re-sends delivered devices; janitor sweeps live transient flush claims; suppress at unread=0 + retry jitter.
+1. #1123 + #1124 + #1126 `[one PR]` — duplicate/spurious push trio: partial-success retry re-sends delivered devices; janitor sweeps live transient flush claims; suppress at unread=0 + retry jitter. (#1124 also touches `pending_delivery` — coordinate with Lane H work.)
 2. #779 + #780 `[one PR]` — preserve XEP-0359 stanza-id through XEP-0357 publish (SW dedupe is dead by construction); suppress push for XEP-0444 reaction-only messages.
 3. #774 + #772 + #773 + #776 + #777 `[one PR]` — XEP-0357/0050 polish: strict publish-options FORM_TYPE validation, emit SessionExpired, session-lifecycle robustness, single-tx register-device, typed composer errors.
 4. #775 — finish §6 forward cleanup on 410 GONE (device half done; user-server invalidation + client notify remain).
@@ -89,8 +89,7 @@ Bundles marked `[one PR]` touch the same files and should land together.
 3. #1206 — residual: durable codec drops presence payloads on restart (`persistence_codec.rs:158`); in-memory path fixed by #1207.
 4. #1137 — residual: wrap-aware `record_detached_outbound_at` + sort (2^32 boundary only).
 5. #1132 — residual: state-inventory collector still raw asks without timeout (janitor half fixed by #1207).
-6. #1124 — (listed in Lane C bundle; lives in pending_delivery).
-7. #1188 — deflake xep0115 caps test (ping FIFO anchor).
+6. #1188 — deflake xep0115 caps test (ping FIFO anchor).
 
 ### Lane I — Infra / CI (after Tier 1 items)
 1. #1162 — PR-time infra CI + chart diff-fail publish + HelmRelease remediation + ESO redundancy.
