@@ -431,14 +431,6 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     });
 }
 
-/// Cadence for the orphan reaper (ADR-0017 Phase 3 Slice 5, element 9).
-/// Slower than the SM-expiry janitor's 60s (dead-node detection is not as
-/// latency-sensitive as this node's own expired-session sweep), but
-/// responsive enough that a dead node's claims do not sit unreclaimed for
-/// long.
-#[cfg(feature = "clustering")]
-const ORPHAN_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
-
 /// ADR-0017 Phase 3 Slice 5, element 9 (quoted verbatim): *"any node may
 /// steal such [orphaned] claims (fenced CAS) and then expire or promote
 /// them, after first committing the expire CAS on the owner's `nodes`
@@ -447,12 +439,22 @@ const ORPHAN_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// [`run_orphan_reaper_sweep`] itself is feature-gated, and the outer
 /// function here is always callable so its call site in `http.rs` needs no
 /// `#[cfg]` of its own, mirroring the other eight janitor spawns.
-pub(crate) fn spawn_orphan_reaper_janitor(websocket_state: &Arc<WebSocketState>) {
+///
+/// `interval` is `ClusteringConfig::orphan_reaper_interval`
+/// (`WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`, default 120s) — ADR-0017
+/// Phase 3 Slice 11 corrigenda (deviation 111) made this cadence env-
+/// overridable, the same way every sibling cluster timer already is, so the
+/// multi-process harness's kill-one hydration capstone does not have to
+/// wait out the full 120s production default in real wall-clock time.
+pub(crate) fn spawn_orphan_reaper_janitor(
+    websocket_state: &Arc<WebSocketState>,
+    interval: std::time::Duration,
+) {
     #[cfg(feature = "clustering")]
     {
         let weak_state = Arc::downgrade(websocket_state);
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(ORPHAN_REAPER_INTERVAL);
+            let mut ticker = tokio::time::interval(interval);
             // Skip the first (immediate) tick, mirroring the other janitors
             // — no need to sweep before the node-lease loop has even
             // registered this node.
@@ -469,6 +471,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(websocket_state: &Arc<WebSocketState>)
     #[cfg(not(feature = "clustering"))]
     {
         let _ = websocket_state;
+        let _ = interval;
     }
 }
 

@@ -981,6 +981,114 @@ mod tests {
         );
     }
 
+    /// FIX B test double (ADR-0017 Phase 3 Slice 11 corrigenda, council-
+    /// adjudicated, deviation 110): reports `Unreachable` for its first
+    /// `unreachable_calls` asks, then writes the persisted snapshot
+    /// directly into the shared, in-memory persistence store the registry
+    /// under test reads from — standing in for "the remote owner finally
+    /// force-detached and persisted the session" — and reports `Detached`
+    /// on that and every later ask. The retry loop's own subsequent
+    /// iteration finds the snapshot at branch 1's top-of-loop re-check and
+    /// steals it, so a well-behaved caller never needs a further ask.
+    struct FlakyAsker {
+        asks_seen: std::sync::atomic::AtomicUsize,
+        unreachable_calls: usize,
+        persistence: Arc<InMemorySmPersistence>,
+        jid: jid::FullJid,
+    }
+
+    impl FlakyAsker {
+        fn new(
+            unreachable_calls: usize,
+            persistence: Arc<InMemorySmPersistence>,
+            jid: jid::FullJid,
+        ) -> Self {
+            Self {
+                asks_seen: std::sync::atomic::AtomicUsize::new(0),
+                unreachable_calls,
+                persistence,
+                jid,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteResumeAsker for FlakyAsker {
+        async fn ask_remote_detach(
+            &self,
+            _node_id: &str,
+            stream_id: &str,
+            _requester_bare_jid: &BareJid,
+        ) -> RemoteResumeAskOutcome {
+            let call_index = self
+                .asks_seen
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call_index < self.unreachable_calls {
+                return RemoteResumeAskOutcome::Unreachable;
+            }
+            self.persistence
+                .upsert_session(make_persisted_session(stream_id, &self.jid))
+                .await
+                .expect("seed the persisted snapshot once the flaky asker finally succeeds");
+            RemoteResumeAskOutcome::Detached
+        }
+    }
+
+    /// FIX B (ADR-0017 Phase 3 Slice 11 corrigenda, council-adjudicated,
+    /// deviation 110): branch 3 of cross-node resume (owner unreachable →
+    /// HOLD + retry, succeeding on a later attempt) previously had only
+    /// failure/timeout coverage in this module — `SlowAsker` (above), and
+    /// every `UnreachableAsker`/`SlowAsker`-shaped double elsewhere in this
+    /// crate, report `Unreachable` on EVERY call, so the bounded
+    /// backoff-and-retry loop's own SUCCESS path (a later ask actually
+    /// landing on branch 1's persisted-snapshot re-check) was never
+    /// exercised. Mirrors
+    /// `fix1_slow_asker_never_holds_past_the_handshake_budget`'s structure
+    /// (single in-process `ClaimStore`, no Postgres, `start_paused = true`)
+    /// but with `FlakyAsker` in place of `SlowAsker`.
+    #[tokio::test(start_paused = true)]
+    async fn fix_b_flaky_asker_holds_then_succeeds_on_a_later_attempt() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let owner = crate::ownership::NodeIdentity::new("owner-node", "owner-epoch");
+        let entity = Entity::new(EntityType::SmSession, "stream-flaky".to_string());
+        claim_store
+            .acquire(&entity, &owner)
+            .await
+            .expect("owner claims the entity");
+
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        let persistence = Arc::new(InMemorySmPersistence::new());
+        let me = crate::ownership::NodeIdentity::new("resuming-node", "resuming-epoch");
+        // Unreachable for the first two asks — forces at least two full
+        // backoff iterations (`INITIAL_HANDSHAKE_BACKOFF` = 100ms, then
+        // 200ms after doubling) before the third ask finally succeeds.
+        let asker = Arc::new(FlakyAsker::new(2, Arc::clone(&persistence), jid.clone()));
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::clone(&persistence) as Arc<dyn SmPersistenceStorage>)
+            .with_claim_store(claim_store, SharedNodeIdentity::new(me))
+            .with_remote_resume_asker(asker.clone());
+
+        // Wide enough for several backoff iterations (100ms + 200ms + ...),
+        // never exercised by the pre-existing failure-only coverage.
+        let budget = Duration::from_secs(5);
+        let outcome = registry
+            .attempt_cross_node_resume("stream-flaky", &jid.to_bare(), budget)
+            .await
+            .expect("attempt_cross_node_resume must not error");
+
+        assert!(
+            matches!(outcome, CrossNodeResumeOutcome::Claimed(_)),
+            "branch 3's hold-and-retry loop must succeed once a later ask actually detaches \
+             the remote session; got {outcome:?}"
+        );
+        assert!(
+            asker.asks_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the retry loop must actually have iterated at least twice before landing on the \
+             successful ask, proving branch 3's hold-and-retry path (not a first-attempt \
+             success) is what's under test"
+        );
+    }
+
     /// FIX 6: when the held-response window expires and the claim has
     /// disappeared entirely (the "session known gone" case), the outcome
     /// must be `NotFound` (→ `<failed/>` `item-not-found`), never

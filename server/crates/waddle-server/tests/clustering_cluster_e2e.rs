@@ -27,9 +27,23 @@
 //!   replacements stay reachable once no original peer survives.
 //!
 //! Gated on the `clustering` feature and `WADDLE_TEST_POSTGRES_URL` (skips
-//! cleanly otherwise). Deferred to Phase 3 (needs heartbeat fencing + the
-//! durable queue): lone-survivor at N=2 keeps serving; a single dead link of
-//! three degrades to the durable fallback without fencing either endpoint.
+//! cleanly otherwise).
+//!
+//! ADR-0017 Phase 3 Slice 11 (harness-maturity capstone) added:
+//! `lone_survivor_and_isolation_fencing` (Slice 2 primitives, formally
+//! activated here); `whole_node_isolation_fences_then_self_heals_without_operator_intervention`
+//! (renamed from the plan's original scaffold name,
+//! `partial_partition_degrades_without_fencing`, per the Slice 11 corrigenda
+//! — a disconnected node self-fences while its uninvolved peers stay ready,
+//! then self-heals — see that test's own doc comment, deviations 107/108,
+//! for exactly what is and is not provable given this harness's
+//! connectivity primitives); the Slice 5 multi-process kill-one
+//! claim-scoped hydration capstone
+//! (`orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`,
+//! deviation 106); and the Slice 7/deviation-70 MUC foreign-owned-room
+//! join-bounce wire shape
+//! (`muc_join_bounces_when_room_claim_is_held_by_another_node`).
+//!
 //! Deferred as a manual go/no-go measurement (dominated by kademlia's
 //! hardcoded 1h record TTL): the dead publisher's record-visibility window.
 
@@ -218,6 +232,16 @@ async fn spawn_cluster_server(
             // reject this harness's fast-timer config at startup — size it
             // down to match (1200 >= 3 * 300).
             ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "300"),
+            // ADR-0017 Phase 3 Slice 11 corrigenda (deviation 111, FIX C):
+            // the orphan reaper's cadence has no other reason to run at its
+            // 120s production default in this harness — every real
+            // subprocess spawned here already runs the unmodified
+            // `spawn_orphan_reaper_janitor` loop, so tightening only its
+            // interval (not its logic) lets
+            // `orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`
+            // observe a sweep in seconds instead of waiting out ~120s of
+            // real wall-clock time per attempt.
+            ("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS", "500"),
         ];
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
@@ -353,6 +377,11 @@ async fn cluster_exit_criteria_end_to_end() {
         },
         allowlist_refresh_interval: Duration::from_secs(1),
         dial_interval: Duration::from_secs(1),
+        // Irrelevant to this in-test-process swarm join (it never spawns
+        // `spawn_orphan_reaper_janitor`, an HTTP-server-only janitor), but
+        // the field is still required by the struct literal — kept tight
+        // for consistency with every other timer above.
+        orphan_reaper_interval: Duration::from_secs(1),
         // The binding transport cap for the timeout criterion below. This
         // literal bypasses env parsing, so it must uphold the same element-5
         // invariant the parser enforces: mailbox + reply <= request
@@ -671,6 +700,69 @@ async fn wait_for_readiness(server: &TestServer, want_ready: bool, deadline: Dur
     }
 }
 
+/// Read `clustering_nodes.expired` for `node_id` directly (Slice 11 harness
+/// assertions need to observe the exact same committed flag the
+/// production CAS predicates read — see `session_janitors.rs`'s identical
+/// single-process helper, `expired_flag`, which this mirrors for the
+/// multi-process harness since that helper is private to its own crate).
+async fn node_expired_flag(db: &Database, node_id: &str) -> Option<bool> {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT expired FROM clustering_nodes WHERE node_id = ?",
+            waddle_server::db_params![node_id.to_string()],
+        )
+        .await
+        .expect("query expired flag");
+    rows.next()
+        .await
+        .expect("row")
+        .map(|row| row.get::<bool>(0).expect("expired column"))
+}
+
+/// Read `clustering_nodes.node_epoch` for `node_id` directly — needed to
+/// reconstruct a full `NodeIdentity` for a subprocess this harness only
+/// ever learns the `node_id` half of (the node-id file never publishes the
+/// internally-minted `node_epoch`).
+async fn node_epoch_for(db: &Database, node_id: &str) -> Option<String> {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT node_epoch FROM clustering_nodes WHERE node_id = ?",
+            waddle_server::db_params![node_id.to_string()],
+        )
+        .await
+        .expect("query node_epoch");
+    rows.next()
+        .await
+        .expect("row")
+        .map(|row| row.get::<String>(0).expect("node_epoch column"))
+}
+
+/// Read `(node_id, claim_epoch)` for a `clustering_claims` row keyed by its
+/// already-encoded `entity` string (`"sm_session:<stream_id>"`, mirroring
+/// `clustering::claims::entity_key`'s own encoding — see that function's
+/// doc comment). `None` if the row does not exist.
+async fn sm_session_claim_owner(db: &Database, stream_id: &str) -> Option<(String, i64)> {
+    let conn = db.guard().await.expect("guard");
+    let entity = format!("sm_session:{stream_id}");
+    let mut rows = conn
+        .query(
+            "SELECT node_id, claim_epoch FROM clustering_claims WHERE entity = ?",
+            waddle_server::db_params![entity],
+        )
+        .await
+        .expect("query claim owner");
+    match rows.next().await.expect("row") {
+        Some(row) => {
+            let node_id: String = row.get(0).expect("node_id column");
+            let claim_epoch: i64 = row.get(1).expect("claim_epoch column");
+            Some((node_id, claim_epoch))
+        }
+        None => None,
+    }
+}
+
 /// ADR-0017 Phase 3 Slice 2: lone-survivor-at-N=2 keeps serving despite zero
 /// reachable swarm peers (the N=2 carve-out — a single other live row is
 /// never enough corroboration to blame isolation on); isolation-fencing DOES
@@ -930,6 +1022,270 @@ async fn cross_node_resume_live_steal_handshake() {
     drop(server_b);
 }
 
+/// ADR-0017 Phase 3 Slice 11 (binding FIX 6b, council-adjudicated): the
+/// multi-process capstone of Slice 5's own single-process
+/// `session_janitors::orphan_reaper_sweep_tests` — two real processes,
+/// shared Postgres, kill one, and assert the survivor's REAL
+/// `spawn_orphan_reaper_janitor` loop (not a harness reimplementation —
+/// `run_orphan_reaper_sweep` is `pub(crate)`-private to `waddle-server`, so
+/// this test cannot call it directly even if it wanted to; it can only wait
+/// for the real subprocess's own janitor tick and observe its effects
+/// through Postgres) steals and hydrates ONLY the dead node's orphaned
+/// `sm_session` claim, never re-touching the survivor's own already-claimed
+/// session.
+///
+/// **Deviation 106 (harness limitation, documented not fabricated)**: the
+/// orphan reaper's `list_orphaned_sm_session_claims` candidate scan, and
+/// `steal_stale(OwnerStale)`'s own CAS predicate, both read ONLY the
+/// dead owner's *committed* `clustering_nodes.expired` flag — never a raw
+/// heartbeat comparison (`clustering::claims`'s own module doc; the
+/// Postgres-gated
+/// `steal_stale_ignores_raw_heartbeat_only_committed_expired_flag_matters`
+/// unit test enforces this directly). Auditing every production caller of
+/// `NodeLeaseStore::expire` turns up exactly two: (a) the orphan reaper's
+/// own per-*already-surfaced-candidate* reaffirmation (a no-op on a row
+/// that isn't a candidate yet — circular for a row that ISN'T already
+/// flagged), and (b) `self_fence::expire_bounded`, called only on a node's
+/// OWN just-superseded identity during ITS OWN graceful re-registration
+/// after self-fencing. No production code path ever commits
+/// `expired = true` on ANOTHER, silently (unclean-SIGKILL) dead node's row
+/// — there is no "stale-node watchdog" sweep. This means a bare `SIGKILL`
+/// alone never makes the dead node's `sm_session` claims reaper-visible in
+/// production today (their real-world recovery path is almost always a
+/// client's own XEP-0198 resume attempt hitting the Slice 6 cross-node
+/// live-steal handshake instead, which authorizes via `ResumeIdentityProof`
+/// and never touches the `expired` flag at all — the orphan reaper is the
+/// backstop for sessions that are never resumed). Committing that one flag
+/// for a genuinely-dead peer is squarely a production-code change (a
+/// watchdog caller of `NodeLeaseStore::expire`), which this slice's HARD
+/// RULES forbid making speculatively — flagged here, not silently patched.
+/// The existing single-process `session_janitors::orphan_reaper_sweep_tests`
+/// already established the accepted harness convention for this exact gap:
+/// its own `register_and_pre_expire_dead_owner` helper commits the expire
+/// CAS directly, through the SAME public `ClaimStore::expire` method the
+/// reaper itself calls, rather than fabricating a nonexistent production
+/// caller. This test mirrors that precedent (also mirroring this file's own
+/// `deposed_owner_with_live_socket_room_actor_scenario`, which seeds
+/// `report_steal_intent` directly for the identical reason: "no production
+/// reporter call site exists"). Everything downstream of that one seeded
+/// fact — the candidate scan, the steal CAS, and the targeted
+/// `hydrate_reclaimed` hydration — runs for real, inside the survivor's own
+/// unmodified production janitor loop and logic. ADR-0017 Phase 3 Slice 11
+/// corrigenda (deviation 111, FIX C): the loop's *cadence* is now env-
+/// overridable (`WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`, wired through
+/// `ClusteringConfig::orphan_reaper_interval`), and `spawn_cluster_server`
+/// sets it to 500ms for every subprocess this harness spawns — a minimal,
+/// explicitly-sanctioned production change (only the timer's period, never
+/// its logic) made so this test observes a real sweep in seconds rather
+/// than waiting out the 120s production default per attempt.
+///
+/// Wall clock: dominated by the harness's 500ms `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`
+/// override, not the 120s production default.
+#[tokio::test(flavor = "multi_thread")]
+async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() {
+    use waddle_server::clustering::claims::NodeLeaseStore as _;
+    use waddle_xmpp::ownership::NodeIdentity;
+
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const USERNAME: &str = "admin";
+    // The node-lease TTL this harness configures every subprocess with
+    // (`spawn_cluster_server`'s `WADDLE_CLUSTERING_NODE_LEASE_TTL_MS`) —
+    // reused verbatim for the direct `expire()` CAS below so its own
+    // heartbeat-staleness gate lines up with the real subprocess config,
+    // not an arbitrarily different value.
+    const NODE_LEASE_TTL: Duration = Duration::from_millis(1200);
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    // Shared fixed test account; whichever server started LAST (server_b)
+    // is the one whose reseeded password is live in the shared Postgres
+    // users table (same convention `cross_node_resume_live_steal_handshake`
+    // documents and relies on).
+    let password = server_b.fixed_account_password().to_string();
+
+    // Client A enables resumable SM on node A: `handle_sm_enable` acquires
+    // the `sm_session` `ClaimStore` claim immediately (before any detach —
+    // see `session_registry/claims.rs`'s `ensure_claimed` call site), so
+    // node A genuinely, currently owns this claim in the SAME shared
+    // Postgres `clustering_claims` table the orphan reaper reads.
+    let resource_a = format!("orphan-a-{}", uuid::Uuid::new_v4());
+    let mut client_a = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &resource_a,
+    )
+    .await
+    .expect("client A connects to node A");
+    client_a
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("client A enables resumable SM");
+    let enabled_a = client_a
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("client A's SM enabled ack");
+    let stream_a = extract_attr_after(&enabled_a, "<enabled", "id")
+        .unwrap_or_else(|| panic!("enabled missing id: {enabled_a}"));
+
+    // Client B enables resumable SM on node B — the CONTROL: this claim
+    // must survive the whole test completely untouched (same owner, same
+    // epoch), proving the orphan reaper's targeted scan never re-touches a
+    // survivor's own already-claimed sessions.
+    let resource_b = format!("orphan-b-{}", uuid::Uuid::new_v4());
+    let mut client_b = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &resource_b,
+    )
+    .await
+    .expect("client B connects to node B");
+    client_b
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("client B enables resumable SM");
+    let enabled_b = client_b
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("client B's SM enabled ack");
+    let stream_b = extract_attr_after(&enabled_b, "<enabled", "id")
+        .unwrap_or_else(|| panic!("enabled missing id: {enabled_b}"));
+
+    // Precondition sanity: both claims exist, owned exactly as expected,
+    // before anything is killed.
+    let (owner_a_before, epoch_a_before) = sm_session_claim_owner(&db, &stream_a)
+        .await
+        .expect("A's sm_session claim must exist before the kill");
+    assert_eq!(
+        owner_a_before, node_a,
+        "A must own its own freshly-enabled claim"
+    );
+    let (owner_b_before, epoch_b_before) = sm_session_claim_owner(&db, &stream_b)
+        .await
+        .expect("B's sm_session claim must exist before the kill");
+    assert_eq!(
+        owner_b_before, node_b,
+        "B must own its own freshly-enabled claim"
+    );
+
+    let node_a_epoch = node_epoch_for(&db, &node_a)
+        .await
+        .expect("A's clustering_nodes row must exist before the kill");
+
+    // Hard-kill A (SIGKILL via `Drop`, exactly like `lone_survivor_and_
+    // isolation_fencing`'s own unclean-death leg) — client A's socket goes
+    // down with it, un-gracefully, with no self-expire.
+    drop(server_a);
+
+    // Let A's heartbeat genuinely lapse past the configured node-lease TTL
+    // before committing the deviation-106 precondition step below — the
+    // production `expire()` CAS itself is gated on real heartbeat
+    // staleness (`heartbeat < now() - lease_ttl`), so this sleep is not
+    // cosmetic.
+    tokio::time::sleep(NODE_LEASE_TTL * 2).await;
+
+    // Deviation 106's one seeded precondition: commit the expire CAS on
+    // A's row through the exact same public `ClaimStore::expire` method
+    // the production orphan reaper itself calls — see this test's own doc
+    // comment for why no production caller does this for an unclean
+    // SIGKILL today.
+    let claim_store_for_expire = PostgresClaimStore::new(db.clone());
+    let identity_a = NodeIdentity::new(node_a.clone(), node_a_epoch);
+    let committed = claim_store_for_expire
+        .expire(&identity_a, NODE_LEASE_TTL)
+        .await
+        .expect("expire CAS call against A's row");
+    assert!(
+        committed,
+        "A's heartbeat must have genuinely lapsed past the node-lease TTL by now"
+    );
+    assert_eq!(
+        node_expired_flag(&db, &node_a).await,
+        Some(true),
+        "A's clustering_nodes row must show committed expired=true"
+    );
+
+    // From here on, everything is the REAL, unmodified survivor's own
+    // production `spawn_orphan_reaper_janitor` loop, on its real ~120s
+    // cadence — poll Postgres for its effect rather than driving it
+    // directly (it is crate-private; this harness cannot call it).
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Some((owner, _epoch)) = sm_session_claim_owner(&db, &stream_a).await {
+            if owner == node_b {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node B's real orphan-reaper janitor never reclaimed A's orphaned sm_session \
+             claim within {deadline:?} of A's death"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    // Targeted, exactly-once hydration, proven via Postgres alone (this
+    // harness has no in-process view into B's own SM session registry —
+    // the claims table is the shared, observable ground truth both
+    // processes and this test agree on):
+    let (owner_a_after, epoch_a_after) = sm_session_claim_owner(&db, &stream_a)
+        .await
+        .expect("A's claim must still exist, now under a new owner");
+    assert_eq!(
+        owner_a_after, node_b,
+        "B must now own A's orphaned sm_session claim"
+    );
+    assert!(
+        epoch_a_after > epoch_a_before,
+        "the steal must have bumped the claim epoch (was {epoch_a_before}, now {epoch_a_after})"
+    );
+
+    // The control claim (B's own) must be COMPLETELY untouched: same
+    // owner, same epoch, byte-for-byte — proving the reaper's targeted
+    // scan never re-steals/re-hydrates a survivor's own already-claimed
+    // session a second time.
+    let (owner_b_after, epoch_b_after) = sm_session_claim_owner(&db, &stream_b)
+        .await
+        .expect("B's own claim must still exist");
+    assert_eq!(
+        owner_b_after, node_b,
+        "B's own claim must still be owned by B"
+    );
+    assert_eq!(
+        epoch_b_after, epoch_b_before,
+        "B's own claim epoch must be byte-for-byte unchanged — never re-stolen/re-hydrated"
+    );
+
+    drop(server_b);
+    drop(client_a);
+    drop(client_b);
+}
+
 /// ADR-0017 Phase 3 Slice 7 (deviation 21/34, council-adjudicated): the
 /// deposed-owner-with-live-socket harness scenario's `RoomActor` variant —
 /// bound to this slice per the phase plan's own text ("the `RoomActor`
@@ -1159,12 +1515,336 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     stop_token.cancel();
 }
 
-/// DEFERRED (Phase 3): a single dead link between two of three nodes degrades
-/// routing to the durable fallback without fencing either endpoint — requires
-/// the durable `pending_delivery` cross-node fallback.
+/// ADR-0017 Phase 3 Slice 11 (binding, deviation 70): the MUC join-bounce
+/// wire shape, over two real processes — Slice 7's own Tests paragraph
+/// deferred this exact assertion here verbatim: "the presence-error WIRE
+/// shape (`type='wait'` + `<resource-constraint/>`) is asserted over real
+/// processes in Slice 11's harness capstone (a foreign-owned-room join
+/// against a two-node cluster), where it proves strictly more than a
+/// doubles-based unit test could." The unit-level version already covers
+/// the registry-error return value
+/// (`room_registry_actor::tests::get_or_create_room_refuses_when_claim_is_held_by_a_live_foreign_node`);
+/// this is the first assertion of the actual wire bytes a real client
+/// receives, over a real two-node cluster whose production `server::mod`
+/// bring-up wires the SAME `RoomRegistry`/`PostgresClaimStore` a real
+/// client join goes through on both sides (`server/mod.rs`'s
+/// `wire_clustering_claims` call, unconditional whenever clustering +
+/// Postgres are both active — not a hand-wired unit-test-style registry).
+///
+/// Client A joins a fresh instant room on node A (a real production join:
+/// `RoomRegistryActor::acquire_room_claim` genuinely acquires the Postgres
+/// claim under node A's identity) and stays connected, keeping A's
+/// node-lease fresh — `steal_from_dead_owner` only ever applies to a
+/// stale/dead owner (see `owner_lease_fresh`), so a live owner's claim is
+/// never contested, exactly the "current owner, no cross-node MUC
+/// proxying" precondition deviation 70 describes. Client B then joins the
+/// SAME room JID against node B: node B's own `RoomRegistryActor` sees
+/// `ClaimError::AlreadyClaimed` with a fresh foreign lease and returns
+/// `RoomRegistryError::ClaimHeldByAnotherNode`, which
+/// `handle_muc_join_unlocked` maps to the conformant XEP-0045 bounce.
 #[tokio::test]
-#[ignore = "Phase 3: requires the durable-queue fallback"]
-async fn partial_partition_degrades_without_fencing() {}
+async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping muc_join_bounces_when_room_claim_is_held_by_another_node: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const USERNAME: &str = "admin";
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let password = server_b.fixed_account_password().to_string();
+
+    let room = format!("slice11-foreign-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    // Client A joins first, against node A: an XEP-0045 instant-room join
+    // (bare `<x xmlns='.../muc'/>`), which genuinely creates the room and
+    // grants Owner — the real production `acquire_room_claim` path, not a
+    // seeded/faked claim.
+    let resource_a = format!("muc-owner-a-{}", uuid::Uuid::new_v4());
+    let mut client_a = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &resource_a,
+    )
+    .await
+    .expect("client A connects to node A");
+    client_a
+        .send(&format!(
+            r#"<presence to="{room}/owner-a"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("client A sends join presence");
+    client_a
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("client A's join completes (room created, A is Owner)");
+
+    // Client B, a SEPARATE connection against node B (a different
+    // process), attempts to join the SAME room while A is still live —
+    // node A's lease stays fresh throughout, so node B must never steal;
+    // it must bounce.
+    let resource_b = format!("muc-joiner-b-{}", uuid::Uuid::new_v4());
+    let mut client_b = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &resource_b,
+    )
+    .await
+    .expect("client B connects to node B");
+    client_b
+        .send(&format!(
+            r#"<presence to="{room}/joiner-b"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("client B sends join presence against the foreign-owned room");
+
+    let bounce = client_b
+        .recv_matching(|frame| frame.contains("resource-constraint") || frame.contains("<subject"))
+        .await
+        .expect("client B receives a reply to its join attempt");
+
+    assert!(
+        !bounce.contains("<subject"),
+        "node B must never silently succeed a join against a room it does not own \
+         (no cross-node MUC proxying exists this phase): {bounce}"
+    );
+    assert!(
+        bounce.contains("resource-constraint"),
+        "expected a conformant XEP-0045 <resource-constraint/> bounce, got: {bounce}"
+    );
+    assert_eq!(
+        extract_attr_after(&bounce, "<presence", "type").as_deref(),
+        Some("error"),
+        "the bounce presence stanza must carry type='error': {bounce}"
+    );
+    assert_eq!(
+        extract_attr_after(&bounce, "<error", "type").as_deref(),
+        Some("wait"),
+        "the bounce's <error> element must carry type='wait' (XEP-0045's retry-able \
+         resource-constraint semantics), got: {bounce}"
+    );
+
+    drop(server_a);
+    drop(server_b);
+    drop(client_a);
+    drop(client_b);
+}
+
+/// ADR-0017 Phase 3 Slice 11 (this slice's own harness-fencing scaffold,
+/// deferred from Phase 2, activated here per the phase plan's own Slice 11
+/// text). Originally named `partial_partition_degrades_without_fencing`
+/// (the plan's own scaffold name) — renamed here, per the Slice 11
+/// corrigenda, to describe what this test actually proves: a fully,
+/// symmetrically isolated node self-fences and then, unattended, self-heals
+/// once connectivity returns. Exit criterion 3 (phase-level) as originally
+/// scoped reads "a single dead link among three nodes degrades to the
+/// durable queue without fencing either endpoint" — deviations 107/108
+/// below explain precisely which half of that criterion this test can and
+/// cannot prove; see also the phase-level exit-criteria section's own
+/// caveat for criterion 3.
+///
+/// **Deviation 107 (harness limitation, documented not fabricated) — no
+/// pairwise link-severing primitive exists.** This harness's only
+/// connectivity-affecting primitive reachable from a NEW test is
+/// `clustering_peer_allowlist` revocation (`clustering/allowlist.rs`): a
+/// single global `HashSet<PeerId>`, enforced identically and symmetrically
+/// by every node's own refresh — revoking a peer_id cuts it off from the
+/// WHOLE mesh, never from one specific counterpart. There is no per-pair
+/// column, gate, or config knob. The relay actor's own fault-injection
+/// messages (`RelayCrash`/`RelaySleep`, `clustering/relay.rs`) are the only
+/// other candidate, but triggering either from THIS test would require a
+/// `RelayHandle`, which requires this test process itself to join the
+/// swarm via `swarm::spawn` — and this file's own module doc states
+/// plainly that "kameo's `init_global` is a process singleton," so only ONE
+/// test in this whole binary may ever do that; `cluster_exit_criteria_end_to_end`
+/// already claims that slot. Building a genuine single-edge partition
+/// primitive is squarely a production-code change (e.g. a per-peer
+/// connection-gating config knob) — out of scope for a harness-only slice
+/// per this slice's own HARD RULES, flagged here rather than added
+/// speculatively. Closest faithful substitute implemented below: full,
+/// symmetric isolation of ONE of three nodes (the same primitive
+/// `lone_survivor_and_isolation_fencing`'s Part 2 uses), extended with an
+/// assertion Part 2 does NOT make — genuine, unattended SELF-RECOVERY
+/// (re-registration under a fresh identity, `self_fence.rs`'s
+/// `readiness.set_ready(true)` re-arm path) once connectivity returns, with
+/// no process restart. This is the most faithful available proof that a
+/// connectivity degradation "degrades... without [permanently] fencing"
+/// rather than requiring manual/operator intervention to recover.
+///
+/// **Deviation 108 (precise restatement, per the Slice 11 corrigenda) —
+/// the durable-`pending_delivery`-fallback half of this criterion would be
+/// NON-DIAGNOSTIC if asserted inside a partition test, not unobservable.**
+/// `OfflineDeliveryHandler`/`queue_offline_delivery`
+/// (`server/routes/interpret/offline_delivery.rs`) fires on the purely-LOCAL
+/// headless-recipient pass (`route_to_connection.rs`'s
+/// `select_bare_jid_live_targets`, which consults only the in-process
+/// `UserRegistryActor` — no clustering/claims lookup anywhere in that
+/// path), and `clustering/relay.rs`'s own module doc states plainly:
+/// discovery/handshake only, "not wired into the stanza delivery path
+/// (Phase 4)." That write path is real and harness-observable — a bare-JID
+/// message to a recipient whose only live session is on ANOTHER node gets
+/// written to `pending_delivery` on the sending node regardless of whether
+/// the two nodes' link is healthy or severed, because cross-node liveness
+/// is never consulted at all (Phase 4 scope). Asserting that write inside
+/// THIS test would therefore re-prove deviation 14's already-recorded
+/// Non-goal ("No cross-node janitor-flush test... requires the GA
+/// cross-node stanza routing this phase explicitly excludes... deferred to
+/// Phase 4") under a partition label it does not need — the write happens
+/// identically in a fully healthy two-node cluster, so it demonstrates
+/// nothing about partition-triggered fallback behavior specifically. Not
+/// re-litigated here; this test proves only what a partition scenario can
+/// actually distinguish (targeted isolation-fencing plus genuine
+/// self-healing recovery), consistent with that already-settled scope
+/// boundary.
+///
+/// Wall clock: dominated by the isolation-fencing window plus the
+/// re-registration/re-dial recovery window (a few seconds each, per this
+/// harness's fast-timer subprocess config) — single-digit-to-low-tens of
+/// seconds total, reported at the end of this test run.
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_node_isolation_fences_then_self_heals_without_operator_intervention() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping whole_node_isolation_fences_then_self_heals_without_operator_intervention: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let pool = generate_pool();
+    let db = open_control_db(&postgres_url).await;
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let port_c = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b, port_c]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a, port_c]).await;
+    let (server_c, node_c, peer_c) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_c, &[port_a, port_b]).await;
+
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_c, true, Duration::from_secs(15)).await;
+
+    // --- Induce (closest available primitive, see deviation 107): revoke
+    // C's peer_id cluster-wide.
+    let conn = db.guard().await.expect("guard");
+    conn.execute(
+        "DELETE FROM clustering_peer_allowlist WHERE peer_id = ?",
+        waddle_server::db_params![peer_c.clone()],
+    )
+    .await
+    .expect("revoke C");
+
+    // C must self-fence: readiness flips not-ready within a modest
+    // deadline (a few allowlist-refresh + isolation-interval windows) —
+    // same shape `lone_survivor_and_isolation_fencing`'s Part 2 proves.
+    wait_for_readiness(&server_c, false, Duration::from_secs(15)).await;
+
+    // A and B were never isolated from EACH OTHER (only from C) — across
+    // the whole isolation window, both must stay ready throughout, proving
+    // a targeted fence of the disconnected node, never a cluster-wide
+    // wobble that also touches the two nodes that kept their own link
+    // alive.
+    let hold_deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < hold_deadline {
+        assert_eq!(
+            readiness_status(&server_a).await,
+            Some(true),
+            "uninvolved peer A must stay ready throughout C's isolation window"
+        );
+        assert_eq!(
+            readiness_status(&server_b).await,
+            Some(true),
+            "uninvolved peer B must stay ready throughout C's isolation window"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // --- Degrades WITHOUT [permanently] fencing: re-enroll C and assert
+    // genuine, unattended SELF-RECOVERY — no process restart, a fresh
+    // internal identity re-registers and readiness re-arms once swarm
+    // connectivity actually returns (`self_fence.rs`'s
+    // `can_reacquire_claims`/`readiness.set_ready(true)` path).
+    conn.execute(
+        "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+        waddle_server::db_params![peer_c.clone()],
+    )
+    .await
+    .expect("re-enroll C");
+
+    wait_for_readiness(&server_c, true, Duration::from_secs(30)).await;
+
+    // Prove the recovery is REAL re-registration (a fresh `NodeIdentity`),
+    // not a stale readiness flag: C's ORIGINAL `clustering_nodes` row must
+    // now be committed-expired (`self_fence.rs`'s successful-recovery path
+    // explicitly calls `expire_bounded` on the just-superseded identity),
+    // and exactly three live (not expired, not draining) rows must exist
+    // cluster-wide — A, B, and C's fresh post-recovery identity.
+    assert_eq!(
+        node_expired_flag(&db, &node_c).await,
+        Some(true),
+        "C's ORIGINAL clustering_nodes row must be committed-expired after self-healing \
+         re-registration under a fresh identity"
+    );
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM clustering_nodes WHERE NOT expired AND NOT draining",
+            (),
+        )
+        .await
+        .expect("count live nodes");
+    let live_count: i64 = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("row present")
+        .get(0)
+        .expect("count column");
+    assert_eq!(
+        live_count, 3,
+        "exactly three live node rows must exist post-recovery: A, B, and C's fresh \
+         re-registered identity (C's original row is expired, not deleted)"
+    );
+
+    // A and B must still be ready too — full-mesh recovery, not just C's
+    // own local view of itself.
+    assert_eq!(readiness_status(&server_a).await, Some(true));
+    assert_eq!(readiness_status(&server_b).await, Some(true));
+
+    drop(server_a);
+    drop(server_b);
+    drop(server_c);
+}
 
 /// DEFERRED (manual go/no-go measurement): the visibility window of a
 /// hard-killed publisher's kademlia provider+metadata records is dominated by

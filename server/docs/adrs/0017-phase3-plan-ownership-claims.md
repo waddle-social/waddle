@@ -166,7 +166,12 @@ async fn partial_partition_degrades_without_fencing() {}
 ```
 
 Both are empty-bodied named placeholders (no partial assertions to preserve or
-reconcile) — Slice 11 fills them in. A third `#[ignore]` (`dead_publisher_record_visibility_window`,
+reconcile) — Slice 11 fills them in (verbatim scaffold names as they existed at
+this Q4 decision's time; Slice 11's own corrigenda later renames
+`partial_partition_degrades_without_fencing` to
+`whole_node_isolation_fences_then_self_heals_without_operator_intervention` to
+describe what actually lands — see that slice's "As-landed" text below). A third
+`#[ignore]` (`dead_publisher_record_visibility_window`,
 the kademlia-TTL manual measurement) stays ignored; it is explicitly out of Phase 3
 scope (kademlia constants are not addressed by this phase).
 
@@ -683,7 +688,9 @@ heartbeat CAS** (paused node observes fencing loss on wake; moved here for the s
 reason). Harness (`clustering_cluster_e2e.rs`): the two
 previously-`#[ignore]`d scaffolds become fillable **here** at the fencing-primitive
 level (full activation is Slice 11, once Slice 5's durable-queue path also exists for
-`partial_partition_degrades_without_fencing`); `lone_survivor_and_isolation_fencing`
+what lands there as `whole_node_isolation_fences_then_self_heals_without_operator_intervention`,
+renamed from this scaffold's original `partial_partition_degrades_without_fencing`);
+`lone_survivor_and_isolation_fencing`
 can be filled and un-ignored in this slice since it only needs heartbeat fencing, not
 the durable queue.
 
@@ -1832,9 +1839,10 @@ async fn partial_partition_degrades_without_fencing() { /* Slice 5's durable-que
 `lone_survivor_and_isolation_fencing` could technically be filled as early as Slice 2
 (heartbeat fencing alone suffices) but is formally activated here so both scaffolds
 land together as this phase's harness-maturity capstone, matching the scoping map's
-"D9/D10 last" ordering. `partial_partition_degrades_without_fencing` requires Slice 5's
-durable `pending_delivery` fallback to exist (a single dead link between two of three
-nodes must degrade to that path, not fence).
+"D9/D10 last" ordering. `partial_partition_degrades_without_fencing` (landed as
+`whole_node_isolation_fences_then_self_heals_without_operator_intervention` — see
+"As-landed" below) requires Slice 5's durable `pending_delivery` fallback to exist (a
+single dead link between two of three nodes must degrade to that path, not fence).
 
 **Binding (FIX 6b, council-adjudicated)**: Slice 5's own Tests paragraph deferred its
 multi-process kill-one hydration scenario here — this is that scenario's landing slice.
@@ -1853,48 +1861,189 @@ join against a foreign-owned room in the two-node harness must receive the confo
 a silent drop; asserting it over real processes proves what a doubles-based unit test
 cannot.
 
-**Files**: `server/crates/waddle-server/tests/clustering_cluster_e2e.rs` only.
+**Files (as-landed)**: `server/crates/waddle-server/tests/clustering_cluster_e2e.rs`
+(the two scaffolds plus the two bound scenarios); plus, from the post-landing
+corrigenda closing deviations 109–111:
+`server/crates/waddle-server/src/clustering/self_fence.rs` (deviation 109's new test),
+`server/crates/waddle-xmpp/src/stream_management/session_registry/cross_node_resume.rs`
+(deviation 110's new test), and — deviation 111's sole sanctioned production change —
+`server/crates/waddle-server/src/config.rs` (the new
+`WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS` field/parsing/validation) and
+`server/crates/waddle-server/src/server/session_janitors.rs` +
+`server/crates/waddle-server/src/server/http.rs` (threading it in, replacing the
+hardcoded constant).
 
 **Tests**: the two scaffolds themselves are the test deliverable, plus the two bound
-scenarios above (kill-one hydration; foreign-owned-room join bounce).
+scenarios above (kill-one hydration; foreign-owned-room join bounce); plus deviations
+109–111's three additions (two new unit tests, one new config-parsing test).
 
 **Dependencies**: Slice 2 (isolation fencing), Slice 5 (durable-queue fallback).
+
+**As-landed**: `lone_survivor_and_isolation_fencing` was already filled as of this
+slice's start (Slice 2). This slice filled and un-ignored the second scaffold, landed
+as `whole_node_isolation_fences_then_self_heals_without_operator_intervention` (renamed
+from the plan's own scaffold name, `partial_partition_degrades_without_fencing` —
+deviations 107/108: no per-edge partition primitive exists in this harness, and
+asserting the durable-`pending_delivery` cross-node fallback INSIDE a partition test
+would be non-diagnostic, not unobservable — the landed test instead proves targeted
+isolation-fencing plus genuine unattended self-healing recovery; see the "Exit criteria
+for the phase overall" section below for the honest criterion-3 accounting), added the
+Slice 5 kill-one claim-scoped hydration capstone
+(`orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`, deviation 106: no
+production caller ever expires a silently-dead peer's node-lease row today, so the test
+seeds that one precondition directly through the same public `ClaimStore::expire` method
+the production reaper itself calls, mirroring the already-accepted single-process
+`orphan_reaper_sweep_tests` convention), and added the Slice 7/deviation-70 MUC
+foreign-owned-room join-bounce wire-shape assertion
+(`muc_join_bounces_when_room_claim_is_held_by_another_node`).
+
+A council-adjudicated post-landing review of this capstone found two coverage gaps and
+one missing operational knob, closed in the same slice (deviations 109–111 below, full
+detail in the "Slice 11 as-landed corrigenda" section):
+
+- **Deviation 109**: `self_fence.rs`'s terminal "demote ALL local claims" branch (exit
+  criterion 2) had no test combining a genuine fencing-loss trigger with a POPULATED
+  `LocallyClaimedEntities` — closed with
+  `self_fence::tests::node_lease_demotes_every_owned_claim_on_fencing_loss`. The demote-all
+  code itself was already correct; only the test coverage was missing.
+- **Deviation 110**: cross-node XEP-0198 resume's branch 3 (owner-unreachable
+  hold-and-retry, exit criterion 4) had only failure/timeout coverage, never a retry
+  that actually succeeds — closed with
+  `cross_node_resume::tests::fix_b_flaky_asker_holds_then_succeeds_on_a_later_attempt`.
+- **Deviation 111 (the one sanctioned production change in this otherwise harness-only
+  slice)**: the orphan reaper's cadence (`session_janitors::ORPHAN_REAPER_INTERVAL`) was
+  the only cluster timer with no env override — every sibling timer already has one. Added
+  `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS` (default 120s, parsed/validated identically
+  to every sibling `ClusteringConfig` timer) and set it to 500ms in
+  `clustering_cluster_e2e.rs::spawn_cluster_server`'s env list, so
+  `orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions` observes a real
+  sweep in seconds instead of waiting out the ~120s production default per attempt. Minimal
+  and deliberately scoped to the timer's period only — the reaper's logic is unchanged.
+
+See deviations 106–111, below, for the full as-built record.
 
 ---
 
 ## Exit criteria for the phase overall
 
-The multi-process harness (`clustering_cluster_e2e.rs`) must prove, end-to-end, across
-real processes sharing one Postgres:
+Restated here, per the Slice 11 corrigenda, with the actual backing test(s) for each
+criterion — not the plan's original, uncited prose. Most criteria are proven by
+dedicated Postgres-gated unit/integration suites (not exclusively the multi-process
+`clustering_cluster_e2e.rs` harness, contrary to this section's original framing); each
+line below names its module and test function(s).
 
-1. A claim acquired by node A is stolen by node B only via one of the three sanctioned
-   CAS shapes (stale-owner, consent/epoch-only, steal-intent), never a lockless read.
-2. A node that loses fencing (heartbeat CAS returns 0 rows) demotes all local claims and
-   flips readiness to not-ready before its lease becomes stealable.
-3. Lone-survivor-at-N=2 keeps serving; a single dead link among three nodes degrades to
-   the durable queue without fencing either endpoint (Slice 11's two scaffolds).
-4. Cross-node XEP-0198 resume succeeds for all three branches (detached-steal,
+1. **A claim acquired by node A is stolen by node B only via one of the three sanctioned
+   CAS shapes (stale-owner, consent/epoch-only, steal-intent), never a lockless read.**
+   `clustering::claims::tests`: `steal_stale_with_stale_epoch_loses_the_race` +
+   `steal_from_vanished_node_succeeds_via_not_exists` (stale-owner shape),
+   `steal_for_resume_succeeds_against_a_fresh_owner` +
+   `steal_for_resume_with_stale_epoch_loses_the_race` (consent/epoch-only shape),
+   `steal_intent_unanswered_past_ttl_allows_the_steal` +
+   `steal_intent_veto_clears_before_expiry_blocks_the_steal` (steal-intent shape), and
+   `steal_commit_interleaved_inside_a_fenced_transaction` (every shape commits inside a
+   fenced transaction, never a lockless read). Cross-node re-election through the same
+   stale-owner shape is proven again, at the `RoomActor` layer, by
+   `muc::room_registry_actor::tests::get_or_create_room_steals_from_a_dead_owner_and_notifies_it`.
+2. **A node that loses fencing (heartbeat CAS returns 0 rows) demotes all local claims
+   and flips readiness to not-ready before its lease becomes stealable.**
+   `clustering::self_fence::tests::node_lease_self_fences_on_heartbeat_cas_zero_rows`
+   (readiness flips not-ready on a genuine CAS-zero-rows fence) plus, closing this exit
+   criterion's own coverage gap (deviation 109, Slice 11 corrigenda),
+   `node_lease_demotes_every_owned_claim_on_fencing_loss` (the SAME fencing-loss trigger,
+   this time with a POPULATED `LocallyClaimedEntities` holding 2+ owned claims, proving
+   the terminal demote-all loop actually demotes every one of them, not just the ones a
+   veto scan happens to touch).
+3. **Lone-survivor-at-N=2 keeps serving; a single dead link among three nodes degrades
+   to the durable queue without fencing either endpoint (Slice 11's two scaffolds).**
+   `clustering_cluster_e2e::lone_survivor_and_isolation_fencing` proves the first half
+   (Part 1: N=2 lone survivor keeps serving; Part 2: N>=3 isolation DOES fence). **The
+   second half is NOT met as originally scoped** — deviations 107/108 (Slice 11
+   corrigenda): no per-edge (single-link) partition primitive exists anywhere in this
+   harness, only whole-node symmetric isolation, and the durable-`pending_delivery`
+   fallback path cannot be asserted as a *partition-triggered* behavior at all (see
+   deviation 108's precise restatement — that write path never consults cross-node
+   liveness, so it fires identically in a fully healthy cluster and proves nothing
+   partition-specific). What IS proven, by
+   `clustering_cluster_e2e::whole_node_isolation_fences_then_self_heals_without_operator_intervention`
+   (renamed from the plan's original scaffold name,
+   `partial_partition_degrades_without_fencing`, to match): a fully, symmetrically
+   isolated node self-fences while its uninvolved peers stay ready throughout, then —
+   with no process restart and no operator action — genuinely self-heals once
+   connectivity returns (fresh `NodeIdentity` re-registers, the original row is
+   committed-expired, readiness re-arms). This is a real and useful property, but it is
+   a narrower one than "a single dead link... degrades... without fencing either
+   endpoint" as originally written.
+4. **Cross-node XEP-0198 resume succeeds for all three branches (detached-steal,
    live-handshake, held-response-then-steal) and correctly rejects a
-   wrong-identity/forged-`previd` attempt.
-5. A MUC room ownership steal restores configuration/affiliations/subject before
+   wrong-identity/forged-`previd` attempt.**
+   `xep0198_cross_node_resume`: `pure_two_node_detached_steal_race_exactly_one_winner`
+   (detached-steal), `live_handshake_via_asker_falls_through_to_detached_path`
+   (live-handshake), `forged_previd_wrong_identity_returns_not_authorized_without_stealing`
+   (forged-`previd` rejection); `clustering_cluster_e2e::cross_node_resume_live_steal_handshake`
+   proves the same live-handshake branch over real subprocesses. The
+   held-response-then-steal branch's own coverage gap (only failure/timeout paths were
+   exercised) is closed by deviation 110 (Slice 11 corrigenda):
+   `stream_management::session_registry::cross_node_resume::tests::fix_b_flaky_asker_holds_then_succeeds_on_a_later_attempt`
+   drives a retry that actually iterates the bounded backoff loop at least twice before
+   landing `Claimed` on a later attempt, proving the hold-and-retry path's SUCCESS case,
+   not just its `OwnerUnreachable` timeout case (already covered by
+   `fix1_slow_asker_never_holds_past_the_handshake_budget`).
+5. **A MUC room ownership steal restores configuration/affiliations/subject before
    accepting joins, and a deposed owner's next broadcast is blocked by the fencing
-   SELECT.
-6. XEP-0397 ISR (if shipped) consumes a token via non-secret-key lookup + constant-time
-   compare, rotates on success, and destroys state on failed-token auth — or ISR stays
-   unadvertised if the store does not ship with this phase.
-7. Drain at modeled scale (thousands of claims) fits the `claimReleaseBudget` chart
-   value.
+   SELECT.**
+   `muc::room_registry_actor::tests::restore_durable_room_state_applies_before_any_join`
+   (restore-before-join, config/affiliations/subject) and
+   `muc_durable::tests::check_fenced_fanout_returns_false_immediately_after_a_steal_commits`
+   (the deposed owner's very next fenced pre-fan-out SELECT returns false immediately
+   after a steal commits — the plan's own Slice 7 Tests entry, quoted verbatim in that
+   test's doc comment).
+6. **XEP-0397 ISR (if shipped) consumes a token via non-secret-key lookup +
+   constant-time compare, rotates on success, and destroys state on failed-token auth —
+   or ISR stays unadvertised if the store does not ship with this phase.**
+   `clustering::isr::tests`: `consume_matches_and_rotates_inside_the_fenced_transaction`
+   (non-secret-key lookup + rotation), `consume_uses_constant_time_equality_not_eq`
+   (constant-time compare), `consume_with_wrong_token_destroys_the_row_without_sql_where_comparison`
+   (destroys state on failed-token auth).
+7. **Drain at modeled scale (thousands of claims) fits the `claimReleaseBudget` chart
+   value.** `clustering::drain::tests::drain_at_modeled_scale_fits_the_claim_release_budget`.
 
 This maps to the epic's five Phase 3 checkboxes: (1) ties the "epoch-fenced Postgres
-ownership claims" box to criteria 1–3; (2) ties "fenced SM-session persistence +
-cross-node XEP-0198 resume" to criterion 4; (3) ties "durable MUC room ownership" to
-criterion 5; (4) ties "XEP-0397 ISR" to criterion 6; (5) the DashMap-selection-surface
-retirement (Slice 9) is proven by the unchanged e2e `.cue` suite staying green plus the
-new self-healing delivery test, not by the clustering harness (it is a single-node
-concern).
+ownership claims" box to criteria 1–3 (with criterion 3's honest caveat above); (2) ties
+"fenced SM-session persistence + cross-node XEP-0198 resume" to criterion 4; (3) ties
+"durable MUC room ownership" to criterion 5; (4) ties "XEP-0397 ISR" to criterion 6; (5)
+the DashMap-selection-surface retirement (Slice 9) is proven by the unchanged e2e `.cue`
+suite staying green plus the new self-healing delivery test, not by the clustering
+harness (it is a single-node concern).
 
 ## Carried risks / deferred to Phase 4
 
+- **No stale-node watchdog: a hard-crashed (SIGKILL/OOM) node's claims are NOT
+  auto-reclaimed by the orphan reaper this phase (deviation 106) — the most
+  operationally-significant risk this phase carries.** Traced exhaustively in
+  deviation 106 (Slice 11 corrigenda, below): the orphan reaper's own candidate scan
+  (`list_orphaned_sm_session_claims`) and `steal_stale(OwnerStale)`'s own CAS predicate
+  both read ONLY the dead owner's *committed* `clustering_nodes.expired` flag — never a
+  raw heartbeat comparison. Auditing every production caller of `NodeLeaseStore::expire`
+  turns up exactly two, and neither one commits that flag for a genuinely, silently dead
+  peer: (a) the orphan reaper's own per-already-surfaced-candidate reaffirmation (a
+  no-op for a row that isn't a candidate yet — circular for the row this risk is about),
+  and (b) `self_fence::expire_bounded`, called only on a node's OWN just-superseded
+  identity during ITS OWN graceful re-registration. **In production, a bare SIGKILL or
+  OOM-kill of a node therefore leaves that node's `sm_session` claims un-reclaimable by
+  the orphan reaper until one of two things happens**: a client that held one of those
+  sessions attempts its own XEP-0198 `<resume/>`, hitting Slice 6's cross-node
+  live-steal handshake (which authorizes via `ResumeIdentityProof` and never touches the
+  `expired` flag at all — this path does NOT depend on the watchdog gap and works
+  today); or the dead node itself eventually restarts and gracefully drains/re-registers.
+  A session that is never resumed, on a node that never comes back, stays claimed by a
+  dead node's identity indefinitely. Recommended Phase 4 follow-up (not actioned this
+  phase, per this slice's own HARD RULES against speculative production changes): a
+  bounded, periodic "stale-node watchdog" that proactively calls
+  `NodeLeaseStore::expire` against every heartbeat-stale `clustering_nodes` row
+  cluster-wide, not just already-surfaced claim candidates — closing this gap for
+  genuinely abandoned nodes in production, not merely inside this phase's harness
+  (which seeds the equivalent precondition directly, exactly because no such production
+  caller exists yet).
 - **Per-message allowlist origin re-validation.** Still deferred, exactly as Phase 2
   left it: kameo's remote ask/tell handlers don't hand handlers the transport-level
   sender `PeerId`, so re-checking the allowlist per inbound message needs sender
@@ -3981,3 +4130,193 @@ duplicated here.
      `config::tests::clustering_rejects_node_lease_ttl_too_close_to_claim_release_budget`
      / `clustering_accepts_node_lease_ttl_with_comfortable_claim_release_budget_margin`
      / `clustering_defaults_satisfy_the_claim_release_budget_margin`.
+
+### Slice 11 as-landed corrigenda (deviations 106–111)
+
+106. **The multi-process kill-one claim-scoped hydration capstone
+     (`clustering_cluster_e2e.rs::
+     orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`)
+     seeds one precondition directly, mirroring the already-accepted
+     single-process convention, because no production caller exists for
+     it.** Tracing every production caller of `NodeLeaseStore::expire`
+     turns up exactly two: the orphan reaper's own per-candidate
+     reaffirmation (gated on a row already being a candidate — circular for
+     a row that isn't yet, since `list_orphaned_sm_session_claims` and
+     `steal_stale(OwnerStale)` both read only the *committed* `expired`
+     flag, never a raw heartbeat comparison), and
+     `self_fence::expire_bounded`, called only on a node's own
+     just-superseded identity during its own post-fence re-registration.
+     No production code path ever commits `expired = true` on another,
+     silently (unclean-SIGKILL) dead node's row — there is no stale-node
+     watchdog sweep. A bare `SIGKILL` alone therefore never makes a dead
+     node's `sm_session` claims reaper-visible in production today; the
+     real-world recovery path for a still-wanted session is almost always
+     a client's own XEP-0198 resume hitting the Slice 6 cross-node
+     live-steal handshake instead (authorized via `ResumeIdentityProof`,
+     never touching the `expired` flag) — the orphan reaper is the
+     backstop for sessions that are never resumed at all. Committing that
+     one flag for a genuinely-dead peer is a production-code change (a new
+     watchdog caller of `NodeLeaseStore::expire`), which this slice's HARD
+     RULES forbid making speculatively during a harness-only slice —
+     flagged here as a real finding, not silently patched. The
+     already-landed single-process
+     `session_janitors::orphan_reaper_sweep_tests` established the
+     accepted harness convention for this exact gap: its own
+     `register_and_pre_expire_dead_owner` helper commits the expire CAS
+     directly, through the same public `ClaimStore::expire` method the
+     reaper itself calls, rather than fabricating a nonexistent production
+     caller — the multi-process test mirrors that precedent (also
+     mirroring this same file's `deposed_owner_with_live_socket_room_actor_scenario`,
+     which seeds `report_steal_intent` directly for the identical "no
+     production reporter call site exists" reason). Everything downstream
+     of that one seeded fact — the real subprocess's own, unmodified
+     `spawn_orphan_reaper_janitor` loop discovering the candidate, the
+     steal CAS, and the targeted `hydrate_reclaimed` hydration — runs for
+     real, observed only through Postgres (the janitor's sweep function is
+     `waddle-server`-crate-private, so the harness cannot call it
+     directly). At this deviation's original time of writing the janitor's
+     cadence (`ORPHAN_REAPER_INTERVAL`) had no env override, so this test
+     waited out the real ~120s production interval; deviation 111 below
+     closes that specific gap (a minimal, env-only production change) so
+     this test now observes the same real, unmodified sweep logic in
+     seconds instead. **Recommended follow-up (not actioned this
+     slice):** consider a bounded periodic "stale-node watchdog" that
+     proactively calls `NodeLeaseStore::expire` against every
+     heartbeat-stale `clustering_nodes` row cluster-wide (not just
+     already-surfaced claim candidates), closing this gap for genuinely
+     abandoned nodes/claims in production, not merely in this harness — see
+     also the prominent "Carried risks / deferred to Phase 4" bullet this
+     deviation is cross-referenced from.
+107. **`partial_partition_degrades_without_fencing` (landed as
+     `whole_node_isolation_fences_then_self_heals_without_operator_intervention`)
+     cannot construct a
+     genuine single-pair dead link — only a whole-node, symmetric
+     isolation primitive exists.** This harness's sole
+     connectivity-affecting primitive reachable from a test other than
+     `cluster_exit_criteria_end_to_end` is `clustering_peer_allowlist`
+     revocation: one global `HashSet<PeerId>`, read identically by every
+     node's own refresh — revoking a peer_id cuts it off from the whole
+     mesh, never from one specific counterpart; there is no per-pair
+     column or gate anywhere in `clustering/allowlist.rs`. The relay
+     actor's fault-injection messages (`RelayCrash`/`RelaySleep`,
+     `clustering/relay.rs`) are the only other candidate primitive, but
+     triggering either requires a `RelayHandle`, which requires the
+     issuing process to itself join the swarm via `swarm::spawn` — and
+     this file's own module doc states kameo's `init_global` is a process
+     singleton, so only one test in the whole binary may ever do that;
+     `cluster_exit_criteria_end_to_end` already claims that slot for the
+     Phase 2 suite. Building a genuine per-edge partition primitive (e.g.
+     a per-peer connection-gating config knob) is a production-code
+     change, out of scope for this harness-only slice per its HARD RULES —
+     flagged here rather than added speculatively. As-landed substitute:
+     full, symmetric isolation of one of three nodes (the same primitive
+     `lone_survivor_and_isolation_fencing`'s Part 2 uses), EXTENDED with an
+     assertion Part 2 does not make — genuine, unattended self-recovery
+     (re-registration under a fresh `NodeIdentity`, `self_fence.rs`'s
+     `can_reacquire_claims`/`readiness.set_ready(true)` re-arm path, proven
+     via a Postgres-observed fresh live row plus the original row's
+     committed `expired = true`) once connectivity actually returns, with
+     no process restart — the most faithful available proof that a
+     connectivity degradation "degrades... without [permanently] fencing"
+     rather than requiring operator intervention to recover.
+108. **(Reworded, Slice 11 corrigenda — the original wording above implied
+     unobservability; the precise claim is non-diagnosticity.) The
+     durable-`pending_delivery`-fallback half of
+     `whole_node_isolation_fences_then_self_heals_without_operator_intervention`'s
+     exit criterion would be non-diagnostic if asserted inside THIS test,
+     confirmed by tracing every write path — it is not, on that basis, left
+     unasserted.** `OfflineDeliveryHandler`/`queue_offline_delivery`
+     (`server/routes/interpret/offline_delivery.rs`) fires on the
+     purely-local headless-recipient pass
+     (`route_to_connection.rs::select_bare_jid_live_targets`, which
+     consults only the in-process `UserRegistryActor` — no
+     clustering/claims lookup anywhere on that path), and
+     `clustering/relay.rs`'s own module doc states plainly the relay stays
+     "discovery/handshake-only," "not wired into the stanza delivery path
+     (Phase 4)." That write path is real and harness-observable in
+     isolation — a bare-JID message to a recipient whose only live session
+     is on ANOTHER node gets written to `pending_delivery` on the sending
+     node **regardless of whether the two nodes' link is healthy or
+     severed**, because cross-node liveness is never consulted at all
+     (Phase 4 scope). Asserting that write inside a partition test would
+     therefore prove nothing about partition-triggered fallback behavior
+     specifically — it would pass identically in a fully healthy two-node
+     cluster, re-proving deviation 14's already-recorded Non-goal ("No
+     cross-node janitor-flush test... requires the GA cross-node stanza
+     routing this phase explicitly excludes... deferred to Phase 4") under
+     a partition label it does not need. Not re-litigated here; the landed
+     test proves only what a partition scenario can actually distinguish
+     (targeted isolation-fencing plus genuine self-healing recovery),
+     consistent with that already-settled scope boundary.
+109. **(New, Slice 11 corrigenda — closes a criterion-2 coverage gap found
+     on post-landing review.) `self_fence.rs`'s terminal "self-fenced
+     (either trigger): demote ALL local claims" branch (`for entity in
+     local_claims.owned().await { local_claims.demote(&entity).await }`,
+     reached once the `'tick` loop breaks on either fencing trigger) was
+     never exercised with a genuine fencing-loss trigger AND a populated
+     `LocallyClaimedEntities` in the same test.** Every populated-
+     `FakeLocalClaims` test in `self_fence.rs`'s own suite used a
+     `FakeLease` whose heartbeat CAS always returns `Ok(true)` (never loses
+     fencing — those tests exercise the owner-veto scan instead); every
+     test that genuinely loses fencing (`FakeLease::new(|| Ok(false))`)
+     used `NoLocallyClaimedEntities` (an always-empty `owned()`). Neither
+     combination alone proves the demote-all loop demotes every owned
+     claim, which is exactly what exit criterion 2 requires. Closed by
+     `clustering::self_fence::tests::node_lease_demotes_every_owned_claim_on_fencing_loss`:
+     `FakeLease::new(|| Ok(false))` (fencing loss on every heartbeat) driven
+     against a `FakeLocalClaims` populated with two owned entities, asserting
+     both were demoted and readiness flipped not-ready. **The demote-all
+     code itself was already correct — this test passed on first write,
+     with no production code change required.** Only the test coverage was
+     missing; flagged and closed in the same slice, not carried forward.
+110. **(New, Slice 11 corrigenda — closes a criterion-4 coverage gap found
+     on post-landing review.) Cross-node XEP-0198 resume's branch 3
+     (owner-unreachable → HOLD + retry, per element 8) had only
+     failure/timeout coverage — no test ever drove a retry that actually
+     SUCCEEDS on a later attempt.** Every `SlowAsker`/`UnreachableAsker`-
+     shaped `RemoteResumeAsker` test double anywhere in this crate returns
+     `Unreachable` (or times out) on EVERY call, so
+     `prepare_cross_node_resume`'s bounded backoff-and-retry loop was only
+     ever proven to hold correctly within budget and then report
+     `OwnerUnreachable` — never proven to find a persisted snapshot on a
+     LATER iteration and proceed to steal it. Closed by
+     `stream_management::session_registry::cross_node_resume::tests::fix_b_flaky_asker_holds_then_succeeds_on_a_later_attempt`:
+     a `FlakyAsker` reports `Unreachable` for its first two asks (forcing
+     at least two full backoff iterations), then writes the persisted
+     snapshot directly and reports `Detached` on its third ask — standing
+     in for "the remote owner finally force-detached and persisted." The
+     retry loop's own next iteration finds that snapshot at branch 1's
+     top-of-loop re-check and steals it, landing `CrossNodeResumeOutcome::Claimed`,
+     with `asks_seen >= 2` proving the hold-and-retry loop genuinely
+     iterated rather than succeeding on the first attempt. No production
+     code change; test-coverage-only, same as deviation 109.
+111. **(New, Slice 11 corrigenda — the one sanctioned production change in
+     this otherwise harness/test-only slice.) The orphan reaper's cadence
+     (`session_janitors::ORPHAN_REAPER_INTERVAL`) was the only cluster
+     timer in this codebase with no environment override.** Every sibling
+     cluster timer (`WADDLE_CLUSTERING_{HEARTBEAT_INTERVAL,LEASE_TTL,
+     NODE_LEASE_HEARTBEAT_INTERVAL,NODE_LEASE_TTL,REREGISTER_BACKOFF_BASE,
+     REREGISTER_BACKOFF_MAX,RESUME_HANDSHAKE_TIMEOUT,CLAIM_RELEASE_BUDGET}_MS`,
+     etc.) is parsed through the typed `ClusteringConfig::from_vars`
+     pipeline with a default plus validation; the orphan reaper's interval
+     alone was a hardcoded `const Duration::from_secs(120)` inside
+     `session_janitors.rs`, invisible to that pipeline. This is what forced
+     deviation 106's harness test to wait out the real ~120s production
+     cadence per attempt. Closed with a new `ClusteringConfig` field,
+     `orphan_reaper_interval: Duration` (default `120s`, matching the prior
+     hardcoded value byte-for-byte), parsed from
+     `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS` and validated `> 0`
+     identically to every sibling timer (`config::tests::clustering_parses_orphan_reaper_interval_and_rejects_zero`);
+     `spawn_orphan_reaper_janitor` now takes the interval as a parameter
+     instead of reading the module constant, and `server/http.rs`'s call
+     site threads `server_config.clustering.orphan_reaper_interval` through
+     — the reaper's SWEEP LOGIC is completely unchanged, only its timer's
+     period is now configurable. `clustering_cluster_e2e.rs::spawn_cluster_server`
+     sets `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS=500` for every
+     subprocess it spawns, so
+     `orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`
+     now observes a real sweep in seconds. Explicitly recorded as a
+     deviation from this slice's own "harness-only, zero production
+     changes" framing (see the Slice 11 section's "As-landed" text above)
+     precisely because it IS a production change, minimal and justified as
+     it is.

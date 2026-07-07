@@ -168,6 +168,16 @@ pub struct ClusteringConfig {
     /// dials seed peers, picking up pod churn
     /// (`WADDLE_CLUSTERING_DIAL_INTERVAL_MS`).
     pub dial_interval: Duration,
+    /// Cadence for the orphan reaper's `sm_session` claim sweep (ADR-0017
+    /// Phase 3 Slice 5, element 9) — `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`.
+    /// The only cluster timer that, prior to ADR-0017 Phase 3 Slice 11's
+    /// corrigenda (deviation 111), had no env override at all (every
+    /// sibling timer above and below this field does); added so the
+    /// multi-process harness's kill-one hydration capstone
+    /// (`clustering_cluster_e2e.rs::orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`)
+    /// does not have to wait out the full production default in real
+    /// wall-clock time.
+    pub orphan_reaper_interval: Duration,
     /// Enable the relay's fault-injection message set (crash/sleep) for the
     /// multi-process cluster harness (`WADDLE_CLUSTERING_FAULT_INJECTION`).
     /// Never enable in production: it lets any enrolled peer stop this node's
@@ -246,6 +256,7 @@ impl std::fmt::Debug for ClusteringConfig {
                 &self.allowlist_refresh_interval,
             )
             .field("dial_interval", &self.dial_interval)
+            .field("orphan_reaper_interval", &self.orphan_reaper_interval)
             .field("fault_injection", &self.fault_injection)
             .field("node_id_file", &self.node_id_file)
             .field("node_lease", &self.node_lease)
@@ -471,6 +482,7 @@ impl Default for ClusteringConfig {
             lease: ClusteringLeaseConfig::default(),
             allowlist_refresh_interval: Duration::from_secs(30),
             dial_interval: Duration::from_secs(15),
+            orphan_reaper_interval: Duration::from_secs(120),
             fault_injection: false,
             node_id_file: None,
             node_lease: ClusteringNodeLeaseConfig::default(),
@@ -758,6 +770,20 @@ impl ClusteringConfig {
         if dial_interval.is_zero() {
             return Err("WADDLE_CLUSTERING_DIAL_INTERVAL_MS must be greater than 0".to_string());
         }
+        // ADR-0017 Phase 3 Slice 11 corrigenda (deviation 111): the orphan
+        // reaper's own cadence, parsed and validated the same way every
+        // sibling cluster timer is — previously hardcoded with no override
+        // anywhere (`session_janitors::ORPHAN_REAPER_INTERVAL`).
+        let orphan_reaper_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS",
+            millis_u64(Self::default().orphan_reaper_interval),
+        )?);
+        if orphan_reaper_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS must be greater than 0".to_string(),
+            );
+        }
         let fault_injection = parse_bool_var(&vars, "WADDLE_CLUSTERING_FAULT_INJECTION", false)?;
         let node_id_file = vars
             .get("WADDLE_CLUSTERING_NODE_ID_FILE")
@@ -971,6 +997,7 @@ impl ClusteringConfig {
             },
             allowlist_refresh_interval,
             dial_interval,
+            orphan_reaper_interval,
             fault_injection,
             node_id_file,
             node_lease: ClusteringNodeLeaseConfig {
@@ -1764,6 +1791,26 @@ mod tests {
         let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "0")])
             .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS"));
+    }
+
+    // ADR-0017 Phase 3 Slice 11 corrigenda (deviation 111, FIX C): the
+    // orphan reaper's cadence, parsed/validated/defaulted exactly like its
+    // sibling timers — see `clustering_parses_allowlist_refresh_and_rejects_zero`
+    // just above.
+    #[test]
+    fn clustering_parses_orphan_reaper_interval_and_rejects_zero() {
+        let config =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS", "500")])
+                .unwrap();
+        assert_eq!(config.orphan_reaper_interval.as_millis(), 500);
+
+        let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(defaults.orphan_reaper_interval.as_secs(), 120);
+
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS", "0")])
+                .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS"));
     }
 
     #[test]

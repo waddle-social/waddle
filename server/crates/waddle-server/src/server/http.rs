@@ -290,7 +290,10 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     }
 
     spawn_sm_expiry_janitor(&websocket_state);
-    spawn_orphan_reaper_janitor(&websocket_state);
+    spawn_orphan_reaper_janitor(
+        &websocket_state,
+        server_config.clustering.orphan_reaper_interval,
+    );
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_notification_outbox_janitor(&websocket_state);
     spawn_push_service_publish_job_janitor(&websocket_state);

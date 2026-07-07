@@ -2133,6 +2133,79 @@ mod tests {
         stop_token.cancel();
     }
 
+    // FIX A (ADR-0017 Phase 3 Slice 11 corrigenda, council-adjudicated,
+    // deviation 109): the terminal "self-fenced (either trigger): demote
+    // ALL local claims" loop just above (`for entity in
+    // local_claims.owned().await { local_claims.demote(&entity).await }`,
+    // reached once the `'tick` loop breaks on either fencing trigger) was
+    // previously exercised only with an EMPTY `owned()` set (the real-fence
+    // tests above use `NoLocallyClaimedEntities`) or with a `FakeLease` that
+    // never actually loses fencing (`Ok(true)` on every heartbeat, in every
+    // populated-`FakeLocalClaims` veto-scan test above). Neither combination
+    // proves the terminal demote-all loop itself demotes every owned claim,
+    // which is exactly what the phase's exit criterion 2 requires. This
+    // test combines both: a heartbeat CAS that reports fencing loss on
+    // every call, and a populated `FakeLocalClaims` with more than one
+    // owned entity.
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_demotes_every_owned_claim_on_fencing_loss() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(10);
+        let lease = FakeLease::new(Box::new(|| Ok(false)));
+        let entity_a = user_actor_entity("room-fence-a");
+        let entity_b = user_actor_entity("room-fence-b");
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: vec![entity_a.clone(), entity_b.clone()],
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::clone(&demoted),
+            hydrated: FakeLocalClaims::unhydrated(),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        advance_until(interval, 20, || demoted.lock().expect("lock").len() >= 2).await;
+        let mut demoted_entities = demoted.lock().expect("lock").clone();
+        demoted_entities.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut expected = vec![entity_a, entity_b];
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            demoted_entities, expected,
+            "a node that loses fencing (heartbeat CAS returns 0 rows) must demote EVERY \
+             locally owned claim in the terminal self-fenced branch, not merely the ones \
+             touched by the veto scan"
+        );
+        assert!(
+            !readiness.is_ready(),
+            "readiness must flip not-ready before the lease becomes stealable"
+        );
+        stop_token.cancel();
+    }
+
     // --- FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-
     // adjudicated): the inline post-fence reclaim of this node's own
     // just-expired identity's SM-session claims. Postgres-gated: exercises
