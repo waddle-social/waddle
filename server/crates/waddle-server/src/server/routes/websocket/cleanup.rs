@@ -535,7 +535,7 @@ pub(super) async fn cleanup_connection_shutdown(
 /// would leave subscribers on a stale unavailable for a JID that is
 /// online (round-2 concurrency review). The replacement broadcasts its
 /// own presence, so suppressing here is always safe.
-pub(super) async fn broadcast_unavailable_if_no_replacement(
+pub(crate) async fn broadcast_unavailable_if_no_replacement(
     state: &WebSocketState,
     jid: &FullJid,
     was_presence_available: bool,

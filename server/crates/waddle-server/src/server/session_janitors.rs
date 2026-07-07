@@ -328,13 +328,17 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     );
                 }
 
-                if session.presence_available {
-                    routes::websocket::handlers::presence::broadcast_unavailable_for_terminated_session(
-                        &state,
-                        &session.jid,
-                    )
-                    .await;
-                }
+                // Same replacement re-check as the unclean-disconnect
+                // path: a fresh bind that superseded this expired
+                // detached session broadcasts its own presence, so a
+                // late unavailable would pin subscribers on offline for
+                // an online JID.
+                routes::websocket::broadcast_unavailable_if_no_replacement(
+                    &state,
+                    &session.jid,
+                    session.presence_available,
+                )
+                .await;
                 state
                     .deps
                     .protocol

@@ -134,8 +134,15 @@ pub(super) async fn register_bound_connection_after_frame(
             // presence flip after resume must not re-prompt (#1104
             // follow-up). Subscribes that arrived during the detached
             // window were fanned out to the detached session and reach
-            // the client via SM replay instead.
-            if let Some(entry) = state.deps.protocol.connection_registry.get_entry(&jid) {
+            // the client via SM replay instead. Owner-gated: a racing
+            // same-JID replacement must not have ITS once-per-session
+            // claim consumed by this resume's pre-claim.
+            if let Some(entry) = state
+                .deps
+                .protocol
+                .connection_registry
+                .entry_if_owner(&jid, &owner)
+            {
                 let _ = entry.claim_pending_subscribes_flush();
             }
         }
