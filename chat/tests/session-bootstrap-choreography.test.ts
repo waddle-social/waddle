@@ -54,7 +54,11 @@ afterAll(() => {
   else delete (globalThis as Record<string, unknown>).window;
 });
 
-function makeHarness() {
+function makeHarness(options: {
+  inboxHydrateRetryDelaysMs?: number[];
+  dmInbox?: () => Promise<boolean>;
+  channelInbox?: () => Promise<boolean>;
+} = {}) {
   let lifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
   const client = {
     ...handlerStubs(),
@@ -89,8 +93,8 @@ function makeHarness() {
     bootstrap: async () => {},
   });
 
-  const hydrateDmInbox = mock(async () => {});
-  const hydrateChannelInbox = mock(async () => {});
+  const hydrateDmInbox = mock(options.dmInbox ?? (async () => true));
+  const hydrateChannelInbox = mock(options.channelInbox ?? (async () => true));
   const refreshSocialFeed = mock(async () => {});
   const refreshStories = mock(async () => {});
   const refreshCommunityEvents = mock(async () => {});
@@ -168,6 +172,7 @@ function makeHarness() {
     activeRightPanel: ref(null),
     selectedChannelRoomJids: ref({}),
     isActiveDirectDmSurface: () => false,
+    inboxHydrateRetryDelaysMs: options.inboxHydrateRetryDelaysMs ?? [],
     presence: {
       onClientCleared: mock(() => {}),
       handlePresenceUpdate: mock(() => {}),
@@ -302,6 +307,46 @@ describe("session bootstrap choreography (#754)", () => {
       communityEvents: 2,
       notifySettings: 2,
     });
+    h.scope.stop();
+  });
+
+  test("a failed inbox hydrate retries with backoff until it succeeds", async () => {
+    // With MAM catch-up re-emissions now side-effect-free, the inbox
+    // hydrate is the sole unread source for messages missed while
+    // disconnected — a single failed IQ must not strand badges at zero
+    // until the next session-ready.
+    let dmAttempts = 0;
+    const h = makeHarness({
+      inboxHydrateRetryDelaysMs: [0, 0],
+      dmInbox: async () => {
+        dmAttempts += 1;
+        return dmAttempts >= 2;
+      },
+    });
+    await nextTick();
+
+    h.dispatchLifecycle(freshEvent);
+    await flushAsync();
+
+    // Succeeds on the second attempt; the remaining delay is not consumed.
+    expect(h.counts().dmInbox).toBe(2);
+    // The channel hydrate succeeded immediately — no retries.
+    expect(h.counts().channelInbox).toBe(1);
+    h.scope.stop();
+  });
+
+  test("a persistently failing inbox hydrate gives up after the configured retries", async () => {
+    const h = makeHarness({
+      inboxHydrateRetryDelaysMs: [0],
+      dmInbox: async () => false,
+    });
+    await nextTick();
+
+    h.dispatchLifecycle(freshEvent);
+    await flushAsync();
+
+    // Initial attempt + exactly one retry.
+    expect(h.counts().dmInbox).toBe(2);
     h.scope.stop();
   });
 });

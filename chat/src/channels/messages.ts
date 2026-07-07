@@ -90,6 +90,12 @@ export function useChannelMessages(
   const activeChannels = ref<Set<string>>(new Set());
   const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
+  // Stanza-ids whose mention has been counted, insertion-ordered for FIFO
+  // eviction. Bounds memory across long sessions; the cap only needs to
+  // outlast the window in which a live copy and its MAM catch-up
+  // re-emission can both arrive.
+  const recordedMentionStanzaIds = new Set<string>();
+  const RECORDED_MENTION_STANZA_IDS_CAP = 512;
   const pendingNotificationActivities = ref<RoomActivityEvent[]>([]);
   const roomAvatarHashes = ref<Record<string, string>>({});
   const roomJidOverrides = ref<Record<string, string>>({});
@@ -219,10 +225,6 @@ export function useChannelMessages(
         // it depends on cross-room session state and the tab-visibility
         // signal, both of which are out of scope for live-merge.
         if (classified.kind !== "live") return;
-        // Archive decodes (MAM catch-up re-emissions for the focused room)
-        // merge into the timeline above but never notify — see
-        // `recordRoomActivity` for the rationale.
-        if (msg.createdAtSource === "archive") return;
         if (msg.nick !== session.value?.username && isTabHidden()) {
           const isMentioned =
             !!msg.broadcastMention ||
@@ -235,8 +237,12 @@ export function useChannelMessages(
           if (msg.stanzaId) activity.stanzaId = msg.stanzaId;
           if (msg.mentions) activity.mentions = msg.mentions;
           if (msg.broadcastMention) activity.broadcastMention = msg.broadcastMention;
-          enqueueNotificationActivity(activity);
-          if (isMentioned) {
+          if (msg.createdAtSource === "archive") activity.fromArchive = true;
+          // Same policy as `recordRoomActivity`: archive decodes (MAM
+          // catch-up re-emissions) never notify, but a genuinely-missed
+          // mention still records — idempotent by stanza-id.
+          if (!activity.fromArchive) enqueueNotificationActivity(activity);
+          if (isMentioned && shouldRecordMentionOnce(activity)) {
             recordMentionActivity(activity);
             lastMentionActivity.value = activity;
           }
@@ -651,6 +657,7 @@ export function useChannelMessages(
     mentionedChannelCounts.value = {};
     lastMentionActivity.value = null;
     pendingNotificationActivities.value = [];
+    recordedMentionStanzaIds.clear();
   }
 
   function isOwnMentionActivity(event: RoomActivityEvent): boolean {
@@ -674,18 +681,40 @@ export function useChannelMessages(
   function recordRoomActivity(event: RoomActivityEvent) {
     const roomJid = barePeerJid(event.roomJid);
     activeChannels.value = new Set([...activeChannels.value, roomJid]);
-    // MAM catch-up re-emissions may duplicate messages already seen (and
-    // counted) live before a reconnect — they never notify or bump
-    // mention badges; the server inbox hydrate accounts genuinely-missed
-    // messages authoritatively.
-    if (event.fromArchive) return;
-    if (event.nick !== session.value?.username && isTabHidden()) {
+    // MAM catch-up re-emissions never notify: a replayed banner for a
+    // message the user may already have seen is spam, and the push
+    // pipeline covers the disconnected window.
+    if (!event.fromArchive && event.nick !== session.value?.username && isTabHidden()) {
       enqueueNotificationActivity(event);
     }
-    if (isOwnMentionActivity(event)) {
+    // Mentions DO record from catch-up — the server inbox tracks unread
+    // only, not mentions, so a mention missed while disconnected has no
+    // other path to the badge. Idempotent by XEP-0359 stanza-id (identical
+    // on the live and archive copies of a message), so a catch-up
+    // re-emission of an already-recorded mention cannot inflate the count.
+    if (isOwnMentionActivity(event) && shouldRecordMentionOnce(event)) {
       recordMentionActivity(event);
       lastMentionActivity.value = event;
     }
+  }
+
+  /**
+   * Stanza-id-keyed idempotency for mention accounting. Events without a
+   * stanza-id cannot be deduplicated: live ones record (a conformant
+   * server stamps every archived message, so an unstamped stanza has no
+   * archive copy to collide with), archive ones skip (their live twin may
+   * already have recorded, and a missed count is recoverable while an
+   * inflated one is not).
+   */
+  function shouldRecordMentionOnce(event: RoomActivityEvent): boolean {
+    if (!event.stanzaId) return !event.fromArchive;
+    if (recordedMentionStanzaIds.has(event.stanzaId)) return false;
+    recordedMentionStanzaIds.add(event.stanzaId);
+    if (recordedMentionStanzaIds.size > RECORDED_MENTION_STANZA_IDS_CAP) {
+      const oldest = recordedMentionStanzaIds.values().next().value;
+      if (oldest !== undefined) recordedMentionStanzaIds.delete(oldest);
+    }
+    return true;
   }
 
   function isTabHidden(): boolean {

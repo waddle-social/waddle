@@ -330,19 +330,22 @@ export function useDirectMessageConversations(
       && msg.createdAtSource !== "archive"
       && !wasUnreadAccountedByInbox(bare, msg);
 
-    conversations.value = sortByRecent(conversations.value.map((c) => (
-      c.peerJid === bare
-        ? {
-            ...c,
-            peerUsername: existing.peerUsername || peerUsername(bare),
-            lastMessageBody: msg.body,
-            lastMessageAt: msg.createdAt,
-            unreadCount: shouldIncrementUnread ? c.unreadCount + 1 : c.unreadCount,
-            presenceShow: presenceByJid.value[bare] ?? c.presenceShow,
-            presenceIdleSince: presenceIdleByJid.value[bare] ?? c.presenceIdleSince,
-          }
-        : c
-    )));
+    conversations.value = sortByRecent(conversations.value.map((c) => {
+      if (c.peerJid !== bare) return c;
+      // Monotonic preview: an archive re-emission of an OLDER message
+      // (MAM catch-up after a reconnect) must not roll the preview or the
+      // recency ordering back behind a newer live arrival.
+      const isNewestMessage =
+        conversationTimestamp(msg.createdAt) >= conversationTimestamp(c.lastMessageAt);
+      return {
+        ...c,
+        peerUsername: existing.peerUsername || peerUsername(bare),
+        ...(isNewestMessage ? { lastMessageBody: msg.body, lastMessageAt: msg.createdAt } : {}),
+        unreadCount: shouldIncrementUnread ? c.unreadCount + 1 : c.unreadCount,
+        presenceShow: presenceByJid.value[bare] ?? c.presenceShow,
+        presenceIdleSince: presenceIdleByJid.value[bare] ?? c.presenceIdleSince,
+      };
+    }));
   }
 
   function updatePresence(event: PresenceUpdateEvent) {
