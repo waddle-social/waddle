@@ -162,6 +162,18 @@ pub(super) async fn apply_sm_ack(
             websocket_stream_close_xml(),
         ];
     }
+    if sm_state.ack_regresses_last_acked(h) {
+        // Stale or garbage `h` behind the confirmed window: ignore it
+        // entirely. Acknowledging would corrupt last_acked, and the
+        // numeric range-delete below would wipe every pending row.
+        warn!(
+            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            client_h = h,
+            last_acked = sm_state.last_acked,
+            "SM ack ignored: handled count regressed behind last_acked"
+        );
+        return vec![];
+    }
     sm_state.acknowledge(h);
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);

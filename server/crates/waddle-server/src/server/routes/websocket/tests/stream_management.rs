@@ -3192,3 +3192,142 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
          re-deliver pending subscribes"
     );
 }
+
+/// Round-2 concurrency review on #1099: an `h` in the wrap-BEHIND
+/// half-space (mod-2^32 "less than" everything the session ever acked)
+/// passed the too-high guard as "behind", then the numeric range-delete
+/// wiped every claimed pending_delivery row and corrupted last_acked.
+/// A live ack outside the valid window [last_acked, outbound_count] on
+/// the low side is stale garbage: it must be ignored wholesale — no
+/// purge, no counter movement, no stream error.
+#[tokio::test]
+async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
+    let _ = conn
+        .sm_state
+        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    // 0xC0000000 is mod-2^32 "behind" outbound_count=2, so the
+    // too-high guard alone does not catch it — but numerically it
+    // exceeds every real sequence, so an unguarded range-delete would
+    // destroy all rows.
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='3221225472'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "stale wrap-behind ack must be ignored, got {responses:?}"
+    );
+    assert!(
+        !conn.phase.is_closing(),
+        "stale ack must not terminate the stream"
+    );
+    assert_eq!(
+        conn.sm_state.last_acked, 0,
+        "stale ack must not move last_acked"
+    );
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0).len(),
+        2,
+        "stale ack must not purge the replay queue"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "stale ack must not range-delete pending rows"
+    );
+}
+
+/// Companion to the wrap-behind live-ack guard: a resume whose `h`
+/// regressed mod-2^32 behind the session's last_acked cannot be
+/// replayed (that prefix was purged when the ack landed) and must be
+/// refused as a failed resume — session preserved, nothing purged.
+#[tokio::test]
+async fn sm_resume_rejects_handled_count_behind_last_acked() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-regressed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 4,
+            last_acked: 3,
+            replay_gap_through: None,
+            unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 4,
+                stanza_xml: "<message xmlns='jabber:client' id='m4'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            }],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    // h = 0xC0000000 is mod-2^32 behind last_acked=3 (stale garbage);
+    // the wrap-aware too-high guard alone would classify it "behind
+    // outbound" and let acknowledge() + the numeric row range-delete
+    // run.
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-regressed", 0xC000_0000),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("<failed") && frame.contains("resource-constraint")),
+        "regressed-h resume must fail as unresumable, got {responses:?}"
+    );
+    // The detached session survives for a corrected retry.
+    let restored = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .claim_session("stream-regressed")
+        .await
+        .expect("registry")
+        .expect("session preserved after failed resume");
+    assert_eq!(restored.last_acked, 3);
+}

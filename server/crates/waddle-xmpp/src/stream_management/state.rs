@@ -241,6 +241,17 @@ impl StreamManagementState {
         sequence_gt(h, self.outbound_count)
     }
 
+    /// Whether a client `<a h='N'/>` regressed mod-2^32 behind what it
+    /// already acknowledged. XEP-0198 `h` is monotone; such an ack is a
+    /// stale duplicate or garbage. It must be ignored wholesale: the
+    /// wrap-aware too-high guard alone classifies the wrap-behind
+    /// half-space as "valid", and the numeric `<= h` range-delete on
+    /// pending rows would then destroy every claimed row (round-2
+    /// concurrency review on #1099).
+    pub fn ack_regresses_last_acked(&self, h: u32) -> bool {
+        sequence_gt(self.last_acked, h)
+    }
+
     /// Get the current inbound count for sending in an <a/> response.
     pub fn get_inbound_count(&self) -> u32 {
         self.inbound_count

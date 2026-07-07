@@ -144,7 +144,18 @@ impl DetachedSession {
     }
 
     /// Whether this detached session can satisfy XEP-0198 replay for `client_h`.
+    ///
+    /// Two lower bounds, both mod 2^32: `client_h` must not sit below a
+    /// queue-eviction gap, and it must not regress behind `last_acked` —
+    /// stanzas at or below the acked watermark were purged from the
+    /// replay queue when the ack landed, so a resume claiming less than
+    /// the client already confirmed cannot be replayed (and its `h`
+    /// would numerically range-delete every pending row; round-2
+    /// concurrency review on #1099).
     pub fn can_resume_from(&self, client_h: u32) -> bool {
+        if sequence_gt(self.last_acked, client_h) {
+            return false;
+        }
         self.replay_gap_through
             .is_none_or(|gap| !sequence_gt(gap, client_h))
     }
