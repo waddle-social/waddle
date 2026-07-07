@@ -213,6 +213,11 @@ async fn spawn_cluster_server(
             // (config validation enforces this — the held-response window is
             // an upper bound on, never longer than, a fresh node-lease TTL).
             ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "1000"),
+            // ADR-0017 Phase 3 Slice 10: node_lease_ttl (1200) must be >= 3x
+            // the claim-release budget. The default budget is 5s, which would
+            // reject this harness's fast-timer config at startup — size it
+            // down to match (1200 >= 3 * 300).
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "300"),
         ];
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
