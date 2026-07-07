@@ -1,4 +1,5 @@
 use super::*;
+use xmpp_parsers::iq::Iq;
 
 /// Upper bound on each actor `ask` issued from the routing hot path — bounds
 /// both mailbox enqueue and the handler reply so a wedged `UserRegistryActor`
@@ -186,7 +187,7 @@ pub(super) async fn route_to_connection(
     jid: Jid,
     stanza: Box<Stanza>,
     recursion_depth: u8,
-) {
+) -> Vec<Stanza> {
     // #229 PR12 cutover: the destination's main loop is
     // now wired (PR11) to dispatch on `DeliveryKind` and
     // run the recipient-pass pipeline for `PeerStanza`
@@ -228,6 +229,7 @@ pub(super) async fn route_to_connection(
              dropping nested route (full or bare) to prevent duplicate \
              delivery / persistence"
         );
+        Vec::new()
     } else {
         // Notification activity ingest (slice 2b): when the routed
         // stanza is a typed XEP-0085 chat-state on a DM Message (type
@@ -279,8 +281,20 @@ pub(super) async fn route_to_connection(
 
         match jid.clone().try_into_full() {
             Ok(full) => {
-                deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, &full, &stanza)
-                    .await
+                let delivery = deliver_peer_to_full(
+                    deps.user_registry,
+                    deps.sm_session_registry,
+                    &full,
+                    &stanza,
+                )
+                .await;
+                if delivery == FullJidDeliveryOutcome::Unavailable {
+                    service_unavailable_for_undeliverable_iq(stanza.as_ref())
+                        .into_iter()
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             }
             Err(bare) => {
                 // Enumerate XEP-0198 detached-but-resumable
@@ -459,7 +473,7 @@ pub(super) async fn route_to_connection(
                                     ))
                                     .await;
                                 }
-                                return;
+                                return Vec::new();
                             }
                             FanoutPassResult::Unavailable => {
                                 // Shared pass unavailable (no dispatcher
@@ -549,9 +563,35 @@ pub(super) async fn route_to_connection(
                         }
                     }
                 }
+                Vec::new()
             }
         }
     }
+}
+
+fn service_unavailable_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
+    let Stanza::Iq(iq) = stanza else {
+        return None;
+    };
+    let (from, to, id) = match iq.as_ref() {
+        Iq::Get { from, to, id, .. } | Iq::Set { from, to, id, .. } => {
+            (from.clone(), to.clone(), id.clone())
+        }
+        Iq::Result { .. } | Iq::Error { .. } => return None,
+    };
+    let error = StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ServiceUnavailable,
+        "en",
+        "Service unavailable at this address.",
+    );
+    Some(Stanza::Iq(Box::new(Iq::Error {
+        from: to,
+        to: from,
+        id,
+        error,
+        payload: None,
+    })))
 }
 
 /// #1106: queue the PROCESSED (recipient-stamped) stanza into the

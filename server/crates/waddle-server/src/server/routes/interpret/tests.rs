@@ -1476,6 +1476,129 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
     );
 }
 
+fn jingle_payload_for_route_test(action: &str, sid: &str) -> Element {
+    Element::builder("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), action)
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .build()
+}
+
+fn call_iq_set_for_route_test(id: &str, from: &jid::FullJid, to: &jid::FullJid) -> Iq {
+    Iq::Set {
+        from: Some(jid::Jid::from(from.clone())),
+        to: Some(jid::Jid::from(to.clone())),
+        id: id.to_string(),
+        payload: jingle_payload_for_route_test("session-info", "offline-sid"),
+    }
+}
+
+#[tokio::test]
+async fn route_to_connection_offline_full_jid_call_iq_returns_service_unavailable() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: jid::Jid::from(bob.clone()),
+        stanza: Box::new(Stanza::Iq(Box::new(call_iq_set_for_route_test(
+            "call-offline-1",
+            &alice,
+            &bob,
+        )))),
+    }];
+
+    let outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "offline full-JID request IQ should produce one error frame: {:?}",
+        outcome.frames
+    );
+    let element = Element::from_str(&outcome.frames[0]).expect("parseable IQ error");
+    let iq = Iq::try_from(element).expect("typed IQ");
+    let Iq::Error {
+        from,
+        to,
+        id,
+        error,
+        payload,
+    } = iq
+    else {
+        panic!("expected IQ error, got {iq:?}");
+    };
+    assert_eq!(id, "call-offline-1");
+    assert_eq!(from, Some(jid::Jid::from(bob)));
+    assert_eq!(to, Some(jid::Jid::from(alice)));
+    assert_eq!(error.type_, ErrorType::Cancel);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::ServiceUnavailable
+    );
+    assert!(
+        payload.is_none(),
+        "error does not need to echo the original payload"
+    );
+}
+
+#[tokio::test]
+async fn route_to_connection_offline_full_jid_call_iq_result_error_do_not_bounce() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+    let result_iq = Iq::Result {
+        from: Some(jid::Jid::from(alice.clone())),
+        to: Some(jid::Jid::from(bob.clone())),
+        id: "call-result-1".to_string(),
+        payload: None,
+    };
+    let error_iq = Iq::Error {
+        from: Some(jid::Jid::from(alice)),
+        to: Some(jid::Jid::from(bob.clone())),
+        id: "call-error-1".to_string(),
+        error: StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::NotAllowed,
+            "en",
+            "already failed",
+        ),
+        payload: None,
+    };
+    let events = vec![
+        OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(bob.clone()),
+            stanza: Box::new(Stanza::Iq(Box::new(result_iq))),
+        },
+        OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(bob),
+            stanza: Box::new(Stanza::Iq(Box::new(error_iq))),
+        },
+    ];
+
+    let outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert!(
+        outcome.frames.is_empty(),
+        "IQ result/error stanzas must not receive synthesized service-unavailable bounces: {:?}",
+        outcome.frames
+    );
+}
+
 #[tokio::test]
 async fn route_to_connection_bare_jid_selects_highest_priority_available_resources() {
     // RFC 6121 §8.5.2.1 resource selection: deliver to every
