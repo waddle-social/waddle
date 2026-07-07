@@ -30,9 +30,11 @@ Bundles marked `[one PR]` touch the same files and should land together.
 
 ### Lane A — MUC conformance (server)
 1. ✅ **#1111 — RoomFull join → `service-unavailable` presence error (XEP-0045 §7.2.9); was an empty reply. DONE (PR #1212, merged).**
-2. #1172 — MUC MUST gaps: status 201 on create, config broadcast 104/170/171, PM routing, `<decline/>`, affiliation-list authz (§9 admin-only); plus admin/owner overflow-join to a full room (§7.2.9 MAY, deferred from #1111). M–L.
+2. ✅ **#1172 — MUC MUST gaps: status-201 on create, config broadcast (104/170/171), §7.5 PM routing (+ groupchat-to-occupant `bad-request`, normal-typed PM, anti-spoof), §7.8 mediated decline (oracle-closed), affiliation-list authz (§9 Owner/Admin), admin/owner overflow-join (§7.2.9). Anonymity/`whois` scope creep left to #231. DONE (PR #1214, merged).**
 3. ✅ **#1169 — ISR: dropped `urn:xmpp:isr:0` advert + bespoke `format!`-XML token scheme (removal was the conformant choice; nothing depended on it). DONE (PR #1211, merged).**
-4. #1150 — fix all 7 wire deviations (0452, 0500, 0502, 0446, 0433, 0488, 0448). L.
+4. ✅ **#1150 — fixed all 7 wire deviations (0452 `<mentions>`, 0500 field name, 0502 disco field / removed invented subscribe, 0446 `<length>` ms, 0433 XEP-0004 form + RSM, 0488 token text-content, 0448 `<encrypted/>` in `<sources>`). DONE (PR #1216, merged).**
+
+**Lane A COMPLETE.** (Lane B complete.)
 
 ### Lane B — SFU / calls reliability `[one PR bundle]` — ✅ **DONE (PR #1210, merged)**
 1. ✅ #1131 — survivor hangup no longer `<forbidden/>`; XEP-0166 §6.7 4-case handler (ack / item-not-found + unknown-session / forbidden). Also: an undeliverable session-terminate now acks (hangup succeeds).
