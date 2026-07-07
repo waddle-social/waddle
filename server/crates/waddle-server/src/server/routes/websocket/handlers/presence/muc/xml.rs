@@ -111,12 +111,16 @@ pub(super) fn build_muc_presence_error_xml(
     room_jid: &BareJid,
     nick: &str,
     to_jid: &FullJid,
-    error: StanzaError,
+    mut error: StanzaError,
 ) -> String {
     let from_jid = room_jid
         .clone()
         .with_resource_str(nick)
         .unwrap_or_else(|_| to_jid.clone());
+    // XEP-0045 §7.2 error examples stamp the room bare JID as the
+    // erroring entity (`<error by='room@service'>`); preserve an
+    // explicitly-set `by` should a caller ever provide one.
+    error.by.get_or_insert_with(|| room_jid.clone().into());
 
     element_to_xml(
         Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
@@ -129,6 +133,10 @@ pub(super) fn build_muc_presence_error_xml(
                 to_jid.to_string(),
             )
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+            // XEP-0045 §7.2: join-failure presence errors echo the
+            // `<x xmlns='http://jabber.org/protocol/muc'/>` element so
+            // clients can associate the error with the join request.
+            .append(Element::from(xmpp_parsers::muc::Muc::new()))
             .append(Element::from(error))
             .build(),
     )
