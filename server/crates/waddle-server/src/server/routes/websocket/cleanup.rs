@@ -299,6 +299,13 @@ pub(super) async fn cleanup_connection_shutdown(
                 presence_payloads: presence_state
                     .map(|state| state.payloads)
                     .unwrap_or_default(),
+                // The once-per-session claim state travels with the
+                // detached session (not inferred from presence): a
+                // session that went available then unavailable before
+                // detaching keeps its consumed claim across resume.
+                pending_subscribes_flushed: entry
+                    .pending_subscribes_flushed
+                    .load(std::sync::atomic::Ordering::Acquire),
             },
         ) {
             let stream_id = detached.stream_id.clone();

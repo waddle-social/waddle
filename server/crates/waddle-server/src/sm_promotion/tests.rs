@@ -68,6 +68,7 @@ fn detached_session_with_unacked(
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -730,6 +731,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
 
     let summary = promote_session_unacked(

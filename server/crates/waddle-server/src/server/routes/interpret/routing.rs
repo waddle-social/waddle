@@ -614,6 +614,7 @@ mod tests {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         }
     }
 

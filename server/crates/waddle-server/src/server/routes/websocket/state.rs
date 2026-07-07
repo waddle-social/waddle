@@ -372,6 +372,12 @@ pub(super) struct WsConnState {
     /// restored from XEP-0198 detached state so re-registration
     /// republishes the full last presence per RFC 6121 §4.3.2 (#1103).
     pub(super) presence_payloads: Vec<minidom::Element>,
+    /// Whether the once-per-session pending-subscribe flush (RFC 6121
+    /// §3.1.3, issue #1104) was consumed by the resumed session before
+    /// it detached. Restored only on true SM resume; drives the
+    /// pre-claim in `registration.rs` so a resumed session that went
+    /// available → unavailable → detached does not re-prompt.
+    pub(super) pending_subscribes_flushed: bool,
     /// SM stream id restored by `<resume/>` but not yet removed from the
     /// detached registry. The main loop clears it after live routing is
     /// registered, closing the take-before-register fanout gap.
@@ -435,6 +441,7 @@ impl WsConnState {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
             pending_resume_stream_id: None,
             pending_resume_h: None,
             registry_owner: None,

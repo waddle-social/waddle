@@ -278,6 +278,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     for sequence in 1..=(waddle_xmpp::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1)
     {
@@ -361,6 +362,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     state
         .deps
@@ -442,6 +444,7 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -519,6 +522,7 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -885,6 +889,7 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     conn.sm_state.restore_from_session(&detached);
 
@@ -1048,6 +1053,7 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -1108,6 +1114,7 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -1175,6 +1182,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     state
         .deps
@@ -1252,6 +1260,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -1333,6 +1342,7 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -1407,6 +1417,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -1477,6 +1488,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -1555,6 +1567,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice laptop");
@@ -1619,6 +1632,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice laptop again");
@@ -1803,6 +1817,7 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");
@@ -1868,6 +1883,7 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");
@@ -1963,6 +1979,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             presence_status: Some("ready from detach".to_string()),
             presence_priority: 7,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice web");
@@ -2053,6 +2070,7 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             presence_status: Some("stepped away".to_string()),
             presence_priority: 5,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -2154,6 +2172,7 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 presence_status: Some(status.to_string()),
                 presence_priority: 5,
                 presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
             })
             .await
             .expect("store detached alice resource");
@@ -2226,6 +2245,7 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             presence_status: Some("private".to_string()),
             presence_priority: 5,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -2384,6 +2404,7 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached bob");
@@ -2444,6 +2465,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached alice");
@@ -2522,6 +2544,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached bob");
@@ -2609,6 +2632,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     };
     state
         .deps
@@ -2954,6 +2978,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -3092,6 +3117,7 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -3231,6 +3257,7 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -3301,6 +3328,7 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: vec![idle.clone()],
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");
@@ -3371,13 +3399,14 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
             carbons_enabled: false,
             roster_interested: false,
             blocklist_interested: false,
-            // Available at detach ⇒ the initial available presence
-            // already happened ⇒ the claim was consumed pre-detach.
+            // Still available at detach; the claim consumed by the
+            // initial available presence is recorded explicitly.
             presence_available: true,
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: true,
         })
         .await
         .expect("store");
@@ -3416,6 +3445,161 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
         "the once-per-session claim must already be consumed on the \
          resumed entry — a presence flip after resume must not \
          re-deliver pending subscribes"
+    );
+}
+
+/// The consumed claim must survive detach even when the session went
+/// UNAVAILABLE after its initial available presence: presence state at
+/// detach says nothing about whether the flush already happened, so
+/// the claim is carried explicitly on the detached session. Before
+/// this fix the pre-claim was gated on `presence_available`, so an
+/// available → unavailable → detach → resume sequence re-armed the CAS
+/// and the next available re-prompted the user.
+#[tokio::test]
+async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-claimed-unavail".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            // Went available (claim consumed), then unavailable before
+            // the transport dropped.
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: true,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-claimed-unavail", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry after resume");
+    assert!(
+        !entry.claim_pending_subscribes_flush(),
+        "the claim consumed before the unavailable flip must stay \
+         consumed across resume — the next available presence must \
+         not re-deliver pending subscribes"
+    );
+}
+
+/// Companion: a session that NEVER went available before detaching has
+/// an unconsumed claim, and resume must keep it armed — the resumed
+/// session's true initial available presence still owes the RFC 6121
+/// §3.1.3 pending-subscribe delivery.
+#[tokio::test]
+async fn sm_resume_keeps_unconsumed_claim_armed() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-unclaimed".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-unclaimed", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "resume must succeed: {responses:?}"
+    );
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(8);
+    let mut pending_tx = Some(tx);
+    super::super::registration::register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry after resume");
+    assert!(
+        entry.claim_pending_subscribes_flush(),
+        "a never-available session's claim must still be armed after \
+         resume so the initial available presence delivers the queued \
+         subscribes"
     );
 }
 
@@ -3522,6 +3706,7 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store");

@@ -125,26 +125,28 @@ pub(super) async fn register_bound_connection_after_frame(
                 // new presence after <resumed/> (#1103 follow-up).
                 conn.presence_payloads.clone(),
             );
-        if resumed {
-            // XEP-0198 §5: a resumed stream is the SAME session. The
-            // resource being available at detach means its initial
-            // available presence already happened and the pending-
-            // subscribe delivery already fired (RFC 6121 §3.1.3), so
-            // consume the fresh entry's once-per-session claim — a
-            // presence flip after resume must not re-prompt (#1104
-            // follow-up). Subscribes that arrived during the detached
-            // window were fanned out to the detached session and reach
-            // the client via SM replay instead. Owner-gated: a racing
-            // same-JID replacement must not have ITS once-per-session
-            // claim consumed by this resume's pre-claim.
-            if let Some(entry) = state
-                .deps
-                .protocol
-                .connection_registry
-                .entry_if_owner(&jid, &owner)
-            {
-                let _ = entry.claim_pending_subscribes_flush();
-            }
+    }
+
+    if resumed && conn.pending_subscribes_flushed {
+        // XEP-0198 §5: a resumed stream is the SAME session. The
+        // detached session recorded that its once-per-session
+        // pending-subscribe delivery already fired (RFC 6121 §3.1.3),
+        // so consume the fresh entry's claim — a presence flip after
+        // resume must not re-prompt (#1104 follow-up). Gated on the
+        // carried flag, NOT on current presence: a session that went
+        // available (claim consumed) then unavailable before detaching
+        // must not re-arm the claim on resume. Subscribes that arrived
+        // during the detached window were fanned out to the detached
+        // session and reach the client via SM replay instead.
+        // Owner-gated: a racing same-JID replacement must not have ITS
+        // once-per-session claim consumed by this resume's pre-claim.
+        if let Some(entry) = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&jid, &owner)
+        {
+            let _ = entry.claim_pending_subscribes_flush();
         }
     }
 

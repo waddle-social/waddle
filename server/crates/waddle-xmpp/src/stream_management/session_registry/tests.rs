@@ -79,6 +79,7 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         presence_status: None,
         presence_priority: 0,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 
@@ -910,6 +911,7 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         presence_status: Some("online".to_string()),
         presence_priority: 3,
         presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
     }
 }
 

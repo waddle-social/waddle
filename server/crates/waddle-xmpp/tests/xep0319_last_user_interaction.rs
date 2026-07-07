@@ -178,6 +178,7 @@ async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: vec![idle_element.clone()],
+            pending_subscribes_flushed: false,
         })
         .await
         .expect("store detached session");

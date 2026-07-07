@@ -27,6 +27,13 @@ pub struct DetachedSessionSnapshot {
     /// so probe/subscription delivery can relay them verbatim while the
     /// stream awaits resume (issue #1103).
     pub presence_payloads: Vec<minidom::Element>,
+    /// Whether the session's once-per-session pending-subscribe flush
+    /// (RFC 6121 §3.1.3, issue #1104) was already consumed before
+    /// detach. Carried explicitly — it cannot be inferred from
+    /// `presence_available`, because a session that went available
+    /// (claim consumed) and then unavailable before detaching must not
+    /// re-arm the claim on resume.
+    pub pending_subscribes_flushed: bool,
 }
 
 /// Stream management state for a connection.
@@ -344,6 +351,7 @@ impl StreamManagementState {
             presence_status: snapshot.presence_status,
             presence_priority: snapshot.presence_priority,
             presence_payloads: snapshot.presence_payloads,
+            pending_subscribes_flushed: snapshot.pending_subscribes_flushed,
         })
     }
 
@@ -587,6 +595,7 @@ mod tests {
                 presence_status: Some("ready".to_string()),
                 presence_priority: 7,
                 presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
             })
             .expect("resumable state must produce detached session");
         assert!(
@@ -614,6 +623,7 @@ mod tests {
                 presence_status: None,
                 presence_priority: 0,
                 presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
             })
             .expect("resumable state must produce detached session");
         assert!(
@@ -688,6 +698,7 @@ mod tests {
             presence_status: None,
             presence_priority: 0,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         };
         let mut state = StreamManagementState::with_config(1000, 3);
         state.restore_from_session(&detached);

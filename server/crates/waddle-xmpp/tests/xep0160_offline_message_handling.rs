@@ -799,6 +799,7 @@ fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
             presence_status: None,
             presence_priority: 1,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .expect("session resumable");
     assert!(
@@ -825,6 +826,7 @@ fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
             presence_status: None,
             presence_priority: 1,
             presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
         })
         .expect("session resumable");
     assert!(

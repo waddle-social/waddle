@@ -160,5 +160,8 @@ pub(super) fn persisted_to_detached(
         // show/status/priority (issue #1103 limitation, documented on
         // `DetachedSession::presence_payloads`).
         presence_payloads: Vec::new(),
+        // Not persisted: durable rehydration may re-deliver the pending
+        // subscribes once after a restart — acceptable.
+        pending_subscribes_flushed: false,
     })
 }

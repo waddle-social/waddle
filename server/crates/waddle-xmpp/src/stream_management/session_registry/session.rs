@@ -95,6 +95,13 @@ pub struct DetachedSession {
     /// shape does not carry payloads, so sessions rehydrated after a
     /// process restart report bare show/status/priority.
     pub presence_payloads: Vec<minidom::Element>,
+    /// Whether the once-per-session pending-subscribe flush (RFC 6121
+    /// §3.1.3, issue #1104) was already consumed before detach. Resume
+    /// restores this onto the fresh connection so the claim is only
+    /// re-consumed when the detached session had actually consumed it —
+    /// NOT inferred from `presence_available`, which goes stale when
+    /// the session flips unavailable after its initial available.
+    pub pending_subscribes_flushed: bool,
 }
 
 impl DetachedSession {
