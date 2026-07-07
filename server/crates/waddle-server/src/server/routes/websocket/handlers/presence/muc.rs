@@ -10,6 +10,7 @@ pub use access::{
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::muc::RoomRegistry;
 use xml::{
     build_muc_conflict_presence_xml, build_muc_presence_error_xml, build_muc_self_unavailable_xml,
     create_presence_stanza,
@@ -297,15 +298,28 @@ async fn handle_muc_join_unlocked(
                 // against an already-stopped actor. Retry once through
                 // the registry, which respawns the room; never drop the
                 // join silently.
-                let room_gone = matches!(
+                let room_sealed = matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
                         waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
                     )
-                ) || !matches!(&error, kameo::error::SendError::HandlerError(_));
+                );
+                let room_gone =
+                    room_sealed || !matches!(&error, kameo::error::SendError::HandlerError(_));
                 if room_gone {
                     if !retried_dead_room {
                         retried_dead_room = true;
+                        if room_sealed {
+                            // #1108 follow-up: a sealed actor can still
+                            // be registered when the guarded destroy's
+                            // seal ask timed out — the registry lookup
+                            // would hand back the same sealed actor and
+                            // the retry would fail identically. Purge it
+                            // so get-or-create respawns a fresh room.
+                            let _ = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                                .reap_sealed_room(room_jid.clone())
+                                .await;
+                        }
                         continue;
                     }
                     warn!(room = %room_jid, nick = %nick, error = ?error, "MUC join failed twice against a destroyed room actor");

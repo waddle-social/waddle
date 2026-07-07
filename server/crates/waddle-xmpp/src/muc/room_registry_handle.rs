@@ -36,7 +36,7 @@ use super::affiliation::DurableMembershipSource;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom,
-    IsMucJid, ListRooms, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor,
+    IsMucJid, ListRooms, ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor,
     RoomRegistryError,
 };
 use super::RoomConfig;
@@ -328,6 +328,15 @@ impl RoomRegistry {
         ) -> bool,
         "destroy_room_if_inactive",
         DestroyRoomIfInactive { room_jid, expected_occupancy_revision, guard }
+    );
+
+    registry_method!(
+        /// Purge a sealed-but-registered room actor left behind by a
+        /// timed-out guarded destroy (#1108 follow-up). Returns whether
+        /// one was removed.
+        reap_sealed_room(room_jid: BareJid) -> bool,
+        "reap_sealed_room",
+        ReapSealedRoom { room_jid }
     );
 
     registry_method!(

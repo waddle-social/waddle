@@ -863,9 +863,32 @@ impl kameo::message::Message<IsDormant> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         DormancyStatus {
-            dormant: self.room.is_dormant(),
+            // A sealed actor is dormant by definition: the seal already
+            // certified inactivity and refuses every admission since.
+            // Without this, an EmptyNonPersistent seal whose registry
+            // reply timed out (explicit creator-Owner grant keeps
+            // `is_dormant()` false) would never be re-confirmed by the
+            // janitor — a permanently unjoinable registered room.
+            dormant: self.sealed || self.room.is_dormant(),
             occupancy_revision: self.occupancy_revision,
         }
+    }
+}
+
+/// Whether this actor was sealed for destruction (#1108). Used by the
+/// registry's [`super::room_registry_actor::ReapSealedRoom`] to purge
+/// a sealed actor left registered by a timed-out guarded destroy.
+pub struct IsSealed;
+
+impl kameo::message::Message<IsSealed> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        _msg: IsSealed,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.sealed
     }
 }
 

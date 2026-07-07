@@ -822,3 +822,69 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
          durable, non-live recipient"
     );
 }
+
+/// gpt-5.5 review follow-up to #1108: when the registry's seal ask
+/// times out but the seal lands anyway, the sealed actor stays
+/// registered and every join gets RoomSealed. ReapSealedRoom purges
+/// exactly that state so the join retry respawns a fresh room.
+#[tokio::test]
+async fn reap_sealed_room_purges_a_sealed_but_registered_actor() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("stuck");
+    let acquisition: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig {
+                persistent: false,
+                ..RoomConfig::default()
+            },
+        })
+        .await
+        .expect("create");
+    // Seal directly, simulating a SealIfInactive that ran after the
+    // registry's DestroyRoomIfInactive ask had already timed out.
+    let sealed = acquisition
+        .actor_ref
+        .ask(crate::muc::room_actor::SealIfInactive {
+            expected_occupancy_revision: 0,
+            guard: crate::muc::room_actor::SealGuard::EmptyNonPersistent,
+        })
+        .await
+        .expect("seal");
+    assert!(sealed, "fresh empty instant room must seal");
+
+    let reaped: bool = registry
+        .ask(ReapSealedRoom {
+            room_jid: jid.clone(),
+        })
+        .await
+        .expect("reap");
+    assert!(reaped, "the sealed actor must be purged from the registry");
+
+    // A subsequent get-or-create must respawn: the caller is the
+    // creator again, and the new actor accepts joins.
+    let fresh: RoomAcquisition = registry
+        .ask(GetOrCreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig {
+                persistent: false,
+                ..RoomConfig::default()
+            },
+        })
+        .await
+        .expect("recreate");
+    assert_eq!(fresh.creation, RoomCreation::Created);
+
+    // Reaping a live (unsealed) room must refuse.
+    let not_reaped: bool = registry
+        .ask(ReapSealedRoom {
+            room_jid: jid.clone(),
+        })
+        .await
+        .expect("reap live");
+    assert!(!not_reaped, "an unsealed room must never be reaped");
+}

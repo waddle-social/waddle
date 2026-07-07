@@ -3327,3 +3327,48 @@ async fn resolver_write_does_not_downgrade_explicit_grant() {
         "the surviving explicit grant must keep blocking dormancy"
     );
 }
+
+/// gpt-5.5 review follow-up to #1108: a sealed actor must report
+/// dormant even when explicit affiliations would normally block
+/// dormancy (the EmptyNonPersistent guard seals instant rooms holding
+/// the creator's Owner grant). Otherwise a seal whose registry reply
+/// timed out leaves a sealed-but-registered room the janitor never
+/// re-confirms — permanently unjoinable.
+#[tokio::test]
+async fn sealed_room_reports_dormant_so_the_sweep_converges() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        persistent: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let owner: BareJid = "creator@example.com".parse().expect("bare jid");
+    actor
+        .ask(ChangeAffiliation {
+            jid: owner,
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+    let probe = actor
+        .ask(crate::muc::room_actor::IsDormant)
+        .await
+        .expect("dormancy probe before seal");
+    let sealed = actor
+        .ask(crate::muc::room_actor::SealIfInactive {
+            expected_occupancy_revision: probe.occupancy_revision,
+            guard: crate::muc::room_actor::SealGuard::EmptyNonPersistent,
+        })
+        .await
+        .expect("seal");
+    assert!(sealed, "empty non-persistent room must seal");
+
+    let status = actor
+        .ask(crate::muc::room_actor::IsDormant)
+        .await
+        .expect("dormancy probe");
+    assert!(
+        status.dormant,
+        "a sealed room must report dormant regardless of explicit \
+         affiliations, so the next sweep re-confirms the seal"
+    );
+}

@@ -15,7 +15,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::affiliation::DurableMembershipSource;
-use super::room_actor::{HydrateDurableRecipients, RoomActor, SealGuard, SealIfInactive};
+use super::room_actor::{HydrateDurableRecipients, IsSealed, RoomActor, SealGuard, SealIfInactive};
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
 use crate::xep::xep0421::OccupantIdSecret;
@@ -384,6 +384,65 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     room = %msg.room_jid,
                     error = ?error,
                     "Guarded destroy seal ask failed; keeping the room"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Purge a sealed room actor that is still registered (#1108
+/// follow-up): when [`DestroyRoomIfInactive`]'s seal ask times out but
+/// the queued [`SealIfInactive`] lands anyway, the actor stays in the
+/// map, sealed, refusing every join. The join retry path sends this
+/// before re-running get-or-create so the room respawns immediately
+/// instead of waiting for the next janitor sweep.
+///
+/// Returns `true` when a sealed (or dead) actor was removed. Never
+/// removes on uncertainty: a timeout or an unsealed reply keeps the
+/// room.
+pub struct ReapSealedRoom {
+    pub room_jid: BareJid,
+}
+
+impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: ReapSealedRoom,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(actor_ref) = self.rooms.get(&msg.room_jid).cloned() else {
+            return false;
+        };
+        if !actor_ref.is_alive() {
+            self.rooms.remove(&msg.room_jid);
+            self.poisoned_rooms.remove(&msg.room_jid);
+            info!(room = %msg.room_jid, "Reaped dead room actor during sealed-room purge");
+            return true;
+        }
+        let sealed = actor_ref
+            .ask(IsSealed)
+            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+            .reply_timeout(SEAL_ASK_TIMEOUT)
+            .await;
+        match sealed {
+            Ok(true) => {
+                self.rooms.remove(&msg.room_jid);
+                self.poisoned_rooms.remove(&msg.room_jid);
+                info!(
+                    room = %msg.room_jid,
+                    "Reaped sealed room actor left by a timed-out guarded destroy"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                warn!(
+                    room = %msg.room_jid,
+                    error = ?error,
+                    "Sealed-room probe failed; keeping the room"
                 );
                 false
             }
