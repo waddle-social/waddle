@@ -256,3 +256,45 @@ fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPer
         ))),
     }
 }
+
+#[cfg(test)]
+mod presence_payloads_tests {
+    use super::{parse_presence_payloads, serialize_presence_payloads};
+    use xmpp_parsers::minidom::Element;
+
+    #[test]
+    fn empty_payloads_serialize_to_none_so_the_column_stays_null() {
+        assert_eq!(serialize_presence_payloads(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn null_or_empty_column_parses_to_no_payloads() {
+        assert!(parse_presence_payloads(None).unwrap().is_empty());
+        assert!(parse_presence_payloads(Some(String::new()))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn multiple_payloads_round_trip_verbatim_and_in_order() {
+        let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+            .parse()
+            .unwrap();
+        let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+            .parse()
+            .unwrap();
+        let encoded = serialize_presence_payloads(&[caps.clone(), idle.clone()])
+            .unwrap()
+            .expect("non-empty payloads serialize to Some");
+        let decoded = parse_presence_payloads(Some(encoded)).unwrap();
+        assert_eq!(decoded, vec![caps, idle]);
+    }
+
+    #[test]
+    fn malformed_column_is_a_typed_error_not_a_panic() {
+        // A corrupted / truncated column must surface as a typed decode
+        // error (which drops the session as a poison pill on restore),
+        // never a panic that bricks cold startup.
+        assert!(parse_presence_payloads(Some("<c xmlns='urn:x'".to_string())).is_err());
+    }
+}
