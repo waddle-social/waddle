@@ -1004,6 +1004,7 @@ mod orphan_reaper_sweep_tests {
             lease_ttl: Some(lease_ttl),
             pod_template_hash: None,
             resume_bridge: None,
+            ordered_relay_delivery_bridge: None,
             stop_token: None,
             resume_handshake_timeout: None,
         };

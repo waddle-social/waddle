@@ -38,6 +38,8 @@ async fn handle_xmpp_frame_impl(
         phase,
         authenticated_session,
         sm_state,
+        sm_inbound_completion,
+        ordered_relay_handoff_tx,
         carbons_enabled,
         presence_available,
         presence_show,
@@ -219,11 +221,15 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::Stanza(stanza) => {
-            // Count inbound stanzas for XEP-0198: iq/message/presence always
-            // count; SM control nonzas and framing elements are excluded above.
-            if sm_state.enabled {
-                sm_state.increment_inbound();
-            }
+            let reserved_inbound_for_sm = sm_state
+                .enabled
+                .then(|| sm_inbound_completion.reserve(sm_state));
+            let ordered_relay_origin = ordered_relay_origin_for_inbound_stanza(
+                sm_state,
+                phase.bound_jid(),
+                reserved_inbound_for_sm,
+                ordered_relay_handoff_tx.as_ref(),
+            );
 
             // Resource binding is stream setup, not request processing: handle
             // it inline and return BEFORE the wedge backstop (#808 ADR-008 scope
@@ -236,7 +242,11 @@ async fn handle_xmpp_frame_impl(
                         if e.ns() == waddle_xmpp::ns::BIND
                 );
                 if is_bind {
-                    return handle_resource_binding(iq, domain, phase);
+                    let responses = handle_resource_binding(iq, domain, phase);
+                    if let Some(inbound_sequence) = reserved_inbound_for_sm {
+                        sm_inbound_completion.complete(inbound_sequence, sm_state);
+                    }
+                    return responses;
                 }
             }
 
@@ -255,6 +265,7 @@ async fn handle_xmpp_frame_impl(
                             roster_interested,
                             blocklist_interested,
                             state_machine: state_machine.as_mut(),
+                            ordered_relay_origin: ordered_relay_origin.clone(),
                         };
                         handlers::iq::handle_iq_with_conn_state(
                             *iq,
@@ -288,12 +299,156 @@ async fn handle_xmpp_frame_impl(
                             phase,
                             state_machine.as_mut(),
                             authenticated_session.as_ref(),
+                            ordered_relay_origin.clone(),
                         )
                         .await
                     }
                 }
             };
-            run_with_backstop(backstop, dispatch).await
+            let responses = run_with_backstop(backstop, dispatch).await;
+            if let Some(inbound_sequence) = reserved_inbound_for_sm {
+                if !ordered_relay_origin_was_deferred(&ordered_relay_origin) {
+                    sm_inbound_completion.complete(inbound_sequence, sm_state);
+                }
+            }
+            responses
         }
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn ordered_relay_origin_for_inbound_stanza(
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+    bound_jid: Option<&jid::FullJid>,
+    inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
+    handoff_tx: Option<
+        &tokio::sync::mpsc::UnboundedSender<
+            crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+        >,
+    >,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    if sm_state.enabled {
+        let stream_id = sm_state.stream_id.as_ref()?;
+        let inbound_sequence = inbound_sequence?;
+        return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
+                waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
+            ),
+            inbound_sequence: inbound_sequence.0,
+            handoff: handoff_tx.map(|tx| {
+                crate::server::routes::interpret::OrderedRelayHandoffHandle::new(
+                    inbound_sequence,
+                    tx.clone(),
+                )
+            }),
+        });
+    }
+    bound_jid.map(
+        |jid| crate::server::routes::interpret::OrderedRelayRouteOrigin {
+            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                waddle_xmpp::ownership::Entity::new(
+                    waddle_xmpp::ownership::EntityType::UserActor,
+                    jid.to_bare().to_string(),
+                ),
+            ),
+            inbound_sequence: 0,
+            handoff: None,
+        },
+    )
+}
+
+#[cfg(not(feature = "clustering"))]
+fn ordered_relay_origin_for_inbound_stanza(
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+    bound_jid: Option<&jid::FullJid>,
+    inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
+    handoff_tx: Option<
+        &tokio::sync::mpsc::UnboundedSender<
+            crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+        >,
+    >,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    let _ = (sm_state, bound_jid, inbound_sequence, handoff_tx);
+    None
+}
+
+#[cfg(feature = "clustering")]
+fn ordered_relay_origin_was_deferred(
+    origin: &Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) -> bool {
+    origin
+        .as_ref()
+        .and_then(|origin| origin.handoff.as_ref())
+        .is_some_and(|handoff| handoff.was_deferred())
+}
+
+#[cfg(not(feature = "clustering"))]
+fn ordered_relay_origin_was_deferred(
+    origin: &Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) -> bool {
+    let _ = origin;
+    false
+}
+
+#[cfg(feature = "clustering")]
+pub(super) fn ordered_relay_origin_from_sm(
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+    bound_jid: Option<&jid::FullJid>,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    if sm_state.enabled {
+        let stream_id = sm_state.stream_id.as_ref()?;
+        return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
+                waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
+            ),
+            inbound_sequence: sm_state.get_inbound_count(),
+            handoff: None,
+        });
+    }
+    bound_jid.map(
+        |jid| crate::server::routes::interpret::OrderedRelayRouteOrigin {
+            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                waddle_xmpp::ownership::Entity::new(
+                    waddle_xmpp::ownership::EntityType::UserActor,
+                    jid.to_bare().to_string(),
+                ),
+            ),
+            inbound_sequence: 0,
+            handoff: None,
+        },
+    )
+}
+
+#[cfg(not(feature = "clustering"))]
+pub(super) fn ordered_relay_origin_from_sm(
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+    bound_jid: Option<&jid::FullJid>,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    let _ = (sm_state, bound_jid);
+    None
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_sm_peer_side_route_uses_user_actor_origin() {
+        let sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        let bound: jid::FullJid = "romeo.test/phone".parse().expect("full jid");
+
+        let origin = ordered_relay_origin_from_sm(&sm_state, Some(&bound)).expect("non-SM origin");
+
+        assert_eq!(origin.inbound_sequence, 0);
+        assert!(origin.handoff.is_none());
+        assert_eq!(
+            origin.kind,
+            crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                waddle_xmpp::ownership::Entity::new(
+                    waddle_xmpp::ownership::EntityType::UserActor,
+                    "romeo.test"
+                )
+            )
+        );
     }
 }

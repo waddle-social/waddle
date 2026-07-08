@@ -498,3 +498,112 @@ changes slice scope, XEP behavior, or operational requirements.
     debug-only in-module matrix as a local regression net. This preserves the
     Slice 2 behavior contract without changing XEP wire behavior or runtime
     requirements.
+14. Slice 3 started with an intentionally narrow full-JID production pass
+    instead of the whole 1:1/bare-JID matrix. The as-landed first pass adds a
+    construction-order `OrderedRelayDeliveryBridge`, wires it into the relay
+    actor, revalidates origin SM and target UserActor claims before applying a
+    local `TrySendPeer` effect, and commits the receiver sequence only after
+    live delivery, detached queueing, or a terminal drop. Origin-side
+    full-JID routing attempts the relay only when a live SM origin context and
+    fresh foreign UserActor claim are present; otherwise it keeps the existing
+    local path. Receiver `Unavailable` NACKs flow back to the origin so the
+    existing undeliverable full-JID IQ fallback, including Jingle
+    `session-terminate` empty-result ack behavior, remains the only
+    client-visible reply shape. Bare-JID fan-out, full multi-process DM proof,
+    XEP-0198 pending-handoff counter tests, and MUC/presence routing remain
+    open Slice 3/4 work, not silently claimed by this partial pass.
+15. Slice 3 adversarial review found that Postgres claim checks alone did not
+    prove the libp2p sender was the claimed owner. The correction adds a
+    signed `origin_proof` to `RemoteStanzaEnvelope`, binds node leases to the
+    swarm `PeerId`, and verifies the signature, public key, derived `PeerId`,
+    current owner claim, and current target claim before any receiver-side
+    delivery effect. The proof is internal relay metadata only; it is never
+    serialized into client-visible XMPP XML.
+16. Slice 3 XEP/convergence review found three wire-semantics traps in the
+    first full-JID pass: some definite no-effect relay failures for full-JID
+    IQs could be collapsed into `Dropped` instead of the existing typed IQ
+    fallback path, delivery receipts generated on a remote recipient node did
+    not inherit an ordered-relay origin context for cross-node return routing,
+    and MUC proxy `RoomIq` did not distinguish bare-room IQs from
+    occupant-directed IQs. The correction classifies only definite no-effect
+    ask/NACK failures as `Unavailable` for IQ fallback while preserving
+    ambiguous-timeout `Dropped`, propagates the SM-derived relay origin through
+    `PeerStanza` outbound interpretation, and splits MUC IQ proxy validation
+    into `BareRoomIq` and `OccupantIq` with bare/full address-shape tests.
+    This preserves client-visible XEP-0184, XEP-0198, XEP-0045, and IQ
+    semantics while tightening the internal relay contract.
+17. Slice 3 correctness/XEP review then found that no-commit ordered failures
+    could rewind sender sequence state, ordered delivery awaited local effects
+    inside the single relay actor mailbox, the default ordered-delivery ask
+    budget could outlive the WebSocket stanza wedge backstop, and receiver-side
+    `Dropped` peer delivery was being ACKed as if the recipient node had taken
+    responsibility. The correction sticky-diverts the origin channel on
+    NACK/ask failure instead of deleting sender sequence state, delegates
+    `RelayDeliverOrdered` replies through `Context::spawn` while keeping
+    reserve/commit serialized behind the receiver state, caps full-JID ordered
+    delivery asks below the stanza backstop, maps receiver `Dropped` to a
+    `Backpressure` NACK, and moves live SM inbound-counter advancement until
+    after stanza dispatch returns while carrying the prospective count in the
+    relay envelope. This reduces false ACK/loss and actor head-of-line
+    blocking, but it does not complete the larger GA work for asynchronous
+    pending-handoff SM accounting, immediate `<r/>` while a handoff is still
+    pending, non-SM server-assigned origin provenance, or stale-owner resend to
+    a fresh foreign owner; those remain open before Helm unlock.
+18. Slice 3 follow-up implements the SM-backed GA blockers from item 17:
+    the origin WebSocket now reserves XEP-0198 inbound handled-count slots per
+    stanza, defers completion when ordered relay takes responsibility in a
+    background task, keeps `<r/>` responses immediate with `h` advancing only
+    after contiguous handoff completion, and waits for pending handoff
+    completions before SM cleanup snapshots a dead transport. A later review
+    removed both the spawned-handoff timeout and the cleanup drain timeout:
+    those timeouts could turn a still-running relay handoff into a stale
+    XEP-0198 detach snapshot. The relay ask path itself remains bounded and
+    classifies definite no-effect failures with typed outcomes.
+19. Slice 3 ordered-channel hardening now makes target ownership part of the
+    channel identity via `target_epoch`, splits relay `NotOwner` NACKs by
+    origin-vs-target claim role, retries the current stanza once on a fresh
+    foreign target-owner channel for `NotFound`/`NoEffect` failures, and keeps
+    ambiguous `MaybeCommitted` failures terminal. Per-channel sender locking
+    serializes origin-side sequence allocation and relay asks for one lane, with
+    a bounded lock map and sticky diversion on backpressure. Receiver-side
+    reservations are marked in flight before local delivery effects run, so
+    duplicate same-sequence asks cannot execute the receiver effect twice while
+    the first commit is pending.
+20. Slice 3 protocol scope was tightened rather than broadened by the final
+    XEP review: groupchat messages are excluded from the generic full-JID
+    bridge and remain Slice 4 MUC proxying work, and non-SM server-generated
+    side routes stay local instead of inventing a `UserActor` provenance lane.
+    XEP-0184 receipts can still return cross-node when they inherit the
+    original SM-backed ordered-relay origin through the recipient pass. The
+    real multi-process capstone now provisions the claim schema, signs
+    proof-valid ordered envelopes, registers the synthetic origin node, and
+    targets a real resource connected on the receiving node. Origin `NotOwner`
+    remains a terminal provenance failure; broader bare-JID/MUC/presence
+    routing remains open Slice 3/4 work.
+21. Slice 3 convergence review found the remaining 1:1 GA gaps in the first
+    hot-path patch: bare-JID target-owner refresh could fall back to
+    unavailable instead of local RFC 6121 fan-out when the fresh owner was this
+    node, receiver-side bare-JID delivery had no local-dispatch timeout, the
+    generic user-message relay path accepted `groupchat`, bare-JID channels
+    accepted full-JID payloads whose bare form matched, and full-JID IQ
+    receiver delivery bypassed the recipient `PeerStanza` pass. The correction
+    routes bare-JID DM/IQ/presence payloads over the same ordered relay channel
+    using the exact bare recipient as the channel identity, rejects groupchat
+    outside the MUC proxy payload, wraps receiver-side local bare-JID dispatch
+    in a bounded timeout, maps local fallback replies back to the origin's
+    existing IQ fallback behavior, and sends full-JID IQs through
+    `UserActor::TrySendPeer` so XEP-0191, XEP-0359, XEP-0313, XEP-0280, and
+    inbox projection stay on the normal recipient path. A boxed future boundary
+    in `route_to_connection` is compile-structure only; it does not change
+    XMPP wire behavior.
+22. Slice 3 receiver timeout review split no-effect backpressure from
+    ambiguous receiver effects. The relay now bounds the entire receiver-side
+    reserved effect before committing an ACK, but timeout after validation or
+    local dispatch has started NACKs as internal `MaybeCommitted`, not
+    `Backpressure`, and preserves that provenance in the sticky receiver
+    diversion so replays remain conservative. The origin maps direct
+    `MaybeCommitted` and `Diverted(MaybeCommitted)` to `Dropped`, avoiding
+    synthesized IQ fallback or retry assumptions for a stanza that may already
+    have archived, updated inbox state, emitted carbons, or reached a live
+    resource. Pre-effect failures such as full outbound channels still use
+    `Backpressure` and remain definite no-effect.

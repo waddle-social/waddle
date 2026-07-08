@@ -88,6 +88,8 @@ pub mod resume_asker;
 /// scenario.
 #[cfg(feature = "clustering")]
 pub mod resume_bridge;
+#[cfg(feature = "clustering")]
+pub mod route_bridge;
 /// Self-fencing, isolation detection, and re-registration hysteresis
 /// (ADR-0017 Phase 3 Slice 2). Public for the same reason as
 /// [`claims`]/[`lease`]: the harness drives the node-lease loop directly.
@@ -378,6 +380,11 @@ pub struct ClusteringHandles {
     /// `local_claims`). Feature-gated for the same reason as `local_claims`.
     #[cfg(feature = "clustering")]
     pub resume_bridge: Option<Arc<resume_bridge::ResumeStealBridge>>,
+    /// ADR-0017 Phase 4 Slice 3: bridge used by the relay actor to apply
+    /// ordered full-JID delivery effects locally, plus the shared sender-side
+    /// sequence allocator used by origin routing calls.
+    #[cfg(feature = "clustering")]
+    pub ordered_relay_delivery_bridge: Option<Arc<route_bridge::OrderedRelayDeliveryBridge>>,
     /// This node's clustering-scope cancellation token (the same child
     /// token every clustering task races against — see
     /// `clustering_scope_token`'s doc comment). Exposed so a caller outside
@@ -572,6 +579,10 @@ pub async fn start_if_enabled(
         // applies. The swarm's `RelayActor` answers `RelayResumeSteal` asks
         // through this exact `Arc`.
         let resume_bridge = resume_bridge::ResumeStealBridge::new();
+        let ordered_relay_delivery_bridge = route_bridge::OrderedRelayDeliveryBridge::new(
+            clustering_stop.clone(),
+            &config.messaging,
+        );
         // ADR-0017 Phase 3 Slice 7: constructed empty for the same
         // construction-order reason as `resume_bridge` — the MUC room
         // registry doesn't exist yet at this point in startup (it is
@@ -592,6 +603,7 @@ pub async fn start_if_enabled(
             swarm::RelayBridges {
                 resume_bridge: Arc::clone(&resume_bridge),
                 room_local_claims: Arc::clone(&room_local_claims),
+                ordered_relay_delivery_bridge: Arc::clone(&ordered_relay_delivery_bridge),
             },
         )
         .await?;
@@ -619,7 +631,14 @@ pub async fn start_if_enabled(
         // (parsed once in `config.rs`'s `from_vars` pipeline, like every
         // sibling var) rather than a raw `std::env::var` at this call site.
         let pod_template_hash = config.pod_template_hash.clone();
-        register_node_lease(&node_lease, &node_identity, pod_template_hash.clone()).await?;
+        let local_peer_id = handle.local_peer_id.to_string();
+        register_node_lease(
+            &node_lease,
+            &node_identity,
+            pod_template_hash.clone(),
+            Some(local_peer_id.clone()),
+        )
+        .await?;
 
         // ADR-0017 Phase 3 Slice 4 follow-up plumbing: hand back a
         // `ClaimStore` view onto the same `clustering_claims` rows the
@@ -702,6 +721,7 @@ pub async fn start_if_enabled(
             lease_ttl: Some(config.node_lease.lease_ttl),
             pod_template_hash: pod_template_hash.clone(),
             resume_bridge: Some(resume_bridge),
+            ordered_relay_delivery_bridge: Some(ordered_relay_delivery_bridge),
             stop_token: Some(clustering_stop.clone()),
             resume_handshake_timeout: Some(config.resume_handshake.timeout),
         };
@@ -722,6 +742,7 @@ pub async fn start_if_enabled(
                 local_claims: combined_local_claims,
                 readiness,
                 live_identity,
+                peer_id: Some(local_peer_id),
                 // FIX 4(b): the same `ClaimStore` view onto
                 // `clustering_claims` as `claim_store_handle` above —
                 // wraps the same `db` clone, never a second, independent
@@ -743,10 +764,11 @@ async fn register_node_lease(
     node_lease: &claims::PostgresClaimStore,
     identity: &waddle_xmpp::ownership::NodeIdentity,
     pod_template_hash: Option<String>,
+    peer_id: Option<String>,
 ) -> Result<(), ClusteringError> {
     use claims::NodeLeaseStore as _;
     node_lease
-        .register(identity, pod_template_hash)
+        .register_with_peer_id(identity, pod_template_hash, peer_id)
         .await
         .map_err(ClusteringError::NodeLease)
 }

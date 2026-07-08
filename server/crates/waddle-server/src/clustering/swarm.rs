@@ -186,6 +186,7 @@ pub async fn spawn(
 pub struct RelayBridges {
     pub resume_bridge: Arc<super::resume_bridge::ResumeStealBridge>,
     pub room_local_claims: Arc<super::local_claims::RoomLocalClaims>,
+    pub ordered_relay_delivery_bridge: Arc<super::route_bridge::OrderedRelayDeliveryBridge>,
 }
 
 /// The fallible remainder of swarm bring-up after the keypair-slot lease:
@@ -204,8 +205,10 @@ async fn bring_up(
     let RelayBridges {
         resume_bridge,
         room_local_claims,
+        ordered_relay_delivery_bridge,
     } = relay_bridges;
     let local_peer_id = keypair.public().to_peer_id();
+    ordered_relay_delivery_bridge.wire_origin_signer(keypair.clone());
 
     // Peer authorization (ADR element 3): load the enrolled peer set before
     // the swarm accepts anything. An empty allowlist is deny-all — correct for
@@ -309,6 +312,7 @@ async fn bring_up(
         stop_token.clone(),
         resume_bridge,
         room_local_claims,
+        ordered_relay_delivery_bridge,
     );
 
     let handle = SwarmHandle {
@@ -966,6 +970,11 @@ mod tests {
             RelayBridges {
                 resume_bridge: crate::clustering::resume_bridge::ResumeStealBridge::new(),
                 room_local_claims: crate::clustering::local_claims::RoomLocalClaims::new(),
+                ordered_relay_delivery_bridge:
+                    crate::clustering::route_bridge::OrderedRelayDeliveryBridge::new(
+                        stop.clone(),
+                        &config.messaging,
+                    ),
             },
         )
         .await
@@ -1039,6 +1048,11 @@ mod tests {
             RelayBridges {
                 resume_bridge: crate::clustering::resume_bridge::ResumeStealBridge::new(),
                 room_local_claims: crate::clustering::local_claims::RoomLocalClaims::new(),
+                ordered_relay_delivery_bridge:
+                    crate::clustering::route_bridge::OrderedRelayDeliveryBridge::new(
+                        CancellationToken::new(),
+                        &config.messaging,
+                    ),
             },
         )
         .await

@@ -54,13 +54,13 @@ use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStore};
-use waddle_server::clustering::claims::PostgresClaimStore;
+use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
 use waddle_server::clustering::ordered_relay::{
-    OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayPayload,
-    OrderedRelayRecipient, OrderedRelayReply, OrderedRelaySenderState, OrderedRelaySequence,
-    OriginInboundSequence, RemoteStanzaEnvelope,
+    OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayOrigin,
+    OrderedRelayOriginProof, OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply,
+    OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence, RemoteStanzaEnvelope,
 };
 use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
 use waddle_server::clustering::swarm;
@@ -68,7 +68,7 @@ use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 
 const POOL_SIZE: usize = 4;
 const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
@@ -79,25 +79,50 @@ struct EnrolledPool {
     pool_env: String,
     /// PeerIds derived from every pool slot (all enrolled).
     peer_ids: Vec<libp2p::PeerId>,
+    seeds: Vec<Vec<u8>>,
 }
 
 fn generate_pool() -> EnrolledPool {
+    let mut encoded_seeds = Vec::new();
     let mut seeds = Vec::new();
     let mut peer_ids = Vec::new();
     for _ in 0..POOL_SIZE {
         let keypair = ed25519::Keypair::generate();
         let seed = keypair.secret().as_ref().to_vec();
+        seeds.push(seed.clone());
         peer_ids.push(
             libp2p::identity::Keypair::from(keypair)
                 .public()
                 .to_peer_id(),
         );
-        seeds.push(base64::engine::general_purpose::STANDARD.encode(seed));
+        encoded_seeds.push(base64::engine::general_purpose::STANDARD.encode(seed));
     }
     EnrolledPool {
-        pool_env: seeds.join(","),
+        pool_env: encoded_seeds.join(","),
         peer_ids,
+        seeds,
     }
+}
+
+fn keypair_for_peer(pool: &EnrolledPool, peer_id: &libp2p::PeerId) -> libp2p::identity::Keypair {
+    for seed in &pool.seeds {
+        let mut seed = seed.clone();
+        let secret =
+            ed25519::SecretKey::try_from_bytes(&mut seed).expect("valid enrolled seed bytes");
+        let keypair = libp2p::identity::Keypair::from(ed25519::Keypair::from(secret));
+        if keypair.public().to_peer_id() == *peer_id {
+            return keypair;
+        }
+    }
+    panic!("test-process peer id was not derived from enrolled pool");
+}
+
+fn sign_ordered_envelope(envelope: &mut RemoteStanzaEnvelope, keypair: &libp2p::identity::Keypair) {
+    let signing_bytes = envelope.signing_bytes().expect("ordered signing bytes");
+    envelope.origin_proof = Some(OrderedRelayOriginProof {
+        public_key: keypair.public().encode_protobuf(),
+        signature: keypair.sign(&signing_bytes).expect("sign envelope"),
+    });
 }
 
 async fn open_control_db(url: &str) -> Database {
@@ -117,8 +142,14 @@ async fn open_control_db(url: &str) -> Database {
 
 /// Reset the clustering control-plane tables and enroll every pool PeerId.
 async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
+    use waddle_xmpp::ownership::ClaimStore as _;
+
     // Provision the schema through the production `ensure_schema` path — an
     // inline DDL copy here could silently diverge as the schema evolves.
+    PostgresClaimStore::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("claims schema");
     PostgresKeypairSlotLease::new(db.clone())
         .ensure_schema()
         .await
@@ -128,6 +159,12 @@ async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
         .await
         .expect("allowlist schema");
     let conn = db.guard().await.expect("guard");
+    conn.execute("DELETE FROM clustering_claims", ())
+        .await
+        .expect("clean claims");
+    conn.execute("DELETE FROM clustering_nodes", ())
+        .await
+        .expect("clean nodes");
     conn.execute("DELETE FROM clustering_keypair_slots", ())
         .await
         .expect("clean slots");
@@ -325,42 +362,43 @@ fn thread_message(id: &str, body_size: usize) -> RemoteStanza {
     RemoteStanza(waddle_xmpp::Stanza::Message(message))
 }
 
-fn ordered_channel(id: &str) -> OrderedRelayChannel {
+fn ordered_channel(
+    id: &str,
+    target: &jid::FullJid,
+    target_epoch: ClaimEpoch,
+) -> OrderedRelayChannel {
     OrderedRelayChannel {
-        origin_stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(id),
-        recipient: OrderedRelayRecipient::BareJid(
-            "ordered-recipient@localhost".parse().expect("bare jid"),
-        ),
+        origin: OrderedRelayOrigin::SmSession(waddle_xmpp::pending_delivery::SmSessionId::new(id)),
+        recipient: OrderedRelayRecipient::FullJid(target.clone()),
+        target_epoch,
     }
 }
 
-fn ordered_origin_claim(id: &str) -> OrderedRelayClaim {
+fn ordered_origin_claim(id: &str, epoch: ClaimEpoch) -> OrderedRelayClaim {
     OrderedRelayClaim {
         entity: Entity::new(EntityType::SmSession, id),
-        epoch: ClaimEpoch(0),
+        epoch,
     }
 }
 
-fn ordered_target_claim() -> OrderedRelayClaim {
+fn ordered_target_claim(target: &jid::FullJid, epoch: ClaimEpoch) -> OrderedRelayClaim {
     OrderedRelayClaim {
-        entity: Entity::new(EntityType::UserActor, "ordered-recipient@localhost"),
-        epoch: ClaimEpoch(0),
+        entity: Entity::new(EntityType::UserActor, target.to_bare().to_string()),
+        epoch,
     }
 }
 
-fn ordered_message_payload(id: &str, body_size: usize) -> OrderedRelayPayload {
+fn ordered_message_payload(
+    id: &str,
+    body_size: usize,
+    target: &jid::FullJid,
+) -> OrderedRelayPayload {
     let mut stanza = thread_message(id, body_size);
     if let waddle_xmpp::Stanza::Message(message) = &mut stanza.0 {
-        message.to = Some(
-            "ordered-recipient@localhost/device"
-                .parse()
-                .expect("full jid"),
-        );
+        message.to = Some(jid::Jid::from(target.clone()));
     }
     OrderedRelayPayload::Message {
-        recipient: "ordered-recipient@localhost/device"
-            .parse()
-            .expect("full jid"),
+        recipient: jid::Jid::from(target.clone()),
         stanza,
     }
 }
@@ -468,6 +506,11 @@ async fn cluster_exit_criteria_end_to_end() {
         swarm::RelayBridges {
             resume_bridge: waddle_server::clustering::resume_bridge::ResumeStealBridge::new(),
             room_local_claims: waddle_server::clustering::local_claims::RoomLocalClaims::new(),
+            ordered_relay_delivery_bridge:
+                waddle_server::clustering::route_bridge::OrderedRelayDeliveryBridge::new(
+                    stop.clone(),
+                    &config.messaging,
+                ),
         },
     )
     .await
@@ -505,26 +548,172 @@ async fn cluster_exit_criteria_end_to_end() {
         other => panic!("expected message, got {}", other.name()),
     }
 
-    // --- Phase 4 Slice 2: ordered relay substrate over the real cross-node
-    // relay, still with no production routing caller. The receiver ACKs the
-    // first envelope, ACKs an exact duplicate idempotently, and NACKs a gap
-    // without calling any delivery actor.
+    // --- Phase 4 Slice 3: ordered relay over the real cross-node relay.
+    // The receiver validates origin proof + origin/target claims, delivers
+    // to a live target resource on node A, ACKs an exact duplicate
+    // idempotently, and NACKs a later gap.
+    use waddle_xmpp::ownership::ClaimStore as _;
+
+    let mut ordered_target_client = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        "ordered-device",
+    )
+    .await
+    .expect("cluster-peer target connects to node A");
+    let ordered_target_full: jid::FullJid = ordered_target_client
+        .full_jid
+        .as_ref()
+        .expect("target bind full jid")
+        .parse()
+        .expect("target full jid");
+
+    let claim_store = PostgresClaimStore::new(db.clone());
     let ordered_stream_id = "ordered-e2e-stream";
+    let origin_identity = NodeIdentity::new(
+        handle.node_id.as_str().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    claim_store
+        .register_with_peer_id(
+            &origin_identity,
+            None,
+            Some(handle.local_peer_id.to_string()),
+        )
+        .await
+        .expect("register test-process origin node");
+    let origin_entity = Entity::new(EntityType::SmSession, ordered_stream_id);
+    let origin_epoch = claim_store
+        .acquire(&origin_entity, &origin_identity)
+        .await
+        .expect("test-process origin SM claim");
+    let target_entity = Entity::new(
+        EntityType::UserActor,
+        ordered_target_full.to_bare().to_string(),
+    );
+    let target_snapshot = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(snapshot) = claim_store
+                .current_claim(&target_entity)
+                .await
+                .expect("target user claim lookup")
+            {
+                if snapshot.owner.node_id == node_a && snapshot.owner_lease_fresh {
+                    break snapshot;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node A did not publish target UserActor claim for {target_entity}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+
+    let mut ordered_origin_client = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        "localhost",
+        "admin",
+        server_b.fixed_account_password(),
+        "ordered-origin",
+    )
+    .await
+    .expect("admin origin connects to node B");
+    ordered_origin_client
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("origin enables SM");
+    let origin_enabled = ordered_origin_client
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("origin receives SM enabled");
+    let origin_stream_id = extract_attr_after(&origin_enabled, "<enabled", "id")
+        .expect("origin enabled carries stream id");
+    let origin_sm_entity = Entity::new(EntityType::SmSession, origin_stream_id.as_str());
+    {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(snapshot) = claim_store
+                .current_claim(&origin_sm_entity)
+                .await
+                .expect("origin SM claim lookup")
+            {
+                if snapshot.owner.node_id == node_b && snapshot.owner_lease_fresh {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node B did not publish origin SM claim for {origin_sm_entity}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    let mut cross_node_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(ordered_target_full.clone())));
+    cross_node_message.thread = Some(xmpp_parsers::message::Thread {
+        id: "ordered-websocket-one".to_string(),
+        parent: None,
+    });
+    cross_node_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "phase4 cross-node route".to_string(),
+    );
+    let cross_node_xml = waddle_xmpp::parser::message_to_string(&cross_node_message)
+        .expect("serialize typed cross-node message");
+    ordered_origin_client
+        .send(&cross_node_xml)
+        .await
+        .expect("origin sends full-JID message to remote target");
+    let delivered = ordered_target_client
+        .recv_matching(|frame| {
+            frame.contains("ordered-websocket-one") && frame.contains("phase4 cross-node route")
+        })
+        .await
+        .expect("target receives origin WebSocket cross-node message");
+    assert!(
+        delivered.contains(ordered_target_full.as_str()),
+        "delivered frame should remain addressed to the target full JID: {delivered}"
+    );
+    ordered_origin_client
+        .send(r#"<r xmlns="urn:xmpp:sm:3"/>"#)
+        .await
+        .expect("origin requests handled count after remote handoff");
+    let origin_ack = ordered_origin_client
+        .recv_matching(|frame| {
+            frame.contains("<a") && (frame.contains("h=\"1\"") || frame.contains("h='1'"))
+        })
+        .await
+        .expect("origin SM ack advances after remote handoff completion");
+    assert!(
+        origin_ack.contains("h=\"1\"") || origin_ack.contains("h='1'"),
+        "origin handled count should include the cross-node stanza: {origin_ack}"
+    );
+
     let ordered_origin_node = NodeId::new(handle.node_id.as_str().to_string());
-    let ordered_channel = ordered_channel(ordered_stream_id);
-    let origin_claim = ordered_origin_claim(ordered_stream_id);
-    let target_claim = ordered_target_claim();
+    let ordered_channel = ordered_channel(
+        ordered_stream_id,
+        &ordered_target_full,
+        target_snapshot.claim_epoch,
+    );
+    let origin_claim = ordered_origin_claim(ordered_stream_id, origin_epoch);
+    let target_claim = ordered_target_claim(&ordered_target_full, target_snapshot.claim_epoch);
+    let origin_keypair = keypair_for_peer(&pool, &handle.local_peer_id);
     let mut ordered_sender = OrderedRelaySenderState::default();
-    let first_ordered = ordered_sender
+    let mut first_ordered = ordered_sender
         .next_envelope(
             ordered_origin_node.clone(),
             ordered_channel.clone(),
             OriginInboundSequence(1),
             origin_claim.clone(),
             target_claim.clone(),
-            ordered_message_payload("ordered-one", 32),
+            ordered_message_payload("ordered-one", 32, &ordered_target_full),
         )
         .expect("first ordered envelope");
+    sign_ordered_envelope(&mut first_ordered, &origin_keypair);
     let first_reply = relay_a
         .deliver_ordered(first_ordered.clone())
         .await
@@ -538,6 +727,10 @@ async fn cluster_exit_criteria_end_to_end() {
             ..
         })
     ));
+    ordered_target_client
+        .recv_matching(|frame| frame.contains("ordered-one"))
+        .await
+        .expect("target receives direct ordered relay envelope");
 
     let duplicate_reply = relay_a
         .deliver_ordered(first_ordered)
@@ -553,15 +746,17 @@ async fn cluster_exit_criteria_end_to_end() {
         })
     ));
 
-    let gap = RemoteStanzaEnvelope {
+    let mut gap = RemoteStanzaEnvelope {
         asserted_origin_node: ordered_origin_node,
         channel: ordered_channel,
         sequence: OrderedRelaySequence(3),
         origin_inbound_sequence: OriginInboundSequence(3),
         origin_claim,
         target_claim,
-        payload: ordered_message_payload("ordered-gap", 32),
+        payload: ordered_message_payload("ordered-gap", 32, &ordered_target_full),
+        origin_proof: None,
     };
+    sign_ordered_envelope(&mut gap, &origin_keypair);
     let gap_reply = relay_a
         .deliver_ordered(gap)
         .await
@@ -578,6 +773,7 @@ async fn cluster_exit_criteria_end_to_end() {
         ),
         "expected ordered relay gap NACK, got {gap_reply:?}"
     );
+    drop(ordered_target_client);
 
     // --- Exit criterion: integrity under concurrent large + small payloads.
     // (Per-(origin→recipient) sequencing is Phase 4; Phase 2 asserts that
@@ -1589,6 +1785,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             local_claims,
             readiness: ClusteringReadiness::new(),
             live_identity,
+            peer_id: None,
             claim_store,
             claim_release_budget: Duration::from_secs(5),
         },

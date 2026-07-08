@@ -357,6 +357,12 @@ pub struct NodeLeaseRunConfig {
     /// always binds the identity currently in force, never a stale
     /// pre-fence snapshot.
     pub live_identity: waddle_xmpp::ownership::SharedNodeIdentity,
+    /// The libp2p PeerId currently held by this process's leased swarm
+    /// keypair, bound into every node-lease registration for the current
+    /// process. Re-registrations mint a fresh node identity, but they do not
+    /// mint a fresh swarm keypair, so the PeerId binding intentionally stays
+    /// stable across a self-fence.
+    pub peer_id: Option<String>,
     /// ADR-0017 Phase 3 Slice 10: the graceful per-entity claim-release
     /// drain's time budget (`ClusteringNodeLeaseConfig::claim_release_budget`,
     /// `claimReleaseBudget` in the ADR's own text) — bound on
@@ -691,6 +697,7 @@ pub async fn run_node_lease<L>(
         local_claims,
         readiness,
         live_identity,
+        peer_id,
         claim_store,
         claim_release_budget,
     } = run_config;
@@ -1012,7 +1019,10 @@ pub async fn run_node_lease<L>(
                 }
                 _ = tokio::time::sleep(backoff.next_delay()) => {}
             }
-            match lease.register(&fresh, pod_template_hash.clone()).await {
+            match lease
+                .register_with_peer_id(&fresh, pod_template_hash.clone(), peer_id.clone())
+                .await
+            {
                 Ok(()) => {
                     let other_live = lease
                         .count_other_live_nodes(&fresh, config.lease_ttl)
@@ -1442,6 +1452,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -1488,6 +1499,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -1538,6 +1550,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -1600,6 +1613,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -1786,6 +1800,7 @@ mod tests {
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -2005,6 +2020,7 @@ mod tests {
                 local_claims,
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -2070,6 +2086,7 @@ mod tests {
                 local_claims,
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -2136,6 +2153,7 @@ mod tests {
                 local_claims,
                 readiness,
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -2205,6 +2223,7 @@ mod tests {
                 local_claims,
                 readiness: readiness.clone(),
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },
@@ -2329,6 +2348,7 @@ mod tests {
                 live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(
                     initial_identity.clone(),
                 ),
+                peer_id: None,
                 claim_store: task_claim_store,
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
             },

@@ -3328,6 +3328,7 @@ mod fix3_shutdown_race {
             lease_ttl: None,
             pod_template_hash: None,
             resume_bridge: None,
+            ordered_relay_delivery_bridge: None,
             stop_token: None,
             resume_handshake_timeout: Some(handshake_budget),
         };
@@ -3658,6 +3659,7 @@ mod fix_a_post_cas_shutdown {
             lease_ttl: None,
             pod_template_hash: None,
             resume_bridge: None,
+            ordered_relay_delivery_bridge: None,
             stop_token: None,
             resume_handshake_timeout: Some(handshake_budget),
         };

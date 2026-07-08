@@ -9,6 +9,7 @@ use super::codec::RemoteStanza;
 use super::NodeId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 use waddle_xmpp::pending_delivery::SmSessionId;
 
@@ -43,11 +44,27 @@ pub enum OrderedRelayRecipient {
     Room(jid::BareJid),
 }
 
-/// One origin-stream/recipient lane. Ordering is scoped to this value.
+/// Typed origin key for ordered-relay channels.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrderedRelayOrigin {
+    SmSession(SmSessionId),
+    Entity(Entity),
+}
+
+/// One origin-stream/recipient lane. Ordering is scoped to this value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderedRelayChannel {
-    pub origin_stream_id: SmSessionId,
+    pub origin: OrderedRelayOrigin,
     pub recipient: OrderedRelayRecipient,
+    pub target_epoch: ClaimEpoch,
+}
+
+impl Hash for OrderedRelayChannel {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.origin.hash(state);
+        self.recipient.hash(state);
+        self.target_epoch.0.hash(state);
+    }
 }
 
 /// Claim provenance carried on every ordered relay envelope. Slice 2 only
@@ -59,6 +76,20 @@ pub struct OrderedRelayClaim {
     pub epoch: ClaimEpoch,
 }
 
+/// Cryptographic provenance for the sender's asserted origin node.
+///
+/// The `public_key` is the sender's libp2p public key encoded with
+/// `libp2p_identity::PublicKey::encode_protobuf`; the receiver verifies
+/// `signature` over the envelope's signing bytes and derives the sender
+/// `PeerId` from the decoded public key. This is deliberately separate from
+/// `asserted_origin_node`: the node id remains claim provenance, while the
+/// public key proves which enrolled swarm identity signed this relay unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedRelayOriginProof {
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
 /// MUC proxy traffic classes for the later remote-safe MUC message set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderedRelayMucProxyKind {
@@ -66,7 +97,8 @@ pub enum OrderedRelayMucProxyKind {
     OccupantPresence,
     GroupchatMessage,
     PrivateMessage,
-    RoomIq,
+    BareRoomIq,
+    OccupantIq,
     FanoutChunk,
 }
 
@@ -82,7 +114,10 @@ impl OrderedRelayMucProxyKind {
                     | OrderedRelayMucProxyKind::PrivateMessage
                     | OrderedRelayMucProxyKind::FanoutChunk,
                 waddle_xmpp::Stanza::Message(_)
-            ) | (OrderedRelayMucProxyKind::RoomIq, waddle_xmpp::Stanza::Iq(_))
+            ) | (
+                OrderedRelayMucProxyKind::BareRoomIq | OrderedRelayMucProxyKind::OccupantIq,
+                waddle_xmpp::Stanza::Iq(_)
+            )
         )
     }
 }
@@ -122,7 +157,9 @@ impl OrderedRelayPayload {
 
     fn matches_stanza_kind(&self) -> bool {
         match (self, self.stanza()) {
-            (OrderedRelayPayload::Message { .. }, waddle_xmpp::Stanza::Message(_)) => true,
+            (OrderedRelayPayload::Message { .. }, waddle_xmpp::Stanza::Message(message)) => {
+                message.type_ != xmpp_parsers::message::MessageType::Groupchat
+            }
             (OrderedRelayPayload::Iq { .. }, waddle_xmpp::Stanza::Iq(_)) => true,
             (OrderedRelayPayload::Presence { .. }, waddle_xmpp::Stanza::Presence(_)) => true,
             (OrderedRelayPayload::MucProxy { kind, .. }, stanza) => kind.matches_stanza(stanza),
@@ -137,7 +174,7 @@ impl OrderedRelayPayload {
                 | OrderedRelayPayload::Iq { recipient, .. }
                 | OrderedRelayPayload::Presence { recipient, .. },
                 OrderedRelayRecipient::BareJid(bare),
-            ) => recipient.to_bare() == *bare,
+            ) => recipient == &jid::Jid::from(bare.clone()),
             (
                 OrderedRelayPayload::Message { recipient, .. }
                 | OrderedRelayPayload::Iq { recipient, .. }
@@ -228,6 +265,35 @@ pub struct RemoteStanzaEnvelope {
     pub origin_claim: OrderedRelayClaim,
     pub target_claim: OrderedRelayClaim,
     pub payload: OrderedRelayPayload,
+    /// Optional at the substrate level so ordering tests can construct raw
+    /// envelopes, but production delivery rejects unsigned envelopes before
+    /// applying any local effect.
+    pub origin_proof: Option<OrderedRelayOriginProof>,
+}
+
+impl RemoteStanzaEnvelope {
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&RemoteStanzaEnvelopeSigningView {
+            asserted_origin_node: &self.asserted_origin_node,
+            channel: &self.channel,
+            sequence: self.sequence,
+            origin_inbound_sequence: self.origin_inbound_sequence,
+            origin_claim: &self.origin_claim,
+            target_claim: &self.target_claim,
+            payload: &self.payload,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct RemoteStanzaEnvelopeSigningView<'a> {
+    asserted_origin_node: &'a NodeId,
+    channel: &'a OrderedRelayChannel,
+    sequence: OrderedRelaySequence,
+    origin_inbound_sequence: OriginInboundSequence,
+    origin_claim: &'a OrderedRelayClaim,
+    target_claim: &'a OrderedRelayClaim,
+    payload: &'a OrderedRelayPayload,
 }
 
 /// Internal ACK for an ordered relay envelope. This is not an XEP-0184 receipt
@@ -240,15 +306,25 @@ pub struct OrderedRelayAck {
     pub next_expected: OrderedRelaySequence,
 }
 
+/// Which claim in an ordered-relay envelope failed ownership validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderedRelayClaimRole {
+    Origin,
+    Target,
+}
+
 /// Internal NACK reason. These are relay-control outcomes only; they do not
 /// synthesize client stanzas or mutate XEP-0198 counters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderedRelayNackReason {
     Gap { expected: OrderedRelaySequence },
-    NotOwner,
+    InFlight,
+    NotOwner { role: OrderedRelayClaimRole },
     Unreachable,
+    TargetUnavailable,
     ParseFailure,
     Backpressure,
+    MaybeCommitted,
     Diverted(OrderedRelayDiversion),
 }
 
@@ -256,10 +332,18 @@ impl OrderedRelayNackReason {
     pub(crate) fn metric_label(&self) -> &'static str {
         match self {
             OrderedRelayNackReason::Gap { .. } => "gap",
-            OrderedRelayNackReason::NotOwner => "not_owner",
+            OrderedRelayNackReason::InFlight => "in_flight",
+            OrderedRelayNackReason::NotOwner {
+                role: OrderedRelayClaimRole::Origin,
+            } => "not_owner_origin",
+            OrderedRelayNackReason::NotOwner {
+                role: OrderedRelayClaimRole::Target,
+            } => "not_owner_target",
             OrderedRelayNackReason::Unreachable => "unreachable",
+            OrderedRelayNackReason::TargetUnavailable => "target_unavailable",
             OrderedRelayNackReason::ParseFailure => "parse_failure",
             OrderedRelayNackReason::Backpressure => "backpressure",
+            OrderedRelayNackReason::MaybeCommitted => "maybe_committed",
             OrderedRelayNackReason::Diverted(_) => "diverted",
         }
     }
@@ -310,6 +394,7 @@ pub enum OrderedRelayDiversionReason {
     NotOwner,
     Unreachable,
     Backpressure,
+    MaybeCommitted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,6 +407,12 @@ struct OrderedRelayRecentAck {
 struct OrderedRelayEnvelopeFingerprint {
     origin_inbound_sequence: OriginInboundSequence,
     payload: OrderedRelayPayloadFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrderedRelayPendingReservation {
+    sequence: OrderedRelaySequence,
+    fingerprint: OrderedRelayEnvelopeFingerprint,
 }
 
 impl From<&RemoteStanzaEnvelope> for OrderedRelayEnvelopeFingerprint {
@@ -421,6 +512,7 @@ impl OrderedRelaySenderState {
             origin_claim,
             target_claim,
             payload,
+            origin_proof: None,
         };
         self.next_by_channel.insert(channel, next_sequence);
         Ok(envelope)
@@ -447,13 +539,14 @@ impl OrderedRelaySenderState {
 #[derive(Debug, Default)]
 pub struct OrderedRelayReceiverState {
     next_expected_by_channel: HashMap<OrderedRelayChannel, OrderedRelaySequence>,
+    pending_by_channel: HashMap<OrderedRelayChannel, OrderedRelayPendingReservation>,
     recent_acked_by_channel: HashMap<OrderedRelayChannel, VecDeque<OrderedRelayRecentAck>>,
     diversions: HashMap<OrderedRelayChannel, OrderedRelayDiversion>,
     new_channels_diverted: bool,
 }
 
 impl OrderedRelayReceiverState {
-    pub fn reserve(&self, envelope: RemoteStanzaEnvelope) -> OrderedRelayReservation {
+    pub fn reserve(&mut self, envelope: RemoteStanzaEnvelope) -> OrderedRelayReservation {
         if let Some(diversion) = self.diversions.get(&envelope.channel) {
             return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
@@ -465,6 +558,7 @@ impl OrderedRelayReceiverState {
             && !self
                 .next_expected_by_channel
                 .contains_key(&envelope.channel)
+            && !self.pending_by_channel.contains_key(&envelope.channel)
         {
             return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
@@ -476,7 +570,8 @@ impl OrderedRelayReceiverState {
         if !self
             .next_expected_by_channel
             .contains_key(&envelope.channel)
-            && self.next_expected_by_channel.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
+            && !self.pending_by_channel.contains_key(&envelope.channel)
+            && self.tracked_channel_count() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
         {
             return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
@@ -490,6 +585,31 @@ impl OrderedRelayReceiverState {
                 channel: envelope.channel,
                 sequence: envelope.sequence,
                 reason: OrderedRelayNackReason::ParseFailure,
+            }));
+        }
+
+        if let Some(pending) = self.pending_by_channel.get(&envelope.channel) {
+            if envelope.sequence == pending.sequence {
+                let reason =
+                    if OrderedRelayEnvelopeFingerprint::from(&envelope) == pending.fingerprint {
+                        OrderedRelayNackReason::InFlight
+                    } else {
+                        OrderedRelayNackReason::ParseFailure
+                    };
+                return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(
+                    OrderedRelayNack {
+                        channel: envelope.channel,
+                        sequence: envelope.sequence,
+                        reason,
+                    },
+                ));
+            }
+            return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
+                channel: envelope.channel,
+                sequence: envelope.sequence,
+                reason: OrderedRelayNackReason::Gap {
+                    expected: pending.sequence,
+                },
             }));
         }
 
@@ -546,6 +666,13 @@ impl OrderedRelayReceiverState {
             }));
         };
 
+        self.pending_by_channel.insert(
+            envelope.channel.clone(),
+            OrderedRelayPendingReservation {
+                sequence: envelope.sequence,
+                fingerprint: OrderedRelayEnvelopeFingerprint::from(&envelope),
+            },
+        );
         OrderedRelayReservation::Reserved(Box::new(OrderedRelayReservedEnvelope {
             envelope,
             next_expected,
@@ -554,6 +681,7 @@ impl OrderedRelayReceiverState {
 
     pub fn commit_reserved(&mut self, reserved: OrderedRelayReservedEnvelope) -> OrderedRelayReply {
         let envelope = reserved.envelope;
+        self.pending_by_channel.remove(&envelope.channel);
         if let Some(diversion) = self.diversions.get(&envelope.channel) {
             return OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
@@ -565,7 +693,7 @@ impl OrderedRelayReceiverState {
         if !self
             .next_expected_by_channel
             .contains_key(&envelope.channel)
-            && self.next_expected_by_channel.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
+            && self.tracked_channel_count() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
         {
             return OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
@@ -602,11 +730,30 @@ impl OrderedRelayReceiverState {
         })
     }
 
+    pub fn abort_reserved(
+        &mut self,
+        reserved: OrderedRelayReservedEnvelope,
+        reason: OrderedRelayNackReason,
+    ) -> OrderedRelayReply {
+        let envelope = reserved.envelope;
+        self.pending_by_channel.remove(&envelope.channel);
+        self.divert(OrderedRelayDiversion {
+            channel: envelope.channel.clone(),
+            reason: receiver_diversion_reason_for_nack(&reason),
+        });
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            channel: envelope.channel,
+            sequence: envelope.sequence,
+            reason,
+        })
+    }
+
     pub fn divert(&mut self, diversion: OrderedRelayDiversion) {
         if !self.diversions.contains_key(&diversion.channel)
             && self.diversions.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
         {
             self.next_expected_by_channel.remove(&diversion.channel);
+            self.pending_by_channel.remove(&diversion.channel);
             self.recent_acked_by_channel.remove(&diversion.channel);
             self.new_channels_diverted = true;
             return;
@@ -616,8 +763,31 @@ impl OrderedRelayReceiverState {
 
     pub fn forget_channel(&mut self, channel: &OrderedRelayChannel) {
         self.next_expected_by_channel.remove(channel);
+        self.pending_by_channel.remove(channel);
         self.recent_acked_by_channel.remove(channel);
         self.diversions.remove(channel);
+    }
+
+    fn tracked_channel_count(&self) -> usize {
+        self.next_expected_by_channel.len() + self.pending_by_channel.len()
+    }
+}
+
+fn receiver_diversion_reason_for_nack(
+    reason: &OrderedRelayNackReason,
+) -> OrderedRelayDiversionReason {
+    match reason {
+        OrderedRelayNackReason::Gap { .. }
+        | OrderedRelayNackReason::ParseFailure
+        | OrderedRelayNackReason::Diverted(_) => OrderedRelayDiversionReason::OrderingGap,
+        OrderedRelayNackReason::InFlight | OrderedRelayNackReason::Backpressure => {
+            OrderedRelayDiversionReason::Backpressure
+        }
+        OrderedRelayNackReason::MaybeCommitted => OrderedRelayDiversionReason::MaybeCommitted,
+        OrderedRelayNackReason::NotOwner { .. } => OrderedRelayDiversionReason::NotOwner,
+        OrderedRelayNackReason::Unreachable | OrderedRelayNackReason::TargetUnavailable => {
+            OrderedRelayDiversionReason::Unreachable
+        }
     }
 }
 
@@ -638,8 +808,8 @@ fn record_ack(
 
 fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
     envelope.payload.matches_stanza_kind()
-        && envelope.origin_claim.entity.entity_type == EntityType::SmSession
-        && envelope.origin_claim.entity.id == envelope.channel.origin_stream_id.as_str()
+        && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)
+        && envelope.target_claim.epoch == envelope.channel.target_epoch
         && envelope
             .payload
             .matches_channel_recipient(&envelope.channel.recipient)
@@ -647,6 +817,18 @@ fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
         && envelope
             .payload
             .matches_target_claim(&envelope.target_claim)
+}
+
+fn origin_claim_matches_channel(claim: &OrderedRelayClaim, origin: &OrderedRelayOrigin) -> bool {
+    match origin {
+        OrderedRelayOrigin::SmSession(stream_id) => {
+            claim.entity.entity_type == EntityType::SmSession
+                && claim.entity.id == stream_id.as_str()
+        }
+        OrderedRelayOrigin::Entity(entity) => {
+            entity.entity_type != EntityType::SmSession && claim.entity == *entity
+        }
+    }
 }
 
 fn stanza_to(stanza: &waddle_xmpp::Stanza) -> Option<&jid::Jid> {
@@ -693,7 +875,8 @@ fn muc_proxy_stanza_is_addressed_to_room(
                 && (message.type_ == xmpp_parsers::message::MessageType::Chat
                     || message.type_ == xmpp_parsers::message::MessageType::Normal)
         }
-        (OrderedRelayMucProxyKind::RoomIq, waddle_xmpp::Stanza::Iq(_)) => true,
+        (OrderedRelayMucProxyKind::BareRoomIq, waddle_xmpp::Stanza::Iq(_)) => jid_is_bare(to),
+        (OrderedRelayMucProxyKind::OccupantIq, waddle_xmpp::Stanza::Iq(_)) => jid_is_full(to),
         _ => false,
     }
 }
@@ -719,10 +902,11 @@ mod invariant_tests {
 
     fn channel_for_bare(bare: &str) -> OrderedRelayChannel {
         OrderedRelayChannel {
-            origin_stream_id: SmSessionId::new("stream-1"),
+            origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
             recipient: OrderedRelayRecipient::BareJid(
                 jid::BareJid::from_str(bare).expect("bare jid"),
             ),
+            target_epoch: ClaimEpoch(3),
         }
     }
 
@@ -843,10 +1027,11 @@ mod tests {
 
     fn channel_for_bare(bare: &str) -> OrderedRelayChannel {
         OrderedRelayChannel {
-            origin_stream_id: SmSessionId::new("stream-1"),
+            origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
             recipient: OrderedRelayRecipient::BareJid(
                 jid::BareJid::from_str(bare).expect("bare jid"),
             ),
+            target_epoch: ClaimEpoch(3),
         }
     }
 
@@ -860,8 +1045,9 @@ mod tests {
 
     fn room_channel() -> OrderedRelayChannel {
         OrderedRelayChannel {
-            origin_stream_id: SmSessionId::new("stream-1"),
+            origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
             recipient: OrderedRelayRecipient::Room(room_jid()),
+            target_epoch: ClaimEpoch(11),
         }
     }
 
@@ -1100,6 +1286,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
+            origin_proof: None,
         };
 
         assert!(matches!(
@@ -1131,6 +1318,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
+            origin_proof: None,
         };
         assert!(matches!(
             receive(&mut receiver, envelope.clone()),
@@ -1164,6 +1352,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
+            origin_proof: None,
         };
         assert!(matches!(
             receive(&mut receiver, envelope.clone()),
@@ -1178,10 +1367,6 @@ mod tests {
             origin_claim: OrderedRelayClaim {
                 epoch: ClaimEpoch(99),
                 ..origin_claim()
-            },
-            target_claim: OrderedRelayClaim {
-                epoch: ClaimEpoch(100),
-                ..target_claim()
             },
             ..envelope
         };
@@ -1206,6 +1391,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload_to("wrong-recipient", "romeo@example.test"),
+            origin_proof: None,
         };
 
         assert!(matches!(
@@ -1229,6 +1415,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
+            origin_proof: None,
         };
         let second = RemoteStanzaEnvelope {
             asserted_origin_node: origin_node(),
@@ -1238,6 +1425,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("two"),
+            origin_proof: None,
         };
 
         let reserved = match receiver.reserve(first) {
@@ -1278,6 +1466,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("two"),
+            origin_proof: None,
         };
 
         assert!(matches!(
@@ -1298,6 +1487,7 @@ mod tests {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
+            origin_proof: None,
         };
         assert!(matches!(
             receive(&mut receiver, first),
@@ -1324,6 +1514,7 @@ mod tests {
                     origin_claim: origin_claim(),
                     target_claim: target_claim(),
                     payload: message_payload(&format!("m{sequence}")),
+                    origin_proof: None,
                 },
             );
             assert!(matches!(reply, OrderedRelayReply::Ack(_)));
@@ -1339,6 +1530,7 @@ mod tests {
                 origin_claim: origin_claim(),
                 target_claim: target_claim(),
                 payload: message_payload("too-old"),
+                origin_proof: None,
             },
         );
 
@@ -1367,6 +1559,7 @@ mod tests {
                 recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
                 stanza: presence_stanza(),
             },
+            origin_proof: None,
         };
 
         assert!(matches!(
@@ -1415,6 +1608,7 @@ mod tests {
                 kind: OrderedRelayMucProxyKind::JoinPresence,
                 stanza: presence_stanza(),
             },
+            origin_proof: None,
         };
 
         assert!(matches!(
@@ -1438,6 +1632,7 @@ mod tests {
                 kind: OrderedRelayMucProxyKind::GroupchatMessage,
                 stanza: presence_stanza(),
             },
+            origin_proof: None,
         };
 
         let mut fresh_receiver = OrderedRelayReceiverState::default();
@@ -1467,6 +1662,7 @@ mod tests {
                     xmpp_parsers::presence::Type::Unavailable,
                 ),
             },
+            origin_proof: None,
         };
         let bare_groupchat = RemoteStanzaEnvelope {
             payload: OrderedRelayPayload::MucProxy {

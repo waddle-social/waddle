@@ -33,7 +33,8 @@ async fn drive_dm_message(
     );
     sm.transition_to_ready(full_jid, false);
     sm.set_blocklist(waddle_xmpp::protocol::session_state::Blocklist::empty());
-    let _ = handlers::message::handle_message(message, state, &phase, Some(&mut sm), None).await;
+    let _ =
+        handlers::message::handle_message(message, state, &phase, Some(&mut sm), None, None).await;
 }
 
 async fn store_committed_dm_archive_for_notification(
@@ -4015,6 +4016,7 @@ async fn inbox_query_requires_ready_phase() {
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
         state_machine: None,
+        ordered_relay_origin: None,
     };
     let responses = handle_iq_with_conn_state(
         parse_iq_for_test(frame),

@@ -710,7 +710,7 @@ async fn handle_message_for_test(
     sm.transition_to_ready(sender_jid.clone(), false);
     sm.set_blocklist(Blocklist::empty());
     let phase = ConnectionPhase::ready(sender_jid.clone(), false);
-    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session).await
+    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session, None).await
 }
 
 fn authenticated_phase_for_session(session: &Session, domain: &str) -> ConnectionPhase {

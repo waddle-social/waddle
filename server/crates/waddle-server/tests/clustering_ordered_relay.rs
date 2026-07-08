@@ -6,9 +6,9 @@ use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::ordered_relay::{
     OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDiversion,
     OrderedRelayDiversionReason, OrderedRelayMucProxyKind, OrderedRelayNack,
-    OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply,
-    OrderedRelayReservation, OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence,
-    RemoteStanzaEnvelope,
+    OrderedRelayNackReason, OrderedRelayOrigin, OrderedRelayPayload, OrderedRelayRecipient,
+    OrderedRelayReply, OrderedRelayReservation, OrderedRelaySenderState, OrderedRelaySequence,
+    OriginInboundSequence, RemoteStanzaEnvelope,
 };
 use waddle_server::clustering::NodeId;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
@@ -24,8 +24,9 @@ fn channel() -> OrderedRelayChannel {
 
 fn channel_for_bare(bare: &str) -> OrderedRelayChannel {
     OrderedRelayChannel {
-        origin_stream_id: SmSessionId::new("stream-1"),
+        origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
         recipient: OrderedRelayRecipient::BareJid(jid::BareJid::from_str(bare).expect("bare jid")),
+        target_epoch: ClaimEpoch(3),
     }
 }
 
@@ -39,8 +40,9 @@ fn room_jid() -> jid::BareJid {
 
 fn room_channel() -> OrderedRelayChannel {
     OrderedRelayChannel {
-        origin_stream_id: SmSessionId::new("stream-1"),
+        origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
         recipient: OrderedRelayRecipient::Room(room_jid()),
+        target_epoch: ClaimEpoch(11),
     }
 }
 
@@ -65,6 +67,10 @@ fn target_claim() -> OrderedRelayClaim {
 
 fn target_claim_for_bare(bare: &str) -> OrderedRelayClaim {
     claim(EntityType::UserActor, bare, 3)
+}
+
+fn user_actor_origin_claim() -> OrderedRelayClaim {
+    claim(EntityType::UserActor, "romeo@example.test", 5)
 }
 
 fn room_claim() -> OrderedRelayClaim {
@@ -102,6 +108,12 @@ fn groupchat_stanza_to(to: &str) -> RemoteStanza {
     let mut message = Message::new(Some(jid::Jid::from_str(to).expect("jid")));
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
     RemoteStanza(waddle_xmpp::Stanza::Message(message))
+}
+
+fn iq_stanza_to(to: &str) -> RemoteStanza {
+    let mut iq = xmpp_parsers::iq::Iq::from_get("room-iq", xmpp_parsers::ping::Ping);
+    *iq.to_mut() = Some(jid::Jid::from_str(to).expect("jid"));
+    RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(iq)))
 }
 
 fn receive(
@@ -282,6 +294,7 @@ fn receiver_acks_in_order_and_duplicate_envelopes() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        origin_proof: None,
     };
 
     assert!(matches!(
@@ -314,6 +327,7 @@ fn receiver_nacks_recent_duplicate_with_different_payload() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        origin_proof: None,
     };
     assert!(matches!(
         receive(&mut receiver, envelope.clone()),
@@ -348,6 +362,7 @@ fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        origin_proof: None,
     };
     assert!(matches!(
         receive(&mut receiver, envelope.clone()),
@@ -362,10 +377,6 @@ fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
         origin_claim: OrderedRelayClaim {
             epoch: ClaimEpoch(99),
             ..origin_claim()
-        },
-        target_claim: OrderedRelayClaim {
-            epoch: ClaimEpoch(100),
-            ..target_claim()
         },
         ..envelope
     };
@@ -391,6 +402,58 @@ fn receiver_nacks_channel_payload_and_claim_mismatch() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload_to("wrong-recipient", "romeo@example.test"),
+        origin_proof: None,
+    };
+
+    assert!(matches!(
+        receive(&mut receiver, envelope),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn receiver_nacks_full_jid_payload_on_bare_channel() {
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        target_claim: target_claim(),
+        payload: message_payload_to("full-as-bare", "juliet@example.test/phone"),
+        origin_proof: None,
+    };
+
+    assert!(matches!(
+        receive(&mut receiver, envelope),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn receiver_nacks_groupchat_on_user_message_payload() {
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        target_claim: target_claim(),
+        payload: OrderedRelayPayload::Message {
+            recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
+            stanza: groupchat_stanza_to("juliet@example.test"),
+        },
+        origin_proof: None,
     };
 
     assert!(matches!(
@@ -415,6 +478,7 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        origin_proof: None,
     };
     let second = RemoteStanzaEnvelope {
         asserted_origin_node: origin_node(),
@@ -424,6 +488,7 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("two"),
+        origin_proof: None,
     };
 
     let reserved = match receiver.reserve(first) {
@@ -453,6 +518,109 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
 }
 
 #[test]
+fn receiver_duplicate_pending_envelope_does_not_reserve_second_effect() {
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        target_claim: target_claim(),
+        payload: message_payload("one"),
+        origin_proof: None,
+    };
+
+    let reserved = match receiver.reserve(envelope.clone()) {
+        OrderedRelayReservation::Reserved(reserved) => reserved,
+        OrderedRelayReservation::Completed(reply) => {
+            panic!("expected first reservation before side effect, got {reply:?}");
+        }
+    };
+
+    assert!(matches!(
+        receiver.reserve(envelope),
+        OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::InFlight,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        receiver.commit_reserved(*reserved),
+        OrderedRelayReply::Ack(OrderedRelayAck {
+            duplicate: false,
+            next_expected: OrderedRelaySequence(2),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn receiver_accepts_entity_origin_when_claim_matches_channel_origin() {
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: OrderedRelayChannel {
+            origin: OrderedRelayOrigin::Entity(user_actor_origin_claim().entity.clone()),
+            recipient: OrderedRelayRecipient::BareJid(
+                jid::BareJid::from_str("juliet@example.test").expect("bare jid"),
+            ),
+            target_epoch: ClaimEpoch(3),
+        },
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(0),
+        origin_claim: user_actor_origin_claim(),
+        target_claim: target_claim(),
+        payload: message_payload("entity-origin"),
+        origin_proof: None,
+    };
+
+    assert!(matches!(
+        receive(&mut receiver, envelope),
+        OrderedRelayReply::Ack(OrderedRelayAck {
+            duplicate: false,
+            next_expected: OrderedRelaySequence(2),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn receiver_rejects_entity_origin_when_claim_differs_from_channel_origin() {
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: OrderedRelayChannel {
+            origin: OrderedRelayOrigin::Entity(Entity::new(
+                EntityType::UserActor,
+                "romeo@example.test",
+            )),
+            recipient: OrderedRelayRecipient::BareJid(
+                jid::BareJid::from_str("juliet@example.test").expect("bare jid"),
+            ),
+            target_epoch: ClaimEpoch(3),
+        },
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(0),
+        origin_claim: claim(EntityType::UserActor, "mallory@example.test", 5),
+        target_claim: target_claim(),
+        payload: message_payload("wrong-entity-origin"),
+        origin_proof: None,
+    };
+
+    assert!(matches!(
+        receive(&mut receiver, envelope),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn receiver_nacks_gaps_without_advancing_expected_sequence() {
     let mut receiver =
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
@@ -465,6 +633,7 @@ fn receiver_nacks_gaps_without_advancing_expected_sequence() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("two"),
+        origin_proof: None,
     };
 
     assert!(matches!(
@@ -485,6 +654,7 @@ fn receiver_nacks_gaps_without_advancing_expected_sequence() {
         origin_claim: origin_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        origin_proof: None,
     };
     assert!(matches!(
         receive(&mut receiver, first),
@@ -512,6 +682,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
                 origin_claim: origin_claim(),
                 target_claim: target_claim(),
                 payload: message_payload(&format!("m{sequence}")),
+                origin_proof: None,
             },
         );
         assert!(matches!(reply, OrderedRelayReply::Ack(_)));
@@ -527,6 +698,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
             origin_claim: origin_claim(),
             target_claim: target_claim(),
             payload: message_payload("too-old"),
+            origin_proof: None,
         },
     );
 
@@ -556,6 +728,7 @@ fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
             recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
             stanza: presence_stanza(),
         },
+        origin_proof: None,
     };
 
     assert!(matches!(
@@ -605,6 +778,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
             kind: OrderedRelayMucProxyKind::JoinPresence,
             stanza: presence_stanza(),
         },
+        origin_proof: None,
     };
 
     assert!(matches!(
@@ -628,6 +802,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             stanza: presence_stanza(),
         },
+        origin_proof: None,
     };
 
     let mut fresh_receiver =
@@ -658,6 +833,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
                 xmpp_parsers::presence::Type::Unavailable,
             ),
         },
+        origin_proof: None,
     };
     let bare_groupchat = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
@@ -693,6 +869,82 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
     assert!(matches!(
         receive(&mut receiver, full_groupchat),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
+    let bare_room_iq = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: room_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        target_claim: room_claim(),
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::BareRoomIq,
+            stanza: iq_stanza_to("room@example.test"),
+        },
+        origin_proof: None,
+    };
+    let full_jid_as_bare_room_iq = RemoteStanzaEnvelope {
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::BareRoomIq,
+            stanza: iq_stanza_to("room@example.test/romeo"),
+        },
+        ..bare_room_iq.clone()
+    };
+    let occupant_iq = RemoteStanzaEnvelope {
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::OccupantIq,
+            stanza: iq_stanza_to("room@example.test/romeo"),
+        },
+        ..bare_room_iq.clone()
+    };
+    let bare_jid_as_occupant_iq = RemoteStanzaEnvelope {
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::OccupantIq,
+            stanza: iq_stanza_to("room@example.test"),
+        },
+        ..bare_room_iq.clone()
+    };
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(matches!(
+        receive(&mut receiver, bare_room_iq),
+        OrderedRelayReply::Ack(OrderedRelayAck { .. })
+    ));
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(matches!(
+        receive(&mut receiver, full_jid_as_bare_room_iq),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(matches!(
+        receive(&mut receiver, occupant_iq),
+        OrderedRelayReply::Ack(OrderedRelayAck { .. })
+    ));
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(matches!(
+        receive(&mut receiver, bare_jid_as_occupant_iq),
         OrderedRelayReply::Nack(OrderedRelayNack {
             reason: OrderedRelayNackReason::ParseFailure,
             ..

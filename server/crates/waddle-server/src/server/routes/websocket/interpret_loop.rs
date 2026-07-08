@@ -29,5 +29,6 @@ pub(crate) fn build_interpret_deps<'a>(
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
+        ordered_relay_origin: None,
     }
 }

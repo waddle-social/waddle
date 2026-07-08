@@ -329,7 +329,7 @@ enum ActorSendFailure {
 ///   "live" can still turn out not to land by the time delivery runs, and if
 ///   every target fails to land, the message must not be silently lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FullJidDeliveryOutcome {
+pub(crate) enum FullJidDeliveryOutcome {
     /// Delivered onto a live resource's channel.
     Delivered,
     /// Routed to the detached XEP-0198 replay buffer.
@@ -528,7 +528,7 @@ async fn deliver_one_via_actor(
 /// only delivery path. `None` — test fixtures without an actor tree — can no
 /// longer deliver live and falls back to the detached XEP-0198 buffer (the same
 /// "no live target" fallback used everywhere), never a DashMap send.
-pub(super) async fn deliver_peer_to_full(
+pub(crate) async fn deliver_peer_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,

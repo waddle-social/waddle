@@ -564,7 +564,6 @@ async fn create_websocket_state(
         state.db_pool.global(),
     )
     .await;
-
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -761,6 +760,31 @@ async fn create_websocket_state(
             shutdown: shutdown_handle,
         },
     });
+    #[cfg(feature = "clustering")]
+    if let (Some(bridge), Some((claim_store, node_identity))) = (
+        &state.clustering_claims.ordered_relay_delivery_bridge,
+        state.clustering_claims.claim_pair(),
+    ) {
+        if let Some(node_lease) = &state.clustering_claims.node_lease {
+            bridge.wire(Arc::new(
+                crate::clustering::route_bridge::OrderedRelayDeliveryServices {
+                    claim_store,
+                    node_lease: Arc::clone(node_lease),
+                    node_identity,
+                    connection_registry: Arc::clone(
+                        &websocket_state.deps.protocol.connection_registry,
+                    ),
+                    user_registry: websocket_state.deps.protocol.user_registry.clone(),
+                    sm_session_registry: Arc::clone(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                    ),
+                    web_socket_state: Arc::downgrade(&websocket_state),
+                },
+            ));
+        } else {
+            warn!("ordered relay delivery bridge not wired: clustering node lease handle missing");
+        }
+    }
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));

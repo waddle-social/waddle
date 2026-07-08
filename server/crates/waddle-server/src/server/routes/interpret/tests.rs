@@ -287,6 +287,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
+        ordered_relay_origin: None,
     };
     let _outcome = interpret(
         vec![OutboundEvent::SendCarbons {
@@ -2347,6 +2348,7 @@ fn offline_pass_deps<'a>(
         blocking_storage: Some(blocking),
         message_dispatcher: Some(dispatcher),
         pending_delivery_storage: None,
+        ordered_relay_origin: None,
     }
 }
 
@@ -2855,6 +2857,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
+        ordered_relay_origin: None,
     };
 
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
@@ -3309,6 +3312,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         blocking_storage: Some(&blocking),
         message_dispatcher: Some(&dispatcher),
         pending_delivery_storage: None,
+        ordered_relay_origin: None,
     };
 
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "must arrive");

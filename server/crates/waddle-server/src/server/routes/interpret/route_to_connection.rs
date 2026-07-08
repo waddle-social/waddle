@@ -1,5 +1,9 @@
 use super::*;
+use std::{future::Future, pin::Pin};
 use xmpp_parsers::iq::Iq;
+
+type OrderedRelayDeliveryFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
 /// RFC 6121 §8.5.2.1.1 bare-JID destination selection: the candidate set and
 /// priority ranking come from the actor-authoritative `UserActor` alone
@@ -60,7 +64,7 @@ async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<ji
     waddle_xmpp::registry::get_resources_for_user(user_registry, bare).await
 }
 
-pub(super) async fn route_to_connection(
+pub(crate) async fn route_to_connection(
     deps: &Deps<'_>,
     jid: Jid,
     stanza: Box<Stanza>,
@@ -159,13 +163,19 @@ pub(super) async fn route_to_connection(
 
         match jid.clone().try_into_full() {
             Ok(full) => {
-                let delivery = deliver_peer_to_full(
-                    deps.user_registry,
-                    deps.sm_session_registry,
-                    &full,
-                    &stanza,
-                )
-                .await;
+                let delivery =
+                    match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await {
+                        Some(outcome) => outcome,
+                        None => {
+                            deliver_peer_to_full(
+                                deps.user_registry,
+                                deps.sm_session_registry,
+                                &full,
+                                &stanza,
+                            )
+                            .await
+                        }
+                    };
                 if delivery == FullJidDeliveryOutcome::Unavailable {
                     fallback_reply_for_undeliverable_iq(stanza.as_ref())
                         .into_iter()
@@ -175,6 +185,18 @@ pub(super) async fn route_to_connection(
                 }
             }
             Err(bare) => {
+                if let Some(delivery) =
+                    deliver_bare_jid_via_ordered_relay(deps, &bare, stanza.as_ref()).await
+                {
+                    return if delivery == FullJidDeliveryOutcome::Unavailable {
+                        fallback_reply_for_undeliverable_iq(stanza.as_ref())
+                            .into_iter()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                }
+
                 // Enumerate XEP-0198 detached-but-resumable
                 // resources for the bare JID. The legacy
                 // `handle_message` direct-route path queued
@@ -486,6 +508,62 @@ pub(super) async fn route_to_connection(
     }
 }
 
+fn deliver_full_jid_via_ordered_relay<'a>(
+    deps: &'a Deps<'_>,
+    target: &'a jid::FullJid,
+    stanza: &'a Stanza,
+) -> OrderedRelayDeliveryFuture<'a> {
+    Box::pin(async move {
+        #[cfg(feature = "clustering")]
+        {
+            let origin = deps.ordered_relay_origin.as_ref()?;
+            let state = deps.web_socket_state?;
+            let bridge = state
+                .deps
+                .app_state
+                .clustering_claims
+                .ordered_relay_delivery_bridge
+                .as_ref()?;
+            bridge
+                .try_deliver_full_jid_remote(target, stanza, origin)
+                .await
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            let _ = (deps, target, stanza);
+            None
+        }
+    })
+}
+
+fn deliver_bare_jid_via_ordered_relay<'a>(
+    deps: &'a Deps<'_>,
+    target: &'a jid::BareJid,
+    stanza: &'a Stanza,
+) -> OrderedRelayDeliveryFuture<'a> {
+    Box::pin(async move {
+        #[cfg(feature = "clustering")]
+        {
+            let origin = deps.ordered_relay_origin.as_ref()?;
+            let state = deps.web_socket_state?;
+            let bridge = state
+                .deps
+                .app_state
+                .clustering_claims
+                .ordered_relay_delivery_bridge
+                .as_ref()?;
+            bridge
+                .try_deliver_bare_jid_remote(target, stanza, origin)
+                .await
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            let _ = (deps, target, stanza);
+            None
+        }
+    })
+}
+
 /// Synthesize the reply for a full-JID **request** IQ (`get`/`set`) that
 /// could not be delivered because the addressed resource is confirmed
 /// offline (#1130). Returns `None` for `result`/`error` IQs (nothing
@@ -500,7 +578,7 @@ pub(super) async fn route_to_connection(
 /// `<iq type='result'/>` instead. Every other undeliverable request IQ
 /// gets a typed `cancel`/`<service-unavailable/>` that echoes the
 /// original request payload per RFC 6120 §8.3.1.
-fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
+pub(crate) fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
     let Stanza::Iq(iq) = stanza else {
         return None;
     };

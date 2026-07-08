@@ -353,6 +353,12 @@ pub(super) struct WsConnState {
     /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
     /// once enabled and holds the unacked queue used for resumption.
     pub(super) sm_state: StreamManagementState,
+    pub(super) sm_inbound_completion: crate::server::routes::interpret::SmInboundCompletionTracker,
+    pub(super) ordered_relay_handoff_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<
+            crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+        >,
+    >,
     /// Per-connection XEP-0280 opt-in state. Updated when this resource
     /// sends `<enable/>` / `<disable/>` and restored from detached SM state
     /// on resume so re-registration preserves carbons behavior.
@@ -431,6 +437,9 @@ impl WsConnState {
             stream_open_sent: false,
             authenticated_session: None,
             sm_state: StreamManagementState::new(),
+            sm_inbound_completion:
+                crate::server::routes::interpret::SmInboundCompletionTracker::default(),
+            ordered_relay_handoff_tx: None,
             carbons_enabled: false,
             roster_interested: false,
             blocklist_interested: false,

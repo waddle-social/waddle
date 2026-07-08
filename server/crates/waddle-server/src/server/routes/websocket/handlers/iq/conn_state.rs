@@ -10,4 +10,5 @@ pub struct IqConnState<'a> {
     /// load-at-bind seed). `None` only for transition-period unit
     /// tests; production (`handle_xmpp_frame`) always supplies it.
     pub state_machine: Option<&'a mut waddle_xmpp::protocol::XmppStateMachine>,
+    pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }

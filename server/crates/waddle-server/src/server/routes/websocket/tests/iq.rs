@@ -86,6 +86,7 @@ async fn link_preview_lookup_for_test(
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
         state_machine: None,
+        ordered_relay_origin: None,
     };
     handle_iq_with_conn_state(
         parse_iq_for_test(frame),
@@ -674,6 +675,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
         state_machine: None,
+        ordered_relay_origin: None,
     };
     let responses = handle_iq_with_conn_state(
         parse_iq_for_test(frame),

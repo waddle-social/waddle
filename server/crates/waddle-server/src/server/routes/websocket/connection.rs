@@ -135,6 +135,10 @@ async fn handle_xmpp_websocket(
 
     // Track connection state
     let mut conn = WsConnState::new();
+    let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<
+        crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+    >();
+    conn.ordered_relay_handoff_tx = Some(handoff_tx);
     // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
     // in the per-connection sans-io machine, so one must exist from
     // the very first instant — a client that wedges before
@@ -278,6 +282,28 @@ async fn handle_xmpp_websocket(
                         // target the newcomer's registry slot and occupant.
                         info!("Outbound channel closed; session superseded by replacement");
                         superseded = true;
+                        break;
+                    }
+                }
+            }
+
+            handoff = handoff_rx.recv() => {
+                match handoff {
+                    Some(handoff) => {
+                        if !handle_ordered_relay_handoff_completion(
+                            &mut ws_sender,
+                            &mut ws_receiver,
+                            &state,
+                            &mut conn,
+                            handoff,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                    None => {
+                        warn!("Ordered relay handoff completion channel closed");
                         break;
                     }
                 }
@@ -468,6 +494,7 @@ async fn handle_xmpp_websocket(
     // short-circuits.
     if !superseded {
         process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+        drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
     }
 
     // Connection is ending. Decide between two paths:
@@ -666,6 +693,75 @@ async fn handle_inbound_text(
         return false;
     }
     true
+}
+
+async fn handle_ordered_relay_handoff_completion(
+    ws_sender: &mut SplitSink<WebSocket, Message>,
+    ws_receiver: &mut SplitStream<WebSocket>,
+    state: &Arc<WebSocketState>,
+    conn: &mut WsConnState,
+    completion: crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+) -> bool {
+    conn.sm_inbound_completion
+        .complete(completion.inbound_sequence, &mut conn.sm_state);
+    let replies = serialize_ordered_relay_handoff_replies(completion.replies);
+    if replies.is_empty() {
+        return true;
+    }
+    match write_response_batch(
+        ws_sender,
+        ws_receiver,
+        state.as_ref(),
+        conn,
+        replies,
+        BatchSmPolicy::Record,
+    )
+    .await
+    {
+        BatchWriteOutcome::Continue => true,
+        BatchWriteOutcome::TransportClosed => false,
+    }
+}
+
+async fn drain_ordered_relay_handoffs_before_cleanup(
+    handoff_rx: &mut mpsc::UnboundedReceiver<
+        crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+    >,
+    conn: &mut WsConnState,
+) {
+    if !conn.sm_inbound_completion.has_pending() {
+        return;
+    }
+    while conn.sm_inbound_completion.has_pending() {
+        let Some(completion) = handoff_rx.recv().await else {
+            break;
+        };
+        conn.sm_inbound_completion
+            .complete(completion.inbound_sequence, &mut conn.sm_state);
+        let replies = serialize_ordered_relay_handoff_replies(completion.replies);
+        batch_write::record_remaining_for_replay(conn, replies.into_iter(), BatchSmPolicy::Record);
+    }
+    conn.sm_inbound_completion.reset();
+}
+
+fn serialize_ordered_relay_handoff_replies(replies: Vec<Stanza>) -> Vec<String> {
+    replies
+        .into_iter()
+        .filter_map(|reply| {
+            let serialized = match reply {
+                Stanza::Iq(reply) => waddle_xmpp::parser::stanza_to_string(*reply),
+                Stanza::Message(reply) => waddle_xmpp::parser::stanza_to_string(reply),
+                Stanza::Presence(reply) => waddle_xmpp::parser::stanza_to_string(reply),
+            };
+            match serialized {
+                Ok(xml) => Some(xml),
+                Err(error) => {
+                    warn!(%error, "failed to serialize ordered relay handoff reply");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Process inbound frames the mid-batch drain deferred before the

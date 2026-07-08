@@ -258,6 +258,11 @@ impl ClaimStore for PostgresClaimStore {
                 -- `CREATE TABLE IF NOT EXISTS` rather than a separate `ALTER
                 -- TABLE` migration.
                 draining          BOOLEAN NOT NULL DEFAULT FALSE,
+                -- ADR-0017 Phase 4: libp2p PeerId bound to this exact
+                -- node_id/node_epoch registration. Ordered relay validates
+                -- signed origin envelopes against this value before applying
+                -- delivery effects.
+                peer_id           TEXT,
                 -- ADR-0017 Phase 3 Slice 10 (Q5's operational definition of
                 -- "the current deployment generation" — realized here):
                 -- stamped once, at this row's FIRST registration, and never
@@ -276,6 +281,12 @@ impl ClaimStore for PostgresClaimStore {
                 first_seen        TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        conn.execute(
+            "ALTER TABLE clustering_nodes ADD COLUMN IF NOT EXISTS peer_id TEXT",
             (),
         )
         .await
@@ -925,6 +936,20 @@ pub trait NodeLeaseStore: Send + Sync {
         pod_template_hash: Option<String>,
     ) -> Result<(), ClaimError>;
 
+    /// Register this node and bind the claim node identity to the libp2p
+    /// PeerId currently holding the leased swarm keypair. The default keeps
+    /// existing fakes/no-op stores simple; production Postgres overrides it
+    /// so inbound ordered-relay delivery can verify signed origin envelopes
+    /// against a registry-bound PeerId, not a sender-provided node string.
+    async fn register_with_peer_id(
+        &self,
+        me: &NodeIdentity,
+        pod_template_hash: Option<String>,
+        _peer_id: Option<String>,
+    ) -> Result<(), ClaimError> {
+        self.register(me, pod_template_hash).await
+    }
+
     /// Renew this node's heartbeat. `Ok(false)` (zero rows affected) is
     /// **fencing loss** — the lease lapsed, was expired by a
     /// stealer/reaper, or the epoch was superseded — not an error: the
@@ -964,6 +989,13 @@ pub trait NodeLeaseStore: Send + Sync {
     /// The default supports fakes/no-op stores that have no lease table.
     async fn is_fresh(&self, _me: &NodeIdentity, _lease_ttl: Duration) -> Result<bool, ClaimError> {
         Ok(true)
+    }
+
+    /// Read the PeerId currently bound to this exact `node_id`/`node_epoch`
+    /// row. `None` means the node row is absent or predates the binding and
+    /// must not authenticate relay delivery effects.
+    async fn peer_id_for_node(&self, _node: &NodeIdentity) -> Result<Option<String>, ClaimError> {
+        Ok(None)
     }
 
     /// Mark this node draining (Slice 10: stop acquiring new claims, keep
@@ -1176,6 +1208,39 @@ pub struct OrphanedSmSessionClaim {
     pub owner: NodeIdentity,
 }
 
+async fn register_node(
+    store: &PostgresClaimStore,
+    me: &NodeIdentity,
+    pod_template_hash: Option<String>,
+    peer_id: Option<String>,
+) -> Result<(), ClaimError> {
+    // Runs on the control-plane pool (element 4/12, Slice 0): node
+    // registration is liveness-control-plane traffic, never the main pool.
+    let conn = store.db.control_plane_guard().await.map_err(db_err)?;
+    conn.execute(
+        r#"
+        INSERT INTO clustering_nodes (node_id, node_epoch, heartbeat, expired, pod_template_hash, draining, peer_id)
+        VALUES (?, ?, now(), false, ?, false, ?)
+        ON CONFLICT (node_id) DO UPDATE SET
+            node_epoch = EXCLUDED.node_epoch,
+            heartbeat = now(),
+            expired = false,
+            pod_template_hash = EXCLUDED.pod_template_hash,
+            draining = false,
+            peer_id = EXCLUDED.peer_id
+        "#,
+        crate::db_params![
+            me.node_id.clone(),
+            me.node_epoch.clone(),
+            pod_template_hash,
+            peer_id,
+        ],
+    )
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
 #[async_trait]
 impl NodeLeaseStore for PostgresClaimStore {
     async fn register(
@@ -1183,30 +1248,37 @@ impl NodeLeaseStore for PostgresClaimStore {
         me: &NodeIdentity,
         pod_template_hash: Option<String>,
     ) -> Result<(), ClaimError> {
-        // Runs on the control-plane pool (element 4/12, Slice 0): node
-        // registration is liveness-control-plane traffic, never the main
-        // pool.
+        register_node(self, me, pod_template_hash, None).await
+    }
+
+    async fn register_with_peer_id(
+        &self,
+        me: &NodeIdentity,
+        pod_template_hash: Option<String>,
+        peer_id: Option<String>,
+    ) -> Result<(), ClaimError> {
+        register_node(self, me, pod_template_hash, peer_id).await
+    }
+
+    async fn peer_id_for_node(&self, node: &NodeIdentity) -> Result<Option<String>, ClaimError> {
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        conn.execute(
-            r#"
-            INSERT INTO clustering_nodes (node_id, node_epoch, heartbeat, expired, pod_template_hash, draining)
-            VALUES (?, ?, now(), false, ?, false)
-            ON CONFLICT (node_id) DO UPDATE SET
-                node_epoch = EXCLUDED.node_epoch,
-                heartbeat = now(),
-                expired = false,
-                pod_template_hash = EXCLUDED.pod_template_hash,
-                draining = false
-            "#,
-            crate::db_params![
-                me.node_id.clone(),
-                me.node_epoch.clone(),
-                pod_template_hash,
-            ],
-        )
-        .await
-        .map_err(db_err)?;
-        Ok(())
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT peer_id
+                FROM clustering_nodes
+                WHERE node_id = ?
+                  AND node_epoch = ?
+                  AND NOT expired
+                "#,
+                crate::db_params![node.node_id.clone(), node.node_epoch.clone()],
+            )
+            .await
+            .map_err(db_err)?;
+        let Some(row) = rows.next().await.map_err(db_err)? else {
+            return Ok(None);
+        };
+        row.get::<Option<String>>(0).map_err(db_err)
     }
 
     async fn heartbeat(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError> {

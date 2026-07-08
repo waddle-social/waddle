@@ -1,5 +1,29 @@
 use super::*;
+use std::sync::Arc;
 use waddle_xmpp::protocol::TimerId;
+
+/// Per-stanza origin provenance needed to build an ordered-relay envelope.
+///
+/// Client-originated stanzas use their live SM stream when available so
+/// XEP-0198 handled-count completion can be deferred until relay handoff
+/// settles. Non-SM bound sessions and server-generated side routes use their
+/// locally owned entity claim as ordered-relay provenance.
+#[cfg(feature = "clustering")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrderedRelayRouteOriginKind {
+    SmSession(waddle_xmpp::pending_delivery::SmSessionId),
+    Entity(waddle_xmpp::ownership::Entity),
+}
+
+#[derive(Clone, Debug)]
+pub struct OrderedRelayRouteOrigin {
+    #[cfg(feature = "clustering")]
+    pub kind: OrderedRelayRouteOriginKind,
+    #[cfg(feature = "clustering")]
+    pub inbound_sequence: u32,
+    #[cfg(feature = "clustering")]
+    pub handoff: Option<super::handoff::OrderedRelayHandoffHandle>,
+}
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
@@ -134,9 +158,18 @@ pub struct Deps<'a> {
     /// `None` in unit tests that don't exercise the offline-pass.
     pub pending_delivery_storage:
         Option<&'a Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
+    /// Origin provenance for ordered cross-node routing. SM streams defer
+    /// inbound handled-count completion until handoff settles; non-SM bound
+    /// sessions and server-side routes use the locally owned entity claim.
+    pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 }
 
 impl<'a> Deps<'a> {
+    pub fn with_ordered_relay_origin(mut self, origin: Option<OrderedRelayRouteOrigin>) -> Self {
+        self.ordered_relay_origin = origin;
+        self
+    }
+
     /// Build a minimal `Deps` with only the connection registry — a
     /// test-only convenience for unit tests that don't exercise SM
     /// fan-out, archive, or inbox storage. Defaults `local_domain` to
@@ -158,6 +191,7 @@ impl<'a> Deps<'a> {
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
+            ordered_relay_origin: None,
         }
     }
 
@@ -186,6 +220,7 @@ impl<'a> Deps<'a> {
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
+            ordered_relay_origin: None,
         }
     }
 
@@ -212,6 +247,7 @@ impl<'a> Deps<'a> {
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
+            ordered_relay_origin: None,
         }
     }
 
@@ -236,6 +272,7 @@ impl<'a> Deps<'a> {
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
+            ordered_relay_origin: None,
         }
     }
 }

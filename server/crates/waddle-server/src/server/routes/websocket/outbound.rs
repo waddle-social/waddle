@@ -1,6 +1,7 @@
 use super::*;
 use super::{
     batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
+    frame::ordered_relay_origin_from_sm,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
     send::send_ws_message,
@@ -128,6 +129,8 @@ where
             // #229 PR11: peer-routed stanza. Run the recipient pass before
             // writing so XEP-0191, XEP-0359, MAM, carbons, and inbox side
             // effects stay identical to the in-loop path.
+            let ordered_relay_origin =
+                ordered_relay_origin_from_sm(&conn.sm_state, conn.phase.bound_jid());
             let Some(sm) = conn.state_machine.as_mut() else {
                 warn!(
                     "PeerStanza arrived before per-connection state machine was initialized; \
@@ -139,7 +142,8 @@ where
                 outbound_stanza.stanza,
             )));
             let interpret_deps =
-                build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref());
+                build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref())
+                    .with_ordered_relay_origin(ordered_relay_origin);
             let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
             // Timer/keepalive effects can't arise from a StanzaFromPeer
             // dispatch today (only TransportReady/Tick produce them),
