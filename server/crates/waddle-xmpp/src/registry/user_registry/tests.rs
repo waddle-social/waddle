@@ -1,7 +1,15 @@
 use super::*;
-use crate::registry::connection_registry::{ConnectionEntry, OutboundStanza};
+use crate::ownership::{
+    ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
+};
+use crate::registry::connection_registry::{ConnectionEntry, ForceDetachOutcome, OutboundStanza};
+use async_trait::async_trait;
 use kameo::actor::Spawn;
 use kameo::error::SendError;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// A bounded outbound channel for a test registration. Returns the sender to
@@ -21,8 +29,194 @@ fn full(user: &str, resource: &str) -> FullJid {
         .expect("valid JID")
 }
 
+fn user_entity(jid: &BareJid) -> Entity {
+    Entity::new(EntityType::UserActor, jid.to_string())
+}
+
+fn this_identity() -> NodeIdentity {
+    NodeIdentity::new("node-this", "epoch-this")
+}
+
+fn foreign_identity() -> NodeIdentity {
+    NodeIdentity::new("node-foreign", "epoch-foreign")
+}
+
 async fn spawn_registry() -> ActorRef<UserRegistryActor> {
     UserRegistryActor::spawn(UserRegistryActor::new())
+}
+
+async fn wire_claims(
+    registry: &ActorRef<UserRegistryActor>,
+    claim_store: Arc<dyn ClaimStore>,
+    identity: NodeIdentity,
+) {
+    wire_shared_claims(registry, claim_store, SharedNodeIdentity::new(identity)).await;
+}
+
+async fn wire_shared_claims(
+    registry: &ActorRef<UserRegistryActor>,
+    claim_store: Arc<dyn ClaimStore>,
+    node_identity: SharedNodeIdentity,
+) {
+    registry
+        .ask(WireUserClusteringClaims {
+            claim_store,
+            node_identity,
+        })
+        .await
+        .expect("wire user claims");
+}
+
+struct RecordingClaimStore {
+    state: Mutex<Option<(NodeIdentity, ClaimEpoch, bool)>>,
+    release_owners: Mutex<Vec<NodeIdentity>>,
+    fence_errors: AtomicBool,
+    steal_calls: AtomicUsize,
+}
+
+impl RecordingClaimStore {
+    fn empty() -> Self {
+        Self {
+            state: Mutex::new(None),
+            release_owners: Mutex::new(Vec::new()),
+            fence_errors: AtomicBool::new(false),
+            steal_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn seeded(owner: NodeIdentity, epoch: ClaimEpoch, owner_lease_fresh: bool) -> Self {
+        Self {
+            state: Mutex::new(Some((owner, epoch, owner_lease_fresh))),
+            release_owners: Mutex::new(Vec::new()),
+            fence_errors: AtomicBool::new(false),
+            steal_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn release_owners(&self) -> Vec<NodeIdentity> {
+        self.release_owners.lock().expect("lock").clone()
+    }
+
+    fn set_owner_lease_fresh(&self, owner_lease_fresh: bool) {
+        let mut state = self.state.lock().expect("lock");
+        let Some((owner, epoch, _)) = state.clone() else {
+            panic!("claim store must be seeded before changing owner freshness");
+        };
+        *state = Some((owner, epoch, owner_lease_fresh));
+    }
+
+    fn set_fence_errors(&self, fence_errors: bool) {
+        self.fence_errors.store(fence_errors, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl ClaimStore for RecordingClaimStore {
+    async fn ensure_schema(&self) -> Result<(), ClaimError> {
+        Ok(())
+    }
+
+    async fn acquire(&self, _entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
+        let mut state = self.state.lock().expect("lock");
+        if state.is_some() {
+            return Err(ClaimError::AlreadyClaimed);
+        }
+        *state = Some((me.clone(), ClaimEpoch(0), true));
+        Ok(ClaimEpoch(0))
+    }
+
+    async fn ensure_claimed(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        let existing = self.state.lock().expect("lock").clone();
+        match existing {
+            None => self.acquire(entity, me).await,
+            Some((owner, epoch, _)) if owner == *me => Ok(epoch),
+            Some(_) => Err(ClaimError::AlreadyClaimed),
+        }
+    }
+
+    async fn steal_stale(
+        &self,
+        _entity: &Entity,
+        observed: ClaimEpoch,
+        _staleness: StalePredicate,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        self.steal_calls.fetch_add(1, Ordering::SeqCst);
+        let mut state = self.state.lock().expect("lock");
+        match &*state {
+            Some((_, epoch, false)) if *epoch == observed => {
+                let new_epoch = ClaimEpoch(epoch.0 + 1);
+                *state = Some((me.clone(), new_epoch, true));
+                Ok(new_epoch)
+            }
+            _ => Err(ClaimError::Conflict),
+        }
+    }
+
+    async fn steal_for_resume(
+        &self,
+        _entity: &Entity,
+        _observed: ClaimEpoch,
+        _witness: ResumeIdentityProof,
+        _me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        Err(ClaimError::Conflict)
+    }
+
+    async fn current_claim(&self, _entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError> {
+        Ok(self.state.lock().expect("lock").clone().map(
+            |(owner, claim_epoch, owner_lease_fresh)| ClaimSnapshot {
+                owner,
+                claim_epoch,
+                owner_lease_fresh,
+            },
+        ))
+    }
+
+    async fn fence(
+        &self,
+        _entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<bool, ClaimError> {
+        if self.fence_errors.load(Ordering::SeqCst) {
+            return Err(ClaimError::Backend("test fence unavailable".to_string()));
+        }
+        Ok(
+            matches!(&*self.state.lock().expect("lock"), Some((owner, epoch, _)) if owner == me && *epoch == mine),
+        )
+    }
+
+    async fn release(
+        &self,
+        _entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<(), ClaimError> {
+        self.release_owners.lock().expect("lock").push(me.clone());
+        let mut state = self.state.lock().expect("lock");
+        if matches!(&*state, Some((owner, epoch, _)) if owner == me && *epoch == mine) {
+            *state = None;
+        }
+        Ok(())
+    }
+
+    async fn release_many(
+        &self,
+        _entities: &[Entity],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        self.release_owners.lock().expect("lock").push(me.clone());
+        let mut state = self.state.lock().expect("lock");
+        if matches!(&*state, Some((owner, _, _)) if owner == me) {
+            *state = None;
+        }
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -111,6 +305,506 @@ async fn test_remove_user() {
         .expect("ask failed");
 
     assert!(!removed_again);
+}
+
+#[tokio::test]
+async fn test_get_or_create_acquires_user_actor_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("claimed");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get_or_create");
+
+    let snapshot = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .expect("user claim should be held after actor spawn");
+    assert_eq!(snapshot.owner, this_identity());
+}
+
+#[tokio::test]
+async fn test_remove_user_releases_user_actor_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("released");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get_or_create");
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .is_some());
+
+    let removed = registry
+        .ask(RemoveUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("remove");
+    assert!(removed);
+
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .is_none());
+    claim_store
+        .acquire(&entity, &foreign_identity())
+        .await
+        .expect("a different node can acquire after release");
+}
+
+#[tokio::test]
+async fn test_remove_user_releases_with_the_acquisition_identity_after_identity_rotation() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::empty());
+    let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
+    let shared_identity = SharedNodeIdentity::new(this_identity());
+    let bare_jid = bare("rotated-release");
+    let entity = user_entity(&bare_jid);
+    wire_shared_claims(&registry, claim_store_trait, shared_identity.clone()).await;
+
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get_or_create");
+
+    shared_identity.set(NodeIdentity::new("node-this", "epoch-after-self-fence"));
+
+    let removed = registry
+        .ask(RemoveUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("remove");
+    assert!(removed);
+
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("current_claim")
+            .is_none(),
+        "release must use the identity that acquired the claim, not the rotated shared identity"
+    );
+    assert_eq!(claim_store.release_owners(), vec![this_identity()]);
+}
+
+#[tokio::test]
+async fn test_unregister_last_resource_releases_user_actor_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("phone");
+    let jid = full("phone", "mobile");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    let (tx, _rx) = outbound_channel();
+    registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry: ConnectionEntry::new(tx),
+        })
+        .await
+        .expect("register");
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .is_some());
+
+    registry
+        .ask(UnregisterUserResource { jid, owner: None })
+        .await
+        .expect("unregister");
+
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_get_or_create_steals_user_actor_claim_from_a_dead_owner() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::seeded(
+        foreign_identity(),
+        ClaimEpoch(3),
+        false,
+    ));
+    let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
+    let bare_jid = bare("dead-foreign");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, claim_store_trait, this_identity()).await;
+
+    let actor = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get_or_create should steal from a dead owner");
+    assert!(actor.is_alive());
+
+    let snapshot = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .expect("claim exists after steal");
+    assert_eq!(snapshot.owner, this_identity());
+    assert_eq!(snapshot.claim_epoch, ClaimEpoch(4));
+    assert_eq!(
+        claim_store.steal_calls.load(Ordering::SeqCst),
+        1,
+        "dead-owner recovery must go through steal_stale(OwnerStale)"
+    );
+}
+
+#[tokio::test]
+async fn test_get_or_create_refuses_live_foreign_user_actor_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("foreign");
+    let entity = user_entity(&bare_jid);
+    claim_store
+        .acquire(&entity, &foreign_identity())
+        .await
+        .expect("foreign acquire");
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    let result = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(UserRegistryError::ClaimHeldByAnotherNode(ref jid)))
+                if *jid == bare_jid
+        ),
+        "a live foreign user owner must not be displaced: {result:?}"
+    );
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn test_register_refuses_live_foreign_user_actor_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("foreign-register");
+    let jid = full("foreign-register", "mobile");
+    let entity = user_entity(&bare_jid);
+    claim_store
+        .acquire(&entity, &foreign_identity())
+        .await
+        .expect("foreign acquire");
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    let (tx, _rx) = outbound_channel();
+    let result = registry
+        .ask(RegisterUserResource {
+            jid,
+            entry: ConnectionEntry::new(tx),
+        })
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(UserRegistryError::ClaimHeldByAnotherNode(ref jid)))
+                if *jid == bare_jid
+        ),
+        "register must fail closed when another live node owns the bare JID: {result:?}"
+    );
+    assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn test_register_after_identity_rotation_reclaims_before_reusing_stale_user_actor() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::empty());
+    let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
+    let shared_identity = SharedNodeIdentity::new(this_identity());
+    let bare_jid = bare("missed-fence");
+    let jid = full("missed-fence", "phone");
+    let entity = user_entity(&bare_jid);
+    wire_shared_claims(&registry, claim_store_trait, shared_identity.clone()).await;
+
+    let old_actor = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("create");
+
+    shared_identity.set(NodeIdentity::new("node-this", "epoch-after-self-fence"));
+    claim_store.set_owner_lease_fresh(false);
+
+    let (tx, _rx) = outbound_channel();
+    registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry: ConnectionEntry::new(tx),
+        })
+        .await
+        .expect("register");
+
+    old_actor.wait_for_shutdown().await;
+    let new_actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get")
+        .expect("actor");
+    assert_ne!(
+        old_actor.id(),
+        new_actor.id(),
+        "registration must not reuse a UserActor whose local claim was minted by the pre-fence identity"
+    );
+    let resources = new_actor
+        .ask(crate::registry::user_actor::GetResources)
+        .await
+        .expect("resources");
+    assert_eq!(resources, vec![jid]);
+
+    let snapshot = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .expect("claim");
+    assert_eq!(
+        snapshot.owner,
+        NodeIdentity::new("node-this", "epoch-after-self-fence")
+    );
+    assert_eq!(snapshot.claim_epoch, ClaimEpoch(1));
+    assert!(
+        claim_store.release_owners().is_empty(),
+        "stale-entry demotion must not release a claim after identity rotation"
+    );
+}
+
+#[tokio::test]
+async fn test_register_after_identity_rotation_force_detaches_stale_actor_resources() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::empty());
+    let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
+    let shared_identity = SharedNodeIdentity::new(this_identity());
+    let bare_jid = bare("missed-live-fence");
+    let old_jid = full("missed-live-fence", "old-phone");
+    let new_jid = full("missed-live-fence", "new-phone");
+    let entity = user_entity(&bare_jid);
+    wire_shared_claims(&registry, claim_store_trait, shared_identity.clone()).await;
+
+    let (old_tx, _old_rx) = outbound_channel();
+    let old_entry = ConnectionEntry::new(old_tx);
+    let mut force_detach_rx = old_entry
+        .take_force_detach_rx()
+        .expect("connection task owns the force-detach receiver");
+    registry
+        .ask(RegisterUserResource {
+            jid: old_jid.clone(),
+            entry: old_entry,
+        })
+        .await
+        .expect("register old");
+    let old_actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get old")
+        .expect("old actor");
+
+    shared_identity.set(NodeIdentity::new("node-this", "epoch-after-self-fence"));
+    claim_store.set_owner_lease_fresh(false);
+
+    let force_detach_task = tokio::spawn({
+        let bare_jid = bare_jid.clone();
+        async move {
+            let request = force_detach_rx
+                .recv()
+                .await
+                .expect("stale resource force-detach request");
+            assert_eq!(request.requester_bare_jid, bare_jid);
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        }
+    });
+    let (new_tx, _new_rx) = outbound_channel();
+    registry
+        .ask(RegisterUserResource {
+            jid: new_jid.clone(),
+            entry: ConnectionEntry::new(new_tx),
+        })
+        .await
+        .expect("register new after forced stale detach");
+
+    force_detach_task.await.expect("force-detach task");
+    old_actor.wait_for_shutdown().await;
+    let new_actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get new")
+        .expect("new actor");
+    assert_ne!(old_actor.id(), new_actor.id());
+    let resources = new_actor
+        .ask(crate::registry::user_actor::GetResources)
+        .await
+        .expect("resources");
+    assert_eq!(resources, vec![new_jid]);
+
+    let snapshot = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .expect("claim");
+    assert_eq!(
+        snapshot.owner,
+        NodeIdentity::new("node-this", "epoch-after-self-fence")
+    );
+    assert_eq!(snapshot.claim_epoch, ClaimEpoch(1));
+    assert!(
+        claim_store.release_owners().is_empty(),
+        "stale-entry retirement must not release after identity rotation"
+    );
+}
+
+#[tokio::test]
+async fn test_register_claim_validation_error_does_not_force_detach_or_remove_live_actor() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::empty());
+    let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
+    let bare_jid = bare("validation-outage");
+    let old_jid = full("validation-outage", "old-phone");
+    let new_jid = full("validation-outage", "new-phone");
+    wire_claims(&registry, claim_store_trait, this_identity()).await;
+
+    let (old_tx, _old_rx) = outbound_channel();
+    let old_entry = ConnectionEntry::new(old_tx);
+    let mut force_detach_rx = old_entry
+        .take_force_detach_rx()
+        .expect("connection task owns the force-detach receiver");
+    registry
+        .ask(RegisterUserResource {
+            jid: old_jid.clone(),
+            entry: old_entry,
+        })
+        .await
+        .expect("register old");
+    let old_actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get old")
+        .expect("old actor");
+
+    claim_store.set_fence_errors(true);
+
+    let (new_tx, _new_rx) = outbound_channel();
+    let result = registry
+        .ask(RegisterUserResource {
+            jid: new_jid,
+            entry: ConnectionEntry::new(new_tx),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(ref jid)))
+                if *jid == bare_jid
+        ),
+        "claim validation outage must fail closed without retiring the actor: {result:?}"
+    );
+    assert!(matches!(
+        force_detach_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    let still_registered = registry
+        .ask(GetUserForLocalClaim {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get local claim actor");
+    assert_eq!(
+        still_registered.map(|actor| actor.id()),
+        Some(old_actor.id()),
+        "validation outage must not remove the live actor from the registry"
+    );
+    let resources = old_actor
+        .ask(crate::registry::user_actor::GetResources)
+        .await
+        .expect("resources");
+    assert_eq!(resources, vec![old_jid]);
+    assert!(old_actor.is_alive());
+    assert!(claim_store.release_owners().is_empty());
+}
+
+#[tokio::test]
+async fn test_demote_user_actor_hard_kills_without_releasing_the_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("demoted");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    let actor = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get_or_create");
+    assert!(actor.is_alive());
+
+    let demoted = registry
+        .ask(DemoteUserActor {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("demote");
+    assert!(demoted);
+    actor.wait_for_shutdown().await;
+
+    let lookup = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get_user after demote");
+    assert!(
+        lookup.is_none(),
+        "demote forgets the local registry entry without poisoning the user"
+    );
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("current_claim")
+            .is_some(),
+        "demotion must not release a claim that may already belong to a new owner"
+    );
 }
 
 #[tokio::test]
@@ -220,6 +914,58 @@ async fn test_get_or_create_fails_fast_for_dead_actor_until_explicit_cleanup() {
 }
 
 #[tokio::test]
+async fn test_dead_actor_detection_releases_user_actor_claim() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let bare_jid = bare("dead-claim");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
+
+    let actor = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("create");
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .is_some());
+
+    actor.kill();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while actor.is_alive() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "actor did not die in time"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let result = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(UserRegistryError::UserActorStateLost(jid)))
+            if jid == bare_jid
+    ));
+
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
+        .is_none());
+    claim_store
+        .acquire(&entity, &foreign_identity())
+        .await
+        .expect("dead-actor detection releases the claim for another node");
+}
+
+#[tokio::test]
 async fn test_unregister_and_register_are_serialized_without_user_loss() {
     let registry = spawn_registry().await;
     let bare_jid = bare("alice");
@@ -285,8 +1031,11 @@ async fn test_reap_user_if_empty_removes_orphaned_empty_actor() {
     use crate::registry::TrySendPeer;
 
     let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
     let bare_jid = bare("alice");
     let phone = full("alice", "phone");
+    let entity = user_entity(&bare_jid);
+    wire_claims(&registry, Arc::clone(&claim_store), this_identity()).await;
 
     let (phone_tx, phone_rx) = outbound_channel();
     registry
@@ -331,6 +1080,11 @@ async fn test_reap_user_if_empty_removes_orphaned_empty_actor() {
         .ask(GetUser { bare_jid })
         .await
         .expect("get user")
+        .is_none());
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim")
         .is_none());
 }
 

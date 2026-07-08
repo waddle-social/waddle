@@ -1665,6 +1665,28 @@ mod tests {
         .expect("force-expire row");
     }
 
+    async fn seed_detached_sm_session_row(db: &crate::db::Database, stream_id: &str) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            r#"
+            INSERT INTO sm_sessions (
+                stream_id, user_id, full_jid, inbound_count, outbound_count,
+                last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
+                carbons_enabled, roster_interested, blocklist_interested,
+                presence_available, presence_priority
+            ) VALUES (?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+            ON CONFLICT (stream_id) DO NOTHING
+            "#,
+            crate::db_params![
+                stream_id.to_string(),
+                "alice".to_string(),
+                "alice@example.com/web".to_string(),
+            ],
+        )
+        .await
+        .expect("seed sm_sessions row");
+    }
+
     async fn wait_until(mut condition: impl FnMut() -> bool, step: Duration, deadline: Duration) {
         let start = tokio::time::Instant::now();
         loop {
@@ -2262,6 +2284,7 @@ mod tests {
             waddle_xmpp::ownership::EntityType::SmSession,
             format!("stream-fix4-{}", uuid::Uuid::new_v4()),
         );
+        seed_detached_sm_session_row(&db, &entity.id).await;
         store
             .acquire(&entity, &initial_identity)
             .await

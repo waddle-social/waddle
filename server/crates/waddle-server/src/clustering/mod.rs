@@ -303,6 +303,14 @@ pub struct ClusteringHandles {
     /// under the same conditions `local_claims` is `None`.
     #[cfg(feature = "clustering")]
     pub room_local_claims: Option<Arc<local_claims::RoomLocalClaims>>,
+    /// ADR-0017 Phase 4 Slice 1b: the `UserActor`-backed
+    /// `LocallyClaimedEntities` counterpart of `local_claims`, constructed
+    /// empty here because the user registry is spawned later while building
+    /// `WebSocketState`, then wired by `server/http.rs` immediately after
+    /// that registry is created. `None` under the same conditions as
+    /// `local_claims`.
+    #[cfg(feature = "clustering")]
+    pub user_local_claims: Option<Arc<local_claims::UserLocalClaims>>,
     /// ADR-0017 Phase 3 Slice 7: the durable MUC room ownership store —
     /// the SAME `Arc` `server/mod.rs` hands to
     /// `RoomRegistry::wire_clustering_claims` (never a second, independent
@@ -568,6 +576,7 @@ pub async fn start_if_enabled(
         // `Demote` asks (the two-part demotion protocol's part (a))
         // through this exact `Arc`.
         let room_local_claims = local_claims::RoomLocalClaims::new();
+        let user_local_claims = local_claims::UserLocalClaims::new();
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
@@ -635,6 +644,7 @@ pub async fn start_if_enabled(
         let combined_local_claims = local_claims::CombinedLocalClaims::new(
             Arc::clone(&local_claims),
             Arc::clone(&room_local_claims),
+            Arc::clone(&user_local_claims),
         );
         let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
             Arc::new(claims::PostgresClaimStore::new(db.clone()));
@@ -680,6 +690,7 @@ pub async fn start_if_enabled(
             node_identity: Some(live_identity.clone()),
             local_claims: Some(Arc::clone(&local_claims)),
             room_local_claims: Some(Arc::clone(&room_local_claims)),
+            user_local_claims: Some(Arc::clone(&user_local_claims)),
             muc_durable_store: Some(muc_durable_store),
             isr_token_store: Some(isr_token_store),
             node_lease: Some(node_lease_handle),

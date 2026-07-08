@@ -439,6 +439,31 @@ async fn create_websocket_state(
             waddle_xmpp::registry::UserRegistryActor::new(),
         )
     };
+    // ADR-0017 Phase 4 Slice 1b: wire the same clustering claim
+    // store/identity pair into UserRegistry that SM sessions and rooms use.
+    // A `None` pair (clustering disabled, non-Postgres, or non-clustering
+    // build) leaves the registry on its single-node in-process default.
+    #[cfg(feature = "clustering")]
+    if let Some((claim_store, node_identity)) = state.clustering_claims.claim_pair() {
+        if let Err(error) = user_registry
+            .tell(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity,
+            })
+            .mailbox_timeout(std::time::Duration::from_secs(2))
+            .await
+        {
+            warn!(
+                %error,
+                "failed to wire clustering claims into the user registry"
+            );
+        }
+    }
+    #[cfg(feature = "clustering")]
+    if let Some(user_local_claims) = &state.clustering_claims.user_local_claims {
+        user_local_claims.wire(user_registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+    }
 
     // Read the MUC room registry and PubSub storage off the shared
     // `AppState` — both are built in `start_with_config` so admin V2

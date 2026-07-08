@@ -140,6 +140,29 @@ orphan scan reclaim SM-session claims. This closes the Phase 3 carried risk
 without adding raw-heartbeat reads to claim CAS/steal logic and without XMPP
 wire behavior changes.
 
+**As-landed Slice 1b**: `UserRegistryActor` now acquires a typed
+`EntityType::UserActor` claim before spawning a local bare-JID actor, stores the
+claim owner plus epoch with the actor entry, and releases with that acquisition
+identity on explicit removal, empty-resource pruning, reaper pruning, and
+dead-actor fail-fast. Claim acquisition also mirrors the room registry's
+dead-owner path: a live foreign owner fails closed, while an owner whose node
+lease is no longer fresh is recovered through `steal_stale(OwnerStale)`.
+Startup wires the same clustering claim store/shared node identity into the
+user registry that SM sessions and rooms already use; non-clustering
+deployments stay on the single-node `InProcessClaimStore`. The server-side
+`UserLocalClaims` handle now reports local UserActor claims to the node-lease
+loop, health-asks them for steal-intent veto, forgets them on demotion without
+releasing a claim that may have moved, and force-detaches their live
+`ConnectionRegistry` resources through the existing connection-owned
+`ForceDetachRequest` path so clients receive the native conflict close and the
+normal teardown path removes any remaining routing slot. It fails generic drain
+sealing closed until a UserActor-specific durable final-write barrier exists.
+Registry-level stale-entry reuse also validates the stored owner/epoch against
+the current shared node identity and claim fence; if validation fails, it
+force-detaches any old live resources or fails closed before reacquiring or
+stealing the claim. Cross-node proxying remains pending before the relay hot
+path is enabled.
+
 ### Slice 2 - ordered relay channel foundation
 
 **Scope**: introduce the relay message types and channel mechanics, still not
@@ -333,3 +356,43 @@ changes slice scope, XEP behavior, or operational requirements.
    `sm_sessions` row before expecting cross-node hydration. This narrows
    reaper authority and aligns the harness with the XEP-0198 durable-detach
    boundary.
+5. Slice 1b initially split the UserActor carryover into registry-level
+   acquire/release only, but adversarial review found that split unsafe: old
+   local UserActors could keep serving after self-fence/demotion, stale
+   foreign UserActor claims could block binds indefinitely, and releases would
+   leak after `SharedNodeIdentity` rotation if they used the current identity.
+   The correction stores the acquisition identity with each actor entry,
+   releases with that identity, steals only from dead owners via
+   `steal_stale(OwnerStale)`, and wires `UserLocalClaims` into
+   `CombinedLocalClaims` for owned/demote/health-check dispatch. A follow-up
+   convergence pass found actor hard-kill alone insufficient, because the real
+   WebSocket task and DashMap routing entry live in `ConnectionRegistry`; the
+   correction now force-detaches those resources through the existing
+   connection-owned conflict-close channel before owner-gated registry cleanup
+   only after the connection task acknowledges cleanup. A final correctness
+   pass closed three edge cases: UserActor health checks are now
+   non-destructive so a failed health probe cannot release the claim before
+   demotion; `owned()` falls back to `ConnectionRegistry` bare-JID enumeration
+   if the user registry cannot answer during terminal self-fence; and a queued
+   force-detach timeout leaves the registry entry in place so the connection
+   task can still consume the request and run non-superseded cleanup. XMPP wire
+   behavior remains unchanged except for the intended native `<conflict/>`
+   close on a deposed live stream. A later XEP/lifecycle review found the
+   registry reuse fast path still needed the same discipline: a stale
+   `UserEntry` whose stored owner/epoch no longer matches the current shared
+   identity/fence is now retired only after its live resources acknowledge
+   `ForceDetachRequest`, otherwise the bind fails closed instead of accepting a
+   new resource while old streams remain invisible to the fresh `UserActor`. A
+   final correctness pass split claim validation into current, proven-stale,
+   and unavailable states: transient `ClaimStore::fence` errors now fail
+   closed without detaching or removing the still-live actor, because only a
+   proven stale owner can justify connection teardown. Cross-node relay
+   proxying is still separate Slice 2+ work.
+6. CI exposed stale test fixtures from Slice 1a's live-stealer hardening:
+   stale-owner steal tests still modeled "missing owner row is enough" and
+   the inline self-fence reclaim test still seeded a claim-only SM session.
+   The correction updates tests to seed a fresh stealer `clustering_nodes` row
+   before `steal_stale(OwnerStale)` and a durable detached `sm_sessions` row
+   before expecting targeted hydration. This changes no production behavior;
+   it aligns the tests with the already-landed hardened CAS and XEP-0198
+   durable-detach boundary.

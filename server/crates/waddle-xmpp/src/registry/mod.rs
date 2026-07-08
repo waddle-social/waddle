@@ -31,6 +31,7 @@ pub use user_actor::delivery::{
 };
 pub use user_actor::GetResources;
 pub use user_registry::{
-    GetOrCreateUser, GetUser, ListUsers, ReapUserIfEmpty, RegisterUserResource, RemoveUser,
-    UnregisterUserResource, UserCount, UserRegistryActor, UserRegistryError,
+    DemoteUserActor, GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers, ReapUserIfEmpty,
+    RegisterUserResource, RemoveUser, UnregisterUserResource, UserCount, UserRegistryActor,
+    UserRegistryError, WireUserClusteringClaims,
 };

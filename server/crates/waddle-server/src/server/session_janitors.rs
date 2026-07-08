@@ -997,6 +997,7 @@ mod orphan_reaper_sweep_tests {
             node_identity: Some(sweeper_identity_handle.clone()),
             local_claims: None,
             room_local_claims: None,
+            user_local_claims: None,
             muc_durable_store: None,
             isr_token_store: None,
             node_lease: Some(sweeper_node_lease),

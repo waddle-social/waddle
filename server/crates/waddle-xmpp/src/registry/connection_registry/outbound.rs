@@ -122,10 +122,12 @@ impl OutboundStanza {
     }
 }
 
-/// A request to force-detach a live SM session for cross-node XEP-0198
-/// resume (ADR-0017 Phase 3 Slice 6, element 8's "live, owned elsewhere"
-/// branch). Delivered through [`ConnectionEntry::force_detach_tx`] into the
-/// owning connection's own select loop, so the destructive detach-flush +
+/// A request to force-detach a live connection from its own connection task.
+/// Introduced for cross-node XEP-0198 resume (ADR-0017 Phase 3 Slice 6,
+/// element 8's "live, owned elsewhere" branch) and also used by clustered
+/// `UserActor` owner demotion/retirement before a stale user claim is reused.
+/// Delivered through [`ConnectionEntry::force_detach_tx`] into the owning
+/// connection's own select loop, so the destructive detach-flush +
 /// `<conflict/>` close runs on the connection's own task (never from an
 /// external task reaching into its state directly).
 #[derive(Debug)]
