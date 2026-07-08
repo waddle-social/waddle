@@ -488,3 +488,13 @@ changes slice scope, XEP behavior, or operational requirements.
     payload, and only maps an unknown ordered-relay message type to an internal
     parse NACK; all other codec failures stay ambiguous relay errors. This
     remains internal relay behavior only.
+13. CI exposed that the broad Nix test job compiles the entire
+    `waddle-server` lib-test crate in release/all-features mode, which made
+    the ordered-relay private invariant tests part of the same LTO-heavy
+    monolith that was killed before execution. The correction keeps only the
+    release-relevant private invariant probes in that lib-test target, moves
+    the public ordered-relay behavior coverage into the dedicated
+    `clustering_ordered_relay` integration test target, and leaves the larger
+    debug-only in-module matrix as a local regression net. This preserves the
+    Slice 2 behavior contract without changing XEP wire behavior or runtime
+    requirements.
