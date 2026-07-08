@@ -440,6 +440,61 @@ async fn store_session_atomic_and_join_read_preserve_presence_payloads() {
     assert_eq!(body, Some("m1".to_string()));
 }
 
+/// #1206 hardening (review): a corrupt `presence_payloads` cell must NOT
+/// poison the whole session on restore. Presence caps are non-essential and
+/// self-heal on the client's next presence broadcast, but the session's
+/// XEP-0198 unacked message queue is precious — decode degrades to caps-less
+/// and keeps the session (and its queue) instead of dropping it.
+#[tokio::test]
+async fn corrupt_presence_payloads_cell_degrades_to_caps_less_not_session_drop() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .store_session_atomic(
+            fixture_session("corrupt-payloads"),
+            vec![fixture_unacked("corrupt-payloads", 1)],
+        )
+        .await
+        .unwrap();
+
+    // Simulate storage-layer corruption of ONLY the presence_payloads cell
+    // (unclosed element — parses to an error).
+    storage
+        .execute(
+            "UPDATE sm_sessions SET presence_payloads = ? WHERE stream_id = ?",
+            crate::db_params![
+                "<c xmlns='urn:x'".to_string(),
+                "corrupt-payloads".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // get_session: session survives, caps-less.
+    let loaded = storage
+        .get_session(&SmSessionId::new("corrupt-payloads"))
+        .await
+        .unwrap()
+        .expect("session must survive a corrupt presence_payloads cell");
+    assert!(
+        loaded.presence_payloads.is_empty(),
+        "a corrupt payloads cell degrades to caps-less"
+    );
+
+    // Cold-start JOIN restore: the session AND its unacked queue survive
+    // (the corrupt cell must not turn it into a dropped poison pill).
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (session, unacked) = grouped
+        .iter()
+        .find(|(s, _)| s.stream_id.as_str() == "corrupt-payloads")
+        .expect("session must not be dropped as a poison pill");
+    assert!(session.presence_payloads.is_empty());
+    assert_eq!(
+        unacked.len(),
+        1,
+        "the unacked message queue must be preserved despite the corrupt payloads cell"
+    );
+}
+
 /// Issue #209 PR #405 (Greptile/Copilot P2 review):
 /// `store_session_atomic` MUST roll back the entire transaction
 /// on any mid-batch failure — including the session-row update.

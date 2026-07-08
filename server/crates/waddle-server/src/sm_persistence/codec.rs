@@ -64,6 +64,25 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     let max_resume_duration =
         std::time::Duration::from_millis(max_resume_duration_ms.max(0) as u64);
     let presence_show = presence_show_raw.as_deref().map(parse_show).transpose()?;
+    // Degrade a malformed `presence_payloads` cell to caps-less rather than
+    // failing the whole session decode. Presence extension payloads are
+    // non-essential decoration that the client re-advertises on its next
+    // presence broadcast, whereas a decode error here would poison the
+    // session on cold start (`list_all_sessions_with_unacked`) and drop its
+    // XEP-0198 unacked message queue with it — a strictly worse trade
+    // (#1206 review). The column is always server-serialized well-formed XML
+    // via the minidom builder, so this only guards against storage-layer
+    // corruption of that single cell.
+    let presence_payloads =
+        parse_presence_payloads(presence_payloads_raw).unwrap_or_else(|error| {
+            tracing::warn!(
+                stream_id = %stream_id,
+                %error,
+                "sm session presence_payloads failed to decode; restoring the session \
+                 caps-less rather than dropping it (its unacked queue is preserved)"
+            );
+            Vec::new()
+        });
 
     Ok(PersistedSession {
         stream_id: SmSessionId::new(stream_id),
@@ -83,7 +102,7 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         presence_show,
         presence_status,
         presence_priority: presence_priority.clamp(i8::MIN as i64, i8::MAX as i64) as i8,
-        presence_payloads: parse_presence_payloads(presence_payloads_raw)?,
+        presence_payloads,
     })
 }
 
