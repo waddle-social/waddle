@@ -55,12 +55,34 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     let replay_gap_through: Option<i64> = row
         .get(16)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let presence_payloads_raw: Option<String> = row
+        .get(17)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let detached_at = DateTime::<Utc>::from_timestamp_millis(detached_at_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid detached_at_ms".into()))?;
     let max_resume_duration =
         std::time::Duration::from_millis(max_resume_duration_ms.max(0) as u64);
     let presence_show = presence_show_raw.as_deref().map(parse_show).transpose()?;
+    // Degrade a malformed `presence_payloads` cell to caps-less rather than
+    // failing the whole session decode. Presence extension payloads are
+    // non-essential decoration that the client re-advertises on its next
+    // presence broadcast, whereas a decode error here would poison the
+    // session on cold start (`list_all_sessions_with_unacked`) and drop its
+    // XEP-0198 unacked message queue with it — a strictly worse trade
+    // (#1206 review). The column is always server-serialized well-formed XML
+    // via the minidom builder, so this only guards against storage-layer
+    // corruption of that single cell.
+    let presence_payloads =
+        parse_presence_payloads(presence_payloads_raw).unwrap_or_else(|error| {
+            tracing::warn!(
+                stream_id = %stream_id,
+                %error,
+                "sm session presence_payloads failed to decode; restoring the session \
+                 caps-less rather than dropping it (its unacked queue is preserved)"
+            );
+            Vec::new()
+        });
 
     Ok(PersistedSession {
         stream_id: SmSessionId::new(stream_id),
@@ -80,6 +102,7 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         presence_show,
         presence_status,
         presence_priority: presence_priority.clamp(i8::MIN as i64, i8::MAX as i64) as i8,
+        presence_payloads,
     })
 }
 
@@ -116,8 +139,10 @@ pub(crate) fn decode_unacked(
 
 /// Decode an unacked-stanza row from a JOIN result. Reads
 /// `stream_id` from column 0 (the session's stream_id),
-/// `stanza_xml` from column 18, and `original_receipt_at_ms`
-/// from column 19. Caller already has `sequence` (column 17).
+/// `stanza_xml` from column 19, and `original_receipt_at_ms`
+/// from column 20. Caller already has `sequence` (column 18).
+/// The unacked columns sit after the 18 session columns
+/// (0..=17, presence_payloads added at 17 for #1206).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
     row: &crate::db::Row,
@@ -127,10 +152,10 @@ pub(super) fn decode_unacked_join_row(
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let stanza_xml: String = row
-        .get(18)
+        .get(19)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let receipt_ms: i64 = row
-        .get(19)
+        .get(20)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
@@ -182,6 +207,71 @@ pub(crate) fn serialize_stanza(stanza: &Stanza) -> Result<String, SmPersistenceE
     String::from_utf8(buf).map_err(|e| SmPersistenceError::Other(e.to_string()))
 }
 
+/// Wrapper element name+namespace for encoding a resource's presence
+/// extension payloads into the single `sm_sessions.presence_payloads`
+/// TEXT column. This is an internal storage encoding only — the wrapper
+/// is never written to the XMPP wire (only its children are, individually,
+/// on probe/subscription delivery), so a `urn:waddle:*` namespace is
+/// appropriate and does not fall under the XEP wire-conformance rule.
+const PRESENCE_PAYLOADS_WRAPPER_NAME: &str = "payloads";
+const PRESENCE_PAYLOADS_WRAPPER_NS: &str = "urn:waddle:sm:presence-payloads:0";
+
+/// Serialize a resource's presence extension payloads to a single XML
+/// string for durable storage, or `None` when there are none (so the
+/// column stays NULL). The children are wrapped in one container element
+/// built via the minidom element builder — never `format!`/string concat,
+/// per the XML hard rule.
+pub(crate) fn serialize_presence_payloads(
+    payloads: &[xmpp_parsers::minidom::Element],
+) -> Result<Option<String>, SmPersistenceError> {
+    if payloads.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = xmpp_parsers::minidom::Element::builder(
+        PRESENCE_PAYLOADS_WRAPPER_NAME,
+        PRESENCE_PAYLOADS_WRAPPER_NS,
+    );
+    for child in payloads {
+        builder = builder.append(child.clone());
+    }
+    let mut buf = Vec::new();
+    builder
+        .build()
+        .write_to(&mut buf)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))
+}
+
+/// Parse the durable `presence_payloads` column back into typed elements
+/// (exactly once, per the typed-payloads hard rule). A NULL / empty column
+/// yields an empty vec.
+pub(crate) fn parse_presence_payloads(
+    raw: Option<String>,
+) -> Result<Vec<xmpp_parsers::minidom::Element>, SmPersistenceError> {
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let wrapper: xmpp_parsers::minidom::Element = raw
+        .parse()
+        .map_err(|e: xmpp_parsers::minidom::Error| SmPersistenceError::Other(e.to_string()))?;
+    // Validate the wrapper shape so a well-formed-but-wrong-root cell (e.g. a
+    // corruption that leaves only a lone `<c/>`) is a typed error, not a
+    // silent empty/wrong result — otherwise it would bypass the caller's
+    // warn+degrade path in `decode_session` (Greptile/Qodo review).
+    if wrapper.name() != PRESENCE_PAYLOADS_WRAPPER_NAME
+        || wrapper.ns() != PRESENCE_PAYLOADS_WRAPPER_NS
+    {
+        return Err(SmPersistenceError::Other(format!(
+            "unexpected presence_payloads wrapper <{} xmlns='{}'>",
+            wrapper.name(),
+            wrapper.ns()
+        )));
+    }
+    Ok(wrapper.children().cloned().collect())
+}
+
 fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPersistenceError> {
     match element.name() {
         "message" => xmpp_parsers::message::Message::try_from(element)
@@ -196,5 +286,59 @@ fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPer
         other => Err(SmPersistenceError::Other(format!(
             "unknown stanza element '{other}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod presence_payloads_tests {
+    use super::{parse_presence_payloads, serialize_presence_payloads};
+    use xmpp_parsers::minidom::Element;
+
+    #[test]
+    fn empty_payloads_serialize_to_none_so_the_column_stays_null() {
+        assert_eq!(serialize_presence_payloads(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn null_or_empty_column_parses_to_no_payloads() {
+        assert!(parse_presence_payloads(None).unwrap().is_empty());
+        assert!(parse_presence_payloads(Some(String::new()))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn multiple_payloads_round_trip_verbatim_and_in_order() {
+        let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+            .parse()
+            .unwrap();
+        let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+            .parse()
+            .unwrap();
+        let encoded = serialize_presence_payloads(&[caps.clone(), idle.clone()])
+            .unwrap()
+            .expect("non-empty payloads serialize to Some");
+        let decoded = parse_presence_payloads(Some(encoded)).unwrap();
+        assert_eq!(decoded, vec![caps, idle]);
+    }
+
+    #[test]
+    fn malformed_column_is_a_typed_error_not_a_panic() {
+        // A corrupted / truncated column must surface as a typed decode
+        // error — never a panic — so `decode_session` can catch it and
+        // degrade the session to caps-less rather than crashing cold startup.
+        assert!(parse_presence_payloads(Some("<c xmlns='urn:x'".to_string())).is_err());
+    }
+
+    #[test]
+    fn well_formed_wrong_root_is_a_typed_error_so_the_caller_can_degrade() {
+        // A cell that still parses as valid XML but is NOT the server-written
+        // wrapper (e.g. corruption leaving a lone `<c/>`) must be a typed
+        // error, not a silent empty result — otherwise it would bypass
+        // `decode_session`'s warn+degrade path and lose payloads without a
+        // trace.
+        let lone_caps =
+            r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='n' ver='v'/>"#;
+        assert!(parse_presence_payloads(Some(lone_caps.to_string())).is_err());
     }
 }

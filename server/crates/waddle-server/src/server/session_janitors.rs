@@ -720,6 +720,7 @@ mod orphan_reaper_sweep_tests {
             presence_show: Some(Show::Chat),
             presence_status: Some("at the keyboard".to_string()),
             presence_priority: 5,
+            presence_payloads: Vec::new(),
         }
     }
 

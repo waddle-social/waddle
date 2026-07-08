@@ -38,6 +38,7 @@ pub(super) fn detached_to_persisted(
         presence_show: session.presence_show.clone(),
         presence_status: session.presence_status.clone(),
         presence_priority: session.presence_priority,
+        presence_payloads: session.presence_payloads.clone(),
     })
 }
 
@@ -155,11 +156,11 @@ pub(super) fn persisted_to_detached(
         presence_show: persisted.presence_show.clone(),
         presence_status: persisted.presence_status.clone(),
         presence_priority: persisted.presence_priority,
-        // The durable shape does not persist presence extension payloads;
-        // a restart-rehydrated detached session reports bare
-        // show/status/priority (issue #1103 limitation, documented on
-        // `DetachedSession::presence_payloads`).
-        presence_payloads: Vec::new(),
+        // Durable rehydration carries the resource's own presence extension
+        // payloads (XEP-0115 caps, XEP-0319 idle, ...) so a restart /
+        // cross-node resume relays them verbatim on probe rather than
+        // reporting a caps-less resource (issue #1206).
+        presence_payloads: persisted.presence_payloads.clone(),
         // Not persisted: durable rehydration may re-deliver the pending
         // subscribes once after a restart — acceptable.
         pending_subscribes_flushed: false,

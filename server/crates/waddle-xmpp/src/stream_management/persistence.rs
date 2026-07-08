@@ -126,6 +126,15 @@ pub struct PersistedSession {
     pub presence_show: Option<Show>,
     pub presence_status: Option<String>,
     pub presence_priority: i8,
+    /// The resource's presence extension payloads (XEP-0115 `<c/>` caps,
+    /// XEP-0319 `<idle/>`, arbitrary extensions) as last broadcast while
+    /// available, so a session rehydrated from durable storage (restart or
+    /// cross-node resume) relays the resource's own advertisements verbatim
+    /// instead of coming back caps-less (issue #1206, follow-up to #1101 /
+    /// #1103). Typed arbitrary-XML per the typed-payloads hard rule; the
+    /// libSQL/Postgres backend serializes to a single TEXT column on write
+    /// and parses back to typed on read.
+    pub presence_payloads: Vec<minidom::Element>,
 }
 
 /// One row in the `sm_unacked` table — a stanza sent to a session

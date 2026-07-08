@@ -36,7 +36,8 @@ mod joined_sessions;
 mod schema;
 
 use codec::{
-    decode_session, decode_unacked, decode_unacked_join_row, serialize_stanza, show_wire_str,
+    decode_session, decode_unacked, decode_unacked_join_row, serialize_presence_payloads,
+    serialize_stanza, show_wire_str,
 };
 
 /// Per-stream insert/update mutex map. Serializes writes for the same
@@ -185,6 +186,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let detached_at_ms = session.detached_at.timestamp_millis();
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
+        let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
 
         // Portable upsert: SQLite and Postgres both support
         // INSERT ... ON CONFLICT (col) DO UPDATE SET ...
@@ -194,8 +196,9 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 stream_id, user_id, full_jid, inbound_count, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
-                presence_show, presence_status, presence_priority, replay_gap_through
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                presence_show, presence_status, presence_priority, replay_gap_through,
+                presence_payloads
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -212,7 +215,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 presence_show = excluded.presence_show,
                 presence_status = excluded.presence_status,
                 presence_priority = excluded.presence_priority,
-                replay_gap_through = excluded.replay_gap_through
+                replay_gap_through = excluded.replay_gap_through,
+                presence_payloads = excluded.presence_payloads
             "#,
             crate::db_params![
                 session.stream_id.as_str().to_string(),
@@ -232,6 +236,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 session.presence_status,
                 i64::from(session.presence_priority),
                 session.replay_gap_through.map(i64::from),
+                presence_payloads_xml,
             ],
         )
         .await?;
@@ -247,7 +252,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
-                        presence_show, presence_status, presence_priority, replay_gap_through \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
                  FROM sm_sessions WHERE stream_id = ?",
                 crate::db_params![stream_id.as_str().to_string()],
             )
@@ -418,7 +424,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
-                        presence_show, presence_status, presence_priority, replay_gap_through \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
                  FROM sm_sessions WHERE detached_at_ms + max_resume_duration_ms <= ?",
                 crate::db_params![now_ms],
             )
@@ -440,7 +447,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
-                        presence_show, presence_status, presence_priority, replay_gap_through \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
                  FROM sm_sessions",
                 (),
             )

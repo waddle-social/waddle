@@ -10,7 +10,7 @@ pub(super) async fn list_all_sessions_with_unacked(
                     s.detached_at_ms, s.max_resume_duration_ms, \
                     s.carbons_enabled, s.roster_interested, s.blocklist_interested, s.presence_available, \
                     s.presence_show, s.presence_status, s.presence_priority, \
-                    s.replay_gap_through, \
+                    s.replay_gap_through, s.presence_payloads, \
                     u.sequence, u.stanza_xml, u.original_receipt_at_ms \
              FROM sm_sessions s \
              LEFT JOIN sm_unacked u ON s.stream_id = u.stream_id \
@@ -53,7 +53,8 @@ pub(super) async fn list_all_sessions_with_unacked(
         };
         let starts_new_group = current_stream_id.as_deref() != Some(row_stream_id.as_str());
         if starts_new_group {
-            // Decode the session columns (0..=16, 17 columns)
+            // Decode the session columns (0..=17, 18 columns;
+            // presence_payloads added at 17 for #1206)
             // exactly once per stream_id group. On decode
             // failure, skip the entire group's rows so a single
             // poison-pill session can't brick cold startup
@@ -85,11 +86,12 @@ pub(super) async fn list_all_sessions_with_unacked(
             // session; drop this unacked row too.
             continue;
         }
-        // Unacked columns: sequence (17), stanza_xml (18),
-        // original_receipt_at_ms (19). NULL when LEFT JOIN had
-        // no match. Per-row decode failure skips that row but
-        // keeps the rest of the session's queue.
-        let sequence_opt: Option<i64> = match row.get(17) {
+        // Unacked columns: sequence (18), stanza_xml (19),
+        // original_receipt_at_ms (20) — shifted +1 by the
+        // presence_payloads session column (17) added for #1206.
+        // NULL when LEFT JOIN had no match. Per-row decode failure
+        // skips that row but keeps the rest of the session's queue.
+        let sequence_opt: Option<i64> = match row.get(18) {
             Ok(v) => v,
             Err(error) => {
                 tracing::debug!(

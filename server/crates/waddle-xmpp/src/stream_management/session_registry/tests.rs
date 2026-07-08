@@ -1406,6 +1406,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
         presence_show: None,
         presence_status: None,
         presence_priority: 0,
+        presence_payloads: Vec::new(),
     };
     storage.upsert_session(expired).await.unwrap();
     let mut queued =
@@ -2566,6 +2567,7 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("seed decoy durable row");
@@ -2762,6 +2764,7 @@ async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .expect("seed durable row");

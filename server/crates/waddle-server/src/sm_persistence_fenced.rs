@@ -139,7 +139,7 @@ use waddle_xmpp::stream_management::persistence::{
 
 use crate::db::{Database, DatabaseDriver, Transaction};
 use crate::sm_persistence::codec::{
-    decode_session, decode_unacked, serialize_stanza, show_wire_str,
+    decode_session, decode_unacked, serialize_presence_payloads, serialize_stanza, show_wire_str,
 };
 
 /// FIX 3: map a [`ClaimError`] to the [`SmPersistenceError`] this trait's
@@ -291,9 +291,20 @@ impl PostgresFencedSmPersistence {
                 presence_status TEXT,
                 presence_priority INTEGER NOT NULL,
                 replay_gap_through BIGINT,
-                promotion_attempts INTEGER NOT NULL DEFAULT 0
+                promotion_attempts INTEGER NOT NULL DEFAULT 0,
+                presence_payloads TEXT
             )
             "#,
+            (),
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        // #1206: presence extension payloads (XEP-0115 caps, XEP-0319 idle,
+        // ...). ADD COLUMN IF NOT EXISTS (not folded into CREATE TABLE alone)
+        // so a table left by an earlier run of this impl gains the column —
+        // matching the sibling column-group migration below.
+        conn.execute(
+            "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS presence_payloads TEXT",
             (),
         )
         .await
@@ -458,6 +469,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
+        let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
 
         let mut tx = self
             .db
@@ -476,8 +488,9 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 stream_id, user_id, full_jid, inbound_count, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
-                presence_show, presence_status, presence_priority, replay_gap_through
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                presence_show, presence_status, presence_priority, replay_gap_through,
+                presence_payloads
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -494,7 +507,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 presence_show = excluded.presence_show,
                 presence_status = excluded.presence_status,
                 presence_priority = excluded.presence_priority,
-                replay_gap_through = excluded.replay_gap_through
+                replay_gap_through = excluded.replay_gap_through,
+                presence_payloads = excluded.presence_payloads
             "#,
             crate::db_params![
                 stream_id.as_str().to_string(),
@@ -513,6 +527,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 session.presence_status,
                 i64::from(session.presence_priority),
                 session.replay_gap_through.map(i64::from),
+                presence_payloads_xml,
             ],
         )
         .await
@@ -536,7 +551,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
-                        presence_show, presence_status, presence_priority, replay_gap_through \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
                  FROM sm_sessions WHERE stream_id = ?",
                 crate::db_params![stream_id.as_str().to_string()],
             )
@@ -712,7 +728,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
-                        presence_show, presence_status, presence_priority, replay_gap_through \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
                  FROM sm_sessions \
                  WHERE detached_at_ms + max_resume_duration_ms <= (EXTRACT(EPOCH FROM now()) * 1000)::bigint",
                 (),
@@ -735,7 +752,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
-                        presence_show, presence_status, presence_priority, replay_gap_through \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
                  FROM sm_sessions",
                 (),
             )
@@ -769,6 +787,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
+        let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
 
         let mut tx = self
             .db
@@ -795,8 +814,9 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 stream_id, user_id, full_jid, inbound_count, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
-                presence_show, presence_status, presence_priority, replay_gap_through
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                presence_show, presence_status, presence_priority, replay_gap_through,
+                presence_payloads
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -813,7 +833,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 presence_show = excluded.presence_show,
                 presence_status = excluded.presence_status,
                 presence_priority = excluded.presence_priority,
-                replay_gap_through = excluded.replay_gap_through
+                replay_gap_through = excluded.replay_gap_through,
+                presence_payloads = excluded.presence_payloads
             "#,
             crate::db_params![
                 stream_id.as_str().to_string(),
@@ -832,6 +853,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 session.presence_status.clone(),
                 i64::from(session.presence_priority),
                 session.replay_gap_through.map(i64::from),
+                presence_payloads_xml,
             ],
         )
         .await

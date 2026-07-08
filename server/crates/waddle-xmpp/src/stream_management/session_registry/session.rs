@@ -91,9 +91,11 @@ pub struct DetachedSession {
     /// The resource's presence extension payloads (XEP-0115 caps,
     /// XEP-0319 idle, anything else) as last broadcast while available,
     /// relayed verbatim by probe/subscription delivery for detached
-    /// resources (issue #1103). In-memory only: the durable persisted
-    /// shape does not carry payloads, so sessions rehydrated after a
-    /// process restart report bare show/status/priority.
+    /// resources (issue #1103). The durable persisted shape
+    /// ([`PersistedSession`](super::super::persistence::PersistedSession))
+    /// now carries these too (issue #1206), so a session rehydrated after
+    /// a process restart or cross-node resume reports its full presence,
+    /// payloads included — not bare show/status/priority.
     pub presence_payloads: Vec<minidom::Element>,
     /// Whether the once-per-session pending-subscribe flush (RFC 6121
     /// §3.1.3, issue #1104) was already consumed before detach. Resume

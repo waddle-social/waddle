@@ -29,6 +29,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         presence_show: Some(Show::Chat),
         presence_status: Some("at the keyboard".to_string()),
         presence_priority: 5,
+        presence_payloads: Vec::new(),
     }
 }
 
@@ -72,6 +73,40 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.presence_show, s.presence_show);
     assert_eq!(loaded.presence_status, s.presence_status);
     assert_eq!(loaded.presence_priority, s.presence_priority);
+    assert_eq!(loaded.presence_payloads, s.presence_payloads);
+}
+
+/// #1206: the durable shape must carry the resource's own presence
+/// extension payloads (XEP-0115 `<c/>` caps, XEP-0319 `<idle/>`) so a
+/// session rehydrated from storage relays them verbatim on probe instead
+/// of coming back caps-less. The payloads survive a serialize→TEXT→parse
+/// round-trip, verbatim and in order.
+#[tokio::test]
+async fn round_trip_session_preserves_presence_payloads() {
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut s = fixture_session("stream-payloads");
+    s.presence_payloads = vec![caps.clone(), idle.clone()];
+    storage.upsert_session(s.clone()).await.unwrap();
+
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-payloads"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.presence_payloads,
+        vec![caps, idle],
+        "durable get_session must return the stored presence payloads verbatim and in order"
+    );
 }
 
 #[tokio::test]
@@ -355,6 +390,109 @@ async fn store_session_atomic_round_trips_via_transaction() {
     assert_eq!(listed.len(), 3);
     assert_eq!(listed[0].sequence, 1);
     assert_eq!(listed[2].sequence, 3);
+}
+
+/// #1206: the production store path is `store_session` → the OVERRIDDEN
+/// `store_session_atomic`, and cold-start restore reads back through the
+/// `list_all_sessions_with_unacked` JOIN. Both must carry the resource's
+/// presence payloads. This drives the end-to-end write+JOIN-read path and
+/// simultaneously guards the JOIN column indices: the unacked stanza must
+/// still decode after `presence_payloads` was inserted as a session column.
+#[tokio::test]
+async fn store_session_atomic_and_join_read_preserve_presence_payloads() {
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut session = fixture_session("atomic-payloads");
+    session.presence_payloads = vec![caps.clone(), idle.clone()];
+    storage
+        .store_session_atomic(session, vec![fixture_unacked("atomic-payloads", 1)])
+        .await
+        .unwrap();
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (restored, unacked) = grouped
+        .iter()
+        .find(|(s, _)| s.stream_id.as_str() == "atomic-payloads")
+        .expect("session present in cold-start restore set");
+
+    assert_eq!(
+        restored.presence_payloads,
+        vec![caps, idle],
+        "the atomic store + JOIN restore must preserve the resource's presence payloads"
+    );
+
+    // Column-index guard: the unacked stanza still decodes end-to-end after
+    // presence_payloads shifted the JOIN's unacked columns by one.
+    assert_eq!(unacked.len(), 1, "the unacked stanza must survive the JOIN");
+    assert_eq!(unacked[0].sequence, 1);
+    let body = match &*unacked[0].stanza {
+        Stanza::Message(m) => m.bodies.values().next().cloned(),
+        _ => panic!("expected Message"),
+    };
+    assert_eq!(body, Some("m1".to_string()));
+}
+
+/// #1206 hardening (review): a corrupt `presence_payloads` cell must NOT
+/// poison the whole session on restore. Presence caps are non-essential and
+/// self-heal on the client's next presence broadcast, but the session's
+/// XEP-0198 unacked message queue is precious — decode degrades to caps-less
+/// and keeps the session (and its queue) instead of dropping it.
+#[tokio::test]
+async fn corrupt_presence_payloads_cell_degrades_to_caps_less_not_session_drop() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .store_session_atomic(
+            fixture_session("corrupt-payloads"),
+            vec![fixture_unacked("corrupt-payloads", 1)],
+        )
+        .await
+        .unwrap();
+
+    // Simulate storage-layer corruption of ONLY the presence_payloads cell
+    // (unclosed element — parses to an error).
+    storage
+        .execute(
+            "UPDATE sm_sessions SET presence_payloads = ? WHERE stream_id = ?",
+            crate::db_params![
+                "<c xmlns='urn:x'".to_string(),
+                "corrupt-payloads".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // get_session: session survives, caps-less.
+    let loaded = storage
+        .get_session(&SmSessionId::new("corrupt-payloads"))
+        .await
+        .unwrap()
+        .expect("session must survive a corrupt presence_payloads cell");
+    assert!(
+        loaded.presence_payloads.is_empty(),
+        "a corrupt payloads cell degrades to caps-less"
+    );
+
+    // Cold-start JOIN restore: the session AND its unacked queue survive
+    // (the corrupt cell must not turn it into a dropped poison pill).
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (session, unacked) = grouped
+        .iter()
+        .find(|(s, _)| s.stream_id.as_str() == "corrupt-payloads")
+        .expect("session must not be dropped as a poison pill");
+    assert!(session.presence_payloads.is_empty());
+    assert_eq!(
+        unacked.len(),
+        1,
+        "the unacked message queue must be preserved despite the corrupt payloads cell"
+    );
 }
 
 /// Issue #209 PR #405 (Greptile/Copilot P2 review):
