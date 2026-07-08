@@ -392,6 +392,54 @@ async fn store_session_atomic_round_trips_via_transaction() {
     assert_eq!(listed[2].sequence, 3);
 }
 
+/// #1206: the production store path is `store_session` → the OVERRIDDEN
+/// `store_session_atomic`, and cold-start restore reads back through the
+/// `list_all_sessions_with_unacked` JOIN. Both must carry the resource's
+/// presence payloads. This drives the end-to-end write+JOIN-read path and
+/// simultaneously guards the JOIN column indices: the unacked stanza must
+/// still decode after `presence_payloads` was inserted as a session column.
+#[tokio::test]
+async fn store_session_atomic_and_join_read_preserve_presence_payloads() {
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut session = fixture_session("atomic-payloads");
+    session.presence_payloads = vec![caps.clone(), idle.clone()];
+    storage
+        .store_session_atomic(session, vec![fixture_unacked("atomic-payloads", 1)])
+        .await
+        .unwrap();
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (restored, unacked) = grouped
+        .iter()
+        .find(|(s, _)| s.stream_id.as_str() == "atomic-payloads")
+        .expect("session present in cold-start restore set");
+
+    assert_eq!(
+        restored.presence_payloads,
+        vec![caps, idle],
+        "the atomic store + JOIN restore must preserve the resource's presence payloads"
+    );
+
+    // Column-index guard: the unacked stanza still decodes end-to-end after
+    // presence_payloads shifted the JOIN's unacked columns by one.
+    assert_eq!(unacked.len(), 1, "the unacked stanza must survive the JOIN");
+    assert_eq!(unacked[0].sequence, 1);
+    let body = match &*unacked[0].stanza {
+        Stanza::Message(m) => m.bodies.values().next().cloned(),
+        _ => panic!("expected Message"),
+    };
+    assert_eq!(body, Some("m1".to_string()));
+}
+
 /// Issue #209 PR #405 (Greptile/Copilot P2 review):
 /// `store_session_atomic` MUST roll back the entire transaction
 /// on any mid-batch failure — including the session-row update.

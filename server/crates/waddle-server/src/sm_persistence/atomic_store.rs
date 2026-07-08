@@ -12,6 +12,7 @@ pub(super) async fn store_session_atomic(
         .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
     let detached_at_ms = session.detached_at.timestamp_millis();
     let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
+    let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
 
     let mut tx = storage
         .db
@@ -44,8 +45,9 @@ pub(super) async fn store_session_atomic(
             stream_id, user_id, full_jid, inbound_count, outbound_count,
             last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
             carbons_enabled, roster_interested, blocklist_interested, presence_available,
-            presence_show, presence_status, presence_priority, replay_gap_through
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            presence_show, presence_status, presence_priority, replay_gap_through,
+            presence_payloads
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (stream_id) DO UPDATE SET
             user_id = excluded.user_id,
             full_jid = excluded.full_jid,
@@ -62,7 +64,8 @@ pub(super) async fn store_session_atomic(
             presence_show = excluded.presence_show,
             presence_status = excluded.presence_status,
             presence_priority = excluded.presence_priority,
-            replay_gap_through = excluded.replay_gap_through
+            replay_gap_through = excluded.replay_gap_through,
+            presence_payloads = excluded.presence_payloads
         "#,
         crate::db_params![
             session.stream_id.as_str().to_string(),
@@ -82,6 +85,7 @@ pub(super) async fn store_session_atomic(
             session.presence_status.clone(),
             i64::from(session.presence_priority),
             session.replay_gap_through.map(i64::from),
+            presence_payloads_xml,
         ],
     )
     .await
