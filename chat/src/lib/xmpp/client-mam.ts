@@ -32,6 +32,14 @@ import type { WasmArchivedMessage, WasmMamPage, WasmMessage } from "./wasm-types
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
 const DM_CALL_ACTIVITY_MAX_PAGES = 50;
 
+// #1221: cap reconnect catch-up paging per conversation (≤500 msgs at
+// 100/page). Unbounded paging of a large room archive on every fresh
+// reconnect overflowed the SM queue during the prod join storm. On
+// exhaustion the loop throws into the per-conversation `catchupFailure`
+// fallback (bounded wholesale reload); older history lazy-loads via the
+// normal MAM pagination.
+const RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION = 5;
+
 export type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
 
 type CatchupRunStats = { pages: number; messages: number };
@@ -485,9 +493,13 @@ export class MamPager {
     if (entry.after) {
       let after: string | undefined = entry.after;
       const seenAfter = new Set<string>();
+      let pageCount = 0;
       while (after) {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
+        if (pageCount >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
+          throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${entry.key}`);
+        }
         let page: WasmMamPage | null | undefined;
         try {
           page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after });
@@ -499,6 +511,7 @@ export class MamPager {
           }
           throw error;
         }
+        pageCount += 1;
         if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
         if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
         const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds, { stats });
@@ -523,9 +536,13 @@ export class MamPager {
     if (entry.after) {
       let after: string | undefined = entry.after;
       const seenAfter = new Set<string>();
+      let pageCount = 0;
       while (after) {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
+        if (pageCount >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
+          throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${entry.key}`);
+        }
         let page: WasmMamPage | null | undefined;
         try {
           page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after });
@@ -537,6 +554,7 @@ export class MamPager {
           }
           throw error;
         }
+        pageCount += 1;
         if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
         if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
         const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds, stats);
@@ -567,6 +585,9 @@ export class MamPager {
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
+      if (pages.length >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
+        throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${peerJid}`);
+      }
       const firstArchiveId = pageFirstArchiveId(page);
       if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${peerJid}`);
       if (seenBefore.has(firstArchiveId)) throw new Error(`Reconnect catch-up repeated backward archive cursor for ${peerJid}`);
@@ -598,6 +619,9 @@ export class MamPager {
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
+      if (pages.length >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
+        throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${roomJid}`);
+      }
       const firstArchiveId = pageFirstArchiveId(page);
       if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${roomJid}`);
       if (seenBefore.has(firstArchiveId)) throw new Error(`Reconnect catch-up repeated backward archive cursor for ${roomJid}`);
