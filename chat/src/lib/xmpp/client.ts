@@ -627,25 +627,14 @@ export class BrowserXmppClient {
     return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
   }
 
-  private canonicalJoinedRoomJid(roomJid: string): string {
-    const key = this.roomJoinKey(roomJid);
-    if (!key) return roomJid;
-    if (this.currentRoom && this.roomJoinKey(this.currentRoom) === key) {
-      return this.currentRoom;
-    }
-    for (const joinedRoom of this.joinedMucs.keys()) {
-      if (this.roomJoinKey(joinedRoom) === key) return joinedRoom;
-    }
-    return roomJid;
-  }
-
   private markMucReadyFromSelfPresence(roomJid: string): void {
-    const room = this.canonicalJoinedRoomJid(roomJid);
-    if (!this.joinedMucs.has(room)) {
-      this.joinedMucs.set(room, Promise.resolve());
+    const key = this.roomJoinKey(roomJid);
+    if (!key) return;
+    if (!this.joinedMucs.has(key)) {
+      this.joinedMucs.set(key, Promise.resolve());
     }
-    this.joinedMucReady.add(room);
-    this.rememberJoinedRoom(room);
+    this.joinedMucReady.add(key);
+    this.rememberJoinedRoom(roomJid);
   }
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
@@ -660,24 +649,18 @@ export class BrowserXmppClient {
     if (errorNick !== waiter.requestedNick) return false;
 
     waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
-    this.revokeMucReadiness(this.canonicalJoinedRoomJid(room), { keepPendingJoin: true });
+    this.revokeMucReadiness(room, { keepPendingJoin: true });
     return true;
   }
 
   private revokeMucReadiness(roomJid: string, options: { keepPendingJoin?: boolean } = {}): void {
-    const normalized = roomJid.trim().toLowerCase();
+    const key = this.roomJoinKey(roomJid);
+    if (!key) return;
     if (!options.keepPendingJoin) {
-      this.joinedMucs.delete(roomJid);
-      this.joinedMucJoinTokens.delete(roomJid);
+      this.joinedMucs.delete(key);
+      this.joinedMucJoinTokens.delete(key);
     }
-    this.joinedMucReady.delete(roomJid);
-    if (normalized && normalized !== roomJid) {
-      if (!options.keepPendingJoin) {
-        this.joinedMucs.delete(normalized);
-        this.joinedMucJoinTokens.delete(normalized);
-      }
-      this.joinedMucReady.delete(normalized);
-    }
+    this.joinedMucReady.delete(key);
   }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.events.set("message", h); }
@@ -1105,34 +1088,39 @@ export class BrowserXmppClient {
   }
 
   async ensureJoined(roomJid: string): Promise<void> {
-    if (this.joinedMucReady.has(roomJid)) return;
-    const existing = this.joinedMucs.get(roomJid);
+    // Every join tracker keys on the canonical `roomJoinKey` (lowercased
+    // bare JID) so case variants from topology vs. retained-room replay
+    // resolve to a single entry (#1221). The raw `roomJid` still goes on
+    // the wire (`performMucJoin`, `rememberJoinedRoom`).
+    const key = this.roomJoinKey(roomJid);
+    if (this.joinedMucReady.has(key)) return;
+    const existing = this.joinedMucs.get(key);
     if (existing) {
-      const existingToken = this.joinedMucJoinTokens.get(roomJid);
+      const existingToken = this.joinedMucJoinTokens.get(key);
       await existing;
-      if (existingToken && this.joinedMucJoinTokens.get(roomJid) !== existingToken) {
+      if (existingToken && this.joinedMucJoinTokens.get(key) !== existingToken) {
         return;
       }
-      if (!existingToken && !this.joinedMucs.has(roomJid)) return;
-      this.joinedMucReady.add(roomJid);
+      if (!existingToken && !this.joinedMucs.has(key)) return;
+      this.joinedMucReady.add(key);
       this.rememberJoinedRoom(roomJid);
       return;
     }
     const promise = this.performMucJoin(roomJid);
-    const joinToken = Symbol(roomJid);
-    this.joinedMucs.set(roomJid, promise);
-    this.joinedMucJoinTokens.set(roomJid, joinToken);
+    const joinToken = Symbol(key);
+    this.joinedMucs.set(key, promise);
+    this.joinedMucJoinTokens.set(key, joinToken);
     try {
       await promise;
-      if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
-        this.joinedMucReady.add(roomJid);
+      if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.joinedMucReady.add(key);
         this.rememberJoinedRoom(roomJid);
       }
     } catch (err) {
-      if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
-        this.joinedMucs.delete(roomJid);
-        this.joinedMucJoinTokens.delete(roomJid);
-        this.joinedMucReady.delete(roomJid);
+      if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.joinedMucs.delete(key);
+        this.joinedMucJoinTokens.delete(key);
+        this.joinedMucReady.delete(key);
       }
       throw err;
     }
@@ -1248,7 +1236,7 @@ export class BrowserXmppClient {
   }
 
   private roomIsReady(roomJid: string): boolean {
-    return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(roomJid);
+    return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(this.roomJoinKey(roomJid));
   }
 
   private enqueueReason(): string {
@@ -2348,11 +2336,10 @@ export class BrowserXmppClient {
     clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
+    // `joinedMucs` keys are already canonical `roomJoinKey`s (#1221).
     this.retainedJoinedRoomJids = new Set([
       ...this.retainedJoinedRoomJids,
-      ...previouslyJoinedRooms
-        .map((roomJid) => roomJid.split("/")[0]?.trim().toLowerCase() ?? "")
-        .filter(Boolean),
+      ...previouslyJoinedRooms.filter(Boolean),
     ]);
     this.persistRetainedJoinedRooms();
     this.joinedMucs.clear();
