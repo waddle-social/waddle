@@ -214,26 +214,27 @@ where
                     // perspective; we surface it loudly so production
                     // logs can flag MAM corruption / unexpected
                     // tombstones.
+                    //
+                    // Deliberately DIFFERENT from the blocked-row path
+                    // below: on a `delete_row` failure we leave the row
+                    // claimed (recovered later by the claim-expiry
+                    // janitor when the SM session expires) rather than
+                    // `release_row`-ing it for retry. Releasing here would
+                    // re-claim the poison pill on the very next batch —
+                    // and a whole batch of delete-failing poison rows
+                    // would spin the paced loop forever (a full batch is
+                    // never "short", so it never terminates). Leaking one
+                    // quota slot until session expiry is strictly better
+                    // than a hot reclaim loop (issue #1220 review).
                     outcome.unresolved += 1;
                     waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
                     if let Err(error) = storage.delete_row(&row.id).await {
-                        // Mirror the blocked-row path below (PR #360): a
-                        // delete failure that leaves the row tagged by the
-                        // still-live SM session wedges it permanently — the
-                        // SM-expiry janitor won't see it orphaned (session
-                        // alive), the SM ack won't delete it
-                        // (`outbound_sequence` NULL — never pushed), and the
-                        // next flush won't re-claim it (`flushed_in_session`
-                        // not NULL). Release the claim so the next flush
-                        // re-claims and re-attempts the delete rather than
-                        // leaking a quota slot until the session expires.
                         warn!(
                             row_id = %row.id,
                             error = %error,
                             "pending_delivery delete_row (unresolved poison pill) failed; \
-                             releasing claim so the next flush can re-attempt the delete"
+                             leaving row claimed for claim-expiry janitor recovery"
                         );
-                        release_row_or_warn(storage, &row.id, "poison-pill delete failure").await;
                     }
                     continue;
                 }

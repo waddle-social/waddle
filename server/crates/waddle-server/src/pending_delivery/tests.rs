@@ -588,6 +588,58 @@ async fn flush_stops_when_connection_no_longer_owns_its_slot() {
     );
 }
 
+#[tokio::test]
+async fn flush_full_batch_of_poison_pills_terminates() {
+    // Issue #1220 review: a backlog larger than one full batch, every row
+    // an unresolvable (poison-pill) Archived row, must not spin the paced
+    // loop. Poison pills are deleted (not released), so each batch shrinks
+    // the backlog and the loop terminates. The timeout guards against a
+    // regression that re-introduces a release-and-reclaim loop.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let total = FLUSH_BATCH_SIZE + 5;
+    for n in 0..total {
+        storage
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .unwrap();
+    }
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+
+    let sm_session = SmSessionId::new("sm-stream-uuid-1");
+    // NullArchiveResolver resolves every Archived row to Ok(None), i.e. a
+    // poison pill.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        flush_for_resource(
+            &storage,
+            &registry,
+            &bare("alice@example.com"),
+            &resource,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+                owner: None,
+            },
+        ),
+    )
+    .await
+    .expect("a full batch of poison pills must terminate the flush, not spin");
+
+    assert_eq!(outcome.unresolved, total as u32);
+    assert_eq!(outcome.pushed, 0);
+    assert_eq!(
+        storage.count(&bare("alice@example.com")).await.unwrap(),
+        0,
+        "every poison pill was deleted"
+    );
+}
+
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
 
 #[tokio::test]
