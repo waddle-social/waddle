@@ -203,6 +203,10 @@ async fn spawn_cluster_server(
             // disabling it flips the permission backend onto the SpiceDB path and
             // fails startup. Its seeding is delete-then-recreate, safe for the
             // sequential startups this harness performs.
+            // The secondary fixed account is also owner-capable so foreign-owned
+            // MUC join tests reach the RoomRegistry ownership check instead of
+            // being denied by the local instant-room creation guard first.
+            ("WADDLE_SERVER_OWNER_LOCALPARTS", "admin,cluster-peer"),
             ("WADDLE_CLUSTERING_ENABLED", "true"),
             ("WADDLE_CLUSTERING_LISTEN_ADDRS", &listen),
             ("WADDLE_CLUSTERING_KEYPAIR_POOL", &pool_env),
@@ -1604,7 +1608,10 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
         .expect("client B sends join presence against the foreign-owned room");
 
     let bounce = client_b
-        .recv_matching(|frame| frame.contains("resource-constraint") || frame.contains("<subject"))
+        .recv_matching(|frame| {
+            frame.contains("<subject")
+                || (frame.contains("<presence") && frame.contains("type='error'"))
+        })
         .await
         .expect("client B receives a reply to its join attempt");
 

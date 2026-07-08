@@ -403,6 +403,10 @@ changes slice scope, XEP behavior, or operational requirements.
    second bind correctly fails until the relay routing slices land. The
    correction seeds a second fixed test account for clustered subprocesses and
    uses that distinct bare JID for the node-B orphan-reaper control session
-   and MUC joiner. This preserves the original SM-claim and foreign-owned-room
+   and MUC joiner. The clustered subprocess profile marks that second account
+   owner-capable so the foreign-owned-room test reaches the RoomRegistry claim
+   check instead of being denied by the local instant-room creation guard; the
+   receive predicate now fails fast on the wrong presence error instead of
+   timing out. This preserves the original SM-claim and foreign-owned-room
    assertions without changing production behavior; the same-bare-JID
    cross-node resume capstone remains covered separately.
