@@ -405,6 +405,12 @@ export class BrowserXmppClient {
   private readonly joinedMucReady = new Set<string>();
   private retainedJoinedRoomJids = new Set<string>();
   private autoJoinRoomJids: ReadonlyArray<string> = [];
+  // Canonical room keys `fanOutAutoJoin` has attempted this session epoch
+  // (#1221). Bounds each room to one auto-join attempt per epoch — a
+  // failed join (e.g. 15s self-presence timeout) is not retried by a
+  // later trigger, and the three fan-out triggers per session coalesce.
+  // Cleared on disconnect so a genuine fresh cycle rejoins.
+  private readonly autoJoinAttemptedRoomKeys = new Set<string>();
   private uploadServiceJid: string | null = null;
   private discoveredRoomJids = new Map<string, string>();
   private readonly reconnect: ReconnectScheduler;
@@ -1005,6 +1011,7 @@ export class BrowserXmppClient {
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
+    this.autoJoinAttemptedRoomKeys.clear();
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
@@ -1172,7 +1179,19 @@ export class BrowserXmppClient {
 
   async fanOutAutoJoin(roomJids: ReadonlyArray<string>, concurrency = 6): Promise<void> {
     if (!this.xmpp) return;
-    const queue = [...new Set(roomJids.filter(Boolean))];
+    // Dedup the input by canonical key and skip rooms already attempted
+    // this epoch; the raw JID enters the queue for the wire (#1221).
+    const queue: string[] = [];
+    const seenThisCall = new Set<string>();
+    for (const roomJid of roomJids) {
+      if (!roomJid) continue;
+      const key = this.roomJoinKey(roomJid);
+      if (!key || seenThisCall.has(key)) continue;
+      seenThisCall.add(key);
+      if (this.autoJoinAttemptedRoomKeys.has(key)) continue;
+      this.autoJoinAttemptedRoomKeys.add(key);
+      queue.push(roomJid);
+    }
     const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
       while (queue.length > 0) {
         const roomJid = queue.shift();
@@ -2345,6 +2364,8 @@ export class BrowserXmppClient {
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
+    // New epoch: a genuine fresh cycle must be free to rejoin (#1221).
+    this.autoJoinAttemptedRoomKeys.clear();
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     // #1164: a terminal failure (auth rejection, resource conflict)

@@ -43,6 +43,7 @@ type PrivateState = {
   ensureJoined: (roomJid: string) => Promise<void>;
   fanOutAutoJoin: (roomJids: ReadonlyArray<string>, concurrency?: number) => Promise<void>;
   joinedMucReady: Set<string>;
+  autoJoinAttemptedRoomKeys: Set<string>;
   fullJid: string;
 };
 
@@ -86,5 +87,51 @@ describe("#1221 canonical join key coalesces case variants", () => {
 
     expect(joinRoom).toHaveBeenCalledTimes(1);
     expect(state.joinedMucReady.has(lower)).toBe(true);
+  });
+});
+
+describe("#1221 fanOutAutoJoin is single-flight per epoch", () => {
+  test("a failed auto-join is not retried by a later trigger in the same epoch", async () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    const room = "room2@conference.example.com";
+    const joinRoom = mock(async () => {
+      throw new Error("join rejected");
+    });
+    const xmpp = { join_room: joinRoom, set_on_presence() {} };
+    state.xmpp = xmpp;
+    state.connected = true;
+    state.wireEvents(xmpp);
+
+    await state.fanOutAutoJoin([room]); // first trigger: join_room throws
+    await state.fanOutAutoJoin([room]); // second trigger, same epoch: must not retry
+
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+    expect(state.autoJoinAttemptedRoomKeys.has(room)).toBe(true);
+  });
+
+  test("concurrent fan-out triggers for the same room send a single join", async () => {
+    const { state, joinRoom, deliverSelfPresence } = connectedClient();
+    const room = "room3@conference.example.com";
+
+    const a = state.fanOutAutoJoin([room]);
+    const b = state.fanOutAutoJoin([room]);
+    deliverSelfPresence(room);
+    await Promise.all([a, b]);
+
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+  });
+
+  test("case variants in the fan-out input list collapse to one join", async () => {
+    const { state, joinRoom, deliverSelfPresence } = connectedClient();
+
+    const fan = state.fanOutAutoJoin([
+      "Room4@conference.example.com",
+      "room4@conference.example.com",
+    ]);
+    deliverSelfPresence("room4@conference.example.com");
+    await fan;
+
+    expect(joinRoom).toHaveBeenCalledTimes(1);
   });
 });
