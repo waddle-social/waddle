@@ -25,7 +25,9 @@ pub use connection_registry::{
     BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, SendResult,
 };
-pub use selection::{get_resources_for_user, select_routable_resources_for_user};
+pub use selection::{
+    available_resources_for_user, get_resources_for_user, select_routable_resources_for_user,
+};
 pub use user_actor::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
 };

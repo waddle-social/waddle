@@ -69,6 +69,83 @@ fn ping_iq_before_auth_is_logged_and_dropped() {
     );
 }
 
+fn peer_presence(from: &str, to: &str) -> Stanza {
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence.from = Some(from.parse::<jid::Jid>().expect("from jid"));
+    presence.to = Some(to.parse::<jid::Jid>().expect("to jid"));
+    presence.statuses.insert(
+        xmpp_parsers::message::Lang::new(),
+        "cluster-ready".to_string(),
+    );
+    Stanza::Presence(presence)
+}
+
+#[test]
+fn peer_routed_presence_emits_send_stanza() {
+    let mut sm = test_support::ready_machine(
+        "waddle.social",
+        "bob@waddle.social/phone".parse().expect("bound jid"),
+        StanzaDispatcher::new(),
+    );
+
+    let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(peer_presence(
+        "alice@waddle.social/web",
+        "bob@waddle.social",
+    ))));
+
+    assert_eq!(events.len(), 1, "peer presence should produce one event");
+    match &events[0] {
+        OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+            Stanza::Presence(presence) => {
+                assert_eq!(
+                    presence.from.as_ref().map(ToString::to_string).as_deref(),
+                    Some("alice@waddle.social/web")
+                );
+                assert_eq!(
+                    presence
+                        .statuses
+                        .get(&xmpp_parsers::message::Lang::new())
+                        .map(String::as_str),
+                    Some("cluster-ready")
+                );
+            }
+            other => panic!("expected presence stanza, got {}", other.name()),
+        },
+        _ => panic!("expected SendStanza event"),
+    }
+}
+
+#[test]
+fn peer_routed_presence_from_blocked_sender_is_dropped() {
+    let mut sm = test_support::ready_machine(
+        "waddle.social",
+        "bob@waddle.social/phone".parse().expect("bound jid"),
+        StanzaDispatcher::new(),
+    );
+    sm.set_blocklist(Blocklist::new(["alice@waddle.social"
+        .parse::<jid::Jid>()
+        .expect("blocked jid")]));
+
+    let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(peer_presence(
+        "alice@waddle.social/web",
+        "bob@waddle.social",
+    ))));
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, OutboundEvent::SendStanza(_))),
+        "blocked peer presence must not reach the wire"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            OutboundEvent::Log { level, .. } if *level == Level::DEBUG
+        )),
+        "blocked peer presence should emit a debug log"
+    );
+}
+
 #[test]
 fn unknown_iq_namespace_emits_log_warning() {
     let dispatcher = StanzaDispatcher::new(); // no handlers registered

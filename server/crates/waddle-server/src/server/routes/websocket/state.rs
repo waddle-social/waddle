@@ -43,6 +43,47 @@ pub struct PendingDmCallOffer {
     pub started: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Default)]
+pub struct RemoteMucMemberships {
+    entries: dashmap::DashMap<(FullJid, BareJid), String>,
+}
+
+impl RemoteMucMemberships {
+    pub fn record_join(&self, occupant: &FullJid, room: &BareJid, nick: &str) {
+        self.entries
+            .insert((occupant.clone(), room.clone()), nick.to_string());
+    }
+
+    pub fn record_leave(&self, occupant: &FullJid, room: &BareJid) {
+        self.entries.remove(&(occupant.clone(), room.clone()));
+    }
+
+    pub fn contains(&self, occupant: &FullJid, room: &BareJid) -> bool {
+        self.entries.contains_key(&(occupant.clone(), room.clone()))
+    }
+
+    pub fn take_for_occupant(&self, occupant: &FullJid) -> Vec<(BareJid, String)> {
+        let keys: Vec<(FullJid, BareJid)> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let (entry_occupant, room) = entry.key();
+                if entry_occupant == occupant {
+                    Some((entry_occupant.clone(), room.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| {
+                let room = key.1.clone();
+                self.entries.remove(&key).map(|(_, nick)| (room, nick))
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DmPairKey {
     pub low_peer: BareJid,
@@ -308,6 +349,11 @@ pub struct ProtocolServices {
     /// can later fasten a historical `<call-thread-ended/>` record to that
     /// exact anchor with XEP-0422 `<apply-to/>`.
     pub call_threads: Arc<dashmap::DashMap<BareJid, ActiveCallThread>>,
+    /// Remote-owned MUC rooms this node admitted a local connection into.
+    /// Used by unclean disconnect cleanup to send the XEP-0045 unavailable
+    /// presence to the authoritative remote RoomActor even though no local
+    /// RoomActor exists to discover by registry scan.
+    pub remote_muc_memberships: Arc<RemoteMucMemberships>,
     /// Active 1:1 call-thread anchors keyed by the two bare peers plus
     /// JMI/Jingle sid. `proceed` creates the anchor; `finish` later
     /// consumes the entry to stamp the ended summary.

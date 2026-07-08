@@ -23,7 +23,7 @@ use kameo::actor::ActorRef;
 use tracing::warn;
 
 use super::user_actor::delivery::SelectRoutableResources;
-use super::user_actor::{GetResources, UserActor};
+use super::user_actor::{GetAvailableResources, GetResources, UserActor};
 use super::user_registry::{GetUser, UserRegistryActor};
 
 /// Upper bound on each actor ask issued by the selection helpers below —
@@ -79,6 +79,35 @@ pub async fn get_resources_for_user(
                 bare_jid = %bare_jid,
                 %error,
                 "actor selection: GetResources failed; degrading to no local resources"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Every currently presence-available resource of `bare_jid`, sourced from
+/// the authoritative actor tree. Presence side-effect fanout uses this shape:
+/// unlike message routing, RFC 6121 presence broadcasts go to all available
+/// resources, not just the highest-priority bare-JID message targets.
+pub async fn available_resources_for_user(
+    user_registry: &ActorRef<UserRegistryActor>,
+    bare_jid: &BareJid,
+) -> Vec<(FullJid, i8)> {
+    let Some(user_actor) = resolve_user_actor(user_registry, bare_jid).await else {
+        return Vec::new();
+    };
+    match user_actor
+        .ask(GetAvailableResources)
+        .mailbox_timeout(SELECTION_ASK_TIMEOUT)
+        .reply_timeout(SELECTION_ASK_TIMEOUT)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(
+                bare_jid = %bare_jid,
+                %error,
+                "actor selection: GetAvailableResources failed; degrading to no available resources"
             );
             Vec::new()
         }

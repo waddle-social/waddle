@@ -1,13 +1,8 @@
 //! Per-node libp2p identity for the clustering swarm.
 //!
-//! Two paths:
-//! - **Leased pool identity** (production shape, ADR element 3): the node
-//!   leases one slot of the pre-enrolled keypair pool via a Postgres CAS and
-//!   uses that slot's keypair, giving a stable, revocable, per-pod identity
-//!   with at most one live holder per keypair.
-//! - **Ephemeral** fallback: when no pool is configured, a fresh ed25519
-//!   keypair is generated per process — fine for the discovery spike and
-//!   tests, but not a stable identity.
+//! Each node leases one slot of the pre-enrolled keypair pool via a Postgres
+//! CAS and uses that slot's keypair, giving a stable, revocable, per-pod
+//! identity with at most one live holder per keypair.
 
 use base64::Engine;
 use libp2p::identity::{ed25519, Keypair};
@@ -15,11 +10,6 @@ use zeroize::Zeroize;
 
 /// Length of an ed25519 secret key seed in bytes.
 const ED25519_SECRET_LEN: usize = 32;
-
-/// Generate a fresh ephemeral ed25519 keypair (no pool configured).
-pub fn ephemeral_keypair() -> Keypair {
-    Keypair::generate_ed25519()
-}
 
 /// Decode one enrolled keypair-pool entry (base64-encoded 32-byte ed25519
 /// secret key) into a libp2p `Keypair`.

@@ -145,6 +145,15 @@ pub(crate) fn allowlist_table_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Serializes tests that touch the shared `clustering_keypair_slots` table.
+/// The keypair-slot lease tests and swarm bring-up smoke test run in the same
+/// lib-test binary under the Nix Postgres gate, so they must share one lock.
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) fn keypair_slot_table_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Shared client-facing HTTP readiness signal for the clustering control
 /// plane (ADR-0017 element 4, Phase 3 Slice 2): flipped to not-ready the
 /// instant a node self-fences (node-lease heartbeat CAS returns zero rows,

@@ -357,8 +357,9 @@ impl XmppStateMachine {
         // received-carbon fan-out, recipient-side inbox row, and a
         // final wire write.
         //
-        // IQ and presence peer routing arrive in later migration steps
-        // (issue #229 PR10 for groupchat, follow-ups for IQ).
+        // IQ and presence peer routing bypass the recipient-pass message
+        // pipeline, but still honor the bind-time incoming blocklist before
+        // writing to the wire.
         let full_jid = match &self.phase {
             ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
             ConnectionPhase::Unauthenticated
@@ -427,13 +428,21 @@ impl XmppStateMachine {
                 }
                 vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(iq)))]
             }
-            other => vec![OutboundEvent::Log {
-                level: Level::DEBUG,
-                message: format!(
-                    "Peer-routed {} stanza (only message + iq pipelines wired so far)",
-                    other.name()
-                ),
-            }],
+            Stanza::Presence(presence) => {
+                if let Some(sender) = presence.from.as_ref() {
+                    if self.blocklist.contains_jid(sender) {
+                        return vec![OutboundEvent::Log {
+                            level: Level::DEBUG,
+                            message: format!(
+                                "Dropping peer-routed presence from blocked sender {sender}"
+                            ),
+                        }];
+                    }
+                }
+                vec![OutboundEvent::SendStanza(Box::new(Stanza::Presence(
+                    presence,
+                )))]
+            }
         }
     }
 

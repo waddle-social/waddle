@@ -41,8 +41,8 @@
 //! claim-scoped hydration capstone
 //! (`orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`,
 //! upgraded in Phase 4 Slice 1a to exercise the real stale-node watchdog);
-//! and the Slice 7/deviation-70 MUC foreign-owned-room join-bounce wire shape
-//! (`muc_join_bounces_when_room_claim_is_held_by_another_node`).
+//! and the Phase 4 MUC foreign-owned-room proxy wire shape
+//! (`muc_join_routes_to_foreign_room_owner`).
 //!
 //! Deferred as a manual go/no-go measurement (dominated by kademlia's
 //! hardcoded 1h record TTL): the dead publisher's record-visibility window.
@@ -58,9 +58,10 @@ use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
 use waddle_server::clustering::ordered_relay::{
-    OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayOrigin,
-    OrderedRelayOriginProof, OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply,
-    OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence, RemoteStanzaEnvelope,
+    OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayEnvelopeClaims,
+    OrderedRelayOrigin, OrderedRelayOriginProof, OrderedRelayPayload, OrderedRelayRecipient,
+    OrderedRelayReply, OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence,
+    RemoteStanzaEnvelope,
 };
 use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
 use waddle_server::clustering::swarm;
@@ -69,6 +70,7 @@ use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, Cluster
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+use waddle_xmpp::Stanza;
 
 const POOL_SIZE: usize = 4;
 const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
@@ -179,6 +181,108 @@ async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
         .await
         .expect("enroll peer");
     }
+}
+
+async fn reset_fixed_pair_roster(db: &Database) {
+    waddle_server::db::MigrationRunner::single()
+        .run(db)
+        .await
+        .expect("global schema migrations for fixed-pair roster reset");
+    let conn = db.guard().await.expect("guard");
+    conn.execute(
+        "DELETE FROM roster_items \
+         WHERE user_jid IN ('admin@localhost', 'cluster-peer@localhost') \
+            OR contact_jid IN ('admin@localhost', 'cluster-peer@localhost')",
+        (),
+    )
+    .await
+    .expect("clean fixed-pair roster items");
+    conn.execute(
+        "DELETE FROM roster_versions \
+         WHERE user_jid IN ('admin@localhost', 'cluster-peer@localhost')",
+        (),
+    )
+    .await
+    .expect("clean fixed-pair roster versions");
+}
+
+async fn fixed_pair_roster_snapshot(db: &Database) -> Vec<String> {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT user_jid, contact_jid, subscription, ask, approved \
+             FROM roster_items \
+             WHERE user_jid IN ('admin@localhost', 'cluster-peer@localhost') \
+                OR contact_jid IN ('admin@localhost', 'cluster-peer@localhost') \
+             ORDER BY user_jid, contact_jid",
+            (),
+        )
+        .await
+        .expect("fixed-pair roster snapshot");
+    let mut snapshot = Vec::new();
+    while let Some(row) = rows.next().await.expect("fixed-pair roster row") {
+        let user: String = row.get(0).expect("user_jid");
+        let contact: String = row.get(1).expect("contact_jid");
+        let subscription: String = row.get(2).expect("subscription");
+        let ask: Option<String> = row.get(3).expect("ask");
+        let approved: bool = row.get(4).expect("approved");
+        snapshot.push(format!(
+            "{user}->{contact}: subscription={subscription}, ask={ask:?}, approved={approved}"
+        ));
+    }
+    snapshot
+}
+
+fn stanza_xml(stanza: Stanza) -> String {
+    let mut buf = Vec::new();
+    stanza
+        .to_element()
+        .write_to(&mut buf)
+        .expect("write stanza");
+    String::from_utf8(buf).expect("utf8 stanza")
+}
+
+fn presence_xml(
+    presence_type: xmpp_parsers::presence::Type,
+    to: Option<&str>,
+    status: Option<&str>,
+) -> String {
+    let mut presence = xmpp_parsers::presence::Presence::new(presence_type);
+    presence.to = to
+        .map(str::parse)
+        .transpose()
+        .expect("valid presence target");
+    if let Some(status) = status {
+        presence
+            .statuses
+            .insert(xmpp_parsers::message::Lang::new(), status.to_string());
+    }
+    stanza_xml(Stanza::Presence(presence))
+}
+
+fn frame_has_attr(frame: &str, name: &str, value: &str) -> bool {
+    frame.contains(&format!("{name}='{value}'")) || frame.contains(&format!("{name}=\"{value}\""))
+}
+
+fn frame_attr_starts_with(frame: &str, name: &str, prefix: &str) -> bool {
+    frame.contains(&format!("{name}='{prefix}")) || frame.contains(&format!("{name}=\"{prefix}"))
+}
+
+async fn send_roster_get(client: &mut WsXmppClient, id: &str) -> String {
+    let iq = xmpp_parsers::iq::Iq::Get {
+        from: None,
+        to: None,
+        id: id.to_string(),
+        payload: minidom::Element::builder("query", "jabber:iq:roster").build(),
+    };
+    client
+        .send(&stanza_xml(Stanza::Iq(Box::new(iq))))
+        .await
+        .expect("send roster get");
+    client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("roster get result")
 }
 
 /// Reserve an ephemeral TCP port by binding and immediately releasing it.
@@ -388,6 +492,22 @@ fn ordered_target_claim(target: &jid::FullJid, epoch: ClaimEpoch) -> OrderedRela
     }
 }
 
+fn ordered_sender_full() -> jid::FullJid {
+    "ordered-origin@localhost/test-process"
+        .parse()
+        .expect("ordered sender full jid")
+}
+
+fn ordered_sender_claim(epoch: ClaimEpoch) -> OrderedRelayClaim {
+    OrderedRelayClaim {
+        entity: Entity::new(
+            EntityType::UserActor,
+            ordered_sender_full().to_bare().to_string(),
+        ),
+        epoch,
+    }
+}
+
 fn ordered_message_payload(
     id: &str,
     body_size: usize,
@@ -395,6 +515,7 @@ fn ordered_message_payload(
 ) -> OrderedRelayPayload {
     let mut stanza = thread_message(id, body_size);
     if let waddle_xmpp::Stanza::Message(message) = &mut stanza.0 {
+        message.from = Some(jid::Jid::from(ordered_sender_full()));
         message.to = Some(jid::Jid::from(target.clone()));
     }
     OrderedRelayPayload::Message {
@@ -589,6 +710,14 @@ async fn cluster_exit_criteria_end_to_end() {
         .acquire(&origin_entity, &origin_identity)
         .await
         .expect("test-process origin SM claim");
+    let sender_entity = Entity::new(
+        EntityType::UserActor,
+        ordered_sender_full().to_bare().to_string(),
+    );
+    let sender_epoch = claim_store
+        .acquire(&sender_entity, &origin_identity)
+        .await
+        .expect("test-process sender UserActor claim");
     let target_entity = Entity::new(
         EntityType::UserActor,
         ordered_target_full.to_bare().to_string(),
@@ -700,6 +829,7 @@ async fn cluster_exit_criteria_end_to_end() {
         target_snapshot.claim_epoch,
     );
     let origin_claim = ordered_origin_claim(ordered_stream_id, origin_epoch);
+    let sender_claim = ordered_sender_claim(sender_epoch);
     let target_claim = ordered_target_claim(&ordered_target_full, target_snapshot.claim_epoch);
     let origin_keypair = keypair_for_peer(&pool, &handle.local_peer_id);
     let mut ordered_sender = OrderedRelaySenderState::default();
@@ -708,8 +838,11 @@ async fn cluster_exit_criteria_end_to_end() {
             ordered_origin_node.clone(),
             ordered_channel.clone(),
             OriginInboundSequence(1),
-            origin_claim.clone(),
-            target_claim.clone(),
+            OrderedRelayEnvelopeClaims::new(
+                origin_claim.clone(),
+                sender_claim.clone(),
+                target_claim.clone(),
+            ),
             ordered_message_payload("ordered-one", 32, &ordered_target_full),
         )
         .expect("first ordered envelope");
@@ -752,6 +885,7 @@ async fn cluster_exit_criteria_end_to_end() {
         sequence: OrderedRelaySequence(3),
         origin_inbound_sequence: OriginInboundSequence(3),
         origin_claim,
+        sender_claim,
         target_claim,
         payload: ordered_message_payload("ordered-gap", 32, &ordered_target_full),
         origin_proof: None,
@@ -1815,38 +1949,27 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     stop_token.cancel();
 }
 
-/// ADR-0017 Phase 3 Slice 11 (binding, deviation 70): the MUC join-bounce
-/// wire shape, over two real processes — Slice 7's own Tests paragraph
-/// deferred this exact assertion here verbatim: "the presence-error WIRE
-/// shape (`type='wait'` + `<resource-constraint/>`) is asserted over real
-/// processes in Slice 11's harness capstone (a foreign-owned-room join
-/// against a two-node cluster), where it proves strictly more than a
-/// doubles-based unit test could." The unit-level version already covers
-/// the registry-error return value
-/// (`room_registry_actor::tests::get_or_create_room_refuses_when_claim_is_held_by_a_live_foreign_node`);
-/// this is the first assertion of the actual wire bytes a real client
-/// receives, over a real two-node cluster whose production `server::mod`
-/// bring-up wires the SAME `RoomRegistry`/`PostgresClaimStore` a real
-/// client join goes through on both sides (`server/mod.rs`'s
-/// `wire_clustering_claims` call, unconditional whenever clustering +
-/// Postgres are both active — not a hand-wired unit-test-style registry).
+/// ADR-0017 Phase 4: the MUC join proxy wire shape, over two real processes.
+/// Phase 3 deliberately bounced this exact case because the room owner was
+/// fresh on another node and no cross-node MUC routing existed yet. Phase 4
+/// changes that contract: node B must preserve node A as the single
+/// authoritative RoomActor writer and proxy the join over the ordered relay,
+/// carrying the owner-built XEP-0045 replies back to client B.
 ///
 /// Client A joins a fresh instant room on node A (a real production join:
 /// `RoomRegistryActor::acquire_room_claim` genuinely acquires the Postgres
 /// claim under node A's identity) and stays connected, keeping A's
 /// node-lease fresh — `steal_from_dead_owner` only ever applies to a
 /// stale/dead owner (see `owner_lease_fresh`), so a live owner's claim is
-/// never contested, exactly the "current owner, no cross-node MUC
-/// proxying" precondition deviation 70 describes. Client B then joins the
-/// SAME room JID against node B: node B's own `RoomRegistryActor` sees
-/// `ClaimError::AlreadyClaimed` with a fresh foreign lease and returns
-/// `RoomRegistryError::ClaimHeldByAnotherNode`, which
-/// `handle_muc_join_unlocked` maps to the conformant XEP-0045 bounce.
+/// never contested. Client B then joins the SAME room JID against node B:
+/// node B's own `RoomRegistryActor` sees a fresh foreign owner, proxies the
+/// join, and must return the owner node's roster/self-presence/subject
+/// sequence instead of a local retry error.
 #[tokio::test]
-async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
+async fn muc_join_routes_to_foreign_room_owner() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!(
-            "skipping muc_join_bounces_when_room_claim_is_held_by_another_node: \
+            "skipping muc_join_routes_to_foreign_room_owner: \
              WADDLE_TEST_POSTGRES_URL not set"
         );
         return;
@@ -1902,11 +2025,9 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
         .expect("client A's join completes (room created, A is Owner)");
 
     // Client B, a SEPARATE bare JID on node B (a different process),
-    // attempts to join the SAME room while A is still live — node A's
-    // lease stays fresh throughout, so node B must never steal; it must
-    // bounce. B is intentionally not a second `admin` resource: once
-    // UserActor claims are live, same-bare-JID cross-node local actor
-    // creation is itself invalid until the relay routing slice lands.
+    // attempts to join the SAME room while A is still live. Node B must not
+    // steal the room claim or bounce locally; it proxies the join to node A
+    // and writes node A's XEP-0045 join replies back to B's client.
     let resource_b = format!("muc-joiner-b-{}", uuid::Uuid::new_v4());
     let mut client_b = WsXmppClient::connect_and_auth(
         &server_b.ws_url(),
@@ -1924,39 +2045,287 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
         .await
         .expect("client B sends join presence against the foreign-owned room");
 
-    let bounce = client_b
-        .recv_matching(|frame| {
-            frame.contains("<subject")
-                || (frame.contains("<presence") && frame.contains("type='error'"))
-        })
+    let join_replies = client_b
+        .recv_until(|frame| frame.contains("<subject"))
         .await
-        .expect("client B receives a reply to its join attempt");
+        .expect("client B's remote-owner join completes");
 
     assert!(
-        !bounce.contains("<subject"),
-        "node B must never silently succeed a join against a room it does not own \
-         (no cross-node MUC proxying exists this phase): {bounce}"
+        join_replies.iter().all(|frame| {
+            !(frame.contains("<presence") && frame.contains("type='error'"))
+        }),
+        "remote MUC join must not fall back to the Phase 3 resource-constraint bounce: {join_replies:?}"
     );
     assert!(
-        bounce.contains("resource-constraint"),
-        "expected a conformant XEP-0045 <resource-constraint/> bounce, got: {bounce}"
+        join_replies.iter().any(|frame| {
+            frame.contains("<presence")
+                && (frame.contains("from='") || frame.contains("from=\""))
+                && frame.contains("/joiner-b")
+                && (frame.contains("status code='110'") || frame.contains("status code=\"110\""))
+        }),
+        "remote MUC join must include XEP-0045 self-presence status 110: {join_replies:?}"
     );
-    assert_eq!(
-        extract_attr_after(&bounce, "<presence", "type").as_deref(),
-        Some("error"),
-        "the bounce presence stanza must carry type='error': {bounce}"
-    );
-    assert_eq!(
-        extract_attr_after(&bounce, "<error", "type").as_deref(),
-        Some("wait"),
-        "the bounce's <error> element must carry type='wait' (XEP-0045's retry-able \
-         resource-constraint semantics), got: {bounce}"
+
+    client_b
+        .close()
+        .await
+        .expect("client B closes after remote-owner join");
+    let unavailable = client_a
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains(&room)
+                && frame.contains("/joiner-b")
+                && (frame.contains("type='unavailable'") || frame.contains("type=\"unavailable\""))
+        })
+        .await
+        .expect("client A receives remote MUC unavailable for client B");
+    assert!(
+        unavailable.contains(&room) && unavailable.contains("/joiner-b"),
+        "remote MUC cleanup must relay occupant unavailable through the owner node: {unavailable}"
     );
 
     drop(server_a);
     drop(server_b);
     drop(client_a);
-    drop(client_b);
+}
+
+/// ADR-0017 Phase 4: subscription presence and probes use the same ordered
+/// relay as direct messages, while preserving RFC 6121 sender-local side
+/// effects on the node that owns the originating resource.
+#[tokio::test]
+async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping subscription_presence_and_probe_route_to_foreign_user_owner: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    reset_fixed_pair_roster(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const ADMIN_BARE: &str = "admin@localhost";
+    const PEER_BARE: &str = "cluster-peer@localhost";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    // Both subprocesses share the same Postgres `users` table, and
+    // `TestServer` reseeds the fixed admin account on startup. Server B is
+    // started last, so its generated password is the live credential for
+    // admin on both nodes.
+    let admin_password = server_b.fixed_account_password().to_string();
+    let admin_resource = format!("sub-owner-a-{}", uuid::Uuid::new_v4());
+    let peer_resource = format!("sub-peer-b-{}", uuid::Uuid::new_v4());
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &admin_resource,
+    )
+    .await
+    .expect("admin connects to node A");
+    let mut peer = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &peer_resource,
+    )
+    .await
+    .expect("cluster peer connects to node B");
+
+    let _ = send_roster_get(&mut admin, "cluster-admin-roster-init").await;
+    let _ = send_roster_get(&mut peer, "cluster-peer-roster-init").await;
+    admin
+        .send(&presence_xml(
+            xmpp_parsers::presence::Type::None,
+            None,
+            Some("cluster-ready"),
+        ))
+        .await
+        .expect("admin sends available presence");
+    peer.send(&presence_xml(
+        xmpp_parsers::presence::Type::None,
+        None,
+        None,
+    ))
+    .await
+    .expect("peer sends available presence");
+
+    peer.send(&presence_xml(
+        xmpp_parsers::presence::Type::Subscribe,
+        Some(ADMIN_BARE),
+        None,
+    ))
+    .await
+    .expect("peer sends cross-node subscribe");
+    let peer_pending_push = peer
+        .recv_matching(|frame| {
+            frame.contains("jabber:iq:roster")
+                && frame.contains(ADMIN_BARE)
+                && frame_has_attr(frame, "ask", "subscribe")
+        })
+        .await
+        .expect("peer receives sender-local pending subscribe roster push");
+    assert!(
+        peer_pending_push.contains(ADMIN_BARE),
+        "sender-local subscribe roster push must name admin contact: {peer_pending_push}"
+    );
+    let admin_subscribe = admin
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame_has_attr(frame, "type", "subscribe")
+                && frame_attr_starts_with(frame, "from", PEER_BARE)
+        })
+        .await
+        .expect("admin receives subscribe through ordered relay");
+    assert!(
+        frame_has_attr(&admin_subscribe, "type", "subscribe"),
+        "remote subscribe must retain RFC 6121 type: {admin_subscribe}"
+    );
+    use waddle_xmpp::ownership::ClaimStore as _;
+    let claim_store = PostgresClaimStore::new(db.clone());
+    let admin_claim = claim_store
+        .current_claim(&Entity::new(EntityType::UserActor, ADMIN_BARE.to_string()))
+        .await
+        .expect("admin UserActor claim lookup")
+        .expect("admin UserActor claim exists");
+    assert_eq!(
+        admin_claim.owner.node_id, node_a,
+        "admin UserActor claim must stay on node A before approval"
+    );
+    let peer_claim = claim_store
+        .current_claim(&Entity::new(EntityType::UserActor, PEER_BARE.to_string()))
+        .await
+        .expect("peer UserActor claim lookup")
+        .expect("peer UserActor claim exists");
+    assert_eq!(
+        peer_claim.owner.node_id, node_b,
+        "peer UserActor claim must stay on node B before approval"
+    );
+
+    admin
+        .send(&presence_xml(
+            xmpp_parsers::presence::Type::Subscribed,
+            Some(PEER_BARE),
+            None,
+        ))
+        .await
+        .expect("admin approves peer subscription");
+    let admin_approval_push = admin
+        .recv_matching(|frame| {
+            frame.contains("jabber:iq:roster")
+                && frame.contains(PEER_BARE)
+                && frame_has_attr(frame, "subscription", "from")
+        })
+        .await
+        .expect("admin receives sender-local approval roster push");
+    assert!(
+        admin_approval_push.contains(PEER_BARE),
+        "approval roster catch-up must name peer contact: {admin_approval_push}"
+    );
+    let mut approval_frames = Vec::new();
+    let approval_deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < approval_deadline {
+        let frame = peer
+            .recv_timeout(Duration::from_millis(500))
+            .await
+            .unwrap_or_default();
+        if !frame.is_empty() {
+            approval_frames.push(frame);
+        }
+        let has_roster_push = approval_frames.iter().any(|frame| {
+            frame.contains("jabber:iq:roster")
+                && frame.contains(ADMIN_BARE)
+                && frame_has_attr(frame, "subscription", "to")
+        });
+        let has_subscribed = approval_frames.iter().any(|frame| {
+            frame.contains("<presence")
+                && frame_has_attr(frame, "type", "subscribed")
+                && frame_attr_starts_with(frame, "from", ADMIN_BARE)
+        });
+        let has_current_presence = approval_frames.iter().any(|frame| {
+            frame.contains("<presence")
+                && !frame_has_attr(frame, "type", "subscribed")
+                && frame_attr_starts_with(frame, "from", &format!("{ADMIN_BARE}/"))
+                && frame.contains("cluster-ready")
+        });
+        if has_roster_push && has_subscribed && has_current_presence {
+            break;
+        }
+    }
+    let roster_after_approval = fixed_pair_roster_snapshot(&db).await;
+    assert!(
+        approval_frames.iter().any(|frame| {
+            frame.contains("jabber:iq:roster")
+                && frame.contains(ADMIN_BARE)
+                && frame_has_attr(frame, "subscription", "to")
+        }),
+        "peer approval roster push must name admin contact with subscription='to': frames={approval_frames:?}, roster={roster_after_approval:?}"
+    );
+    assert!(
+        approval_frames.iter().any(|frame| {
+            frame.contains("<presence")
+                && frame_has_attr(frame, "type", "subscribed")
+                && frame_attr_starts_with(frame, "from", ADMIN_BARE)
+        }),
+        "approval must stay an RFC 6121 subscribed presence: {approval_frames:?}"
+    );
+    let current_presence = approval_frames
+        .iter()
+        .find(|frame| {
+            frame.contains("<presence")
+                && !frame_has_attr(frame, "type", "subscribed")
+                && frame_attr_starts_with(frame, "from", &format!("{ADMIN_BARE}/"))
+                && frame.contains("cluster-ready")
+        })
+        .unwrap_or_else(|| {
+            panic!("peer receives admin current presence after approval: {approval_frames:?}")
+        });
+    assert!(
+        current_presence.contains("cluster-ready"),
+        "approval catch-up must relay current presence from admin: {current_presence}"
+    );
+
+    peer.send(&presence_xml(
+        xmpp_parsers::presence::Type::Probe,
+        Some(ADMIN_BARE),
+        None,
+    ))
+    .await
+    .expect("peer sends cross-node probe");
+    let probe_reply = peer
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame_attr_starts_with(frame, "from", &format!("{ADMIN_BARE}/"))
+                && frame.contains("cluster-ready")
+        })
+        .await
+        .expect("peer receives probe reply from foreign user owner");
+    assert!(
+        !frame_has_attr(&probe_reply, "type", "unsubscribed"),
+        "authorized cross-node probe must return current presence, not unsubscribed: {probe_reply}"
+    );
+
+    let _ = admin.close().await;
+    let _ = peer.close().await;
+    drop(server_a);
+    drop(server_b);
 }
 
 /// ADR-0017 Phase 3 Slice 11 (this slice's own harness-fencing scaffold,

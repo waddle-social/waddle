@@ -71,6 +71,23 @@ pub enum SwarmError {
     /// The peer allowlist could not be read at startup.
     #[error(transparent)]
     Allowlist(#[from] AllowlistError),
+    /// Configured keypair-pool PeerIds are not fully enrolled.
+    #[error(
+        "clustering keypair pool is not fully enrolled in clustering_peer_allowlist: \
+         missing_peer_ids=[{missing_peer_ids}] configured_keypairs={configured_keypairs} \
+         enrolled_peer_rows={enrolled_peer_rows}"
+    )]
+    KeypairPoolNotEnrolled {
+        configured_keypairs: usize,
+        enrolled_peer_rows: usize,
+        missing_peer_ids: String,
+    },
+    /// Clustering was enabled without a stable, pre-enrolled identity pool.
+    #[error(
+        "clustering requires WADDLE_CLUSTERING_KEYPAIR_POOL with at least one \
+         pre-enrolled keypair; ephemeral identities cannot join the peer allowlist"
+    )]
+    KeypairPoolRequired,
     /// The configured node-id file could not be written.
     #[error("failed to write clustering node-id file '{path}': {reason}")]
     NodeIdFile { path: String, reason: String },
@@ -101,9 +118,10 @@ pub struct SwarmHandle {
 /// renewal deadline) cancels only this scope, while process shutdown still
 /// propagates in and tears clustering down.
 ///
-/// When a keypair pool is configured the node leases one pool slot from the
-/// Postgres control plane and uses that keypair (and heartbeats it); otherwise
-/// it falls back to an ephemeral per-process identity.
+/// The node leases one keypair-pool slot from the Postgres control plane and
+/// uses that stable PeerId (and heartbeats it). Clustering bring-up fails
+/// without a configured pool because ephemeral identities cannot be
+/// pre-enrolled in the symmetric peer allowlist.
 pub async fn spawn(
     config: &ClusteringConfig,
     db: &Database,
@@ -214,8 +232,8 @@ async fn bring_up(
     // the swarm accepts anything. An empty allowlist is deny-all — correct for
     // a first node with no peers, but worth a loud note.
     let allowlist: Arc<dyn AllowlistStore> = Arc::new(PostgresAllowlistStore::new(db.clone()));
-    allowlist.ensure_schema().await?;
     let enrolled = allowlist.enrolled_peers().await?;
+    verify_keypair_pool_enrollment(config, &enrolled)?;
     metrics::record_allowlist_size(enrolled.len() as i64);
     if enrolled.is_empty() {
         tracing::warn!(
@@ -284,6 +302,25 @@ async fn bring_up(
 
     let connected_peers = ConnectedPeerCount::new();
     let bootstrap_peers = config.bootstrap_peers.clone();
+    // The node's single kademlia registration: its supervised relay actor.
+    // Its first registration may occur before the first peer connection, so
+    // the event loop below also triggers a same-name re-registration whenever
+    // a peer connects; the 15s periodic refresh remains the fallback.
+    if config.fault_injection {
+        tracing::warn!(
+            "clustering fault injection is ENABLED: any enrolled peer can crash this node's \
+             relay or stall its mailbox — test harnesses only, never production"
+        );
+    }
+    let relay_registration = relay::spawn_supervised(
+        node_id.clone(),
+        config.fault_injection,
+        stop_token.clone(),
+        resume_bridge,
+        room_local_claims,
+        ordered_relay_delivery_bridge,
+    );
+
     tokio::spawn(run_event_loop(
         swarm,
         bootstrap_peers,
@@ -293,27 +330,10 @@ async fn bring_up(
             current: enrolled,
             interval: config.allowlist_refresh_interval,
         },
+        relay_registration,
         connected_peers.clone(),
         stop_token.clone(),
     ));
-
-    // The node's single kademlia registration: its supervised relay actor.
-    // Must start after the event loop is polling (registration flows through
-    // the swarm command channel serviced by the loop).
-    if config.fault_injection {
-        tracing::warn!(
-            "clustering fault injection is ENABLED: any enrolled peer can crash this node's \
-             relay or stall its mailbox — test harnesses only, never production"
-        );
-    }
-    relay::spawn_supervised(
-        node_id.clone(),
-        config.fault_injection,
-        stop_token.clone(),
-        resume_bridge,
-        room_local_claims,
-        ordered_relay_delivery_bridge,
-    );
 
     let handle = SwarmHandle {
         local_peer_id,
@@ -375,24 +395,57 @@ impl PendingLease {
     }
 }
 
-/// Resolve this node's libp2p keypair: lease a pool slot when a keypair pool
-/// is configured (returned as a [`PendingLease`] — the caller starts its
-/// heartbeat only after the rest of bring-up succeeds, or releases it), else
-/// generate an ephemeral identity.
+fn verify_keypair_pool_enrollment(
+    config: &ClusteringConfig,
+    enrolled: &HashSet<PeerId>,
+) -> Result<(), SwarmError> {
+    if config.keypair_pool.is_empty() {
+        return Err(SwarmError::KeypairPoolRequired);
+    }
+
+    let mut expected = Vec::with_capacity(config.keypair_pool.len());
+    for entry in &config.keypair_pool {
+        expected.push(
+            identity::keypair_from_pool_entry(entry)?
+                .public()
+                .to_peer_id(),
+        );
+    }
+    expected.sort_unstable();
+    expected.dedup();
+
+    let mut missing: Vec<_> = expected
+        .iter()
+        .copied()
+        .filter(|peer_id| !enrolled.contains(peer_id))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort_unstable();
+    let missing_peer_ids = missing
+        .into_iter()
+        .map(|peer_id| peer_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    Err(SwarmError::KeypairPoolNotEnrolled {
+        configured_keypairs: config.keypair_pool.len(),
+        enrolled_peer_rows: enrolled.len(),
+        missing_peer_ids,
+    })
+}
+
+/// Resolve this node's libp2p keypair by leasing a configured keypair-pool slot
+/// (returned as a [`PendingLease`] — the caller starts its heartbeat only after
+/// the rest of bring-up succeeds, or releases it).
 async fn node_keypair(
     config: &ClusteringConfig,
     db: &Database,
     node_id: &NodeId,
 ) -> Result<(Keypair, Option<PendingLease>), SwarmError> {
     if config.keypair_pool.is_empty() {
-        tracing::warn!(
-            "clustering: no keypair pool configured — using an ephemeral per-process identity. \
-             An ephemeral PeerId can never be pre-enrolled on the peer allowlist, so this node \
-             CANNOT join or form a cluster (allowlist enforcement is symmetric and unconditional); \
-             configure WADDLE_CLUSTERING_KEYPAIR_POOL and enroll every node's PeerId for any \
-             multi-node deployment"
-        );
-        return Ok((identity::ephemeral_keypair(), None));
+        return Err(SwarmError::KeypairPoolRequired);
     }
 
     let lease = PostgresKeypairSlotLease::new(db.clone());
@@ -578,6 +631,7 @@ async fn run_event_loop(
     bootstrap_peers: Vec<ClusteringBootstrapConfig>,
     dial_interval: Duration,
     mut allowlist: AllowlistRefresh,
+    relay_registration: relay::RelayRegistrationTrigger,
     connected_peers: ConnectedPeerCount,
     stop_token: CancellationToken,
 ) {
@@ -722,11 +776,14 @@ async fn run_event_loop(
                 handle_swarm_event(
                     &mut swarm,
                     event,
-                    &mut connected,
-                    &mut routing_peers,
-                    &mut conn_addrs,
-                    &mut addr_owners,
-                    &connected_peers,
+                    SwarmEventBookkeeping {
+                        connected: &mut connected,
+                        routing_peers: &mut routing_peers,
+                        conn_addrs: &mut conn_addrs,
+                        addr_owners: &mut addr_owners,
+                        relay_registration: &relay_registration,
+                        connected_peers: &connected_peers,
+                    },
                 );
             }
         }
@@ -803,17 +860,22 @@ fn track_peer_disconnected(
     }
 }
 
+struct SwarmEventBookkeeping<'a> {
+    connected: &'a mut HashSet<PeerId>,
+    routing_peers: &'a mut HashSet<PeerId>,
+    conn_addrs: &'a mut HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
+    addr_owners: &'a mut HashMap<Multiaddr, PeerId>,
+    relay_registration: &'a relay::RelayRegistrationTrigger,
+    connected_peers: &'a ConnectedPeerCount,
+}
+
 /// Update local peer bookkeeping and metrics from a single swarm event. Takes
 /// `&mut swarm` so it can close duplicate connections (duplicate-PeerId
 /// defense-in-depth, ADR element 3).
 fn handle_swarm_event(
     swarm: &mut Swarm<WaddleBehaviour>,
     event: SwarmEvent<WaddleBehaviourEvent>,
-    connected: &mut HashSet<PeerId>,
-    routing_peers: &mut HashSet<PeerId>,
-    conn_addrs: &mut HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
-    addr_owners: &mut HashMap<Multiaddr, PeerId>,
-    connected_peers: &ConnectedPeerCount,
+    state: SwarmEventBookkeeping<'_>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -825,7 +887,9 @@ fn handle_swarm_event(
             endpoint,
             ..
         } => {
-            conn_addrs.insert(connection_id, endpoint.get_remote_address().clone());
+            state
+                .conn_addrs
+                .insert(connection_id, endpoint.get_remote_address().clone());
             // Feed outbound (dialed) addresses to the behaviours: kademlia
             // only inserts a peer into its routing table once it knows a
             // dialable address for it. kameo's mDNS dev-bootstrap does this on
@@ -837,20 +901,23 @@ fn handle_swarm_event(
                 // Remember who owns this dialable address so the dial loop
                 // can skip it while the peer stays connected (even if only
                 // through an inbound connection).
-                addr_owners.insert(endpoint.get_remote_address().clone(), peer_id);
+                state
+                    .addr_owners
+                    .insert(endpoint.get_remote_address().clone(), peer_id);
             }
             // Duplicate-PeerId defense-in-depth (ADR element 3): the
             // keypair-slot lease already guarantees a unique PeerId per live
             // node, so a second concurrent connection to an already-connected
             // peer is unexpected — keep the first, reject the new one.
-            if connected.contains(&peer_id) {
+            if state.connected.contains(&peer_id) {
                 tracing::warn!(
                     %peer_id,
                     "clustering: rejecting duplicate connection to already-connected peer"
                 );
                 swarm.close_connection(connection_id);
             } else {
-                track_peer_connected(peer_id, connected, connected_peers);
+                track_peer_connected(peer_id, state.connected, state.connected_peers);
+                state.relay_registration.trigger();
             }
         }
         SwarmEvent::ConnectionClosed {
@@ -859,15 +926,15 @@ fn handle_swarm_event(
             num_established,
             ..
         } => {
-            conn_addrs.remove(&connection_id);
+            state.conn_addrs.remove(&connection_id);
             // Only drop the peer when its last connection closes. Its
             // addr-ownership entries go with it: a fully disconnected peer
             // must be redialable (the skip would be wrong), and pruning here
             // keeps the map bounded by *connected* peers under pod churn
             // instead of accumulating every address ever dialed.
             if num_established == 0 {
-                track_peer_disconnected(peer_id, connected, connected_peers);
-                addr_owners.retain(|_, owner| *owner != peer_id);
+                track_peer_disconnected(peer_id, state.connected, state.connected_peers);
+                state.addr_owners.retain(|_, owner| *owner != peer_id);
             }
         }
         SwarmEvent::Behaviour(WaddleBehaviourEvent::Kameo(remote::Event::Registry(
@@ -880,13 +947,13 @@ fn handle_swarm_event(
         ))) => {
             let mut changed = false;
             if is_new_peer {
-                changed |= routing_peers.insert(peer);
+                changed |= state.routing_peers.insert(peer);
             }
             if let Some(evicted) = old_peer {
-                changed |= routing_peers.remove(&evicted);
+                changed |= state.routing_peers.remove(&evicted);
             }
             if changed {
-                metrics::record_routing_table_size(routing_peers.len() as i64);
+                metrics::record_routing_table_size(state.routing_peers.len() as i64);
                 tracing::debug!(%peer, "clustering kademlia routing table updated");
             }
         }
@@ -920,6 +987,17 @@ mod tests {
     use super::*;
     use crate::config::ClusteringConfig;
     use crate::db::{DatabaseConfig, DatabaseDriver};
+    use base64::Engine as _;
+
+    fn generated_pool_entry() -> (String, PeerId) {
+        let keypair = libp2p::identity::ed25519::Keypair::generate();
+        let seed = keypair.secret().as_ref().to_vec();
+        let entry = base64::engine::general_purpose::STANDARD.encode(seed);
+        let peer_id = libp2p::identity::Keypair::from(keypair)
+            .public()
+            .to_peer_id();
+        (entry, peer_id)
+    }
 
     // An in-memory SQLite handle for tests that fail before any DB touch
     // (listen-addr parsing precedes allowlist and lease access).
@@ -930,6 +1008,52 @@ mod tests {
         )
         .await
         .expect("open scratch sqlite")
+    }
+
+    #[test]
+    fn keypair_pool_enrollment_preflight_rejects_empty_pool() {
+        let config = ClusteringConfig::default();
+        let error = verify_keypair_pool_enrollment(&config, &HashSet::new())
+            .expect_err("empty keypair pool must fail clustered startup");
+        assert!(
+            matches!(error, SwarmError::KeypairPoolRequired),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn keypair_pool_enrollment_preflight_accepts_fully_enrolled_pool() {
+        let (first_entry, first_peer) = generated_pool_entry();
+        let (second_entry, second_peer) = generated_pool_entry();
+        let config = ClusteringConfig {
+            keypair_pool: vec![first_entry, second_entry],
+            ..ClusteringConfig::default()
+        };
+        let enrolled = HashSet::from([first_peer, second_peer]);
+
+        verify_keypair_pool_enrollment(&config, &enrolled).expect("all pool peers enrolled");
+    }
+
+    #[test]
+    fn keypair_pool_enrollment_preflight_rejects_missing_pool_peer() {
+        let (first_entry, first_peer) = generated_pool_entry();
+        let (second_entry, second_peer) = generated_pool_entry();
+        let config = ClusteringConfig {
+            keypair_pool: vec![first_entry, second_entry],
+            ..ClusteringConfig::default()
+        };
+        let enrolled = HashSet::from([first_peer]);
+
+        let error = verify_keypair_pool_enrollment(&config, &enrolled)
+            .expect_err("missing pool peer must fail startup");
+        assert!(
+            matches!(error, SwarmError::KeypairPoolNotEnrolled { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            error.to_string().contains(&second_peer.to_string()),
+            "error should name the missing peer id: {error}"
+        );
     }
 
     // kameo's `init_global` is a process singleton, so exactly ONE test per
@@ -945,14 +1069,17 @@ mod tests {
         // Hold the shared table lock so a concurrently seeded (possibly
         // invalid) allowlist row from the allowlist tests cannot fail this
         // startup load.
-        let _guard = crate::clustering::allowlist_table_lock().lock().await;
+        let _allowlist_guard = crate::clustering::allowlist_table_lock().lock().await;
+        let _keypair_slot_guard = crate::clustering::keypair_slot_table_lock().lock().await;
         let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
             return;
         };
+        let (pool_entry, peer_id) = generated_pool_entry();
         let config = ClusteringConfig {
             enabled: true,
             listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             bootstrap_peers: Vec::new(),
+            keypair_pool: vec![pool_entry],
             ..ClusteringConfig::default()
         };
         let db = Database::from_config(
@@ -961,6 +1088,29 @@ mod tests {
         )
         .await
         .expect("open test postgres");
+        let allowlist = PostgresAllowlistStore::new(db.clone());
+        allowlist
+            .ensure_schema()
+            .await
+            .expect("provision allowlist schema");
+        PostgresKeypairSlotLease::new(db.clone())
+            .ensure_schema()
+            .await
+            .expect("provision keypair-slot schema");
+        let conn = db.guard().await.expect("guard allowlist seed");
+        conn.execute("DELETE FROM clustering_peer_allowlist", ())
+            .await
+            .expect("clean allowlist table");
+        conn.execute("DELETE FROM clustering_keypair_slots", ())
+            .await
+            .expect("clean keypair-slot table");
+        conn.execute(
+            "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+            crate::db_params![peer_id.to_string()],
+        )
+        .await
+        .expect("enroll smoke-test peer id");
+        drop(conn);
         let stop = CancellationToken::new();
 
         let handle = spawn(

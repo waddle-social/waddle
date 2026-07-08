@@ -337,21 +337,6 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .await;
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .release_claim(&session_id)
-                    .await
-                {
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        error = %error,
-                        "SM janitor: pending_delivery release_claim failed; \
-                         rows remain claimed and will be released by claim-expiry janitor"
-                    );
-                }
 
                 // Same replacement re-check as the unclean-disconnect
                 // path: a fresh bind that superseded this expired
@@ -431,7 +416,46 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .get_entry(&session.jid)
                     .is_none()
                 {
-                    routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
+                    #[cfg(feature = "clustering")]
+                    {
+                        let cleanup_origin =
+                            crate::server::routes::interpret::OrderedRelayRouteOrigin {
+                                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
+                                    session_id.clone(),
+                                ),
+                                sender_entity: waddle_xmpp::ownership::Entity::new(
+                                    waddle_xmpp::ownership::EntityType::UserActor,
+                                    session.jid.to_bare().to_string(),
+                                ),
+                                inbound_sequence: 0,
+                                handoff: None,
+                            };
+                        routes::websocket::cleanup_muc_presence_for_jid_with_origin(
+                            &state,
+                            &session.jid,
+                            cleanup_origin,
+                        )
+                        .await;
+                    }
+                    #[cfg(not(feature = "clustering"))]
+                    {
+                        routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
+                    }
+                }
+                if let Err(error) = state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .release_claim(&session_id)
+                    .await
+                {
+                    warn!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        error = %error,
+                        "SM janitor: pending_delivery release_claim failed; \
+                         rows remain claimed and will be released by claim-expiry janitor"
+                    );
                 }
             }
         }

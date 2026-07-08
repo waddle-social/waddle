@@ -23,8 +23,8 @@ use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
 use super::metrics;
 use super::ordered_relay::{
-    OrderedRelayNack, OrderedRelayNackReason, OrderedRelayReceiverState, OrderedRelayReply,
-    OrderedRelayReservation, RemoteStanzaEnvelope,
+    OrderedRelayMucProxyKind, OrderedRelayNack, OrderedRelayNackReason, OrderedRelayPayload,
+    OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation, RemoteStanzaEnvelope,
 };
 use super::resume_bridge::ResumeStealBridge;
 use super::route_bridge::OrderedRelayDeliveryBridge;
@@ -37,7 +37,7 @@ use kameo::{Actor, RemoteActor, Reply};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity};
 
@@ -79,6 +79,49 @@ const LOOKUP_BACKOFF: [Duration; 3] = [
     Duration::from_millis(400),
     Duration::from_millis(1_600),
 ];
+
+/// Lightweight signal the swarm event loop uses to make a relay registration
+/// visible immediately after a peer connection forms. The periodic refresh
+/// remains the fallback; this just removes the startup discovery window.
+#[derive(Clone)]
+pub struct RelayRegistrationTrigger {
+    tx: mpsc::Sender<()>,
+}
+
+impl RelayRegistrationTrigger {
+    pub fn trigger(&self) {
+        let _ = self.tx.try_send(());
+    }
+}
+
+enum RelayRegisterAttempt {
+    Registered,
+    Cancelled,
+    Failed(String),
+}
+
+async fn register_relay_actor(
+    actor_ref: &ActorRef<RelayActor>,
+    name: &str,
+    stop_token: &CancellationToken,
+) -> RelayRegisterAttempt {
+    // Race registration against cancellation instead of plain `.await`:
+    // kameo's swarm-command reply future panics (`.expect(..)` on a dropped
+    // oneshot sender) if the event loop observes this SAME stop token, drops
+    // `Swarm<WaddleBehaviour>`, and the pending register command's reply is
+    // abandoned as a result. `biased` is load-bearing: the event loop drops
+    // the swarm only AFTER observing this token, so polling the cancellation
+    // arm first guarantees `register` is never polled against an already-closed
+    // swarm command channel.
+    match tokio::select! {
+        biased;
+        _ = stop_token.cancelled() => return RelayRegisterAttempt::Cancelled,
+        result = actor_ref.register(name.to_string()) => result,
+    } {
+        Ok(()) => RelayRegisterAttempt::Registered,
+        Err(error) => RelayRegisterAttempt::Failed(error.to_string()),
+    }
+}
 
 /// The per-node relay actor. Phase 2 carries only the liveness/codec-proof
 /// message set plus harness fault-injection; the ordered per-peer relay
@@ -208,7 +251,10 @@ async fn finish_ordered_reservation(
             )
             .await
             {
-                Ok(Ok(())) => receiver.lock().await.commit_reserved(*reserved),
+                Ok(Ok(client_replies)) => receiver
+                    .lock()
+                    .await
+                    .commit_reserved_with_replies(*reserved, client_replies),
                 Ok(Err(reason)) => receiver.lock().await.abort_reserved(*reserved, reason),
                 Err(_) => {
                     tracing::warn!(
@@ -217,15 +263,32 @@ async fn finish_ordered_reservation(
                         sequence = envelope.sequence.0,
                         "ordered relay: reserved receiver delivery effect timed out"
                     );
-                    receiver
-                        .lock()
-                        .await
-                        .abort_reserved(*reserved, OrderedRelayNackReason::MaybeCommitted)
+                    if is_idempotent_join_presence_envelope(&envelope) {
+                        receiver.lock().await.abort_reserved_without_diversion(
+                            *reserved,
+                            OrderedRelayNackReason::MaybeCommitted,
+                        )
+                    } else {
+                        receiver
+                            .lock()
+                            .await
+                            .abort_reserved(*reserved, OrderedRelayNackReason::MaybeCommitted)
+                    }
                 }
             }
         }
         OrderedRelayReservation::Completed(reply) => reply,
     }
+}
+
+fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool {
+    matches!(
+        &envelope.payload,
+        OrderedRelayPayload::MucProxy {
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            ..
+        }
+    )
 }
 
 #[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v1")]
@@ -456,10 +519,12 @@ pub fn spawn_supervised(
     resume_bridge: Arc<ResumeStealBridge>,
     room_local_claims: Arc<RoomLocalClaims>,
     ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
-) {
+) -> RelayRegistrationTrigger {
+    let (trigger_tx, mut trigger_rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let name = relay_name(&node_id);
         let mut respawns: u64 = 0;
+        let mut trigger_closed = false;
         loop {
             if stop_token.is_cancelled() {
                 break;
@@ -471,29 +536,8 @@ pub fn spawn_supervised(
                 Arc::clone(&room_local_claims),
                 Arc::clone(&ordered_delivery_bridge),
             ));
-            // Race registration against cancellation instead of plain
-            // `.await`: kameo's swarm-command reply future panics
-            // (`.expect(..)` on a dropped oneshot sender) if the event loop
-            // observes this SAME stop token, drops `Swarm<WaddleBehaviour>`,
-            // and the pending register command's reply is abandoned as a
-            // result. `biased` is load-bearing: the event loop drops the
-            // swarm only AFTER observing this token, so polling the
-            // cancellation arm first guarantees `register` is never polled
-            // against an already-closed swarm command channel (an unbiased
-            // select could poll `register` first, whose very first poll
-            // sends the command and panics on the dropped reply).
-            // Cancellation landing mid-register simply drops the in-flight
-            // future (no panic on drop, only on a completed poll).
-            let register_result = tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    actor_ref.kill();
-                    return;
-                }
-                result = actor_ref.register(name.clone()) => result,
-            };
-            match register_result {
-                Ok(()) => {
+            match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                RelayRegisterAttempt::Registered => {
                     if respawns > 0 {
                         metrics::record_relay_respawn();
                         tracing::warn!(
@@ -505,7 +549,11 @@ pub fn spawn_supervised(
                         tracing::info!(%name, "clustering relay actor registered");
                     }
                 }
-                Err(error) => {
+                RelayRegisterAttempt::Cancelled => {
+                    actor_ref.kill();
+                    return;
+                }
+                RelayRegisterAttempt::Failed(error) => {
                     tracing::warn!(%name, %error, "clustering relay registration failed; retrying");
                     actor_ref.kill();
                     // Cancellation-aware backoff: graceful shutdown must not
@@ -567,14 +615,30 @@ pub fn spawn_supervised(
                         // next iteration's `stop_token.cancelled()` arm fires
                         // immediately.
                         if !stop_token.is_cancelled() {
-                            tokio::select! {
-                                biased;
-                                _ = stop_token.cancelled() => {}
-                                result = actor_ref.register(name.clone()) => {
-                                    if let Err(error) = result {
-                                        tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                            match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                                RelayRegisterAttempt::Registered => {}
+                                RelayRegisterAttempt::Cancelled => return,
+                                RelayRegisterAttempt::Failed(error) => {
+                                    tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                                }
+                            }
+                        }
+                    }
+                    trigger = trigger_rx.recv(), if !trigger_closed => {
+                        match trigger {
+                            Some(()) => {
+                                match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                                    RelayRegisterAttempt::Registered => {
+                                        tracing::debug!(%name, "clustering relay re-registered after peer connection");
+                                    }
+                                    RelayRegisterAttempt::Cancelled => return,
+                                    RelayRegisterAttempt::Failed(error) => {
+                                        tracing::debug!(%name, %error, "clustering relay peer-triggered re-registration failed");
                                     }
                                 }
+                            }
+                            None => {
+                                trigger_closed = true;
                             }
                         }
                     }
@@ -582,6 +646,7 @@ pub fn spawn_supervised(
             }
         }
     });
+    RelayRegistrationTrigger { tx: trigger_tx }
 }
 
 /// A client handle to some node's relay, caching the resolved
@@ -1147,6 +1212,8 @@ mod tests {
     };
     use crate::clustering::route_bridge::OrderedRelayDeliveryServices;
     use async_trait::async_trait;
+    use libp2p::PeerId;
+    use std::collections::HashSet;
     use waddle_xmpp::ownership::{
         ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity,
         ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
@@ -1323,6 +1390,21 @@ mod tests {
         }
     }
 
+    struct NoopAllowlist;
+
+    #[async_trait]
+    impl crate::clustering::allowlist::AllowlistStore for NoopAllowlist {
+        async fn ensure_schema(&self) -> Result<(), crate::clustering::allowlist::AllowlistError> {
+            Ok(())
+        }
+
+        async fn enrolled_peers(
+            &self,
+        ) -> Result<HashSet<PeerId>, crate::clustering::allowlist::AllowlistError> {
+            Ok(HashSet::new())
+        }
+    }
+
     fn timeout_envelope() -> RemoteStanzaEnvelope {
         use waddle_xmpp::pending_delivery::SmSessionId;
         use xmpp_parsers::message::{Lang, Message};
@@ -1330,8 +1412,12 @@ mod tests {
         let target: jid::FullJid = "timeout@example.test/phone"
             .parse()
             .expect("valid full jid");
+        let sender: jid::FullJid = "sender@example.test/laptop"
+            .parse()
+            .expect("valid full jid");
         let origin_stream = SmSessionId::new("stream-timeout");
         let mut message = Message::new(Some(jid::Jid::from(target.clone())));
+        message.from = Some(jid::Jid::from(sender.clone()));
         message.type_ = xmpp_parsers::message::MessageType::Chat;
         message
             .bodies
@@ -1348,6 +1434,10 @@ mod tests {
             origin_inbound_sequence: OriginInboundSequence(1),
             origin_claim: OrderedRelayClaim {
                 entity: Entity::new(EntityType::SmSession, origin_stream.to_string()),
+                epoch: ClaimEpoch(0),
+            },
+            sender_claim: OrderedRelayClaim {
+                entity: Entity::new(EntityType::UserActor, sender.to_bare().to_string()),
                 epoch: ClaimEpoch(0),
             },
             target_claim: OrderedRelayClaim {
@@ -1368,6 +1458,7 @@ mod tests {
         use kameo::actor::Spawn;
         use waddle_xmpp::registry::{ConnectionRegistry, UserRegistryActor};
         use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+        use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
         let config = ClusteringMessagingConfig {
             reply_timeout: Duration::from_millis(40),
@@ -1377,11 +1468,13 @@ mod tests {
         let bridge = OrderedRelayDeliveryBridge::new(CancellationToken::new(), &config);
         bridge.wire(Arc::new(OrderedRelayDeliveryServices {
             claim_store: Arc::new(HangingClaimStore),
+            allowlist_store: Arc::new(NoopAllowlist),
             node_lease: Arc::new(NoopNodeLease),
             node_identity: SharedNodeIdentity::new(NodeIdentity::new("receiver", "epoch")),
             connection_registry: Arc::new(ConnectionRegistry::new()),
             user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),
             sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
+            blocking_storage: Arc::new(InMemoryBlockingStorage::new()),
             web_socket_state: std::sync::Weak::new(),
         }));
 

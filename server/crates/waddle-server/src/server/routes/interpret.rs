@@ -203,11 +203,8 @@ use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 pub(crate) use route_to_connection::{fallback_reply_for_undeliverable_iq, route_to_connection};
-use routing::{
-    deliver_direct_to_full, run_fanout_recipient_pass, run_headless_recipient_pass,
-    FanoutPassResult,
-};
-pub(crate) use routing::{deliver_peer_to_full, FullJidDeliveryOutcome};
+pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
+use routing::{run_fanout_recipient_pass, run_headless_recipient_pass, FanoutPassResult};
 
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
@@ -223,6 +220,15 @@ pub(crate) async fn broadcast_room_system_message(
     message: Box<Message>,
 ) -> Option<String> {
     room_system_message::broadcast_room_system_message_event(deps, room, message, 0).await
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) async fn dispatch_muc_to_room_for_relay(
+    deps: &Deps<'_>,
+    room: BareJid,
+    message: Message,
+) -> InterpretOutcome {
+    dispatch_to_room(deps, room, message, 0).await
 }
 
 /// Execute the side effects described by `events`.

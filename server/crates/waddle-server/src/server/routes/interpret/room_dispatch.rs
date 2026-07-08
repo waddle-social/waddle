@@ -36,6 +36,77 @@ pub(super) async fn dispatch_to_room(
         return outcome;
     };
 
+    #[cfg(feature = "clustering")]
+    if let Some(origin) = deps.ordered_relay_origin.as_ref() {
+        if let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        {
+            let stanza = Stanza::Message(incoming.clone());
+            match bridge
+                .try_proxy_muc_remote(
+                    &room_jid,
+                    &stanza,
+                    crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
+                    origin,
+                )
+                .await
+            {
+                Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
+                    replies,
+                )) => {
+                    for reply in replies {
+                        match reply.to_element_string() {
+                            Ok(xml) => outcome.frames.push(xml),
+                            Err(error) => {
+                                warn!(
+                                    room = %room_jid,
+                                    %error,
+                                    "DispatchToRoom: failed to serialize remote MUC reply"
+                                );
+                            }
+                        }
+                    }
+                    return outcome;
+                }
+                Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+                | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
+                    let reply = build_message_error_reply(
+                        &incoming,
+                        &room_jid,
+                        &sender_full,
+                        resource_constraint_error(
+                            "This room's ownership recently moved to another node; please retry.",
+                        ),
+                    );
+                    match Stanza::Message(reply).to_element_string() {
+                        Ok(xml) => outcome.frames.push(xml),
+                        Err(error) => {
+                            warn!(
+                                room = %room_jid,
+                                %error,
+                                "DispatchToRoom: failed to serialize remote MUC failure reply"
+                            );
+                        }
+                    }
+                    return outcome;
+                }
+                Some(
+                    crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
+                )
+                | Some(
+                    crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                ) => {
+                    return outcome;
+                }
+                None => {}
+            }
+        }
+    }
+
     // 1. Prepare the prototype the room gate sees. Enrichment is delayed
     //    until after occupancy / managed-room validation so unauthorized
     //    senders receive the XEP-0045 room error before any Waddle-specific

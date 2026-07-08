@@ -76,6 +76,27 @@ pub struct OrderedRelayClaim {
     pub epoch: ClaimEpoch,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderedRelayEnvelopeClaims {
+    pub origin: OrderedRelayClaim,
+    pub sender: OrderedRelayClaim,
+    pub target: OrderedRelayClaim,
+}
+
+impl OrderedRelayEnvelopeClaims {
+    pub fn new(
+        origin: OrderedRelayClaim,
+        sender: OrderedRelayClaim,
+        target: OrderedRelayClaim,
+    ) -> Self {
+        Self {
+            origin,
+            sender,
+            target,
+        }
+    }
+}
+
 /// Cryptographic provenance for the sender's asserted origin node.
 ///
 /// The `public_key` is the sender's libp2p public key encoded with
@@ -219,6 +240,16 @@ impl OrderedRelayPayload {
         }
     }
 
+    fn matches_sender_claim(&self, claim: &OrderedRelayClaim) -> bool {
+        let Some(from) = stanza_from(self.stanza()) else {
+            return false;
+        };
+        matches!(
+            claim.entity.entity_type,
+            EntityType::UserActor | EntityType::RoomActor
+        ) && claim.entity.id == from.to_bare().to_string()
+    }
+
     fn fingerprint(&self) -> OrderedRelayPayloadFingerprint {
         match self {
             OrderedRelayPayload::Message { recipient, stanza } => {
@@ -263,6 +294,12 @@ pub struct RemoteStanzaEnvelope {
     pub sequence: OrderedRelaySequence,
     pub origin_inbound_sequence: OriginInboundSequence,
     pub origin_claim: OrderedRelayClaim,
+    /// Fresh claim for the XMPP entity named by the carried stanza's `from`.
+    ///
+    /// SM-origin channels keep the stream id as the ordered lane, but receivers
+    /// still validate this sender claim before applying any user/room-visible
+    /// effect so a node cannot relay a stanza from an unrelated JID.
+    pub sender_claim: OrderedRelayClaim,
     pub target_claim: OrderedRelayClaim,
     pub payload: OrderedRelayPayload,
     /// Optional at the substrate level so ordering tests can construct raw
@@ -279,6 +316,7 @@ impl RemoteStanzaEnvelope {
             sequence: self.sequence,
             origin_inbound_sequence: self.origin_inbound_sequence,
             origin_claim: &self.origin_claim,
+            sender_claim: &self.sender_claim,
             target_claim: &self.target_claim,
             payload: &self.payload,
         })
@@ -292,6 +330,7 @@ struct RemoteStanzaEnvelopeSigningView<'a> {
     sequence: OrderedRelaySequence,
     origin_inbound_sequence: OriginInboundSequence,
     origin_claim: &'a OrderedRelayClaim,
+    sender_claim: &'a OrderedRelayClaim,
     target_claim: &'a OrderedRelayClaim,
     payload: &'a OrderedRelayPayload,
 }
@@ -304,12 +343,17 @@ pub struct OrderedRelayAck {
     pub sequence: OrderedRelaySequence,
     pub duplicate: bool,
     pub next_expected: OrderedRelaySequence,
+    /// Typed stanzas the origin node must write back to the originating
+    /// client after a proxied server-side operation completes. Empty for
+    /// ordinary 1:1 delivery.
+    pub client_replies: Vec<RemoteStanza>,
 }
 
 /// Which claim in an ordered-relay envelope failed ownership validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderedRelayClaimRole {
     Origin,
+    Sender,
     Target,
 }
 
@@ -336,6 +380,9 @@ impl OrderedRelayNackReason {
             OrderedRelayNackReason::NotOwner {
                 role: OrderedRelayClaimRole::Origin,
             } => "not_owner_origin",
+            OrderedRelayNackReason::NotOwner {
+                role: OrderedRelayClaimRole::Sender,
+            } => "not_owner_sender",
             OrderedRelayNackReason::NotOwner {
                 role: OrderedRelayClaimRole::Target,
             } => "not_owner_target",
@@ -401,6 +448,7 @@ pub enum OrderedRelayDiversionReason {
 struct OrderedRelayRecentAck {
     sequence: OrderedRelaySequence,
     fingerprint: OrderedRelayEnvelopeFingerprint,
+    client_replies: Vec<RemoteStanza>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,8 +515,7 @@ impl OrderedRelaySenderState {
         asserted_origin_node: NodeId,
         channel: OrderedRelayChannel,
         origin_inbound_sequence: OriginInboundSequence,
-        origin_claim: OrderedRelayClaim,
-        target_claim: OrderedRelayClaim,
+        claims: OrderedRelayEnvelopeClaims,
         payload: OrderedRelayPayload,
     ) -> Result<RemoteStanzaEnvelope, OrderedRelayDiversion> {
         if let Some(diversion) = self.diversions.get(&channel) {
@@ -509,8 +556,9 @@ impl OrderedRelaySenderState {
             channel: channel.clone(),
             sequence,
             origin_inbound_sequence,
-            origin_claim,
-            target_claim,
+            origin_claim: claims.origin,
+            sender_claim: claims.sender,
+            target_claim: claims.target,
             payload,
             origin_proof: None,
         };
@@ -532,6 +580,24 @@ impl OrderedRelaySenderState {
     pub fn forget_channel(&mut self, channel: &OrderedRelayChannel) {
         self.next_by_channel.remove(channel);
         self.diversions.remove(channel);
+    }
+
+    pub fn rollback_unseen_envelope(&mut self, envelope: &RemoteStanzaEnvelope) {
+        if self.diversions.contains_key(&envelope.channel) {
+            return;
+        }
+        let Some(expected_after_envelope) = envelope.sequence.checked_next() else {
+            return;
+        };
+        match self.next_by_channel.get_mut(&envelope.channel) {
+            Some(next) if *next == expected_after_envelope => {
+                *next = envelope.sequence;
+            }
+            None if envelope.sequence == OrderedRelaySequence::FIRST => {
+                self.next_by_channel.remove(&envelope.channel);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -632,6 +698,7 @@ impl OrderedRelayReceiverState {
                             sequence: envelope.sequence,
                             duplicate: true,
                             next_expected: expected,
+                            client_replies: recently_acked.client_replies.clone(),
                         },
                     ));
                 }
@@ -680,6 +747,14 @@ impl OrderedRelayReceiverState {
     }
 
     pub fn commit_reserved(&mut self, reserved: OrderedRelayReservedEnvelope) -> OrderedRelayReply {
+        self.commit_reserved_with_replies(reserved, Vec::new())
+    }
+
+    pub fn commit_reserved_with_replies(
+        &mut self,
+        reserved: OrderedRelayReservedEnvelope,
+        client_replies: Vec<RemoteStanza>,
+    ) -> OrderedRelayReply {
         let envelope = reserved.envelope;
         self.pending_by_channel.remove(&envelope.channel);
         if let Some(diversion) = self.diversions.get(&envelope.channel) {
@@ -721,12 +796,14 @@ impl OrderedRelayReceiverState {
             &mut self.recent_acked_by_channel,
             &envelope.channel,
             &envelope,
+            &client_replies,
         );
         OrderedRelayReply::Ack(OrderedRelayAck {
             channel: envelope.channel,
             sequence: envelope.sequence,
             duplicate: false,
             next_expected: reserved.next_expected,
+            client_replies,
         })
     }
 
@@ -741,6 +818,20 @@ impl OrderedRelayReceiverState {
             channel: envelope.channel.clone(),
             reason: receiver_diversion_reason_for_nack(&reason),
         });
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            channel: envelope.channel,
+            sequence: envelope.sequence,
+            reason,
+        })
+    }
+
+    pub fn abort_reserved_without_diversion(
+        &mut self,
+        reserved: OrderedRelayReservedEnvelope,
+        reason: OrderedRelayNackReason,
+    ) -> OrderedRelayReply {
+        let envelope = reserved.envelope;
+        self.pending_by_channel.remove(&envelope.channel);
         OrderedRelayReply::Nack(OrderedRelayNack {
             channel: envelope.channel,
             sequence: envelope.sequence,
@@ -795,11 +886,13 @@ fn record_ack(
     recent_acked_by_channel: &mut HashMap<OrderedRelayChannel, VecDeque<OrderedRelayRecentAck>>,
     channel: &OrderedRelayChannel,
     envelope: &RemoteStanzaEnvelope,
+    client_replies: &[RemoteStanza],
 ) {
     let recent = recent_acked_by_channel.entry(channel.clone()).or_default();
     recent.push_back(OrderedRelayRecentAck {
         sequence: envelope.sequence,
         fingerprint: OrderedRelayEnvelopeFingerprint::from(envelope),
+        client_replies: client_replies.to_vec(),
     });
     while recent.len() > RECENT_ACK_CACHE_PER_CHANNEL {
         recent.pop_front();
@@ -809,11 +902,15 @@ fn record_ack(
 fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
     envelope.payload.matches_stanza_kind()
         && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)
+        && sender_claim_matches_channel(&envelope.sender_claim, &envelope.channel.origin)
         && envelope.target_claim.epoch == envelope.channel.target_epoch
         && envelope
             .payload
             .matches_channel_recipient(&envelope.channel.recipient)
         && envelope.payload.matches_stanza_addressing()
+        && envelope
+            .payload
+            .matches_sender_claim(&envelope.sender_claim)
         && envelope
             .payload
             .matches_target_claim(&envelope.target_claim)
@@ -831,6 +928,13 @@ fn origin_claim_matches_channel(claim: &OrderedRelayClaim, origin: &OrderedRelay
     }
 }
 
+fn sender_claim_matches_channel(claim: &OrderedRelayClaim, origin: &OrderedRelayOrigin) -> bool {
+    match origin {
+        OrderedRelayOrigin::SmSession(_) => claim.entity.entity_type == EntityType::UserActor,
+        OrderedRelayOrigin::Entity(entity) => claim.entity == *entity,
+    }
+}
+
 fn stanza_to(stanza: &waddle_xmpp::Stanza) -> Option<&jid::Jid> {
     match stanza {
         waddle_xmpp::Stanza::Message(message) => message.to.as_ref(),
@@ -840,6 +944,19 @@ fn stanza_to(stanza: &waddle_xmpp::Stanza) -> Option<&jid::Jid> {
             | xmpp_parsers::iq::Iq::Set { to, .. }
             | xmpp_parsers::iq::Iq::Result { to, .. }
             | xmpp_parsers::iq::Iq::Error { to, .. } => to.as_ref(),
+        },
+    }
+}
+
+fn stanza_from(stanza: &waddle_xmpp::Stanza) -> Option<&jid::Jid> {
+    match stanza {
+        waddle_xmpp::Stanza::Message(message) => message.from.as_ref(),
+        waddle_xmpp::Stanza::Presence(presence) => presence.from.as_ref(),
+        waddle_xmpp::Stanza::Iq(iq) => match iq.as_ref() {
+            xmpp_parsers::iq::Iq::Get { from, .. }
+            | xmpp_parsers::iq::Iq::Set { from, .. }
+            | xmpp_parsers::iq::Iq::Result { from, .. }
+            | xmpp_parsers::iq::Iq::Error { from, .. } => from.as_ref(),
         },
     }
 }
@@ -929,6 +1046,10 @@ mod invariant_tests {
         claim(EntityType::SmSession, "stream-1", 7)
     }
 
+    fn sender_claim() -> OrderedRelayClaim {
+        claim(EntityType::UserActor, "romeo@example.test", 5)
+    }
+
     fn target_claim() -> OrderedRelayClaim {
         claim(EntityType::UserActor, "juliet@example.test", 3)
     }
@@ -937,12 +1058,21 @@ mod invariant_tests {
         claim(EntityType::UserActor, bare, 3)
     }
 
+    fn claims() -> OrderedRelayEnvelopeClaims {
+        OrderedRelayEnvelopeClaims::new(origin_claim(), sender_claim(), target_claim())
+    }
+
+    fn claims_for_target(target: OrderedRelayClaim) -> OrderedRelayEnvelopeClaims {
+        OrderedRelayEnvelopeClaims::new(origin_claim(), sender_claim(), target)
+    }
+
     fn message_payload(id: &str) -> OrderedRelayPayload {
         message_payload_to(id, "juliet@example.test")
     }
 
     fn message_payload_to(id: &str, recipient: &str) -> OrderedRelayPayload {
         let mut stanza = Message::new(Some(jid::Jid::from_str(recipient).expect("jid")));
+        stanza.from = Some(jid::Jid::from_str("romeo@example.test/home").expect("jid"));
         stanza.id = Some(xmpp_parsers::message::Id(id.to_string()));
         stanza.bodies.insert(Lang::new(), format!("payload {id}"));
         OrderedRelayPayload::Message {
@@ -963,8 +1093,7 @@ mod invariant_tests {
             origin_node(),
             channel,
             inbound(u32::MAX),
-            origin_claim(),
-            target_claim(),
+            claims(),
             message_payload("after-max"),
         );
         assert!(matches!(
@@ -992,8 +1121,7 @@ mod invariant_tests {
                 origin_node(),
                 channel_for_bare(&overflow),
                 inbound(index),
-                origin_claim(),
-                target_claim_for_bare(&overflow),
+                claims_for_target(target_claim_for_bare(&overflow)),
                 message_payload_to("overflow", &overflow),
             );
             assert!(matches!(
@@ -1066,6 +1194,10 @@ mod tests {
         claim(EntityType::SmSession, "stream-1", 7)
     }
 
+    fn sender_claim() -> OrderedRelayClaim {
+        claim(EntityType::UserActor, "romeo@example.test", 5)
+    }
+
     fn target_claim() -> OrderedRelayClaim {
         claim(EntityType::UserActor, "juliet@example.test", 3)
     }
@@ -1078,12 +1210,21 @@ mod tests {
         claim(EntityType::RoomActor, "room@example.test", 11)
     }
 
+    fn claims() -> OrderedRelayEnvelopeClaims {
+        OrderedRelayEnvelopeClaims::new(origin_claim(), sender_claim(), target_claim())
+    }
+
+    fn claims_for_target(target: OrderedRelayClaim) -> OrderedRelayEnvelopeClaims {
+        OrderedRelayEnvelopeClaims::new(origin_claim(), sender_claim(), target)
+    }
+
     fn message_payload(id: &str) -> OrderedRelayPayload {
         message_payload_to(id, "juliet@example.test")
     }
 
     fn message_payload_to(id: &str, recipient: &str) -> OrderedRelayPayload {
         let mut stanza = Message::new(Some(jid::Jid::from_str(recipient).expect("jid")));
+        stanza.from = Some(jid::Jid::from_str("romeo@example.test/home").expect("jid"));
         stanza.id = Some(xmpp_parsers::message::Id(id.to_string()));
         stanza.bodies.insert(Lang::new(), format!("payload {id}"));
         OrderedRelayPayload::Message {
@@ -1102,11 +1243,13 @@ mod tests {
     fn presence_stanza_to(to: &str, presence_type: xmpp_parsers::presence::Type) -> RemoteStanza {
         let mut presence = xmpp_parsers::presence::Presence::new(presence_type);
         presence.to = Some(jid::Jid::from_str(to).expect("jid"));
+        presence.from = Some(jid::Jid::from_str("romeo@example.test/home").expect("jid"));
         RemoteStanza(waddle_xmpp::Stanza::Presence(presence))
     }
 
     fn groupchat_stanza_to(to: &str) -> RemoteStanza {
         let mut message = Message::new(Some(jid::Jid::from_str(to).expect("jid")));
+        message.from = Some(jid::Jid::from_str("romeo@example.test/home").expect("jid"));
         message.type_ = xmpp_parsers::message::MessageType::Groupchat;
         RemoteStanza(waddle_xmpp::Stanza::Message(message))
     }
@@ -1131,8 +1274,7 @@ mod tests {
                 origin_node(),
                 channel.clone(),
                 inbound(1),
-                origin_claim(),
-                target_claim(),
+                claims(),
                 message_payload("one"),
             )
             .expect("first");
@@ -1141,8 +1283,7 @@ mod tests {
                 origin_node(),
                 channel,
                 inbound(2),
-                origin_claim(),
-                target_claim(),
+                claims(),
                 message_payload("two"),
             )
             .expect("second");
@@ -1161,8 +1302,7 @@ mod tests {
                 NodeId::new("old-node".to_string()),
                 channel.clone(),
                 inbound(1),
-                origin_claim(),
-                target_claim(),
+                claims(),
                 message_payload("one"),
             )
             .expect("first");
@@ -1171,8 +1311,7 @@ mod tests {
                 NodeId::new("new-node".to_string()),
                 channel,
                 inbound(2),
-                origin_claim(),
-                target_claim(),
+                claims(),
                 message_payload("two"),
             )
             .expect("second");
@@ -1193,8 +1332,7 @@ mod tests {
             origin_node(),
             channel,
             inbound(u32::MAX),
-            origin_claim(),
-            target_claim(),
+            claims(),
             message_payload("after-max"),
         );
         assert!(matches!(
@@ -1221,8 +1359,7 @@ mod tests {
                 origin_node(),
                 overflow.clone(),
                 inbound(1),
-                origin_claim(),
-                target_claim_for_bare("overflow@example.test"),
+                claims_for_target(target_claim_for_bare("overflow@example.test")),
                 message_payload_to("overflow-one", "overflow@example.test"),
             )
             .expect_err("over-capacity channel diverts");
@@ -1233,8 +1370,7 @@ mod tests {
                 origin_node(),
                 overflow,
                 inbound(2),
-                origin_claim(),
-                target_claim_for_bare("overflow@example.test"),
+                claims_for_target(target_claim_for_bare("overflow@example.test")),
                 message_payload_to("overflow-two", "overflow@example.test"),
             )
             .expect_err("diversion remains sticky");
@@ -1258,8 +1394,7 @@ mod tests {
                 origin_node(),
                 channel_for_bare(&overflow),
                 inbound(index),
-                origin_claim(),
-                target_claim_for_bare(&overflow),
+                claims_for_target(target_claim_for_bare(&overflow)),
                 message_payload_to("overflow", &overflow),
             );
             assert!(matches!(
@@ -1284,6 +1419,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
             origin_proof: None,
@@ -1316,6 +1452,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
             origin_proof: None,
@@ -1350,6 +1487,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
             origin_proof: None,
@@ -1389,6 +1527,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload_to("wrong-recipient", "romeo@example.test"),
             origin_proof: None,
@@ -1413,6 +1552,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
             origin_proof: None,
@@ -1423,6 +1563,7 @@ mod tests {
             sequence: OrderedRelaySequence(2),
             origin_inbound_sequence: inbound(2),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("two"),
             origin_proof: None,
@@ -1464,6 +1605,7 @@ mod tests {
             sequence: OrderedRelaySequence(2),
             origin_inbound_sequence: inbound(2),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("two"),
             origin_proof: None,
@@ -1485,6 +1627,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("one"),
             origin_proof: None,
@@ -1512,6 +1655,7 @@ mod tests {
                     sequence: OrderedRelaySequence(sequence),
                     origin_inbound_sequence: inbound(sequence as u32),
                     origin_claim: origin_claim(),
+                    sender_claim: sender_claim(),
                     target_claim: target_claim(),
                     payload: message_payload(&format!("m{sequence}")),
                     origin_proof: None,
@@ -1528,6 +1672,7 @@ mod tests {
                 sequence: OrderedRelaySequence(1),
                 origin_inbound_sequence: inbound(1),
                 origin_claim: origin_claim(),
+                sender_claim: sender_claim(),
                 target_claim: target_claim(),
                 payload: message_payload("too-old"),
                 origin_proof: None,
@@ -1554,6 +1699,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: OrderedRelayPayload::Message {
                 recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
@@ -1585,8 +1731,7 @@ mod tests {
             origin_node(),
             channel,
             inbound(1),
-            origin_claim(),
-            target_claim(),
+            claims(),
             message_payload("after-diversion"),
         );
 
@@ -1602,6 +1747,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: room_claim(),
             payload: OrderedRelayPayload::MucProxy {
                 room_jid: room_jid(),
@@ -1626,6 +1772,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: room_claim(),
             payload: OrderedRelayPayload::MucProxy {
                 room_jid: room_jid(),
@@ -1653,6 +1800,7 @@ mod tests {
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
             target_claim: room_claim(),
             payload: OrderedRelayPayload::MucProxy {
                 room_jid: room_jid(),

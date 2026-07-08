@@ -20,6 +20,8 @@ pub struct OrderedRelayRouteOrigin {
     #[cfg(feature = "clustering")]
     pub kind: OrderedRelayRouteOriginKind,
     #[cfg(feature = "clustering")]
+    pub sender_entity: waddle_xmpp::ownership::Entity,
+    #[cfg(feature = "clustering")]
     pub inbound_sequence: u32,
     #[cfg(feature = "clustering")]
     pub handoff: Option<super::handoff::OrderedRelayHandoffHandle>,

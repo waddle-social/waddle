@@ -746,6 +746,9 @@ async fn create_websocket_state(
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                 call_threads: Arc::new(dashmap::DashMap::new()),
+                remote_muc_memberships: Arc::new(
+                    crate::server::routes::websocket::RemoteMucMemberships::default(),
+                ),
                 dm_call_threads: Arc::new(dashmap::DashMap::new()),
                 dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
                 dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
@@ -769,6 +772,11 @@ async fn create_websocket_state(
             bridge.wire(Arc::new(
                 crate::clustering::route_bridge::OrderedRelayDeliveryServices {
                     claim_store,
+                    allowlist_store: Arc::new(
+                        crate::clustering::allowlist::PostgresAllowlistStore::new(
+                            state.db_pool.global().clone(),
+                        ),
+                    ),
                     node_lease: Arc::clone(node_lease),
                     node_identity,
                     connection_registry: Arc::clone(
@@ -778,6 +786,7 @@ async fn create_websocket_state(
                     sm_session_registry: Arc::clone(
                         &websocket_state.deps.protocol.sm_session_registry,
                     ),
+                    blocking_storage: Arc::clone(&websocket_state.deps.protocol.blocking_storage),
                     web_socket_state: Arc::downgrade(&websocket_state),
                 },
             ));

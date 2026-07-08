@@ -280,14 +280,17 @@ async fn handle_xmpp_frame_impl(
                     }
 
                     Stanza::Presence(presence) => {
-                        handlers::presence::handle_presence(
+                        handlers::presence::handle_presence_with_ordered_relay(
                             presence,
-                            domain,
-                            &muc_domain,
-                            state,
-                            phase,
-                            authenticated_session,
-                            registry_owner.as_ref(),
+                            handlers::presence::PresenceHandlerContext {
+                                domain,
+                                muc_domain: &muc_domain,
+                                state,
+                                phase,
+                                authenticated_session,
+                                registry_owner: registry_owner.as_ref(),
+                                ordered_relay_origin: ordered_relay_origin.clone(),
+                            },
                         )
                         .await
                     }
@@ -327,6 +330,12 @@ fn ordered_relay_origin_for_inbound_stanza(
         >,
     >,
 ) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    let sender_entity = bound_jid.map(|jid| {
+        waddle_xmpp::ownership::Entity::new(
+            waddle_xmpp::ownership::EntityType::UserActor,
+            jid.to_bare().to_string(),
+        )
+    })?;
     if sm_state.enabled {
         let stream_id = sm_state.stream_id.as_ref()?;
         let inbound_sequence = inbound_sequence?;
@@ -334,6 +343,7 @@ fn ordered_relay_origin_for_inbound_stanza(
             kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
                 waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
             ),
+            sender_entity,
             inbound_sequence: inbound_sequence.0,
             handoff: handoff_tx.map(|tx| {
                 crate::server::routes::interpret::OrderedRelayHandoffHandle::new(
@@ -343,18 +353,14 @@ fn ordered_relay_origin_for_inbound_stanza(
             }),
         });
     }
-    bound_jid.map(
-        |jid| crate::server::routes::interpret::OrderedRelayRouteOrigin {
-            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-                waddle_xmpp::ownership::Entity::new(
-                    waddle_xmpp::ownership::EntityType::UserActor,
-                    jid.to_bare().to_string(),
-                ),
-            ),
-            inbound_sequence: 0,
-            handoff: None,
-        },
-    )
+    Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+            sender_entity.clone(),
+        ),
+        sender_entity,
+        inbound_sequence: 0,
+        handoff: None,
+    })
 }
 
 #[cfg(not(feature = "clustering"))]
@@ -395,28 +401,31 @@ pub(super) fn ordered_relay_origin_from_sm(
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
 ) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    let sender_entity = bound_jid.map(|jid| {
+        waddle_xmpp::ownership::Entity::new(
+            waddle_xmpp::ownership::EntityType::UserActor,
+            jid.to_bare().to_string(),
+        )
+    })?;
     if sm_state.enabled {
         let stream_id = sm_state.stream_id.as_ref()?;
         return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
             kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
                 waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
             ),
+            sender_entity,
             inbound_sequence: sm_state.get_inbound_count(),
             handoff: None,
         });
     }
-    bound_jid.map(
-        |jid| crate::server::routes::interpret::OrderedRelayRouteOrigin {
-            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-                waddle_xmpp::ownership::Entity::new(
-                    waddle_xmpp::ownership::EntityType::UserActor,
-                    jid.to_bare().to_string(),
-                ),
-            ),
-            inbound_sequence: 0,
-            handoff: None,
-        },
-    )
+    Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+            sender_entity.clone(),
+        ),
+        sender_entity,
+        inbound_sequence: 0,
+        handoff: None,
+    })
 }
 
 #[cfg(not(feature = "clustering"))]

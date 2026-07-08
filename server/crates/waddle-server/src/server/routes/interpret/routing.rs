@@ -558,7 +558,7 @@ pub(crate) async fn deliver_peer_to_full(
 /// ADR-0017 Phase 1 Slice 3: mirrors [`deliver_peer_to_full`] — the actor is
 /// the only delivery path; `None` (actor-less test fixtures) falls back to the
 /// detached XEP-0198 buffer instead of a DashMap `send_to`.
-pub(super) async fn deliver_direct_to_full(
+pub(crate) async fn deliver_direct_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,

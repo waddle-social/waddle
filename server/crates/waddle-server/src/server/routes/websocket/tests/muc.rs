@@ -20,7 +20,7 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
     )
     .await;
 
-    let responses = handle_muc_leave(state.as_ref(), &room_jid, &stale_jid, "alice").await;
+    let responses = handle_muc_leave(state.as_ref(), &room_jid, &stale_jid, "alice", None).await;
 
     assert_eq!(responses.len(), 1);
     let response = Element::from_str(&responses[0]).expect("leave response XML");
@@ -3384,6 +3384,68 @@ fn muc_join_presence_to(room_jid: &BareJid, nick: &str) -> xmpp_parsers::presenc
 }
 
 #[tokio::test]
+async fn typed_muc_presence_is_not_join_or_update_activity() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "typed-presence@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob.clone(), bob_tx);
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &None,
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice, false);
+    let mut probe = muc_join_presence_to(&room_jid, "alice");
+    probe.type_ = xmpp_parsers::presence::Type::Probe;
+
+    let responses = handlers::presence::handle_presence(
+        probe,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+        None,
+    )
+    .await;
+
+    assert!(
+        responses.is_empty(),
+        "typed MUC presence must not be accepted as join/update activity"
+    );
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "typed MUC presence must not be broadcast to room occupants"
+    );
+}
+
+#[tokio::test]
 async fn available_presence_without_muji_clears_existing_muji_state() {
     let recorder = std::sync::Arc::new(RecordingSfu::default());
     let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
@@ -4350,7 +4412,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
     while mobile_rx.try_recv().is_ok() {}
     while bob_rx.try_recv().is_ok() {}
 
-    let _ = handle_muc_leave(state.as_ref(), &room_jid, &desktop, "alice").await;
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &desktop, "alice", None).await;
 
     for (recipient, rx) in [(&mobile, &mut mobile_rx), (&bob, &mut bob_rx)] {
         let broadcast = rx
@@ -4459,7 +4521,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
     .await;
     while bob_rx.try_recv().is_ok() {}
 
-    let _ = handle_muc_leave(state.as_ref(), &room_jid, &desktop, "alice").await;
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &desktop, "alice", None).await;
 
     let clear_xml = stanza_to_xml(
         &bob_rx
@@ -4605,7 +4667,7 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
     // the join's. The previous 2ms sleep was a workaround for the
     // strict-`>` race (Codex/Copilot review on PR #731). The assertion
     // below uses `>=` to allow same-millisecond ties without flaking.
-    let _ = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice").await;
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
     let after_leave = state
         .deps
         .protocol

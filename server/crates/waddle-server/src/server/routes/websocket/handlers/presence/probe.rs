@@ -7,6 +7,7 @@ pub(super) async fn handle_presence_probe(
     from: BareJid,
     to: BareJid,
     to_full: Option<FullJid>,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) {
     if recipient_blocks_sender(state, &to, &from).await {
         info!(requester = %from, target = %to, "Blocked presence probe");
@@ -14,7 +15,7 @@ pub(super) async fn handle_presence_probe(
     }
     if !presence_probe_authorized(state, &from, &to).await {
         info!(requester = %from, target = %to, "Unauthorized presence probe");
-        send_unsubscribed_probe_response(state, &to, &from).await;
+        send_unsubscribed_probe_response(state, &to, &from, ordered_relay_origin).await;
         return;
     }
     let mut available = state
@@ -54,6 +55,16 @@ pub(super) async fn handle_presence_probe(
         } else {
             build_unavailable_presence(&to, &from)
         });
+        if super::subscription::try_route_presence_to_bare_remote(
+            state,
+            &from,
+            &unavailable,
+            ordered_relay_origin,
+        )
+        .await
+        {
+            return;
+        }
         for resource in
             waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &from)
                 .await
@@ -83,6 +94,16 @@ pub(super) async fn handle_presence_probe(
         // like the live branch below (issue #1103).
         probe_response.payloads.extend(detached.payloads);
         let presence = Stanza::Presence(probe_response);
+        if super::subscription::try_route_presence_to_bare_remote(
+            state,
+            &from,
+            &presence,
+            ordered_relay_origin,
+        )
+        .await
+        {
+            continue;
+        }
         for requester_resource in &requester_resources {
             let _ = state
                 .deps
@@ -121,6 +142,16 @@ pub(super) async fn handle_presence_probe(
                 .extend(stored.payloads.iter().cloned());
         }
         let presence = Stanza::Presence(probe_response);
+        if super::subscription::try_route_presence_to_bare_remote(
+            state,
+            &from,
+            &presence,
+            ordered_relay_origin,
+        )
+        .await
+        {
+            continue;
+        }
         for requester_resource in &requester_resources {
             let _ = state
                 .deps
@@ -132,7 +163,12 @@ pub(super) async fn handle_presence_probe(
     }
 }
 
-async fn send_unsubscribed_probe_response(state: &WebSocketState, from: &BareJid, to: &BareJid) {
+async fn send_unsubscribed_probe_response(
+    state: &WebSocketState,
+    from: &BareJid,
+    to: &BareJid,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) {
     let stanza = Stanza::Presence(build_subscription_presence(
         SubscriptionType::Unsubscribed,
         from,
@@ -140,6 +176,16 @@ async fn send_unsubscribed_probe_response(state: &WebSocketState, from: &BareJid
         None,
         &[],
     ));
+    if super::subscription::try_route_presence_to_bare_remote(
+        state,
+        to,
+        &stanza,
+        ordered_relay_origin,
+    )
+    .await
+    {
+        return;
+    }
     for resource in
         waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, to).await
     {

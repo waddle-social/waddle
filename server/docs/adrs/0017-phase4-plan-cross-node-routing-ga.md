@@ -607,3 +607,204 @@ changes slice scope, XEP behavior, or operational requirements.
     have archived, updated inbox state, emitted carbons, or reached a live
     resource. Pre-effect failures such as full outbound channels still use
     `Backpressure` and remain definite no-effect.
+23. Slice 4 MUC proxying now carries receiver-built client replies in the
+    ordered-relay ACK so remote room owners remain the single writer for join
+    presence and groupchat reflection. Receiver duplicate ACK replay includes
+    the same typed reply stanzas, preserving ordered-channel idempotence. MUC
+    join proxying reuses the owner node's `handle_muc_join` path, and
+    groupchat proxying reuses the room dispatch path with a room-entity relay
+    origin so MUC occupant fanout can itself route cross-node. The proxy keeps
+    the conservative `MaybeCommitted` no-reply behavior for fire-and-forget
+    room message/presence effects. Remote joins make one repair attempt on a
+    distinct UserActor-origin channel; if commit state remains ambiguous, the
+    origin records the possible remote membership for later unavailable
+    cleanup and emits no false join-failure stanza.
+24. Slice 4 presence fanout now threads the inbound ordered-relay origin
+    through regular presence broadcast, directed presence, subscription
+    presence side effects, and probe responses. Those paths first try the
+    ordered relay when the recipient bare/full JID is owned by a fresh foreign
+    `UserActor`; otherwise they keep the existing local registry and detached
+    SM-storage behavior. IQ blocking side effects and terminated-session
+    unavailable broadcasts have no inbound relay origin, so they remain local
+    until a separate server-origin provenance lane is introduced.
+25. Slice 7 chart unlock landed without Helm hooks because the repo's GitOps
+    validation still rejects hook/bootstrap tokens. The chart instead enforces
+    the production invariant at render time: multi-replica requires
+    `clustering.enabled=true`, Postgres, shared uploads via S3/RWX, at least
+    one listen address, and an enrolled-key count of `replicaCount + maxSurge
+    + keypairHeadroom` when the pool is supplied by an external Secret. The
+    render now emits the swarm port, headless Service, PDB, soft anti-affinity,
+    and a NetworkPolicy that keeps normal HTTP ingress open while restricting
+    the swarm port to matching server pods.
+26. Production unlock uses chart `0.4.x`, `replicaCount: 2`,
+    `clustering.enabled: true`, `enrolledKeyCount: 4`, RollingUpdate
+    `maxSurge: 1`, and disables the RWO PVC because uploads are already on
+    R2/S3. The generated keypool was written with the
+    `waddle-cluster-keypool` ops binary to a 0600 file, the non-secret peer
+    IDs were enrolled into `clustering_peer_allowlist`, and a cluster-local
+    `waddle-clustering-keypool` Secret was created because the local
+    1Password CLI could not connect to the desktop app. The permanent follow
+    up is to backfill the same pool value into the `server-runtime-production`
+    1Password item (property `clustering-keypair-pool`) or replace the bridge
+    Secret with an encrypted GitOps-managed secret source.
+27. Slice 4 convergence review found that MUC target-owner refresh still
+    collapsed ACK reply stanzas and ambiguous commit state into a plain
+    delivery enum. The retry path now returns the full remote-delivery outcome,
+    and if the refreshed room owner is this node it runs the MUC proxy receiver
+    effect directly instead of falling into generic bare-JID routing. This
+    preserves remote join self-presence replies and avoids synthesizing a local
+    MUC error for room work that may already have committed.
+28. Slice 4 convergence review also found that unavailable MUC presence and
+    in-room occupant presence updates were still local-only. The origin now
+    proxies explicit MUC leave and non-join occupant presence over the
+    `OccupantPresence` MUC proxy class, the receiver dispatches that class to
+    the existing leave/update handlers, and MUC leave/Muji-clear fanout uses
+    the room-origin routing helper so remaining occupants on other nodes get
+    the XEP-0045 unavailable or reflected presence. Relayed groupchat now
+    reconstructs the authenticated sender session before entering the room
+    dispatcher so managed announcements rooms keep their server-owner gate.
+29. Slice 1/7 operational convergence removed runtime DDL from clustering
+    allowlist startup. The production swarm now only reads
+    `clustering_peer_allowlist`; schema creation remains in the control-plane
+    provisioning path (`waddle-cluster-keypool` SQL output and harness setup),
+    so the application role can be hardened to `SELECT` on the allowlist table
+    without breaking startup.
+30. Slice 4 final convergence added the missing remote-MUC cleanup and
+    per-message enrollment checks. Successful remote joins are tracked in a
+    process-local full-JID/room membership index; explicit remote leaves clear
+    it only after the owning room actor ACKs, and unclean disconnect/SM-expiry
+    drains it by relaying XEP-0045 unavailable presence to each remote room
+    owner. Remote leave failures now return a retryable presence error instead
+    of falsely acknowledging self-unavailable. Ordered-relay receiver
+    validation also re-reads `clustering_peer_allowlist` for every signed
+    envelope so a revoked PeerId is rejected before delivery even if the swarm
+    refresh has not closed the transport yet.
+31. The MUC join `MaybeCommitted` case now keeps receiver-side JoinPresence
+    timeouts retryable, replays the same ordered channel once, and only then
+    attempts a distinct UserActor-origin repair channel. If neither path proves
+    delivery and returns the required roster/status-110 self-presence, the
+    origin records the remote membership for cleanup provenance and returns a
+    retryable presence error to the client instead of silently hanging the join.
+    A later explicit leave, unclean disconnect, SM expiry, or client retry can
+    then relay the authoritative unavailable cleanup or complete the idempotent
+    join against the remote room owner.
+32. Remote MUC disconnect cleanup now treats only an ordered-relay `Delivered`
+    ACK as cleanup success. `MaybeCommitted`, `JoinMaybeCommitted`,
+    `Unavailable`, `Dropped`, and absent bridge outcomes re-record the
+    full-JID/room membership after logging, so uncertain unavailable delivery
+    remains eligible for a later cleanup retry instead of deleting the only
+    provenance for a possible remote occupant.
+33. Directed presence probes and subscription requests now cross the ordered
+    relay before local fallback when the target UserActor claim is fresh on a
+    different node. The receiver handles Probe/Subscribe/Subscribed/Unsubscribe
+    /Unsubscribed as server-side presence requests on the target owner, not as
+    direct client frames, so probes are answered from the target node's live and
+    detached resources and pending subscription queues remain target-local.
+34. Remote MUC disconnect cleanup no longer depends on a still-live resource
+    entry keeping the sender's UserActor claim. Before sending remote
+    unavailable cleanup, the janitor reacquires the bare UserActor claim through
+    the registry, uses that claim as ordered-relay provenance, then asks the
+    registry to reap the UserActor only if it is still empty. This covers normal
+    full cleanup after mirror-unregister and SM-expiry cleanup after the original
+    resource claim was already pruned.
+35. Subscription relay convergence keeps sender-local side effects on the
+    sender's owner node after the target owner commits the RFC 6121 request over
+    ordered relay. The origin node now replays the sender roster push from the
+    shared database, clears pending subscribe state for approval/denial, and
+    relays the required current/unavailable presence side effects for
+    Subscribed/Unsubscribed. The multi-process harness asserts the cross-node
+    Subscribe, sender `ask='subscribe'` push, Subscribed approval push, current
+    presence catch-up, and an authorized cross-node Probe reply.
+36. Remote MUC cleanup provenance was tightened beyond deviation 34 after
+    adversarial review: teardown paths now preserve an already-owned route
+    origin instead of relying on best-effort reacquisition after releasing it.
+    Full disconnect and SM-detach-failure cleanup run before UserActor
+    mirror-unregister using that UserActor claim; SM-expiry cleanup runs before
+    `pending_delivery.release_claim` using the expired SmSession claim. The
+    reacquire-and-reap path remains only as a fallback for callers without
+    explicit provenance. The multi-process MUC test now closes a foreign-node
+    occupant and asserts the room owner receives the relayed XEP-0045
+    unavailable presence.
+37. Relay discovery misses (`RelayAskError::NotFound`) are now classified as a
+    definite no-effect delivery miss without sticky-diverting the ordered
+    channel. The bridge still refreshes the target owner claim and falls back
+    for the current stanza, but a transient Kademlia/relay lookup gap no longer
+    poisons later sends on the same origin-target channel after discovery
+    converges. Transport, timeout, cancellation, and backpressure failures keep
+    their existing channel-diversion behavior.
+38. Relay names are now re-registered immediately after a new peer connection,
+    not only on the 15s supervisor refresh cadence. A relay registration made
+    before the first peer connection can otherwise remain local to the node's
+    Kademlia view, producing directional `NotFound` misses even though the
+    target owner claim is fresh in Postgres. The periodic refresh remains as a
+    fallback; the peer-triggered refresh makes newly connected nodes usable for
+    ordered relay before cross-node stanza routing starts relying on them.
+39. The recipient state machine now wires peer-routed presence stanzas to the
+    wire after applying the same session blocklist guard as peer-routed IQ.
+    Cross-node subscription approval depends on current-presence catch-up
+    (`<presence from='contact/full' to='subscriber'/>`) arriving as a
+    `PeerStanza`; before this fix the message recipient-pass handled messages,
+    IQs were direct, and presence was only debug-logged and dropped. Dedicated
+    machine tests cover peer-routed presence delivery and blocked-sender drop.
+40. The ordered-relay receiver now delivers plain bare-JID presence side
+    effects as direct server frames to the target user's available/detached
+    resources instead of running them through the generic `PeerStanza`
+    recipient-pass route. Subscription/probe requests still use the
+    server-side presence request handler, and messages/IQs keep their existing
+    recipient-pass semantics. This preserves RFC 6121 current/unavailable
+    presence catch-up after cross-node subscription approval while keeping the
+    delivery path actor-backed through `UserRegistryActor`.
+41. Ordered-relay envelopes now carry a signed `sender_claim` for the
+    UserActor/RoomActor named by the stanza's `from`, separate from the
+    origin lane claim. SM-origin channels keep ordering on the stream id, but
+    receivers reject any envelope whose stanza `from` does not match the
+    sender claim or whose sender claim is not fresh under the same node
+    identity as the origin claim. This closes the enrolled-node forged-from
+    gap found in council review and is covered by substrate and bridge
+    provenance tests.
+42. Deferred XEP-0198 handoffs no longer have an outer spawned-task timeout.
+    The relay ask, mailbox, reply, and receiver effect operations remain
+    bounded, but the origin's handled counter now advances only when a real
+    relay outcome completes. This avoids falsely marking an inbound stanza
+    handled while the receiver effect may still commit.
+43. Clustered startup now fails when `WADDLE_CLUSTERING_KEYPAIR_POOL` is set
+    but any derived pool PeerId is absent from `clustering_peer_allowlist`.
+    The runtime still remains SELECT-only on the allowlist table; the preflight
+    turns a missed GitOps/SQL enrollment step into an explicit startup/readiness
+    failure instead of a deny-all, split-brain-looking cluster with green
+    manifests.
+44. Council review found deviation 37 was incomplete for current bare-JID
+    stanzas: `RelayAskError::NotFound` no longer returns a terminal `Dropped`
+    outcome to the route hook. It now returns a bridge miss (`None`) so the
+    current stanza continues through the normal local/headless/durable fallback
+    path. A second council pass found the miss still advanced the sender
+    sequence, so definite no-effect lookup misses now roll back the unseen
+    envelope sequence and target-refresh only forgets the old channel after an
+    actual owner/epoch change or local takeover. Tests cover both a cold lookup
+    miss retrying at sequence 1 and an established channel retrying the missed
+    sequence 2 after sequence 1 was ACKed.
+45. Council review tightened cross-node presence side-effect consumption:
+    presence relay helpers now treat only `Delivered` and `QueuedDetached` as
+    consumed. `Unavailable`, `Dropped`, and bridge misses fall back to the
+    caller's normal RFC 6121 handling, preventing current-presence, probe, and
+    subscription side effects from being silently acknowledged after an ordered
+    relay NACK or lookup miss.
+46. XEP-0045 MUC presence dispatch now rejects typed room/occupant presence
+    unless it is `type='unavailable'`. Join and in-room update paths accept
+    only available presence (`type` absent), so typed stanzas such as
+    `type='probe'` cannot be interpreted as room entry or occupant activity.
+    Ordered-relay `InFlight` NACKs are also classified as maybe-committed but
+    explicitly disallow MUC join repair, suppressing local fallback without
+    racing a duplicate room mutation against the pending receiver effect.
+47. Remote bare-JID presence delivered by the ordered-relay receiver now
+    re-validates the recipient's XEP-0191 blocklist before any live-resource
+    write or detached XEP-0198 replay. A blocked sender is silently dropped
+    with no delivery effect, matching normal presence privacy semantics; a
+    blocklist storage failure is treated as `InFlight` so the relay remains
+    fail-closed instead of leaking presence.
+48. Clustering now treats an empty keypair pool as a configuration error, not a
+    cue to mint an ephemeral runtime identity. The runtime raises
+    `KeypairPoolRequired`, Helm render validation requires either an inline
+    keypair pool or an external secret source whenever `clustering.enabled=true`,
+    and Postgres-backed keypair-slot tests share the cluster test lock to keep
+    the real multi-process harness deterministic.

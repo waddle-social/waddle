@@ -35,7 +35,7 @@ fn muji_reflection_rank(muji: &Muji) -> u8 {
 /// staying lit forever after a tab close: other occupants never
 /// received the leave signal, so their client-side
 /// `$mucCallParticipants` never cleared the stale nick.
-pub(crate) fn broadcast_muc_leave_to_remaining(
+pub(crate) async fn broadcast_muc_leave_to_remaining(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
@@ -62,11 +62,13 @@ pub(crate) fn broadcast_muc_leave_to_remaining(
             false,
             &identity,
         );
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(occupant_jid, Stanza::Presence(presence));
+        super::handlers::presence::route_room_presence_to_occupant(
+            state,
+            room_jid,
+            occupant_jid,
+            Stanza::Presence(presence),
+        )
+        .await;
     }
 }
 
@@ -75,7 +77,7 @@ pub(crate) fn broadcast_muc_leave_to_remaining(
 /// remains. Sibling Muji state is emitted under the exact full JID
 /// that owns it so resource-scoped XEP-0272 preparing state stays
 /// attributable.
-pub(crate) fn broadcast_muc_muji_clear_to_remaining(
+pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
     state: &WebSocketState,
     room_jid: &BareJid,
     leaving_real_jid: &FullJid,
@@ -117,11 +119,13 @@ pub(crate) fn broadcast_muc_muji_clear_to_remaining(
             if !muji.is_empty() {
                 presence.payloads.push(muji.to_element());
             }
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(occupant_jid, Stanza::Presence(presence));
+            super::handlers::presence::route_room_presence_to_occupant(
+                state,
+                room_jid,
+                occupant_jid,
+                Stanza::Presence(presence),
+            )
+            .await;
         }
     }
 }
@@ -130,8 +134,20 @@ pub(crate) fn broadcast_muc_muji_clear_to_remaining(
 /// Public alias for the MUC-presence cleanup used by the SM expired-session
 /// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
 /// to reimplement the room traversal.
+#[cfg(any(not(feature = "clustering"), test))]
 pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
     cleanup_muc_presence(state, jid).await
+}
+
+/// Same cleanup path, but with explicit ordered-relay origin provenance for
+/// clustered remote MUC leaves.
+#[cfg(feature = "clustering")]
+pub async fn cleanup_muc_presence_for_jid_with_origin(
+    state: &WebSocketState,
+    jid: &FullJid,
+    origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
+) {
+    cleanup_muc_presence_with_origin(state, jid, Some(&origin)).await
 }
 
 /// If `outcome` represents the final occupant leaving a
@@ -487,7 +503,10 @@ pub(super) async fn cleanup_connection_shutdown(
                         .connection_registry
                         .unregister_if_owner(&jid, owner)
                         .is_some();
+                    let cleanup_origin = clustered_user_actor_cleanup_origin(&jid);
                     if detach_fail_removed {
+                        cleanup_muc_presence_with_origin(state, &jid, cleanup_origin.as_ref())
+                            .await;
                         // ADR-0017 Phase 1: mirror the unregister into the
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
@@ -508,7 +527,9 @@ pub(super) async fn cleanup_connection_shutdown(
                     // disco#info resolution must be cleared too —
                     // otherwise stale state lingers indefinitely.
                     state.deps.protocol.caps_resolver.drop_resource(&jid);
-                    cleanup_muc_presence(state, &jid).await;
+                    if !detach_fail_removed {
+                        cleanup_muc_presence(state, &jid).await;
+                    }
                     return ConnectionShutdownOutcome::NotPersisted;
                 }
             }
@@ -530,6 +551,15 @@ pub(super) async fn cleanup_connection_shutdown(
         // The flag is only true if this session actually sent initial
         // available presence (RFC 6121 §4.2.2) and did not retract it.
         let was_presence_available = removed_entry.is_presence_available();
+        let cleanup_origin = clustered_user_actor_cleanup_origin(&jid);
+        // XEP-0115 §6: drop the per-resource caps mapping for this
+        // resource. The hash-keyed `CapsCache` itself stays warm so
+        // a future session reusing the same `(hash, ver)` short-
+        // circuits the disco#info round-trip.
+        state.deps.protocol.caps_resolver.drop_resource(&jid);
+        info!(jid = %jid, "WebSocket connection unregistered");
+        broadcast_unavailable_if_no_replacement(state, &jid, was_presence_available).await;
+        cleanup_muc_presence_with_origin(state, &jid, cleanup_origin.as_ref()).await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
         // the dominant disconnect teardown path. Owner-gated (the same token
         // that owned the DashMap entry) so a superseding newcomer that
@@ -540,14 +570,6 @@ pub(super) async fn cleanup_connection_shutdown(
             Some(owner),
         )
         .await;
-        // XEP-0115 §6: drop the per-resource caps mapping for this
-        // resource. The hash-keyed `CapsCache` itself stays warm so
-        // a future session reusing the same `(hash, ver)` short-
-        // circuits the disco#info round-trip.
-        state.deps.protocol.caps_resolver.drop_resource(&jid);
-        info!(jid = %jid, "WebSocket connection unregistered");
-        broadcast_unavailable_if_no_replacement(state, &jid, was_presence_available).await;
-        cleanup_muc_presence(state, &jid).await;
     } else {
         debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
     }
@@ -599,6 +621,16 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
+    cleanup_muc_presence_with_origin(state, jid, None).await;
+}
+
+async fn cleanup_muc_presence_with_origin(
+    state: &WebSocketState,
+    jid: &FullJid,
+    origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) {
+    cleanup_remote_muc_presence(state, jid, origin).await;
+
     for room_jid in list_room_jids(state).await {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
@@ -637,8 +669,8 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
                 // (`handle_muc_leave`) calls the same helper, so the
                 // wire shape is identical regardless of how the
                 // session ended.
-                broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome);
-                broadcast_muc_muji_clear_to_remaining(state, &room_jid, jid, &outcome);
+                broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome).await;
+                broadcast_muc_muji_clear_to_remaining(state, &room_jid, jid, &outcome).await;
                 maybe_evict_empty_room(state, &room_jid, &outcome).await;
             }
             Ok(None) => {}
@@ -652,6 +684,191 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
             }
         }
     }
+}
+
+#[cfg(feature = "clustering")]
+async fn cleanup_remote_muc_presence(
+    state: &WebSocketState,
+    jid: &FullJid,
+    cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) {
+    let memberships = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .take_for_occupant(jid);
+    if memberships.is_empty() {
+        return;
+    }
+    let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    else {
+        for (room_jid, nick) in memberships {
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .record_join(jid, &room_jid, &nick);
+        }
+        return;
+    };
+    let acquired_user_actor_origin = cleanup_origin.is_none();
+    let origin = match cleanup_origin.cloned() {
+        Some(origin) => origin,
+        None => {
+            let Some(origin) = acquire_remote_muc_cleanup_origin(state, jid).await else {
+                for (room_jid, nick) in memberships {
+                    state
+                        .deps
+                        .protocol
+                        .remote_muc_memberships
+                        .record_join(jid, &room_jid, &nick);
+                }
+                return;
+            };
+            origin
+        }
+    };
+    for (room_jid, nick) in memberships {
+        let Some(to) = room_jid
+            .clone()
+            .with_resource_str(&nick)
+            .ok()
+            .map(jid::Jid::from)
+        else {
+            continue;
+        };
+        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+        let mut presence =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+        presence.from = Some(jid::Jid::from(jid.clone()));
+        presence.to = Some(to);
+        let stanza = Stanza::Presence(presence);
+        match bridge
+            .try_proxy_muc_remote(
+                &room_jid,
+                &stanza,
+                crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                &origin,
+            )
+            .await
+        {
+            Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(_)) => {}
+            Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+            | Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+            )
+            | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+            | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
+            | None => {
+                warn!(
+                    room = %room_jid,
+                    nick = %nick,
+                    jid = %jid,
+                    "failed to relay remote MUC unavailable during disconnect cleanup"
+                );
+                state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .record_join(jid, &room_jid, &nick);
+            }
+        }
+    }
+    if acquired_user_actor_origin {
+        reap_remote_muc_cleanup_origin_if_empty(state, jid).await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn clustered_user_actor_cleanup_origin(
+    jid: &FullJid,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::UserActor,
+        jid.to_bare().to_string(),
+    );
+    Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(entity.clone()),
+        sender_entity: entity,
+        inbound_sequence: 0,
+        handoff: None,
+    })
+}
+
+#[cfg(not(feature = "clustering"))]
+fn clustered_user_actor_cleanup_origin(
+    _jid: &FullJid,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    None
+}
+
+#[cfg(feature = "clustering")]
+async fn acquire_remote_muc_cleanup_origin(
+    state: &WebSocketState,
+    jid: &FullJid,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    let bare_jid = jid.to_bare();
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::UserActor,
+        bare_jid.to_string(),
+    );
+    match state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+    {
+        Ok(_) => Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                entity.clone(),
+            ),
+            sender_entity: entity,
+            inbound_sequence: 0,
+            handoff: None,
+        }),
+        Err(error) => {
+            warn!(
+                jid = %jid,
+                error = ?error,
+                "failed to acquire UserActor claim for remote MUC cleanup"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+async fn reap_remote_muc_cleanup_origin_if_empty(state: &WebSocketState, jid: &FullJid) {
+    let bare_jid = jid.to_bare();
+    if let Err(error) = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::ReapUserIfEmpty { bare_jid })
+        .await
+    {
+        warn!(
+            jid = %jid,
+            error = ?error,
+            "failed to reap empty UserActor after remote MUC cleanup"
+        );
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn cleanup_remote_muc_presence(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) {
 }
 
 pub(super) async fn cleanup_invalidated_detached_session(
