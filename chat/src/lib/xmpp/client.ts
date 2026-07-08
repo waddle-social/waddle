@@ -405,6 +405,11 @@ export class BrowserXmppClient {
   private readonly joinedMucReady = new Set<string>();
   private retainedJoinedRoomJids = new Set<string>();
   private autoJoinRoomJids: ReadonlyArray<string> = [];
+  // Self-presence-confirmed (XEP-0045 status 110) room keys captured at
+  // the last disconnect. A `resumed` session-ready re-seeds the join
+  // trackers from this without sending presence — MUC occupancy survives
+  // the SM detach-for-resume server-side (#1221). Cleared on logout.
+  private resumedSessionRoomKeys = new Set<string>();
   // Canonical room keys `fanOutAutoJoin` has attempted this session epoch
   // (#1221). Bounds each room to one auto-join attempt per epoch — a
   // failed join (e.g. 15s self-presence timeout) is not retried by a
@@ -641,6 +646,22 @@ export class BrowserXmppClient {
     }
     this.joinedMucReady.add(key);
     this.rememberJoinedRoom(roomJid);
+  }
+
+  /**
+   * Restore MUC join state after an SM resume without touching the wire
+   * (#1221). Occupancy survived the detach-for-resume server-side, so we
+   * mark each snapshotted room ready (resolved join, no presence sent)
+   * and record it as attempted so a concurrent `discoverTopology`
+   * fan-out does not re-send a join either.
+   */
+  private reseedResumedRooms(): void {
+    for (const key of this.resumedSessionRoomKeys) {
+      if (!key) continue;
+      if (!this.joinedMucs.has(key)) this.joinedMucs.set(key, Promise.resolve());
+      this.joinedMucReady.add(key);
+      this.autoJoinAttemptedRoomKeys.add(key);
+    }
   }
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
@@ -1012,6 +1033,7 @@ export class BrowserXmppClient {
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
     this.autoJoinAttemptedRoomKeys.clear();
+    this.resumedSessionRoomKeys.clear();
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
@@ -2163,11 +2185,21 @@ export class BrowserXmppClient {
       // xmpp reference so the bootstrap aborts cleanly if the client
       // disconnects before the catch-up IQ resolves.
       void this.bootstrapMdsDisplayed(xmpp);
-    }
-    const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
-    if (this.currentRoom) roomsToJoin.add(this.currentRoom);
-    if (roomsToJoin.size > 0) {
-      void this.fanOutAutoJoin([...roomsToJoin]);
+      // A fresh bind lost server-side MUC occupancy, so re-send join
+      // presence for every retained/autojoin room + the focused room.
+      // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
+      // join per room across the three fan-out triggers (#1221).
+      const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
+      if (this.currentRoom) roomsToJoin.add(this.currentRoom);
+      if (roomsToJoin.size > 0) {
+        void this.fanOutAutoJoin([...roomsToJoin]);
+      }
+    } else {
+      // Resumed: occupancy survived the SM detach-for-resume server-side
+      // (no MUC leave was broadcast), so DO NOT re-send join presence.
+      // Re-seed the trackers from the disconnect snapshot so roomIsReady
+      // and the queued-send flush treat the rooms as joined (#1221).
+      this.reseedResumedRooms();
     }
     // #1180: consume the catch-up cursors BEFORE emitting the
     // lifecycle event so the fresh event can report which
@@ -2334,6 +2366,10 @@ export class BrowserXmppClient {
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     const previouslyJoinedRooms = [...this.joinedMucs.keys()];
+    // Snapshot the self-presence-confirmed (status 110) rooms before the
+    // trackers clear so a subsequent `resumed` session-ready can restore
+    // readiness without re-sending join presence (#1221).
+    this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
     // The wire is gone — no point trying to send session-terminate.
     // Clear the local call slot so the UI doesn't strand on a stale

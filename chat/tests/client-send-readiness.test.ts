@@ -945,9 +945,13 @@ describe("client send readiness", () => {
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
+    // #1221: retained-room rejoin is a FRESH-reconnect behavior. A
+    // `resumed` session-ready must NOT re-send join presence (occupancy
+    // survives the SM detach); that path is covered in
+    // session-ready-join-lifecycle.test.ts.
     (client as unknown as {
-      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
-    }).handleSessionReady(xmpp, { type: "resumed" });
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
+    }).handleSessionReady(xmpp, { type: "fresh" });
     await settleReconnectCatchup();
     expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(0);
 
@@ -986,9 +990,13 @@ describe("client send readiness", () => {
     (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids = new Set([roomJid]);
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
+    // #1221: retained-room rejoin is a FRESH-reconnect behavior. A
+    // `resumed` session-ready must NOT re-send join presence (occupancy
+    // survives the SM detach); that path is covered in
+    // session-ready-join-lifecycle.test.ts.
     (client as unknown as {
-      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
-    }).handleSessionReady(xmpp, { type: "resumed" });
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
+    }).handleSessionReady(xmpp, { type: "fresh" });
     await settleReconnectCatchup();
 
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
@@ -1031,9 +1039,13 @@ describe("client send readiness", () => {
     (client as unknown as { xmpp: typeof xmpp }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
+    // #1221: retained-room rejoin is a FRESH-reconnect behavior. A
+    // `resumed` session-ready must NOT re-send join presence (occupancy
+    // survives the SM detach); that path is covered in
+    // session-ready-join-lifecycle.test.ts.
     (client as unknown as {
-      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
-    }).handleSessionReady(xmpp, { type: "resumed" });
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
+    }).handleSessionReady(xmpp, { type: "fresh" });
     await settleReconnectCatchup();
 
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
