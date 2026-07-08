@@ -29,6 +29,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         presence_show: Some(Show::Chat),
         presence_status: Some("at the keyboard".to_string()),
         presence_priority: 5,
+        presence_payloads: Vec::new(),
     }
 }
 

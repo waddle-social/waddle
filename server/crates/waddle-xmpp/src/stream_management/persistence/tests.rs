@@ -28,6 +28,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         presence_show: None,
         presence_status: None,
         presence_priority: 1,
+        presence_payloads: Vec::new(),
     }
 }
 

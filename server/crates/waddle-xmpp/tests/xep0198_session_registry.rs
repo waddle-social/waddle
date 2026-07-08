@@ -698,6 +698,62 @@ async fn xep0198_session_round_trips_through_persistence() {
     assert!(resumed.carbons_enabled);
 }
 
+/// #1206 (follow-up to #1101/#1103): the SM durable shape must carry a
+/// resource's own presence extension payloads (XEP-0115 `<c/>`, XEP-0319
+/// `<idle/>`, arbitrary extensions) across a restart / cross-node
+/// rehydration. Without this, a session rebuilt from durable storage comes
+/// back caps-less, and — because XEP-0198 resume means the client does NOT
+/// resend presence — every subsequent probe response relays the resource as
+/// available with no `<c/>` for the rest of the session, breaking feature
+/// detection toward its subscribers (RFC 6121 §4.3.2 requires the probe
+/// response to reproduce the complete presence stanza).
+#[tokio::test]
+async fn xep0198_persistence_round_trip_preserves_presence_payloads() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let persistence: Arc<dyn SmPersistenceStorage> = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+
+    let mut session = detached_session("stream-payloads", "alice@example.com/laptop");
+    session.presence_payloads = vec![caps.clone(), idle.clone()];
+    registry.store_session(session).await.expect("store");
+
+    // Simulate restart: drop the registry, build a fresh one over the same
+    // persistence handle, restore from durable storage.
+    drop(registry);
+    let restored = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    let count = restored
+        .restore_from_persistence()
+        .await
+        .expect("restore from persistence");
+    assert_eq!(count, 1, "one session restored");
+
+    // AC2: a probe of the still-detached available resource carries its
+    // stored payloads. `detached_presence_state` is the exact source the
+    // probe / subscription-delivery paths read from.
+    let jid: FullJid = "alice@example.com/laptop".parse().unwrap();
+    let state = restored
+        .detached_presence_state(&jid)
+        .await
+        .expect("query detached presence state")
+        .expect("detached available resource present after restore");
+    assert_eq!(
+        state.payloads,
+        vec![caps, idle],
+        "durable rehydration must preserve the resource's own presence payloads \
+         verbatim and in order"
+    );
+}
+
 /// Locked Q8 = B persist-after-promotion contract (issue #209
 /// PR #346, post-Copilot-review): `drain_expired` and
 /// `drain_all_for_shutdown` MUST NOT delete the durable SM row

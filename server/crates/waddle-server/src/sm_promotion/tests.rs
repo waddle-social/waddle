@@ -949,6 +949,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             presence_show: None,
             presence_status: None,
             presence_priority: 0,
+            presence_payloads: Vec::new(),
         })
         .await
         .unwrap();

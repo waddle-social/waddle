@@ -80,6 +80,9 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         presence_show,
         presence_status,
         presence_priority: presence_priority.clamp(i8::MIN as i64, i8::MAX as i64) as i8,
+        // Slice 2 wires this to the `presence_payloads` column; the field
+        // exists first so the workspace compiles with the new struct shape.
+        presence_payloads: Vec::new(),
     })
 }
 
