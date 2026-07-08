@@ -547,6 +547,7 @@ async fn reaper_wins_mid_resume_interleaving_resume_fails_cleanly() {
     // whichever state already exists when it happens to run.)
     let entity = Entity::new(EntityType::SmSession, "stream-reaped".to_string());
     let claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+    let node_lease: Arc<dyn NodeLeaseStore> = Arc::new(PostgresClaimStore::new(db.clone()));
     let snapshot = claim_store
         .current_claim(&entity)
         .await
@@ -554,6 +555,10 @@ async fn reaper_wins_mid_resume_interleaving_resume_fails_cleanly() {
         .expect("claim exists");
     let observed_epoch = snapshot.claim_epoch;
     let reaper_identity = node_identity();
+    node_lease
+        .register(&reaper_identity, None)
+        .await
+        .expect("register the reaper's fresh liveness row");
     claim_store
         .steal_stale(
             &entity,

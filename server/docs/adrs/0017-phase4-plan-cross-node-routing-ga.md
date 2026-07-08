@@ -410,3 +410,11 @@ changes slice scope, XEP behavior, or operational requirements.
    timing out. This preserves the original SM-claim and foreign-owned-room
    assertions without changing production behavior; the same-bare-JID
    cross-node resume capstone remains covered separately.
+8. CI exposed one more stale XEP-0198 CAS interleaving fixture after Slice
+   1a's live-stealer hardening: `reaper_wins_mid_resume_interleaving_...`
+   seeded a synthetic orphan reaper identity but did not register that
+   identity in `clustering_nodes`. The hardened `OwnerStale` CAS now requires
+   the stealer itself to have a registered, same-epoch, non-expired,
+   non-draining row, so the test setup registers the simulated reaper before
+   proving the stale observed epoch loses to the reaper's epoch bump. This
+   changes no production behavior.
