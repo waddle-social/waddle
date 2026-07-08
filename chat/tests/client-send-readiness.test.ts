@@ -1632,9 +1632,12 @@ describe("client keepalive lifecycle", () => {
     await settleReconnectCatchup(newestIndex + 20);
 
     // #1221: capped at 5 pages instead of walking the whole 52-page
-    // archive; the backward loop discards its buffer on the budget throw.
+    // archive. The backward loop applies the 5 pages it fetched before
+    // failing over (partial recovery of the most-recent window), rather
+    // than discarding them.
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(5);
-    expect(dmHandler).not.toHaveBeenCalled();
+    expect(dmHandler).toHaveBeenCalledTimes(5);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
   });
 
   test("stale archive cursor catch-up filters live messages already seen after that cursor", async () => {

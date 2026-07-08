@@ -580,12 +580,27 @@ export class MamPager {
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
     const pages: WasmMamPage[] = [];
+    // Apply the pages collected so far, oldest-first. Called on normal
+    // completion and, on budget exhaustion, BEFORE the throw — so a
+    // resumed session (whose fallback reload is fresh-only) still gets
+    // the most-recent pages it fetched, matching the forward loop which
+    // applies incrementally (#1221).
+    const applyCollected = () => {
+      const selfBare = this.selfBare();
+      for (const page of [...pages].reverse()) {
+        this.applyDmCatchupPage(page, since, seenIds, { applyCallEvents: false, stats });
+      }
+      for (const page of [...pages].reverse()) {
+        this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
+      }
+    };
     while (true) {
       const page = await xmpp.fetch_dm_history_page?.(peerJid, 100, pageParam);
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
       if (pages.length >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
+        applyCollected();
         throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${peerJid}`);
       }
       const firstArchiveId = pageFirstArchiveId(page);
@@ -594,13 +609,7 @@ export class MamPager {
       seenBefore.add(firstArchiveId);
       pageParam = { type: "before", before: firstArchiveId };
     }
-    const selfBare = this.selfBare();
-    for (const page of [...pages].reverse()) {
-      this.applyDmCatchupPage(page, since, seenIds, { applyCallEvents: false, stats });
-    }
-    for (const page of [...pages].reverse()) {
-      this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
-    }
+    applyCollected();
   }
 
   private async runRoomTimestampCatchup(
@@ -614,12 +623,21 @@ export class MamPager {
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
     const pages: WasmMamPage[] = [];
+    // Apply the pages collected so far, oldest-first — on normal
+    // completion and, on budget exhaustion, BEFORE the throw so a resumed
+    // session still gets the most-recent pages it fetched (#1221).
+    const applyCollected = () => {
+      for (const page of [...pages].reverse()) {
+        this.applyRoomCatchupPage(page, since, seenIds, stats);
+      }
+    };
     while (true) {
       const page = await xmpp.fetch_room_history_page?.(roomJid, 100, pageParam);
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
       if (pages.length >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
+        applyCollected();
         throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${roomJid}`);
       }
       const firstArchiveId = pageFirstArchiveId(page);
@@ -628,9 +646,7 @@ export class MamPager {
       seenBefore.add(firstArchiveId);
       pageParam = { type: "before", before: firstArchiveId };
     }
-    for (const page of [...pages].reverse()) {
-      this.applyRoomCatchupPage(page, since, seenIds, stats);
-    }
+    applyCollected();
   }
 
   private applyDmCatchupPage(

@@ -154,6 +154,28 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     expect(joinRoom).toHaveBeenCalledTimes(1);
     expect(joinRoom).toHaveBeenCalledWith(room, "alice");
   });
+
+  test("a resume with a partial snapshot rejoins only the unconfirmed retained rooms", async () => {
+    // A room still mid-join at disconnect is retained but not
+    // self-presence-confirmed, so it is absent from the snapshot. On
+    // resume the confirmed room must be re-seeded WITHOUT a join, while
+    // the unconfirmed retained room is rejoined (single-flight skips the
+    // reseeded one).
+    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const confirmed = "confirmed@conference.example.com";
+    const pending = "pending@conference.example.com";
+    state.retainedJoinedRoomJids = new Set([confirmed, pending]);
+    state.resumedSessionRoomKeys = new Set([confirmed]); // only `confirmed` got its 110
+
+    const ready = state.runSessionReady(xmpp, { type: "resumed" });
+    deliverSelfPresence(pending);
+    await ready;
+    await Promise.resolve();
+
+    expect(state.joinedMucReady.has(confirmed)).toBe(true);
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+    expect(joinRoom).toHaveBeenCalledWith(pending, "alice");
+  });
 });
 
 describe("#1221 session-ready runs once per handle", () => {

@@ -667,6 +667,10 @@ export class BrowserXmppClient {
       this.joinedMucReady.add(key);
       this.autoJoinAttemptedRoomKeys.add(key);
     }
+    // One-shot: the snapshot is a handoff from the last disconnect to
+    // this resume. Clear it once consumed so a later `.size` check can
+    // never read a stale snapshot (the next disconnect repopulates it).
+    this.resumedSessionRoomKeys.clear();
   }
 
   /**
@@ -2214,21 +2218,19 @@ export class BrowserXmppClient {
       // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
       // join per room across the three fan-out triggers (#1221).
       this.fanOutJoinableRooms();
-    } else if (this.resumedSessionRoomKeys.size > 0) {
-      // Resumed with a known snapshot (in-context transient reconnect):
-      // occupancy survived the SM detach-for-resume server-side (no MUC
-      // leave was broadcast), so DO NOT re-send join presence. Re-seed
-      // the trackers from the snapshot so roomIsReady and the queued-send
-      // flush treat the rooms as joined (#1221).
-      this.reseedResumedRooms();
     } else {
-      // Resumed but the in-memory snapshot was lost: the page-reload
-      // pagehide handoff persists the SM resume state, not the join
-      // snapshot, so we no longer know which rooms were confirmed. Rejoin
-      // the retained/autojoin set via the single-flight fan-out — one
+      // Resumed: occupancy survived the SM detach-for-resume server-side
+      // (no MUC leave was broadcast). Re-seed readiness for the
+      // self-presence-confirmed rooms WITHOUT sending presence (they mark
+      // themselves attempted), then fan out — single-flight skips the
+      // reseeded rooms, so a confirmed room sends zero join while any
+      // room the snapshot did NOT confirm is still rejoined (#1221).
+      // This covers a room still mid-join at disconnect (not yet 110-
+      // confirmed) and a lost snapshot after a page reload (the pagehide
+      // handoff persists SM state, not the in-memory snapshot). One
       // client rejoining its own rooms is not the multi-client storm
-      // #1221 fixes, and it self-heals occupancy for rooms we may have
-      // been removed from during the gap.
+      // #1221 fixes.
+      this.reseedResumedRooms();
       this.fanOutJoinableRooms();
     }
     // #1180: consume the catch-up cursors BEFORE emitting the
