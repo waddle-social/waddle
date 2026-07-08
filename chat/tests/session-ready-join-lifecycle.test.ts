@@ -135,6 +135,25 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     expect(joinRoom2).not.toHaveBeenCalled();
     expect(state.joinedMucReady.has(room)).toBe(true);
   });
+
+  test("a resume whose snapshot was lost (page reload) rejoins retained rooms", async () => {
+    // The pagehide handoff persists the SM resume state but not the
+    // in-memory readiness snapshot, so a reloaded client resumes with an
+    // empty resumedSessionRoomKeys. It must fall back to rejoining the
+    // retained set (single-flight) rather than leaving rooms un-ready.
+    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const room = "c7@conference.example.com";
+    state.retainedJoinedRoomJids = new Set([room]);
+    // resumedSessionRoomKeys intentionally left empty (snapshot lost).
+
+    const ready = state.runSessionReady(xmpp, { type: "resumed" });
+    deliverSelfPresence(room);
+    await ready;
+    await Promise.resolve();
+
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+    expect(joinRoom).toHaveBeenCalledWith(room, "alice");
+  });
 });
 
 describe("#1221 session-ready runs once per handle", () => {

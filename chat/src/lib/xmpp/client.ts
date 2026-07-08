@@ -669,6 +669,17 @@ export class BrowserXmppClient {
     }
   }
 
+  /**
+   * Fan out MUC joins for the retained + autojoin rooms plus the focused
+   * room (#1221). Used on a fresh bind and on a resume whose readiness
+   * snapshot was lost. Single-flight per epoch via `fanOutAutoJoin`.
+   */
+  private fanOutJoinableRooms(): void {
+    const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
+    if (this.currentRoom) roomsToJoin.add(this.currentRoom);
+    if (roomsToJoin.size > 0) void this.fanOutAutoJoin([...roomsToJoin]);
+  }
+
   private handleMucPresenceError(presence: WasmPresence): boolean {
     if (presence.presence_type !== "error") return false;
     const [rawRoom = "", errorNick = ""] = presence.from?.split("/") ?? [];
@@ -1227,8 +1238,12 @@ export class BrowserXmppClient {
         try {
           await this.ensureJoined(roomJid);
         } catch {
-          // Failed joins drop their tracker entry inside ensureJoined.
-          // The next topology refresh or reconnect replay can retry.
+          // Failed joins drop their tracker entry inside ensureJoined,
+          // but the key stays in `autoJoinAttemptedRoomKeys`, so a
+          // same-epoch fan-out (e.g. a topology refresh) will NOT retry
+          // (#1221). Retry happens on a reconnect (new epoch clears the
+          // set) or when the user navigates to the room (`switchRoom` →
+          // `ensureJoined`, which is not single-flight-gated).
         }
       }
     });
@@ -2198,17 +2213,23 @@ export class BrowserXmppClient {
       // presence for every retained/autojoin room + the focused room.
       // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
       // join per room across the three fan-out triggers (#1221).
-      const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
-      if (this.currentRoom) roomsToJoin.add(this.currentRoom);
-      if (roomsToJoin.size > 0) {
-        void this.fanOutAutoJoin([...roomsToJoin]);
-      }
-    } else {
-      // Resumed: occupancy survived the SM detach-for-resume server-side
-      // (no MUC leave was broadcast), so DO NOT re-send join presence.
-      // Re-seed the trackers from the disconnect snapshot so roomIsReady
-      // and the queued-send flush treat the rooms as joined (#1221).
+      this.fanOutJoinableRooms();
+    } else if (this.resumedSessionRoomKeys.size > 0) {
+      // Resumed with a known snapshot (in-context transient reconnect):
+      // occupancy survived the SM detach-for-resume server-side (no MUC
+      // leave was broadcast), so DO NOT re-send join presence. Re-seed
+      // the trackers from the snapshot so roomIsReady and the queued-send
+      // flush treat the rooms as joined (#1221).
       this.reseedResumedRooms();
+    } else {
+      // Resumed but the in-memory snapshot was lost: the page-reload
+      // pagehide handoff persists the SM resume state, not the join
+      // snapshot, so we no longer know which rooms were confirmed. Rejoin
+      // the retained/autojoin set via the single-flight fan-out — one
+      // client rejoining its own rooms is not the multi-client storm
+      // #1221 fixes, and it self-heals occupancy for rooms we may have
+      // been removed from during the gap.
+      this.fanOutJoinableRooms();
     }
     // #1180: consume the catch-up cursors BEFORE emitting the
     // lifecycle event so the fresh event can report which
