@@ -1590,7 +1590,7 @@ describe("client keepalive lifecycle", () => {
     expect(readDmCallActivity("bob@example.com")).toBeNull();
   });
 
-  test("timestamp fallback continues beyond fifty pages until it crosses the last seen timestamp", async () => {
+  test("resumed timestamp catch-up stops at the reconnect page budget (#1221)", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
       catchup: {
@@ -1631,10 +1631,10 @@ describe("client keepalive lifecycle", () => {
     xmpp.emit("stream:management:resumed");
     await settleReconnectCatchup(newestIndex + 20);
 
-    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(newestIndex + 1);
-    expect(dmHandler).toHaveBeenCalledTimes(newestIndex);
-    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-1" }));
-    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
+    // #1221: capped at 5 pages instead of walking the whole 52-page
+    // archive; the backward loop discards its buffer on the budget throw.
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(5);
+    expect(dmHandler).not.toHaveBeenCalled();
   });
 
   test("stale archive cursor catch-up filters live messages already seen after that cursor", async () => {
@@ -1919,7 +1919,7 @@ describe("client keepalive lifecycle", () => {
     }));
   });
 
-  test("pages tracked DM catch-up forward beyond fifty pages until MAM is complete", async () => {
+  test("resumed forward catch-up stops at the reconnect page budget (#1221)", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
       catchup: {
@@ -1955,13 +1955,15 @@ describe("client keepalive lifecycle", () => {
     xmpp.emit("stream:management:resumed");
     await settleReconnectCatchup(finalPage + 20);
 
-    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(finalPage);
+    // #1221: capped at 5 forward pages; the forward loop applies each
+    // page as it goes, so 5 messages arrive before the budget throw.
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(5);
     expect(fetchDmHistoryPage).toHaveBeenLastCalledWith("bob@example.com", 100, {
       type: "after",
-      after: "mam-50",
+      after: "mam-4",
     });
-    expect(dmHandler).toHaveBeenCalledTimes(finalPage);
-    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
+    expect(dmHandler).toHaveBeenCalledTimes(5);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-5" }));
   });
 
   test("queryPersonalMamPage seeds reconnect catch-up from XEP-0313 archive ids", async () => {
