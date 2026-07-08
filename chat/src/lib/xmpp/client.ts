@@ -473,6 +473,11 @@ export class BrowserXmppClient {
   // re-entrant `handleSessionReady` (synchronous WASM callback re-
   // entry) cannot observe one set without the other.
   private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
+  // The handle whose `runSessionReady` has already run this session
+  // (#1221). Latches per-handle so the three duplicate session-ready
+  // hooks coalesce even on the no-catch-up path (which opens no barrier).
+  // Reset on disconnect so the next handle runs its own setup.
+  private sessionReadyHandledXmpp: XmppClientInstance | null = null;
   private pendingDuringResume: InboundWasmMessage[] | null = null;
   // F2: buffer entries stranded by a barrier that failed mid-catch-up
   // (the connection died, so `completeResumeBarrier` could not drain
@@ -1034,6 +1039,7 @@ export class BrowserXmppClient {
     this.joinedMucReady.clear();
     this.autoJoinAttemptedRoomKeys.clear();
     this.resumedSessionRoomKeys.clear();
+    this.sessionReadyHandledXmpp = null;
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
@@ -2166,16 +2172,19 @@ export class BrowserXmppClient {
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     // Coalesce duplicate triggers. Three event hooks call
     // `handleSessionReady` on the same xmpp handle; only the first
-    // gets past this gate to run the per-session setup, lifecycle
-    // emit, and catch-up. Subsequent triggers for the *same* xmpp
+    // gets past this latch to run the per-session setup, lifecycle
+    // emit, and catch-up. Subsequent triggers for the *same* handle
     // bail out silently.
     //
-    // A barrier owned by a *different* xmpp handle (e.g. the old
-    // handle from a Wi-Fi → cellular reconnect) does not block the
-    // new handle — the new handle gets its own session-setup +
-    // catch-up. The old barrier's `.finally` guards against writing
-    // back into shared state when `this.xmpp` has moved on.
-    if (this.resumeBarrier && this.resumeBarrier.xmpp === xmpp) return;
+    // The latch is keyed on the handle, set once and synchronously
+    // (before the first await), so it also closes the no-catch-up leak
+    // (#1221): that branch returns without opening a `resumeBarrier`, so
+    // a barrier-only gate let a second callback re-admit → double
+    // fan-out + double bootstrap. A *different* handle (e.g. the old one
+    // from a Wi-Fi → cellular reconnect) does not match the latch — the
+    // new handle gets its own session-setup + catch-up.
+    if (this.sessionReadyHandledXmpp === xmpp) return;
+    this.sessionReadyHandledXmpp = xmpp;
     if (lifecycle.type === "fresh") {
       this.outboundQueue.clearInflight();
       void this.enableCarbons(xmpp);
@@ -2400,8 +2409,10 @@ export class BrowserXmppClient {
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
-    // New epoch: a genuine fresh cycle must be free to rejoin (#1221).
+    // New epoch: a genuine fresh cycle must be free to rejoin (#1221),
+    // and the next handle must run its own session-ready setup.
     this.autoJoinAttemptedRoomKeys.clear();
+    this.sessionReadyHandledXmpp = null;
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     // #1164: a terminal failure (auth rejection, resource conflict)

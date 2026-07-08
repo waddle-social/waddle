@@ -137,6 +137,27 @@ describe("#1221 resumed session-ready does not rejoin", () => {
   });
 });
 
+describe("#1221 session-ready runs once per handle", () => {
+  test("a duplicate no-catchup session-ready for the same handle is a no-op", async () => {
+    // Three event hooks call handleSessionReady on the same handle. The
+    // resumeBarrier gate only covered the catch-up path; the no-catch-up
+    // branch returned without opening a barrier, so a second callback
+    // re-admitted and double-emitted the lifecycle + double-ran setup.
+    const { state, xmpp, joinRoom, received, deliverSelfPresence } = connectedClient();
+    const room = "c5@conference.example.com";
+    state.retainedJoinedRoomJids = new Set([room]);
+
+    const first = state.runSessionReady(xmpp, { type: "fresh" });
+    deliverSelfPresence(room);
+    await first;
+
+    await state.runSessionReady(xmpp, { type: "fresh" }); // duplicate hook
+
+    expect(received.filter((event) => event.type === "fresh")).toHaveLength(1);
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("#1221 fresh session-ready still rejoins", () => {
   test("rejoins each retained room exactly once", async () => {
     const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();

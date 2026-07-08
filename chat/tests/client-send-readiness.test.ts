@@ -1246,17 +1246,27 @@ describe("client keepalive lifecycle", () => {
       is_complete: true,
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    // #1221: session-ready runs once per handle, so a genuine SECOND
+    // fresh session uses a NEW handle (a reconnect constructs a fresh
+    // XmppClientInstance). The catch-up cursor store is client-level, so
+    // the first session arms it (nothing to fetch) and the second pages.
+    const session1 = Object.assign(new EventEmitter(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
-    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
-    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+    (client as unknown as { xmpp: Agent }).xmpp = session1;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(session1);
 
-    xmpp.emit("session:started");
+    session1.emit("session:started");
     await settleReconnectCatchup();
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(0);
 
-    xmpp.emit("session:started");
+    const session2 = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = session2;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(session2);
+
+    session2.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
