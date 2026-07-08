@@ -55,6 +55,9 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     let replay_gap_through: Option<i64> = row
         .get(16)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let presence_payloads_raw: Option<String> = row
+        .get(17)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let detached_at = DateTime::<Utc>::from_timestamp_millis(detached_at_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid detached_at_ms".into()))?;
@@ -80,9 +83,7 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         presence_show,
         presence_status,
         presence_priority: presence_priority.clamp(i8::MIN as i64, i8::MAX as i64) as i8,
-        // Slice 2 wires this to the `presence_payloads` column; the field
-        // exists first so the workspace compiles with the new struct shape.
-        presence_payloads: Vec::new(),
+        presence_payloads: parse_presence_payloads(presence_payloads_raw)?,
     })
 }
 
@@ -119,8 +120,10 @@ pub(crate) fn decode_unacked(
 
 /// Decode an unacked-stanza row from a JOIN result. Reads
 /// `stream_id` from column 0 (the session's stream_id),
-/// `stanza_xml` from column 18, and `original_receipt_at_ms`
-/// from column 19. Caller already has `sequence` (column 17).
+/// `stanza_xml` from column 19, and `original_receipt_at_ms`
+/// from column 20. Caller already has `sequence` (column 18).
+/// The unacked columns sit after the 18 session columns
+/// (0..=17, presence_payloads added at 17 for #1206).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
     row: &crate::db::Row,
@@ -130,10 +133,10 @@ pub(super) fn decode_unacked_join_row(
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let stanza_xml: String = row
-        .get(18)
+        .get(19)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let receipt_ms: i64 = row
-        .get(19)
+        .get(20)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
@@ -183,6 +186,58 @@ pub(crate) fn serialize_stanza(stanza: &Stanza) -> Result<String, SmPersistenceE
         .write_to(&mut buf)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     String::from_utf8(buf).map_err(|e| SmPersistenceError::Other(e.to_string()))
+}
+
+/// Wrapper element name+namespace for encoding a resource's presence
+/// extension payloads into the single `sm_sessions.presence_payloads`
+/// TEXT column. This is an internal storage encoding only — the wrapper
+/// is never written to the XMPP wire (only its children are, individually,
+/// on probe/subscription delivery), so a `urn:waddle:*` namespace is
+/// appropriate and does not fall under the XEP wire-conformance rule.
+const PRESENCE_PAYLOADS_WRAPPER_NAME: &str = "payloads";
+const PRESENCE_PAYLOADS_WRAPPER_NS: &str = "urn:waddle:sm:presence-payloads:0";
+
+/// Serialize a resource's presence extension payloads to a single XML
+/// string for durable storage, or `None` when there are none (so the
+/// column stays NULL). The children are wrapped in one container element
+/// built via the minidom element builder — never `format!`/string concat,
+/// per the XML hard rule.
+pub(crate) fn serialize_presence_payloads(
+    payloads: &[xmpp_parsers::minidom::Element],
+) -> Result<Option<String>, SmPersistenceError> {
+    if payloads.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = xmpp_parsers::minidom::Element::builder(
+        PRESENCE_PAYLOADS_WRAPPER_NAME,
+        PRESENCE_PAYLOADS_WRAPPER_NS,
+    );
+    for child in payloads {
+        builder = builder.append(child.clone());
+    }
+    let mut buf = Vec::new();
+    builder
+        .build()
+        .write_to(&mut buf)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))
+}
+
+/// Parse the durable `presence_payloads` column back into typed elements
+/// (exactly once, per the typed-payloads hard rule). A NULL / empty column
+/// yields an empty vec.
+pub(crate) fn parse_presence_payloads(
+    raw: Option<String>,
+) -> Result<Vec<xmpp_parsers::minidom::Element>, SmPersistenceError> {
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let wrapper: xmpp_parsers::minidom::Element = raw
+        .parse()
+        .map_err(|e: xmpp_parsers::minidom::Error| SmPersistenceError::Other(e.to_string()))?;
+    Ok(wrapper.children().cloned().collect())
 }
 
 fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPersistenceError> {

@@ -73,6 +73,40 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.presence_show, s.presence_show);
     assert_eq!(loaded.presence_status, s.presence_status);
     assert_eq!(loaded.presence_priority, s.presence_priority);
+    assert_eq!(loaded.presence_payloads, s.presence_payloads);
+}
+
+/// #1206: the durable shape must carry the resource's own presence
+/// extension payloads (XEP-0115 `<c/>` caps, XEP-0319 `<idle/>`) so a
+/// session rehydrated from storage relays them verbatim on probe instead
+/// of coming back caps-less. The payloads survive a serialize→TEXT→parse
+/// round-trip, verbatim and in order.
+#[tokio::test]
+async fn round_trip_session_preserves_presence_payloads() {
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut s = fixture_session("stream-payloads");
+    s.presence_payloads = vec![caps.clone(), idle.clone()];
+    storage.upsert_session(s.clone()).await.unwrap();
+
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-payloads"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.presence_payloads,
+        vec![caps, idle],
+        "durable get_session must return the stored presence payloads verbatim and in order"
+    );
 }
 
 #[tokio::test]

@@ -49,7 +49,8 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 presence_status TEXT,
                 presence_priority INTEGER NOT NULL,
                 replay_gap_through {bigint},
-                promotion_attempts INTEGER NOT NULL DEFAULT 0
+                promotion_attempts INTEGER NOT NULL DEFAULT 0,
+                presence_payloads TEXT
             )
             "#
             ),
@@ -102,6 +103,10 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         "promotion_attempts INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
+    // #1206: durable storage of the resource's own presence extension
+    // payloads (XEP-0115 caps, XEP-0319 idle, ...) so a rehydrated session
+    // relays them verbatim on probe instead of coming back caps-less.
+    add_column_if_missing(storage, "sm_sessions", "presence_payloads TEXT").await?;
     // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork,
     // mirroring `pending_delivery`'s identical column group (see that
     // migration's doc comment for the full rationale and the "deferred,
