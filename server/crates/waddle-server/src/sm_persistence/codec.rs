@@ -256,6 +256,19 @@ pub(crate) fn parse_presence_payloads(
     let wrapper: xmpp_parsers::minidom::Element = raw
         .parse()
         .map_err(|e: xmpp_parsers::minidom::Error| SmPersistenceError::Other(e.to_string()))?;
+    // Validate the wrapper shape so a well-formed-but-wrong-root cell (e.g. a
+    // corruption that leaves only a lone `<c/>`) is a typed error, not a
+    // silent empty/wrong result — otherwise it would bypass the caller's
+    // warn+degrade path in `decode_session` (Greptile/Qodo review).
+    if wrapper.name() != PRESENCE_PAYLOADS_WRAPPER_NAME
+        || wrapper.ns() != PRESENCE_PAYLOADS_WRAPPER_NS
+    {
+        return Err(SmPersistenceError::Other(format!(
+            "unexpected presence_payloads wrapper <{} xmlns='{}'>",
+            wrapper.name(),
+            wrapper.ns()
+        )));
+    }
     Ok(wrapper.children().cloned().collect())
 }
 
@@ -312,8 +325,20 @@ mod presence_payloads_tests {
     #[test]
     fn malformed_column_is_a_typed_error_not_a_panic() {
         // A corrupted / truncated column must surface as a typed decode
-        // error (which drops the session as a poison pill on restore),
-        // never a panic that bricks cold startup.
+        // error — never a panic — so `decode_session` can catch it and
+        // degrade the session to caps-less rather than crashing cold startup.
         assert!(parse_presence_payloads(Some("<c xmlns='urn:x'".to_string())).is_err());
+    }
+
+    #[test]
+    fn well_formed_wrong_root_is_a_typed_error_so_the_caller_can_degrade() {
+        // A cell that still parses as valid XML but is NOT the server-written
+        // wrapper (e.g. corruption leaving a lone `<c/>`) must be a typed
+        // error, not a silent empty result — otherwise it would bypass
+        // `decode_session`'s warn+degrade path and lose payloads without a
+        // trace.
+        let lone_caps =
+            r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='n' ver='v'/>"#;
+        assert!(parse_presence_payloads(Some(lone_caps.to_string())).is_err());
     }
 }
