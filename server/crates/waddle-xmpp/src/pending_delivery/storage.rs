@@ -169,6 +169,64 @@ pub trait PendingDeliveryStorage: Send + Sync {
         session: &SmSessionId,
     ) -> Result<Vec<PendingRow>, PendingStorageError>;
 
+    /// Atomically claim up to `limit` currently-unclaimed rows for
+    /// `recipient`, FIFO, tagging them with `session`; return the
+    /// claimed rows in FIFO order. The bounded sibling of
+    /// [`Self::claim_for_session`] (issue #1220): the flush loop calls
+    /// this repeatedly with a batch size deliberately far smaller than
+    /// the recovering connection's outbound channel capacity, so a
+    /// large offline backlog drains in paced batches instead of one
+    /// unbounded claim + burst push that overruns (and, when the flush
+    /// still ran inline on the recipient's own connection task,
+    /// self-deadlocked) the 256-slot outbound mpsc.
+    ///
+    /// This is a **correctness fallback for simple/test backends only**
+    /// — both production backends (the in-memory store here and the
+    /// libSQL/Postgres `DatabasePendingDeliveryStorage`) override it, and
+    /// any backend that cares about scale MUST do the same. The default
+    /// claims via [`Self::claim_for_session`] (which claims the WHOLE
+    /// unclaimed set — the exact unbounded claim this fix removes) and,
+    /// when that returns more than `limit` rows, releases the FIFO
+    /// surplus back to the unclaimed pool so the "return at most `limit`
+    /// rows" contract still holds — mirroring how
+    /// [`Self::list_unclaimed_after`] defaults over [`Self::list`]. A
+    /// real database backend overrides this with a single
+    /// `UPDATE … WHERE flushed_in_session IS NULL AND row_id IN
+    /// (SELECT … ORDER BY row_id ASC LIMIT ?)` so the surplus is never
+    /// claimed in the first place.
+    ///
+    /// A surplus-`release_row` failure is logged best-effort rather than
+    /// propagated: the already-trimmed `limit` rows this call returns are
+    /// valid claims the caller will flush, and a failed release only
+    /// leaves an un-returned surplus row claimed (recovered by the
+    /// claim-expiry janitor) — propagating the error instead would strand
+    /// the returned rows too.
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut claimed = self.claim_for_session(recipient, session).await?;
+        if claimed.len() > limit {
+            let surplus = claimed.split_off(limit);
+            for row in &surplus {
+                if let Err(error) = self.release_row(&row.id).await {
+                    tracing::warn!(
+                        row_id = %row.id,
+                        error = %error,
+                        "claim_batch_for_session default: releasing surplus over-claimed row \
+                         failed; claim-expiry janitor will recover it"
+                    );
+                }
+            }
+        }
+        Ok(claimed)
+    }
+
     /// Delete every row previously claimed by `session`. Used by paths
     /// that succeed or fail as a unit — e.g. SM-ack of the entire
     /// flush batch (locked Q7b).
@@ -559,6 +617,41 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 // already does this, but a future code path that
                 // leaves a row half-released should not be able to
                 // confuse the SM-ack delete.
+                row.outbound_sequence = None;
+                claimed.push(row.clone());
+            }
+        }
+        Ok(claimed)
+    }
+
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        // Issue #1220: claim only the FIFO prefix of `limit` unclaimed
+        // rows so the flush drains in paced batches. Never over-claims
+        // (the default's claim-all-then-release surplus dance is only
+        // for backends that can't bound the claim in one operation).
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let queue = match guard.get_mut(recipient) {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let mut claimed = Vec::new();
+        for row in queue.iter_mut() {
+            if claimed.len() == limit {
+                break;
+            }
+            if row.flushed_in_session.is_none() {
+                row.flushed_in_session = Some(session.clone());
                 row.outbound_sequence = None;
                 claimed.push(row.clone());
             }

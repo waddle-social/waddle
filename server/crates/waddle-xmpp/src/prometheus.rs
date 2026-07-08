@@ -78,6 +78,18 @@ static PENDING_DELIVERY_UNRESOLVED_POISON_PILL: AtomicU64 = AtomicU64::new(0);
 // availability problems, not archive corruption, and no mail is lost.
 // Incremented once per aborted flush, not once per released row.
 static PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE: AtomicU64 = AtomicU64::new(0);
+// `pending_flush_batches`: bounded claim batches processed by the
+// XEP-0160 pending_delivery flush (issue #1220). The flush drains a
+// recipient's offline backlog in batches of `FLUSH_BATCH_SIZE`
+// (deliberately « the 256-slot outbound mpsc) instead of one unbounded
+// claim + burst push that used to self-deadlock the recipient's own
+// connection task. Paired with `pending_flush_rows_pushed` the paced
+// drain is observable: batches × ~FLUSH_BATCH_SIZE ≈ rows_pushed.
+static PENDING_FLUSH_BATCHES: AtomicU64 = AtomicU64::new(0);
+// `pending_flush_rows_pushed`: replay stanzas the pending_delivery
+// flush handed to recovering resources' outbound channels across all
+// batches (issue #1220).
+static PENDING_FLUSH_ROWS_PUSHED: AtomicU64 = AtomicU64::new(0);
 // `sm_promotion_storage_failed`: Q6 promotion encountered a
 // pending_delivery insert error and preserved the durable SM row for
 // retry (issue #209 PR #346 + finding #14 dead-letter cap).
@@ -399,6 +411,14 @@ pub fn increment_pending_delivery_archive_lookup_transient_failure() {
     PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn add_pending_flush_batches(n: u64) {
+    PENDING_FLUSH_BATCHES.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_pending_flush_rows_pushed(n: u64) {
+    PENDING_FLUSH_ROWS_PUSHED.fetch_add(n, Ordering::Relaxed);
+}
+
 pub fn add_sm_promotion_storage_failed(n: u64) {
     SM_PROMOTION_STORAGE_FAILED.fetch_add(n, Ordering::Relaxed);
 }
@@ -542,6 +562,8 @@ pub fn reset_metrics_for_test() {
     PENDING_DELIVERY_AGED_OUT.store(0, Ordering::Release);
     PENDING_DELIVERY_UNRESOLVED_POISON_PILL.store(0, Ordering::Release);
     PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.store(0, Ordering::Release);
+    PENDING_FLUSH_BATCHES.store(0, Ordering::Release);
+    PENDING_FLUSH_ROWS_PUSHED.store(0, Ordering::Release);
     SM_PROMOTION_STORAGE_FAILED.store(0, Ordering::Release);
     SM_PROMOTION_NOT_PROMOTABLE.store(0, Ordering::Release);
     SM_PROMOTION_BLOCKLIST_FAILED.store(0, Ordering::Release);
@@ -581,6 +603,8 @@ pub fn render_metrics() -> String {
     let pending_poison_pill = PENDING_DELIVERY_UNRESOLVED_POISON_PILL.load(Ordering::Relaxed);
     let pending_archive_lookup_transient =
         PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.load(Ordering::Relaxed);
+    let pending_flush_batches = PENDING_FLUSH_BATCHES.load(Ordering::Relaxed);
+    let pending_flush_rows_pushed = PENDING_FLUSH_ROWS_PUSHED.load(Ordering::Relaxed);
     let sm_promotion_storage_failed = SM_PROMOTION_STORAGE_FAILED.load(Ordering::Relaxed);
     let sm_promotion_not_promotable = SM_PROMOTION_NOT_PROMOTABLE.load(Ordering::Relaxed);
     let sm_promotion_blocklist_failed = SM_PROMOTION_BLOCKLIST_FAILED.load(Ordering::Relaxed);
@@ -644,6 +668,12 @@ pub fn render_metrics() -> String {
             "# HELP waddle_pending_delivery_archive_lookup_transient_failure_total Pending_delivery flushes aborted by a transient MAM storage error resolving an Archived row: the failing row and the rest of the claimed batch are released (FIFO preserved) and the client's next presence update retries (issue #1122). Signals MAM storage availability problems, not corruption; no mail is lost.\n",
             "# TYPE waddle_pending_delivery_archive_lookup_transient_failure_total counter\n",
             "waddle_pending_delivery_archive_lookup_transient_failure_total {pending_archive_lookup_transient}\n",
+            "# HELP waddle_pending_flush_batches_total Bounded claim batches processed by the XEP-0160 pending_delivery flush (issue #1220): a recipient's offline backlog is drained in batches of FLUSH_BATCH_SIZE rather than one unbounded claim + burst push (which used to self-deadlock the recipient's own connection task at >256 rows).\n",
+            "# TYPE waddle_pending_flush_batches_total counter\n",
+            "waddle_pending_flush_batches_total {pending_flush_batches}\n",
+            "# HELP waddle_pending_flush_rows_pushed_total Replay stanzas the XEP-0160 pending_delivery flush pushed to recovering resources' outbound channels across all batches (issue #1220).\n",
+            "# TYPE waddle_pending_flush_rows_pushed_total counter\n",
+            "waddle_pending_flush_rows_pushed_total {pending_flush_rows_pushed}\n",
             "# HELP waddle_sm_promotion_storage_failed_total Q6 promotion encountered a transient pending_delivery insert error; durable SM row preserved for retry.\n",
             "# TYPE waddle_sm_promotion_storage_failed_total counter\n",
             "waddle_sm_promotion_storage_failed_total {sm_promotion_storage_failed}\n",
@@ -698,6 +728,8 @@ pub fn render_metrics() -> String {
         pending_aged_out = pending_aged_out,
         pending_poison_pill = pending_poison_pill,
         pending_archive_lookup_transient = pending_archive_lookup_transient,
+        pending_flush_batches = pending_flush_batches,
+        pending_flush_rows_pushed = pending_flush_rows_pushed,
         sm_promotion_storage_failed = sm_promotion_storage_failed,
         sm_promotion_not_promotable = sm_promotion_not_promotable,
         sm_promotion_blocklist_failed = sm_promotion_blocklist_failed,
@@ -865,6 +897,39 @@ mod tests {
         assert!(rendered.contains("waddle_sm_promotion_storage_failed_total 2"));
         assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 1"));
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
+    }
+
+    /// Issue #1220: the paced-flush observability counters must render
+    /// with HELP+TYPE headers, carry their added values, and reset.
+    #[tokio::test]
+    async fn test_pending_flush_batch_metrics_render_and_reset() {
+        let _guard = metrics_test_lock().lock().await;
+        reset_metrics_for_test();
+
+        add_pending_flush_batches(3);
+        add_pending_flush_rows_pushed(150);
+
+        let rendered = render_metrics();
+        for family in [
+            "waddle_pending_flush_batches_total",
+            "waddle_pending_flush_rows_pushed_total",
+        ] {
+            assert!(
+                rendered.contains(&format!("# HELP {family}")),
+                "missing HELP header for {family}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {family} counter")),
+                "missing TYPE header for {family}"
+            );
+        }
+        assert!(rendered.contains("waddle_pending_flush_batches_total 3"));
+        assert!(rendered.contains("waddle_pending_flush_rows_pushed_total 150"));
+
+        reset_metrics_for_test();
+        let after = render_metrics();
+        assert!(after.contains("waddle_pending_flush_batches_total 0"));
+        assert!(after.contains("waddle_pending_flush_rows_pushed_total 0"));
     }
 
     #[tokio::test]

@@ -105,6 +105,146 @@ async fn claim_marks_rows_for_session_first_caller_wins() {
     assert_eq!(claimed2.len(), 0); // first caller drained the unclaimed pool
 }
 
+/// Archive ids of the claimed rows, in the order returned — a stable
+/// FIFO witness for the batch-claim tests (the row `id` is a random
+/// UUID, so we assert on the deterministic `<stanza-id/>` archive id).
+fn archive_ids(rows: &[PendingRow]) -> Vec<String> {
+    rows.iter()
+        .map(|row| match &row.payload {
+            PendingPayload::Archived(stanza_id) => stanza_id.id.as_str().to_string(),
+            PendingPayload::Transient(_) => panic!("expected Archived row"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn claim_batch_claims_only_the_fifo_prefix() {
+    // Issue #1220: the flush must drain a large offline backlog in
+    // bounded batches, never one unbounded claim. A batch claim of
+    // `limit` returns only the oldest `limit` unclaimed rows.
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..5 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .expect("insert ok");
+    }
+    let session = SmSessionId::new("s1");
+
+    let batch = store
+        .claim_batch_for_session(&recipient, &session, 2)
+        .await
+        .expect("batch claim ok");
+
+    assert_eq!(
+        archive_ids(&batch),
+        vec!["id-0", "id-1"],
+        "a batch of 2 claims only the FIFO prefix, leaving the rest unclaimed"
+    );
+    // The remaining three rows are still unclaimed and eligible.
+    let unclaimed = store
+        .list_unclaimed_after(&recipient, None, 100)
+        .await
+        .expect("list ok");
+    assert_eq!(archive_ids(&unclaimed), vec!["id-2", "id-3", "id-4"]);
+}
+
+#[tokio::test]
+async fn claim_batch_continues_from_where_the_previous_batch_left_off() {
+    // Successive batch claims for the same session walk the queue
+    // forward: the flush loop relies on this to drain the whole
+    // backlog across multiple bounded batches (issue #1220).
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..5 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .expect("insert ok");
+    }
+    let session = SmSessionId::new("s1");
+
+    let batch1 = store
+        .claim_batch_for_session(&recipient, &session, 2)
+        .await
+        .expect("claim ok");
+    let batch2 = store
+        .claim_batch_for_session(&recipient, &session, 2)
+        .await
+        .expect("claim ok");
+    let batch3 = store
+        .claim_batch_for_session(&recipient, &session, 2)
+        .await
+        .expect("claim ok");
+    let batch4 = store
+        .claim_batch_for_session(&recipient, &session, 2)
+        .await
+        .expect("claim ok");
+
+    assert_eq!(archive_ids(&batch1), vec!["id-0", "id-1"]);
+    assert_eq!(archive_ids(&batch2), vec!["id-2", "id-3"]);
+    assert_eq!(archive_ids(&batch3), vec!["id-4"], "final short batch");
+    assert!(batch4.is_empty(), "drained — nothing left to claim");
+}
+
+#[tokio::test]
+async fn claim_batch_cross_session_race_sees_disjoint_prefixes() {
+    // Q7c per-recipient lock: two recovering resources batch-claiming
+    // the same backlog must see disjoint FIFO slices, never the same
+    // row twice.
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..4 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .expect("insert ok");
+    }
+    let s1 = SmSessionId::new("s1");
+    let s2 = SmSessionId::new("s2");
+
+    let b1 = store
+        .claim_batch_for_session(&recipient, &s1, 2)
+        .await
+        .expect("claim ok");
+    let b2 = store
+        .claim_batch_for_session(&recipient, &s2, 2)
+        .await
+        .expect("claim ok");
+
+    assert_eq!(archive_ids(&b1), vec!["id-0", "id-1"]);
+    assert_eq!(
+        archive_ids(&b2),
+        vec!["id-2", "id-3"],
+        "the second session claims the next unclaimed prefix, disjoint from the first"
+    );
+}
+
+#[tokio::test]
+async fn claim_batch_limit_zero_claims_nothing() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    store
+        .insert(archived_row("alice@example.com", "id-0"))
+        .await
+        .expect("insert ok");
+    let session = SmSessionId::new("s1");
+
+    let claimed = store
+        .claim_batch_for_session(&recipient, &session, 0)
+        .await
+        .expect("claim ok");
+    assert!(claimed.is_empty());
+    // The row was not touched — still claimable.
+    assert_eq!(store.count(&recipient).await.unwrap(), 1);
+    let still_unclaimed = store
+        .list_unclaimed_after(&recipient, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(still_unclaimed.len(), 1);
+}
+
 #[tokio::test]
 async fn delete_claimed_removes_only_session_rows() {
     let store = InMemoryPendingDeliveryStorage::unlimited();

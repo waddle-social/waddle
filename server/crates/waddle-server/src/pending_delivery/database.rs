@@ -681,6 +681,73 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         Ok(out)
     }
 
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        // Issue #1220: claim only the FIFO prefix of `limit` unclaimed
+        // rows in a single bounded UPDATE — never the whole backlog (the
+        // trait default's claim-all-then-release-surplus dance would run
+        // a full-table `flushed_in_session IS NULL` UPDATE, the very
+        // unbounded claim this fix removes). The inner SELECT picks the
+        // oldest `limit` unclaimed row_ids; the outer UPDATE tags exactly
+        // those and RETURNs them.
+        //
+        // The outer `flushed_in_session IS NULL` guard is load-bearing on
+        // Postgres READ COMMITTED (mirrors `claim_for_session`): two
+        // concurrent claimers can evaluate the inner SELECT against the
+        // same pre-commit snapshot and pick the SAME prefix row_ids. The
+        // loser then blocks on the winner's row locks; when it resumes it
+        // re-checks the UPDATE predicate against the freshly-committed row
+        // — WITHOUT this guard the outer `row_id IN {stale ids}` still
+        // matches (row_id never changes) and the loser would overwrite the
+        // winner's claim, double-claiming rows. WITH the guard the loser
+        // sees `flushed_in_session` is no longer NULL and skips them, so
+        // the two claims stay disjoint (Q7c per-recipient exclusion).
+        // SQLite/libSQL serialize writers so the race can't arise there,
+        // but the guard is correct and free. `outbound_sequence = NULL`
+        // reset mirrors `claim_for_session`.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .query(
+                "UPDATE pending_delivery \
+                    SET flushed_in_session = ?, outbound_sequence = NULL \
+                  WHERE flushed_in_session IS NULL \
+                    AND row_id IN ( \
+                        SELECT row_id FROM pending_delivery \
+                         WHERE recipient_jid = ? AND flushed_in_session IS NULL \
+                         ORDER BY row_id ASC \
+                         LIMIT ? \
+                  ) \
+                  RETURNING row_id, recipient_jid, original_receipt_at, payload_kind, \
+                            archive_stanza_by, archive_stanza_id, transient_xml, \
+                            flushed_in_session, outbound_sequence",
+                crate::db_params![
+                    session.as_str().to_string(),
+                    recipient.to_string(),
+                    limit as i64
+                ],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        // RETURNING leaves row order unspecified on both SQLite and
+        // Postgres; the flush replays in FIFO / order-of-receipt, so
+        // re-sort by the UUID v7 row_id (sortable by generation time).
+        out.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        Ok(out)
+    }
+
     async fn delete_claimed(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
         self.execute(
             "DELETE FROM pending_delivery WHERE flushed_in_session = ?",

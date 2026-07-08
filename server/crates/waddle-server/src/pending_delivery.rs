@@ -53,7 +53,7 @@ mod flush;
 pub use database::DatabasePendingDeliveryStorage;
 pub use flush::{
     flush_for_resource, ArchiveResolveError, ArchiveResolver, FlushContext, FlushOutcome,
-    MamArchiveResolver, NullArchiveResolver,
+    MamArchiveResolver, NullArchiveResolver, FLUSH_BATCH_SIZE,
 };
 
 /// Open the pending_delivery storage for cluster mode (ADR-0017 Phase 3

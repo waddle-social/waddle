@@ -105,18 +105,27 @@ pub(super) async fn handle_regular_presence_update(
                 .entry_if_owner(sender_jid, owner)
                 .is_some_and(|entry| entry.claim_pending_subscribes_flush());
             if first_available {
-                for stanza in state
+                let subscribe_stanzas = state
                     .deps
                     .protocol
                     .connection_registry
-                    .pending_subscription_stanzas(&sender_jid.to_bare())
-                {
-                    let _ = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .send_to(sender_jid, stanza)
-                        .await;
+                    .pending_subscription_stanzas(&sender_jid.to_bare());
+                if !subscribe_stanzas.is_empty() {
+                    // Issue #1220 (same deadlock class as the
+                    // pending_delivery flush, smaller scale): these
+                    // `send_to`s block on the connection's own outbound
+                    // mpsc, which only this task drains — a large queued
+                    // set flushed inline could self-deadlock. The
+                    // once-per-session claim is already consumed above;
+                    // snapshot the stanzas on-task and push them from a
+                    // spawned task so the connection keeps draining.
+                    let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
+                    let target = sender_jid.clone();
+                    tokio::spawn(async move {
+                        for stanza in subscribe_stanzas {
+                            let _ = registry.send_to(&target, stanza).await;
+                        }
+                    });
                 }
             }
         } else {
@@ -153,13 +162,21 @@ pub(super) async fn handle_regular_presence_update(
 /// `pending_delivery` for the user's bare JID and push each row to
 /// this resource.
 ///
+/// The drain itself is `tokio::spawn`ed (issue #1220): it must NOT run
+/// on this connection task, which is the sole consumer of the
+/// connection's outbound mpsc — a large backlog flushed inline
+/// self-deadlocked by filling the channel it was supposed to drain.
+/// This function only consumes the once-per-session claim on-task, then
+/// hands owned `Arc` handles to the spawned flush.
+///
 /// `ConnectionEntry::claim_offline_flush()` is a CAS that returns
 /// `true` exactly once per fresh session — repeated presence updates
 /// (priority transitions, status text changes) do not re-flush an
 /// already-drained queue. Exception (issue #1122 follow-up): when the
 /// flush defers rows on a transient MAM failure
-/// (`deferred_transient > 0`), the CAS is reset so the next presence
-/// update retries instead of stranding the rows until reconnect.
+/// (`deferred_transient > 0`), the spawned task resets the CAS so the
+/// next presence update retries instead of stranding the rows until
+/// reconnect.
 ///
 /// Owner-gated (issue #1208): the entry lookup uses `entry_if_owner` so a
 /// superseded same-JID connection cannot consume the replacement's
@@ -181,56 +198,95 @@ async fn maybe_flush_pending_delivery(
     if !entry.claim_offline_flush() {
         return;
     }
+    // Issue #1220: run the flush OFF this connection task. It used to run
+    // inline here — on the very task that drains this connection's
+    // 256-slot outbound mpsc — so a recipient with more than 256 queued
+    // rows self-deadlocked on login: the flush's blocking sends filled
+    // the channel that only this task drains, and the presence handler
+    // (and thus the drain) never returned. The once-per-session
+    // `claim_offline_flush` CAS is consumed ABOVE, on the connection
+    // task, before the spawn, so the claim-race semantics are unchanged;
+    // only row processing moves off-task. The spawned producer now
+    // backpressures naturally on the mpsc while this connection task
+    // keeps draining it.
+    //
+    // Every handle is cloned into the task (all `Arc`), so the flush
+    // outlives this frame and routes by full JID through the registry.
+    // Because it is detached, a same-full-JID replacement can supersede
+    // this connection mid-flush; `send_pending_flush` would then route
+    // to the replacement while rows stay claimed under THIS session id.
+    // The flush guards against that by re-checking ownership before each
+    // batch (via the `owner` token below) and stopping once this
+    // connection no longer owns its slot — see `FlushContext::owner`.
+    // On a closed channel the sends return ChannelClosed and the flush
+    // releases the batch's remaining rows for a later re-flush; SM
+    // claims are otherwise reclaimed by the claim-expiry janitor.
+    let storage = std::sync::Arc::clone(&state.deps.protocol.pending_delivery_storage);
+    let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
+    let blocking_storage = std::sync::Arc::clone(&state.deps.protocol.blocking_storage);
+    let mam_storage = std::sync::Arc::clone(&state.deps.protocol.mam_storage);
+    let server_domain = state.deps.auth_state.xmpp_domain.clone();
     let recipient_bare = sender_jid.to_bare();
-    let resolver = crate::pending_delivery::MamArchiveResolver {
-        mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
-    };
+    let resource = sender_jid.clone();
+    let owner = std::sync::Arc::clone(owner);
     // Locked Q7b SM-ack lifecycle (issue #209): when the recovering
     // connection has an active XEP-0198 session, key claims by its
     // stream id so a subsequent `<a h>` from the same session deletes
     // exactly its acked rows. Without SM, the flush function falls
     // back to delete-on-push (no ack will ever fire).
     let sm_session_id = entry.sm_stream_id();
-    let outcome = crate::pending_delivery::flush_for_resource(
-        &state.deps.protocol.pending_delivery_storage,
-        &state.deps.protocol.connection_registry,
-        &recipient_bare,
-        sender_jid,
-        crate::pending_delivery::FlushContext {
-            server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-            sm_session: sm_session_id.as_ref(),
-            // XEP-0191 §2 step 4 flush-time block re-evaluation
-            // (PR #360): pass live blocking storage so a recipient
-            // who blocked a sender AFTER intake doesn't see queued
-            // messages from that sender on reconnect.
-            blocking_storage: Some(&state.deps.protocol.blocking_storage),
-            archive_resolver: &resolver,
-        },
-    )
-    .await;
-    if outcome.deferred_transient > 0 {
-        // Issue #1122 follow-up (R2): the flush hit a transient MAM
-        // failure and released the failing row plus the rest of the
-        // batch. `claim_offline_flush` is a once-per-connection CAS,
-        // so without a reset those rows would wait for a full
-        // reconnect — potentially forever on a long-lived session.
-        // Re-open the CAS so this client's next presence update
-        // re-attempts the flush (rate-limited by presence traffic —
-        // no hot retry loop). Safe: this runs on the same connection
-        // task that won the claim above, so no concurrent claimant
-        // can race the reset.
-        entry.reset_offline_flush();
-    }
-    if outcome.claimed > 0 {
-        debug!(
-            jid = %sender_jid,
-            claimed = outcome.claimed,
-            pushed = outcome.pushed,
-            unresolved = outcome.unresolved,
-            deferred_transient = outcome.deferred_transient,
-            "XEP-0160 pending_delivery flush completed"
-        );
-    }
+    tokio::spawn(async move {
+        let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
+        let outcome = crate::pending_delivery::flush_for_resource(
+            &storage,
+            registry.as_ref(),
+            &recipient_bare,
+            &resource,
+            crate::pending_delivery::FlushContext {
+                server_domain: server_domain.as_str(),
+                sm_session: sm_session_id.as_ref(),
+                // XEP-0191 §2 step 4 flush-time block re-evaluation
+                // (PR #360): pass live blocking storage so a recipient
+                // who blocked a sender AFTER intake doesn't see queued
+                // messages from that sender on reconnect.
+                blocking_storage: Some(&blocking_storage),
+                archive_resolver: &resolver,
+                // Issue #1220: per-batch ownership re-check so the
+                // detached flush stops delivering to a same-JID
+                // replacement that superseded this connection mid-flush.
+                owner: Some(&owner),
+            },
+        )
+        .await;
+        if outcome.deferred_transient > 0 {
+            // Issue #1122 follow-up (R2): the flush hit a transient MAM
+            // failure and released the failing row plus the rest of the
+            // batch. `claim_offline_flush` is a once-per-connection CAS,
+            // so without a reset those rows would wait for a full
+            // reconnect — potentially forever on a long-lived session.
+            // Re-open the CAS so this client's next presence update
+            // re-attempts the flush (rate-limited by presence traffic —
+            // no hot retry loop). The CAS is an atomic `AtomicBool`
+            // shared with the connection task through this
+            // `ConnectionEntry` clone (issue #1220 moved the reset onto
+            // this spawned task): a presence-driven claim racing this
+            // reset resolves atomically either way — it re-flushes or it
+            // waits for the following presence update, both safe.
+            entry.reset_offline_flush();
+        }
+        if outcome.claimed > 0 {
+            info!(
+                jid = %resource,
+                claimed = outcome.claimed,
+                pushed = outcome.pushed,
+                batches = outcome.batches,
+                unresolved = outcome.unresolved,
+                deferred_transient = outcome.deferred_transient,
+                dropped_blocked = outcome.dropped_blocked,
+                "XEP-0160 pending_delivery flush completed"
+            );
+        }
+    });
 }
 
 async fn broadcast_presence_to_subscribers(

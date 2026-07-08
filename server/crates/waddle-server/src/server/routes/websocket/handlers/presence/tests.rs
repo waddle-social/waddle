@@ -9,6 +9,102 @@ fn presence_from_xml(xml: &str) -> xmpp_parsers::presence::Presence {
         .expect("presence")
 }
 
+fn pending_transient_row(
+    recipient: &BareJid,
+    from: &str,
+    body: &str,
+) -> waddle_xmpp::pending_delivery::PendingRow {
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+    message.from = Some(from.parse::<jid::Jid>().expect("from jid"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), body.to_string());
+    waddle_xmpp::pending_delivery::PendingRow {
+        id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+        recipient: recipient.clone(),
+        original_receipt_at: chrono::Utc::now(),
+        payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(message)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    }
+}
+
+/// Issue #1220 regression: the XEP-0160 pending-delivery flush must NOT
+/// run inline on the recipient's own connection task. A recipient with
+/// more queued rows than the 256-slot outbound channel capacity used to
+/// self-deadlock on login — the inline flush's blocking sends filled the
+/// mpsc that only this same task drains, so the presence handler never
+/// returned. The flush is now spawned off-task, so the handler returns
+/// promptly and the connection keeps draining while the flush
+/// backpressures naturally on the channel.
+#[tokio::test]
+async fn pending_flush_exceeding_outbound_channel_cap_does_not_wedge_the_handler() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().unwrap();
+    let recipient = jid.to_bare();
+
+    // Queue more offline rows than the real outbound channel capacity
+    // (`OUTBOUND_CHANNEL_SIZE = 256`).
+    const TOTAL: usize = 300;
+    for n in 0..TOTAL {
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .insert(pending_transient_row(
+                &recipient,
+                "bob@elsewhere/x",
+                &format!("queued-{n}"),
+            ))
+            .await
+            .expect("insert queued row");
+    }
+
+    // Register the recovering connection with a real 256-slot channel,
+    // exactly as the live connection loop does. The test task is the
+    // sole consumer of `rx` — mirroring the connection task that both
+    // runs the presence handler and drains its own outbound channel.
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(256);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+
+    // First available presence with non-negative priority triggers the
+    // flush. Against the pre-fix inline flush this call never returns
+    // (it wedges filling the undrained 256-slot channel); the timeout
+    // turns that wedge into a clean failure.
+    let presence =
+        presence_from_xml("<presence xmlns='jabber:client'><priority>1</priority></presence>");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        super::regular::handle_regular_presence_update(
+            state.as_ref(),
+            &jid,
+            Some(&owner),
+            presence,
+        ),
+    )
+    .await
+    .expect("presence handler must not block on the pending-delivery flush (issue #1220)");
+
+    // Drain the connection's outbound channel; every queued row must
+    // arrive without the connection wedging.
+    let mut delivered = 0usize;
+    while delivered < TOTAL {
+        let outbound = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("flush must keep making progress once the task drains")
+            .expect("outbound channel stays open for the whole flush");
+        if matches!(outbound.stanza, waddle_xmpp::Stanza::Message(_)) {
+            delivered += 1;
+        }
+    }
+    assert_eq!(delivered, TOTAL, "every queued offline row is delivered");
+}
+
 /// Issue #1208: a superseded same-full-JID connection processing a late
 /// available presence must not stamp its stale presence onto the
 /// replacement's registry entry, and must not consume the replacement's

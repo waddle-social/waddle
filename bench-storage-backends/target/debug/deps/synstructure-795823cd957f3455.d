@@ -1,0 +1,8 @@
+/Users/oyr/projects/waddle/bench-storage-backends/target/debug/deps/synstructure-795823cd957f3455.d: /Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/lib.rs /Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/macros.rs
+
+/Users/oyr/projects/waddle/bench-storage-backends/target/debug/deps/libsynstructure-795823cd957f3455.rlib: /Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/lib.rs /Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/macros.rs
+
+/Users/oyr/projects/waddle/bench-storage-backends/target/debug/deps/libsynstructure-795823cd957f3455.rmeta: /Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/lib.rs /Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/macros.rs
+
+/Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/lib.rs:
+/Users/oyr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/synstructure-0.13.2/src/macros.rs:
