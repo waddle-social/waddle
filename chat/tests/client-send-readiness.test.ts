@@ -945,9 +945,13 @@ describe("client send readiness", () => {
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
+    // #1221: retained-room rejoin is a FRESH-reconnect behavior. A
+    // `resumed` session-ready must NOT re-send join presence (occupancy
+    // survives the SM detach); that path is covered in
+    // session-ready-join-lifecycle.test.ts.
     (client as unknown as {
-      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
-    }).handleSessionReady(xmpp, { type: "resumed" });
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
+    }).handleSessionReady(xmpp, { type: "fresh" });
     await settleReconnectCatchup();
     expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(0);
 
@@ -986,9 +990,13 @@ describe("client send readiness", () => {
     (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids = new Set([roomJid]);
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
+    // #1221: retained-room rejoin is a FRESH-reconnect behavior. A
+    // `resumed` session-ready must NOT re-send join presence (occupancy
+    // survives the SM detach); that path is covered in
+    // session-ready-join-lifecycle.test.ts.
     (client as unknown as {
-      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
-    }).handleSessionReady(xmpp, { type: "resumed" });
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
+    }).handleSessionReady(xmpp, { type: "fresh" });
     await settleReconnectCatchup();
 
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
@@ -1031,9 +1039,13 @@ describe("client send readiness", () => {
     (client as unknown as { xmpp: typeof xmpp }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
+    // #1221: retained-room rejoin is a FRESH-reconnect behavior. A
+    // `resumed` session-ready must NOT re-send join presence (occupancy
+    // survives the SM detach); that path is covered in
+    // session-ready-join-lifecycle.test.ts.
     (client as unknown as {
-      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
-    }).handleSessionReady(xmpp, { type: "resumed" });
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
+    }).handleSessionReady(xmpp, { type: "fresh" });
     await settleReconnectCatchup();
 
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
@@ -1234,17 +1246,27 @@ describe("client keepalive lifecycle", () => {
       is_complete: true,
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    // #1221: session-ready runs once per handle, so a genuine SECOND
+    // fresh session uses a NEW handle (a reconnect constructs a fresh
+    // XmppClientInstance). The catch-up cursor store is client-level, so
+    // the first session arms it (nothing to fetch) and the second pages.
+    const session1 = Object.assign(new EventEmitter(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
-    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
-    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+    (client as unknown as { xmpp: Agent }).xmpp = session1;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(session1);
 
-    xmpp.emit("session:started");
+    session1.emit("session:started");
     await settleReconnectCatchup();
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(0);
 
-    xmpp.emit("session:started");
+    const session2 = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = session2;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(session2);
+
+    session2.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
@@ -1568,7 +1590,7 @@ describe("client keepalive lifecycle", () => {
     expect(readDmCallActivity("bob@example.com")).toBeNull();
   });
 
-  test("timestamp fallback continues beyond fifty pages until it crosses the last seen timestamp", async () => {
+  test("resumed timestamp catch-up stops at the reconnect page budget (#1221)", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
       catchup: {
@@ -1609,9 +1631,12 @@ describe("client keepalive lifecycle", () => {
     xmpp.emit("stream:management:resumed");
     await settleReconnectCatchup(newestIndex + 20);
 
-    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(newestIndex + 1);
-    expect(dmHandler).toHaveBeenCalledTimes(newestIndex);
-    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-1" }));
+    // #1221: capped at 5 pages instead of walking the whole 52-page
+    // archive. The backward loop applies the 5 pages it fetched before
+    // failing over (partial recovery of the most-recent window), rather
+    // than discarding them.
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(5);
+    expect(dmHandler).toHaveBeenCalledTimes(5);
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
   });
 
@@ -1897,7 +1922,7 @@ describe("client keepalive lifecycle", () => {
     }));
   });
 
-  test("pages tracked DM catch-up forward beyond fifty pages until MAM is complete", async () => {
+  test("resumed forward catch-up stops at the reconnect page budget (#1221)", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
       catchup: {
@@ -1933,13 +1958,15 @@ describe("client keepalive lifecycle", () => {
     xmpp.emit("stream:management:resumed");
     await settleReconnectCatchup(finalPage + 20);
 
-    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(finalPage);
+    // #1221: capped at 5 forward pages; the forward loop applies each
+    // page as it goes, so 5 messages arrive before the budget throw.
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(5);
     expect(fetchDmHistoryPage).toHaveBeenLastCalledWith("bob@example.com", 100, {
       type: "after",
-      after: "mam-50",
+      after: "mam-4",
     });
-    expect(dmHandler).toHaveBeenCalledTimes(finalPage);
-    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
+    expect(dmHandler).toHaveBeenCalledTimes(5);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-5" }));
   });
 
   test("queryPersonalMamPage seeds reconnect catch-up from XEP-0313 archive ids", async () => {

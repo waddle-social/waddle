@@ -405,6 +405,17 @@ export class BrowserXmppClient {
   private readonly joinedMucReady = new Set<string>();
   private retainedJoinedRoomJids = new Set<string>();
   private autoJoinRoomJids: ReadonlyArray<string> = [];
+  // Self-presence-confirmed (XEP-0045 status 110) room keys captured at
+  // the last disconnect. A `resumed` session-ready re-seeds the join
+  // trackers from this without sending presence — MUC occupancy survives
+  // the SM detach-for-resume server-side (#1221). Cleared on logout.
+  private resumedSessionRoomKeys = new Set<string>();
+  // Canonical room keys `fanOutAutoJoin` has attempted this session epoch
+  // (#1221). Bounds each room to one auto-join attempt per epoch — a
+  // failed join (e.g. 15s self-presence timeout) is not retried by a
+  // later trigger, and the three fan-out triggers per session coalesce.
+  // Cleared on disconnect so a genuine fresh cycle rejoins.
+  private readonly autoJoinAttemptedRoomKeys = new Set<string>();
   private uploadServiceJid: string | null = null;
   private discoveredRoomJids = new Map<string, string>();
   private readonly reconnect: ReconnectScheduler;
@@ -462,6 +473,11 @@ export class BrowserXmppClient {
   // re-entrant `handleSessionReady` (synchronous WASM callback re-
   // entry) cannot observe one set without the other.
   private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
+  // The handle whose `runSessionReady` has already run this session
+  // (#1221). Latches per-handle so the three duplicate session-ready
+  // hooks coalesce even on the no-catch-up path (which opens no barrier).
+  // Reset on disconnect so the next handle runs its own setup.
+  private sessionReadyHandledXmpp: XmppClientInstance | null = null;
   private pendingDuringResume: InboundWasmMessage[] | null = null;
   // F2: buffer entries stranded by a barrier that failed mid-catch-up
   // (the connection died, so `completeResumeBarrier` could not drain
@@ -627,25 +643,45 @@ export class BrowserXmppClient {
     return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
   }
 
-  private canonicalJoinedRoomJid(roomJid: string): string {
+  private markMucReadyFromSelfPresence(roomJid: string): void {
     const key = this.roomJoinKey(roomJid);
-    if (!key) return roomJid;
-    if (this.currentRoom && this.roomJoinKey(this.currentRoom) === key) {
-      return this.currentRoom;
+    if (!key) return;
+    if (!this.joinedMucs.has(key)) {
+      this.joinedMucs.set(key, Promise.resolve());
     }
-    for (const joinedRoom of this.joinedMucs.keys()) {
-      if (this.roomJoinKey(joinedRoom) === key) return joinedRoom;
-    }
-    return roomJid;
+    this.joinedMucReady.add(key);
+    this.rememberJoinedRoom(roomJid);
   }
 
-  private markMucReadyFromSelfPresence(roomJid: string): void {
-    const room = this.canonicalJoinedRoomJid(roomJid);
-    if (!this.joinedMucs.has(room)) {
-      this.joinedMucs.set(room, Promise.resolve());
+  /**
+   * Restore MUC join state after an SM resume without touching the wire
+   * (#1221). Occupancy survived the detach-for-resume server-side, so we
+   * mark each snapshotted room ready (resolved join, no presence sent)
+   * and record it as attempted so a concurrent `discoverTopology`
+   * fan-out does not re-send a join either.
+   */
+  private reseedResumedRooms(): void {
+    for (const key of this.resumedSessionRoomKeys) {
+      if (!key) continue;
+      if (!this.joinedMucs.has(key)) this.joinedMucs.set(key, Promise.resolve());
+      this.joinedMucReady.add(key);
+      this.autoJoinAttemptedRoomKeys.add(key);
     }
-    this.joinedMucReady.add(room);
-    this.rememberJoinedRoom(room);
+    // One-shot: the snapshot is a handoff from the last disconnect to
+    // this resume. Clear it once consumed so a later `.size` check can
+    // never read a stale snapshot (the next disconnect repopulates it).
+    this.resumedSessionRoomKeys.clear();
+  }
+
+  /**
+   * Fan out MUC joins for the retained + autojoin rooms plus the focused
+   * room (#1221). Used on a fresh bind and on a resume whose readiness
+   * snapshot was lost. Single-flight per epoch via `fanOutAutoJoin`.
+   */
+  private fanOutJoinableRooms(): void {
+    const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
+    if (this.currentRoom) roomsToJoin.add(this.currentRoom);
+    if (roomsToJoin.size > 0) void this.fanOutAutoJoin([...roomsToJoin]);
   }
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
@@ -660,24 +696,18 @@ export class BrowserXmppClient {
     if (errorNick !== waiter.requestedNick) return false;
 
     waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
-    this.revokeMucReadiness(this.canonicalJoinedRoomJid(room), { keepPendingJoin: true });
+    this.revokeMucReadiness(room, { keepPendingJoin: true });
     return true;
   }
 
   private revokeMucReadiness(roomJid: string, options: { keepPendingJoin?: boolean } = {}): void {
-    const normalized = roomJid.trim().toLowerCase();
+    const key = this.roomJoinKey(roomJid);
+    if (!key) return;
     if (!options.keepPendingJoin) {
-      this.joinedMucs.delete(roomJid);
-      this.joinedMucJoinTokens.delete(roomJid);
+      this.joinedMucs.delete(key);
+      this.joinedMucJoinTokens.delete(key);
     }
-    this.joinedMucReady.delete(roomJid);
-    if (normalized && normalized !== roomJid) {
-      if (!options.keepPendingJoin) {
-        this.joinedMucs.delete(normalized);
-        this.joinedMucJoinTokens.delete(normalized);
-      }
-      this.joinedMucReady.delete(normalized);
-    }
+    this.joinedMucReady.delete(key);
   }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.events.set("message", h); }
@@ -1022,6 +1052,9 @@ export class BrowserXmppClient {
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
+    this.autoJoinAttemptedRoomKeys.clear();
+    this.resumedSessionRoomKeys.clear();
+    this.sessionReadyHandledXmpp = null;
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
@@ -1105,34 +1138,39 @@ export class BrowserXmppClient {
   }
 
   async ensureJoined(roomJid: string): Promise<void> {
-    if (this.joinedMucReady.has(roomJid)) return;
-    const existing = this.joinedMucs.get(roomJid);
+    // Every join tracker keys on the canonical `roomJoinKey` (lowercased
+    // bare JID) so case variants from topology vs. retained-room replay
+    // resolve to a single entry (#1221). The raw `roomJid` still goes on
+    // the wire (`performMucJoin`, `rememberJoinedRoom`).
+    const key = this.roomJoinKey(roomJid);
+    if (this.joinedMucReady.has(key)) return;
+    const existing = this.joinedMucs.get(key);
     if (existing) {
-      const existingToken = this.joinedMucJoinTokens.get(roomJid);
+      const existingToken = this.joinedMucJoinTokens.get(key);
       await existing;
-      if (existingToken && this.joinedMucJoinTokens.get(roomJid) !== existingToken) {
+      if (existingToken && this.joinedMucJoinTokens.get(key) !== existingToken) {
         return;
       }
-      if (!existingToken && !this.joinedMucs.has(roomJid)) return;
-      this.joinedMucReady.add(roomJid);
+      if (!existingToken && !this.joinedMucs.has(key)) return;
+      this.joinedMucReady.add(key);
       this.rememberJoinedRoom(roomJid);
       return;
     }
     const promise = this.performMucJoin(roomJid);
-    const joinToken = Symbol(roomJid);
-    this.joinedMucs.set(roomJid, promise);
-    this.joinedMucJoinTokens.set(roomJid, joinToken);
+    const joinToken = Symbol(key);
+    this.joinedMucs.set(key, promise);
+    this.joinedMucJoinTokens.set(key, joinToken);
     try {
       await promise;
-      if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
-        this.joinedMucReady.add(roomJid);
+      if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.joinedMucReady.add(key);
         this.rememberJoinedRoom(roomJid);
       }
     } catch (err) {
-      if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
-        this.joinedMucs.delete(roomJid);
-        this.joinedMucJoinTokens.delete(roomJid);
-        this.joinedMucReady.delete(roomJid);
+      if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.joinedMucs.delete(key);
+        this.joinedMucJoinTokens.delete(key);
+        this.joinedMucReady.delete(key);
       }
       throw err;
     }
@@ -1184,7 +1222,19 @@ export class BrowserXmppClient {
 
   async fanOutAutoJoin(roomJids: ReadonlyArray<string>, concurrency = 6): Promise<void> {
     if (!this.xmpp) return;
-    const queue = [...new Set(roomJids.filter(Boolean))];
+    // Dedup the input by canonical key and skip rooms already attempted
+    // this epoch; the raw JID enters the queue for the wire (#1221).
+    const queue: string[] = [];
+    const seenThisCall = new Set<string>();
+    for (const roomJid of roomJids) {
+      if (!roomJid) continue;
+      const key = this.roomJoinKey(roomJid);
+      if (!key || seenThisCall.has(key)) continue;
+      seenThisCall.add(key);
+      if (this.autoJoinAttemptedRoomKeys.has(key)) continue;
+      this.autoJoinAttemptedRoomKeys.add(key);
+      queue.push(roomJid);
+    }
     const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
       while (queue.length > 0) {
         const roomJid = queue.shift();
@@ -1192,8 +1242,12 @@ export class BrowserXmppClient {
         try {
           await this.ensureJoined(roomJid);
         } catch {
-          // Failed joins drop their tracker entry inside ensureJoined.
-          // The next topology refresh or reconnect replay can retry.
+          // Failed joins drop their tracker entry inside ensureJoined,
+          // but the key stays in `autoJoinAttemptedRoomKeys`, so a
+          // same-epoch fan-out (e.g. a topology refresh) will NOT retry
+          // (#1221). Retry happens on a reconnect (new epoch clears the
+          // set) or when the user navigates to the room (`switchRoom` →
+          // `ensureJoined`, which is not single-flight-gated).
         }
       }
     });
@@ -1248,7 +1302,7 @@ export class BrowserXmppClient {
   }
 
   private roomIsReady(roomJid: string): boolean {
-    return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(roomJid);
+    return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(this.roomJoinKey(roomJid));
   }
 
   private enqueueReason(): string {
@@ -2137,16 +2191,19 @@ export class BrowserXmppClient {
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     // Coalesce duplicate triggers. Three event hooks call
     // `handleSessionReady` on the same xmpp handle; only the first
-    // gets past this gate to run the per-session setup, lifecycle
-    // emit, and catch-up. Subsequent triggers for the *same* xmpp
+    // gets past this latch to run the per-session setup, lifecycle
+    // emit, and catch-up. Subsequent triggers for the *same* handle
     // bail out silently.
     //
-    // A barrier owned by a *different* xmpp handle (e.g. the old
-    // handle from a Wi-Fi → cellular reconnect) does not block the
-    // new handle — the new handle gets its own session-setup +
-    // catch-up. The old barrier's `.finally` guards against writing
-    // back into shared state when `this.xmpp` has moved on.
-    if (this.resumeBarrier && this.resumeBarrier.xmpp === xmpp) return;
+    // The latch is keyed on the handle, set once and synchronously
+    // (before the first await), so it also closes the no-catch-up leak
+    // (#1221): that branch returns without opening a `resumeBarrier`, so
+    // a barrier-only gate let a second callback re-admit → double
+    // fan-out + double bootstrap. A *different* handle (e.g. the old one
+    // from a Wi-Fi → cellular reconnect) does not match the latch — the
+    // new handle gets its own session-setup + catch-up.
+    if (this.sessionReadyHandledXmpp === xmpp) return;
+    this.sessionReadyHandledXmpp = xmpp;
     if (lifecycle.type === "fresh") {
       this.outboundQueue.clearInflight();
       void this.enableCarbons(xmpp);
@@ -2156,11 +2213,25 @@ export class BrowserXmppClient {
       // xmpp reference so the bootstrap aborts cleanly if the client
       // disconnects before the catch-up IQ resolves.
       void this.bootstrapMdsDisplayed(xmpp);
-    }
-    const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
-    if (this.currentRoom) roomsToJoin.add(this.currentRoom);
-    if (roomsToJoin.size > 0) {
-      void this.fanOutAutoJoin([...roomsToJoin]);
+      // A fresh bind lost server-side MUC occupancy, so re-send join
+      // presence for every retained/autojoin room + the focused room.
+      // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
+      // join per room across the three fan-out triggers (#1221).
+      this.fanOutJoinableRooms();
+    } else {
+      // Resumed: occupancy survived the SM detach-for-resume server-side
+      // (no MUC leave was broadcast). Re-seed readiness for the
+      // self-presence-confirmed rooms WITHOUT sending presence (they mark
+      // themselves attempted), then fan out — single-flight skips the
+      // reseeded rooms, so a confirmed room sends zero join while any
+      // room the snapshot did NOT confirm is still rejoined (#1221).
+      // This covers a room still mid-join at disconnect (not yet 110-
+      // confirmed) and a lost snapshot after a page reload (the pagehide
+      // handoff persists SM state, not the in-memory snapshot). One
+      // client rejoining its own rooms is not the multi-client storm
+      // #1221 fixes.
+      this.reseedResumedRooms();
+      this.fanOutJoinableRooms();
     }
     // #1180: consume the catch-up cursors BEFORE emitting the
     // lifecycle event so the fresh event can report which
@@ -2327,6 +2398,10 @@ export class BrowserXmppClient {
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     const previouslyJoinedRooms = [...this.joinedMucs.keys()];
+    // Snapshot the self-presence-confirmed (status 110) rooms before the
+    // trackers clear so a subsequent `resumed` session-ready can restore
+    // readiness without re-sending join presence (#1221).
+    this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
     // The wire is gone — no point trying to send session-terminate.
     // Clear the local call slot so the UI doesn't strand on a stale
@@ -2348,16 +2423,19 @@ export class BrowserXmppClient {
     clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
+    // `joinedMucs` keys are already canonical `roomJoinKey`s (#1221).
     this.retainedJoinedRoomJids = new Set([
       ...this.retainedJoinedRoomJids,
-      ...previouslyJoinedRooms
-        .map((roomJid) => roomJid.split("/")[0]?.trim().toLowerCase() ?? "")
-        .filter(Boolean),
+      ...previouslyJoinedRooms.filter(Boolean),
     ]);
     this.persistRetainedJoinedRooms();
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
+    // New epoch: a genuine fresh cycle must be free to rejoin (#1221),
+    // and the next handle must run its own session-ready setup.
+    this.autoJoinAttemptedRoomKeys.clear();
+    this.sessionReadyHandledXmpp = null;
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     // #1164: a terminal failure (auth rejection, resource conflict)
