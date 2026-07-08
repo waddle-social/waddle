@@ -65,6 +65,8 @@ use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
 
 const POOL_SIZE: usize = 4;
+const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
+const CLUSTER_PEER_PASSWORD: &str = "cluster-peer-password";
 
 struct EnrolledPool {
     /// base64-encoded 32-byte ed25519 seeds (the WADDLE_CLUSTERING_KEYPAIR_POOL value).
@@ -247,7 +249,10 @@ async fn spawn_cluster_server(
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
         }
 
-        let server = TestServer::start_with_extra_envs(&[], &envs);
+        let server = TestServer::start_with_extra_envs(
+            &[(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD)],
+            &envs,
+        );
 
         // The node-id file is written during clustering bring-up, which
         // precedes HTTP readiness — but poll defensively anyway.
@@ -1083,7 +1088,7 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     reset_node_lease_tables(&db).await;
 
     const DOMAIN: &str = "localhost";
-    const USERNAME: &str = "admin";
+    const OWNER_USERNAME: &str = "admin";
     // The node-lease TTL this harness configures every subprocess with
     // (`spawn_cluster_server`'s `WADDLE_CLUSTERING_NODE_LEASE_TTL_MS`) —
     // reused below so the wait for heartbeat staleness lines up with the
@@ -1103,8 +1108,11 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     // Shared fixed test account; whichever server started LAST (server_b)
     // is the one whose reseeded password is live in the shared Postgres
     // users table (same convention `cross_node_resume_live_steal_handshake`
-    // documents and relies on).
-    let password = server_b.fixed_account_password().to_string();
+    // documents and relies on). The B-side control client deliberately uses
+    // a different bare JID: once UserActor claims are live, two concurrent
+    // local UserActors for the same bare JID on different nodes are not a
+    // valid harness shortcut.
+    let owner_password = server_b.fixed_account_password().to_string();
 
     // Client A enables resumable SM on node A: `handle_sm_enable` acquires
     // the `sm_session` `ClaimStore` claim immediately (before any detach —
@@ -1115,8 +1123,8 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     let mut client_a = WsXmppClient::connect_and_auth(
         &server_a.ws_url(),
         DOMAIN,
-        USERNAME,
-        &password,
+        OWNER_USERNAME,
+        &owner_password,
         &resource_a,
     )
     .await
@@ -1140,8 +1148,8 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     let mut client_b = WsXmppClient::connect_and_auth(
         &server_b.ws_url(),
         DOMAIN,
-        USERNAME,
-        &password,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
         &resource_b,
     )
     .await
@@ -1186,8 +1194,8 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     // this capstone still exercises the production reaper path that steals and
     // hydrates a real orphan, while the claim remains owned by node A until
     // node B's janitor wins the CAS.
-    let full_jid_a = format!("{USERNAME}@{DOMAIN}/{resource_a}");
-    seed_detached_sm_session_row(&db, &stream_a, USERNAME, &full_jid_a).await;
+    let full_jid_a = format!("{OWNER_USERNAME}@{DOMAIN}/{resource_a}");
+    seed_detached_sm_session_row(&db, &stream_a, OWNER_USERNAME, &full_jid_a).await;
 
     // Hard-kill A (SIGKILL via `Drop`, exactly like `lone_survivor_and_
     // isolation_fencing`'s own unclean-death leg) — client A's socket goes
@@ -1530,7 +1538,7 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
     reset_node_lease_tables(&db).await;
 
     const DOMAIN: &str = "localhost";
-    const USERNAME: &str = "admin";
+    const OWNER_USERNAME: &str = "admin";
     const NS_MUC: &str = "http://jabber.org/protocol/muc";
 
     let port_a = free_tcp_port();
@@ -1543,7 +1551,7 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
 
-    let password = server_b.fixed_account_password().to_string();
+    let owner_password = server_b.fixed_account_password().to_string();
 
     let room = format!("slice11-foreign-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
@@ -1555,8 +1563,8 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
     let mut client_a = WsXmppClient::connect_and_auth(
         &server_a.ws_url(),
         DOMAIN,
-        USERNAME,
-        &password,
+        OWNER_USERNAME,
+        &owner_password,
         &resource_a,
     )
     .await
@@ -1572,16 +1580,18 @@ async fn muc_join_bounces_when_room_claim_is_held_by_another_node() {
         .await
         .expect("client A's join completes (room created, A is Owner)");
 
-    // Client B, a SEPARATE connection against node B (a different
-    // process), attempts to join the SAME room while A is still live —
-    // node A's lease stays fresh throughout, so node B must never steal;
-    // it must bounce.
+    // Client B, a SEPARATE bare JID on node B (a different process),
+    // attempts to join the SAME room while A is still live — node A's
+    // lease stays fresh throughout, so node B must never steal; it must
+    // bounce. B is intentionally not a second `admin` resource: once
+    // UserActor claims are live, same-bare-JID cross-node local actor
+    // creation is itself invalid until the relay routing slice lands.
     let resource_b = format!("muc-joiner-b-{}", uuid::Uuid::new_v4());
     let mut client_b = WsXmppClient::connect_and_auth(
         &server_b.ws_url(),
         DOMAIN,
-        USERNAME,
-        &password,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
         &resource_b,
     )
     .await

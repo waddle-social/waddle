@@ -396,3 +396,13 @@ changes slice scope, XEP behavior, or operational requirements.
    before expecting targeted hydration. This changes no production behavior;
    it aligns the tests with the already-landed hardened CAS and XEP-0198
    durable-detach boundary.
+7. CI exposed a stale multi-process harness shortcut from before UserActor
+   claims were wired: two tests bound `admin@localhost` concurrently on node A
+   and node B even though neither assertion was about same-bare-JID
+   cross-node routing. With Slice 1b's UserActor single-owner fence, the
+   second bind correctly fails until the relay routing slices land. The
+   correction seeds a second fixed test account for clustered subprocesses and
+   uses that distinct bare JID for the node-B orphan-reaper control session
+   and MUC joiner. This preserves the original SM-claim and foreign-owned-room
+   assertions without changing production behavior; the same-bare-JID
+   cross-node resume capstone remains covered separately.
