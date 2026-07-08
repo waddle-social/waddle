@@ -203,6 +203,43 @@ async fn upsert_and_get_session_round_trip_except_divergent_detached_at() {
     );
 }
 
+/// #1206: the fenced backend must persist the resource's presence extension
+/// payloads (XEP-0115 caps, XEP-0319 idle) so a cross-node resume rehydrates
+/// them verbatim instead of coming back caps-less. Mirrors the portable
+/// backend's `round_trip_session_preserves_presence_payloads`.
+#[tokio::test]
+async fn upsert_and_get_session_preserves_presence_payloads() {
+    let Some(f) = fixture().await else { return };
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let mut session = fixture_session("stream-payloads");
+    session.presence_payloads = vec![caps.clone(), idle.clone()];
+    f.fenced
+        .upsert_session(session)
+        .await
+        .expect("upsert_session with payloads");
+
+    let loaded = f
+        .fenced
+        .get_session(&SmSessionId::new("stream-payloads"))
+        .await
+        .expect("get_session")
+        .expect("session present");
+
+    assert_eq!(
+        loaded.presence_payloads,
+        vec![caps, idle],
+        "fenced get_session must return the stored presence payloads verbatim and in order"
+    );
+}
+
 #[tokio::test]
 async fn store_session_atomic_also_applies_divergence_a() {
     let Some(f) = fixture().await else { return };
