@@ -186,6 +186,27 @@ called from the hot delivery path.
 - Harness exercises two nodes with the relay channel active but no production
   routing callers yet.
 
+**As-landed Slice 2**: Added the ordered relay substrate only. The new
+`ordered_relay` module defines typed channel, per-channel sequence,
+origin-inbound SM sequence provenance, sender-asserted origin-node provenance
+outside the ordering key, claim-provenance, stanza-envelope, MUC proxy kind,
+ACK/NACK, diversion, sender-state, and receiver-state values. The relay actor
+now accepts one internal `deliver_ordered` ask that reserves a valid in-order
+typed envelope, commits the receiver ACK only after the explicit side-effect
+boundary, ACKs exact duplicate retries, and NACKs gaps or malformed typed
+payloads. Slice 2's side effect is intentionally empty: it does not
+authenticate the sender-asserted origin, validate claims against Postgres, call
+`UserActor`, `RoomActor`, `ConnectionRegistry`, pending delivery, or mutate
+XEP-0198 state. Sequencing is owned by the caller's shared
+`OrderedRelaySenderState`; `RelayHandle` only sends an already-sequenced
+envelope and deliberately does not retry ordered delivery after the ambiguous
+`ActorStopped` case. Metrics landed only for the real receiver reply path:
+low-cardinality internal ordered-relay ACK and NACK counters. The cluster
+harness sends ordered envelopes after the existing echo proof and asserts ACK,
+duplicate ACK, and gap NACK behavior over the live cross-node relay. Cross-node
+DM/MUC/presence/IQ hot-path callers, authenticated-origin comparison, and
+Postgres claim validation remain pending.
+
 ### Slice 3 - cross-node 1:1 message and full-JID IQ routing
 
 **Scope**: route DM and addressed IQ stanzas to resources owned by a remote
@@ -418,3 +439,52 @@ changes slice scope, XEP behavior, or operational requirements.
    non-draining row, so the test setup registers the simulated reaper before
    proving the stale observed epoch loses to the reaper's epoch bump. This
    changes no production behavior.
+9. Slice 2 intentionally landed less than the original metrics wish-list:
+   queue-depth, in-flight, durable-flush-lag, and sticky-diversion operational
+   metrics have no production callers in this substrate-only slice, so they
+   were not forward-declared. Only the ordered relay receiver's real ACK/NACK
+   reply path records metrics, with stable low-cardinality labels. Internal
+   ACK/NACK replies are not XEP-0184 delivery receipts, do not synthesize
+   client stanzas, and do not advance or inspect XEP-0198 `h`. The envelope
+   carries typed origin/target claim provenance now so later routing slices
+   can add per-message claim revalidation without a wire-shape break, but
+   Slice 2 deliberately performs no claim-store reads and applies no delivery
+   side effects.
+10. Slice 2 adversarial review found three substrate traps before production
+    routing can use the relay: sender sequencing cannot live on per-send
+    `RelayHandle` instances, receiver ACK must not commit before the local
+    delivery/durable side effect, and envelope origin fields must not be
+    mistaken for authenticated transport provenance. The correction keeps
+    sequencing in a caller-owned `OrderedRelaySenderState`, adds a
+    receiver-side reserve/commit boundary, records the origin stream's inbound
+    SM sequence in every envelope, renames the node field to
+    `asserted_origin_node`, and bounds per-channel sender/receiver caches with
+    cleanup hooks. This changes no client XEP wire behavior; it narrows Slice 2
+    to an internal substrate and makes authenticated-origin comparison an
+    explicit Slice 3 precondition before any delivery side effect.
+11. Slice 2 convergence review found five more substrate traps: ordering was
+    accidentally keyed by asserted origin node, malformed envelopes could pair
+    a channel for recipient A with payload or claim target B, over-capacity
+    backpressure diversion was not sticky after unrelated channel cleanup,
+    duplicate ACK replay keyed only by sequence could drop a different payload,
+    and ordered delivery retried `ActorStopped` even though that case may have
+    been enqueued. The correction removes asserted origin from the channel key,
+    validates origin claim, channel recipient, stanza addressing, target claim,
+    and MUC proxy type before reservation, stores a typed stanza-element
+    fingerprint for recent ACK replay, records backpressure diversion
+    stickily, and excludes `ActorStopped` from ordered re-lookup retry. This
+    preserves the internal-only Slice 2 scope and avoids changing client XEP
+    wire behavior.
+12. Slice 2 re-review found that the previous fixes still left executable
+    edge cases: the multi-process harness built ordered message stanzas without
+    a matching `to`, MUC proxy validation accepted bare/full JID shapes that do
+    not match XEP-0045 join/groupchat expectations, repeated overflow channels
+    could grow diversion state, duplicate replay still compared mutable
+    asserted-origin/claim provenance, and reply-side codec failures were
+    converted into receiver NACKs even though the remote handler may have run.
+    The correction sets the harness `to`, tightens MUC proxy validation by
+    kind, makes overflow a bounded global new-channel backpressure state,
+    limits duplicate fingerprints to stable inbound sequence plus typed stanza
+    payload, and only maps an unknown ordered-relay message type to an internal
+    parse NACK; all other codec failures stay ambiguous relay errors. This
+    remains internal relay behavior only.

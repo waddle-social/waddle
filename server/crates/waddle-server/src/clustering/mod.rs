@@ -67,6 +67,11 @@ pub mod local_claims;
 /// uses, so both mechanisms feed one shared observability surface.
 #[cfg(feature = "clustering")]
 pub(crate) mod metrics;
+/// Ordered relay channel substrate (ADR-0017 Phase 4 Slice 2). Public for the
+/// same reason as [`relay`]: the multi-process harness drives it directly
+/// before production DM/MUC/presence/IQ routing callers are attached.
+#[cfg(feature = "clustering")]
+pub mod ordered_relay;
 /// Per-node supervised relay actor + client handle. Public: the multi-process
 /// cluster harness drives `RelayHandle` cross-node, and Phase 4's routing
 /// builds on the relay message set.

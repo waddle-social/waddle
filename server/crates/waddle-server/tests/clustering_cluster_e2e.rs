@@ -57,12 +57,18 @@ use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStor
 use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
+use waddle_server::clustering::ordered_relay::{
+    OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayPayload,
+    OrderedRelayRecipient, OrderedRelayReply, OrderedRelaySenderState, OrderedRelaySequence,
+    OriginInboundSequence, RemoteStanzaEnvelope,
+};
 use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
 use waddle_server::clustering::swarm;
 use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 
 const POOL_SIZE: usize = 4;
 const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
@@ -319,6 +325,46 @@ fn thread_message(id: &str, body_size: usize) -> RemoteStanza {
     RemoteStanza(waddle_xmpp::Stanza::Message(message))
 }
 
+fn ordered_channel(id: &str) -> OrderedRelayChannel {
+    OrderedRelayChannel {
+        origin_stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(id),
+        recipient: OrderedRelayRecipient::BareJid(
+            "ordered-recipient@localhost".parse().expect("bare jid"),
+        ),
+    }
+}
+
+fn ordered_origin_claim(id: &str) -> OrderedRelayClaim {
+    OrderedRelayClaim {
+        entity: Entity::new(EntityType::SmSession, id),
+        epoch: ClaimEpoch(0),
+    }
+}
+
+fn ordered_target_claim() -> OrderedRelayClaim {
+    OrderedRelayClaim {
+        entity: Entity::new(EntityType::UserActor, "ordered-recipient@localhost"),
+        epoch: ClaimEpoch(0),
+    }
+}
+
+fn ordered_message_payload(id: &str, body_size: usize) -> OrderedRelayPayload {
+    let mut stanza = thread_message(id, body_size);
+    if let waddle_xmpp::Stanza::Message(message) = &mut stanza.0 {
+        message.to = Some(
+            "ordered-recipient@localhost/device"
+                .parse()
+                .expect("full jid"),
+        );
+    }
+    OrderedRelayPayload::Message {
+        recipient: "ordered-recipient@localhost/device"
+            .parse()
+            .expect("full jid"),
+        stanza,
+    }
+}
+
 /// Serializes the heavy subprocess tests in this binary. They share the
 /// mutable control-plane tables (`clustering_nodes`/`clustering_claims`/
 /// `clustering_peer_allowlist`/`clustering_keypair_slots`) in one Postgres
@@ -458,6 +504,80 @@ async fn cluster_exit_criteria_end_to_end() {
         }
         other => panic!("expected message, got {}", other.name()),
     }
+
+    // --- Phase 4 Slice 2: ordered relay substrate over the real cross-node
+    // relay, still with no production routing caller. The receiver ACKs the
+    // first envelope, ACKs an exact duplicate idempotently, and NACKs a gap
+    // without calling any delivery actor.
+    let ordered_stream_id = "ordered-e2e-stream";
+    let ordered_origin_node = NodeId::new(handle.node_id.as_str().to_string());
+    let ordered_channel = ordered_channel(ordered_stream_id);
+    let origin_claim = ordered_origin_claim(ordered_stream_id);
+    let target_claim = ordered_target_claim();
+    let mut ordered_sender = OrderedRelaySenderState::default();
+    let first_ordered = ordered_sender
+        .next_envelope(
+            ordered_origin_node.clone(),
+            ordered_channel.clone(),
+            OriginInboundSequence(1),
+            origin_claim.clone(),
+            target_claim.clone(),
+            ordered_message_payload("ordered-one", 32),
+        )
+        .expect("first ordered envelope");
+    let first_reply = relay_a
+        .deliver_ordered(first_ordered.clone())
+        .await
+        .expect("ordered relay first envelope");
+    assert!(matches!(
+        first_reply,
+        OrderedRelayReply::Ack(OrderedRelayAck {
+            sequence: OrderedRelaySequence(1),
+            duplicate: false,
+            next_expected: OrderedRelaySequence(2),
+            ..
+        })
+    ));
+
+    let duplicate_reply = relay_a
+        .deliver_ordered(first_ordered)
+        .await
+        .expect("ordered relay duplicate envelope");
+    assert!(matches!(
+        duplicate_reply,
+        OrderedRelayReply::Ack(OrderedRelayAck {
+            sequence: OrderedRelaySequence(1),
+            duplicate: true,
+            next_expected: OrderedRelaySequence(2),
+            ..
+        })
+    ));
+
+    let gap = RemoteStanzaEnvelope {
+        asserted_origin_node: ordered_origin_node,
+        channel: ordered_channel,
+        sequence: OrderedRelaySequence(3),
+        origin_inbound_sequence: OriginInboundSequence(3),
+        origin_claim,
+        target_claim,
+        payload: ordered_message_payload("ordered-gap", 32),
+    };
+    let gap_reply = relay_a
+        .deliver_ordered(gap)
+        .await
+        .expect("ordered relay gap envelope");
+    assert!(
+        matches!(
+            gap_reply,
+            OrderedRelayReply::Nack(waddle_server::clustering::ordered_relay::OrderedRelayNack {
+                reason: waddle_server::clustering::ordered_relay::OrderedRelayNackReason::Gap {
+                    expected: OrderedRelaySequence(2)
+                },
+                ..
+            })
+        ),
+        "expected ordered relay gap NACK, got {gap_reply:?}"
+    );
 
     // --- Exit criterion: integrity under concurrent large + small payloads.
     // (Per-(origin→recipient) sequencing is Phase 4; Phase 2 asserts that

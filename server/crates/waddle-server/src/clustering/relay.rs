@@ -22,6 +22,10 @@
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
 use super::metrics;
+use super::ordered_relay::{
+    OrderedRelayNack, OrderedRelayNackReason, OrderedRelayReceiverState, OrderedRelayReply,
+    OrderedRelayReservation, RemoteStanzaEnvelope,
+};
 use super::resume_bridge::ResumeStealBridge;
 use super::self_fence::LocallyClaimedEntities;
 use super::NodeId;
@@ -96,6 +100,10 @@ pub struct RelayActor {
     /// [`Demote`] asks — the two-part demotion protocol's part (a)
     /// receiving side.
     room_local_claims: Arc<RoomLocalClaims>,
+    /// ADR-0017 Phase 4 Slice 2: internal ordered-relay receiver state. This
+    /// validates sequence ACK/NACK behavior only; no production delivery actor
+    /// is called from this substrate.
+    ordered_receiver: OrderedRelayReceiverState,
 }
 
 impl RelayActor {
@@ -110,6 +118,7 @@ impl RelayActor {
             fault_injection,
             resume_bridge,
             room_local_claims,
+            ordered_receiver: OrderedRelayReceiverState::default(),
         }
     }
 }
@@ -167,6 +176,42 @@ impl Message<RelayEchoStanza> for RelayActor {
             node_id: self.node_id.clone(),
             stanza: msg.stanza,
         }
+    }
+}
+
+/// Ordered relay substrate ask: validate one sequenced typed stanza envelope
+/// and return an internal ACK/NACK. This deliberately does not call any
+/// production delivery actor or mutate client-visible XEP state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayDeliverOrdered {
+    pub envelope: RemoteStanzaEnvelope,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v1")]
+impl Message<RelayDeliverOrdered> for RelayActor {
+    type Reply = OrderedRelayReply;
+
+    async fn handle(
+        &mut self,
+        msg: RelayDeliverOrdered,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> OrderedRelayReply {
+        let reply = match self.ordered_receiver.reserve(msg.envelope) {
+            OrderedRelayReservation::Reserved(reserved) => {
+                // Slice 2 proves the ordered relay substrate only. Production
+                // routing slices must authenticate the remote origin and run
+                // the local delivery/durable effect here before committing.
+                self.ordered_receiver.commit_reserved(*reserved)
+            }
+            OrderedRelayReservation::Completed(reply) => reply,
+        };
+        match &reply {
+            OrderedRelayReply::Ack(_) => metrics::record_ordered_relay_ack(),
+            OrderedRelayReply::Nack(nack) => {
+                metrics::record_ordered_relay_nack(nack.reason.metric_label());
+            }
+        }
+        reply
     }
 }
 
@@ -817,6 +862,53 @@ impl RelayHandle {
         }
     }
 
+    /// Send one already-sequenced ordered-relay envelope to the remote relay,
+    /// with the same stop-token cancellation and stale-ref refresh/retry-once
+    /// behavior as [`Self::echo_stanza`]. Sequencing is deliberately owned
+    /// outside `RelayHandle`: callers must share one sender state per ordered
+    /// channel rather than allocate from a fresh handle per ask.
+    pub async fn deliver_ordered(
+        &mut self,
+        envelope: RemoteStanzaEnvelope,
+    ) -> Result<OrderedRelayReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.deliver_ordered_inner(envelope) => result,
+        }
+    }
+
+    async fn deliver_ordered_inner(
+        &mut self,
+        envelope: RemoteStanzaEnvelope,
+    ) -> Result<OrderedRelayReply, RelayAskError> {
+        let message = RelayDeliverOrdered { envelope };
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_ordered_relookup_retry_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                match remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                {
+                    Ok(reply) => Ok(reply),
+                    Err(error) => ordered_send_error(&message.envelope, error),
+                }
+            }
+            Err(error) => ordered_send_error(&message.envelope, error),
+        }
+    }
+
     /// Ask this relay's node to force-detach its live SM session
     /// `stream_id` on behalf of `requester_bare_jid` (ADR-0017 Phase 3
     /// Slice 6's cross-node XEP-0198 resume live-steal handshake — this
@@ -927,6 +1019,41 @@ fn is_stale_ref_error<E>(error: &RemoteSendError<E>) -> bool {
     classify(error) == RelaySendFailure::StaleRef
 }
 
+/// Ordered relay envelopes are not retried after `ActorStopped`: that error
+/// may have been enqueued before the actor stopped, so a re-send against a
+/// respawned relay could duplicate a committed side effect once production
+/// delivery is wired. `ActorNotRunning`/`UnknownActor`/`BadActorType` are
+/// still safe re-lookup cases because they prove the cached ref was unusable.
+fn is_ordered_relookup_retry_error<E>(error: &RemoteSendError<E>) -> bool {
+    matches!(
+        error,
+        RemoteSendError::ActorNotRunning
+            | RemoteSendError::UnknownActor { .. }
+            | RemoteSendError::BadActorType
+    )
+}
+
+fn is_ordered_parse_nack_error<E>(error: &RemoteSendError<E>) -> bool {
+    matches!(error, RemoteSendError::UnknownMessage { .. })
+}
+
+fn ordered_send_error<E>(
+    envelope: &RemoteStanzaEnvelope,
+    error: RemoteSendError<E>,
+) -> Result<OrderedRelayReply, RelayAskError>
+where
+    RemoteSendError<E>: std::fmt::Display,
+{
+    if is_ordered_parse_nack_error(&error) {
+        return Ok(OrderedRelayReply::Nack(OrderedRelayNack {
+            channel: envelope.channel.clone(),
+            sequence: envelope.sequence,
+            reason: OrderedRelayNackReason::ParseFailure,
+        }));
+    }
+    Err(send_error(error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +1074,9 @@ mod tests {
             &RemoteSendError::ActorNotRunning
         ));
         assert!(is_stale_ref_error::<std::convert::Infallible>(
+            &RemoteSendError::ActorStopped
+        ));
+        assert!(is_stale_ref_error::<std::convert::Infallible>(
             &RemoteSendError::BadActorType
         ));
         assert!(!is_stale_ref_error::<std::convert::Infallible>(
@@ -954,6 +1084,45 @@ mod tests {
         ));
         assert!(!is_stale_ref_error::<std::convert::Infallible>(
             &RemoteSendError::MailboxFull
+        ));
+    }
+
+    #[test]
+    fn ordered_relookup_excludes_maybe_enqueued_actor_stopped() {
+        assert!(is_ordered_relookup_retry_error::<std::convert::Infallible>(
+            &RemoteSendError::ActorNotRunning
+        ));
+        assert!(is_ordered_relookup_retry_error::<std::convert::Infallible>(
+            &RemoteSendError::BadActorType
+        ));
+        assert!(
+            !is_ordered_relookup_retry_error::<std::convert::Infallible>(
+                &RemoteSendError::ActorStopped
+            )
+        );
+        assert!(
+            !is_ordered_relookup_retry_error::<std::convert::Infallible>(
+                &RemoteSendError::ReplyTimeout
+            )
+        );
+    }
+
+    #[test]
+    fn ordered_parse_nack_excludes_reply_side_codec_errors() {
+        assert!(is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::UnknownMessage {
+                actor_remote_id: "actor".into(),
+                message_remote_id: "message".into(),
+            }
+        ));
+        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::DeserializeMessage(String::new())
+        ));
+        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::SerializeReply(String::new())
+        ));
+        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::SerializeMessage(String::new())
         ));
     }
 
