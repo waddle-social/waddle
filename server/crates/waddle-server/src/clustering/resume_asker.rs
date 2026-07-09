@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use jid::BareJid;
 use tokio_util::sync::CancellationToken;
+use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
 use waddle_xmpp::stream_management::{RemoteResumeAskOutcome, RemoteResumeAsker};
 
 use super::relay::{RelayHandle, RelayResumeStealReply};
@@ -42,16 +43,22 @@ impl SwarmRemoteResumeAsker {
 impl RemoteResumeAsker for SwarmRemoteResumeAsker {
     async fn ask_remote_detach(
         &self,
-        node_id: &str,
+        expected_owner: &NodeIdentity,
+        observed: ClaimEpoch,
         stream_id: &str,
         requester_bare_jid: &BareJid,
     ) -> RemoteResumeAskOutcome {
-        let mut relay = RelayHandle::new(NodeId::new(node_id.to_string()), self.stop_token.clone())
-            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        let mut relay = RelayHandle::new(
+            NodeId::new(expected_owner.node_id.clone()),
+            self.stop_token.clone(),
+        )
+        .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
         match relay
             .resume_steal(
                 waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.to_string()),
                 requester_bare_jid.clone(),
+                expected_owner.clone(),
+                observed,
             )
             .await
         {
@@ -60,7 +67,9 @@ impl RemoteResumeAsker for SwarmRemoteResumeAsker {
             Ok(RelayResumeStealReply::NotLiveLocally) => RemoteResumeAskOutcome::NotLiveRemotely,
             Err(error) => {
                 tracing::debug!(
-                    node_id,
+                    node_id = %expected_owner.node_id,
+                    node_epoch = %expected_owner.node_epoch,
+                    claim_epoch = observed.0,
                     stream_id,
                     %error,
                     "cross-node resume: resume_steal ask failed; treating as owner-unreachable"

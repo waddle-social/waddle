@@ -31,14 +31,14 @@ use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
-    CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, ListRooms,
+    CreateRoom, DestroyRoom, DestroyRoomExact, GetOrCreateRoom, GetRoom, ListRooms,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
-        ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
-        GetAffiliation, GetConfig, LeaveByRealJid, ListAffiliations, ListOccupants, OccupantCount,
-        RoomActor, UpdateConfig,
+        ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, CheckMutationOwnership,
+        EnforceMembersOnlyAffiliations, GetAffiliation, GetConfig, LeaveByRealJid,
+        ListAffiliations, ListOccupants, OccupantCount, RoomActor, RoomMutationError, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -514,6 +514,63 @@ fn unavailable(text: impl Into<String>) -> AdminErr {
     Box::new(CommandResult::Error(XmppError::service_unavailable(Some(
         text.into(),
     ))))
+}
+
+fn ownership_retry(text: impl Into<String>) -> AdminErr {
+    Box::new(CommandResult::Error(XmppError::Stanza {
+        condition: waddle_xmpp::StanzaErrorCondition::ResourceConstraint,
+        error_type: waddle_xmpp::StanzaErrorType::Wait,
+        text: Some(text.into()),
+    }))
+}
+
+/// Demote only the actor incarnation that returned `NotOwner`. Any E2 that
+/// replaced retained E1 under the same room JID must survive this cleanup.
+async fn demote_retained_room_actor(state: &AppState, room: &BareJid, actor: &ActorRef<RoomActor>) {
+    remove_retained_room_actor(&state.room_registry, room, actor).await;
+}
+
+async fn remove_retained_room_actor(
+    room_registry: &ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    room: &BareJid,
+    actor: &ActorRef<RoomActor>,
+) {
+    let _ = room_registry
+        .ask(DestroyRoomExact {
+            room_jid: room.clone(),
+            expected_actor: actor.clone(),
+        })
+        .await;
+    actor.kill();
+}
+
+async fn admit_managed_room_mutation(
+    state: &AppState,
+    actor: &ActorRef<RoomActor>,
+    room: &BareJid,
+) -> Result<(), AdminErr> {
+    match actor.ask(CheckMutationOwnership).await {
+        Ok(()) => Ok(()),
+        Err(kameo::error::SendError::HandlerError(RoomMutationError::NotOwner)) => {
+            demote_retained_room_actor(state, room, actor).await;
+            Err(ownership_retry(
+                "This room's ownership recently moved to another node; please retry.",
+            ))
+        }
+        Err(kameo::error::SendError::HandlerError(RoomMutationError::OwnershipUncertain)) => Err(
+            ownership_retry("This room's ownership cannot currently be verified; please retry."),
+        ),
+        Err(kameo::error::SendError::HandlerError(RoomMutationError::PersistFailed(detail))) => {
+            Err(Box::new(CommandResult::Error(
+                XmppError::internal_server_error(Some(format!(
+                    "Room ownership admission could not converge: {detail}"
+                ))),
+            )))
+        }
+        Err(error) => Err(internal_err(format!(
+            "room actor CheckMutationOwnership: {error}"
+        ))),
+    }
 }
 
 async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
@@ -1858,7 +1915,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     config.max_occupants = 0;
     config.enable_logging = true;
 
-    state
+    let room_actor = state
         .room_registry
         .ask(CreateRoom {
             room_jid: channel_jid.clone(),
@@ -1871,12 +1928,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
 
     if let Err(error) = upsert_channel_catalog(state, &localpart, &config, args.channel_type).await
     {
-        let _ = state
-            .room_registry
-            .ask(DestroyRoom {
-                room_jid: channel_jid.clone(),
-            })
-            .await;
+        rollback_created_room(&state.room_registry, &channel_jid, &room_actor).await;
         return Err(error);
     }
 
@@ -1898,12 +1950,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
             Ok(created) => created,
             Err(error) => {
                 let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart).await;
-                let _ = state
-                    .room_registry
-                    .ask(DestroyRoom {
-                        room_jid: channel_jid.clone(),
-                    })
-                    .await;
+                rollback_created_room(&state.room_registry, &channel_jid, &room_actor).await;
                 return Err(error);
             }
         };
@@ -1942,11 +1989,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                         let _ =
                             delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart)
                                 .await;
-                        let _ = state
-                            .room_registry
-                            .ask(DestroyRoom {
-                                room_jid: channel_jid.clone(),
-                            })
+                        rollback_created_room(&state.room_registry, &channel_jid, &room_actor)
                             .await;
                     }
                     Err(retract_error) => {
@@ -2013,12 +2056,7 @@ async fn run_group_dm_create(
         .map_err(send_err("room_registry ask CreateRoom"))?;
 
     if let Err(error) = upsert_group_dm_catalog(state, &localpart, &config).await {
-        let _ = state
-            .room_registry
-            .ask(DestroyRoom {
-                room_jid: room_jid.clone(),
-            })
-            .await;
+        rollback_created_room(&state.room_registry, &room_jid, &actor).await;
         return Err(error);
     }
 
@@ -2029,7 +2067,8 @@ async fn run_group_dm_create(
     let mut persisted_members: Vec<BareJid> = Vec::with_capacity(members.len());
     for member_jid in members {
         if let Err(error) = persist_group_dm_member_tuple(state, &localpart, &member_jid).await {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &actor, &persisted_members)
+                .await;
             return Err(Box::new(CommandResult::Error(error)));
         }
         persisted_members.push(member_jid.clone());
@@ -2040,13 +2079,15 @@ async fn run_group_dm_create(
             })
             .await
         {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &actor, &persisted_members)
+                .await;
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
         if let Err(error) =
             publish_group_dm_bookmark(state, &member_jid, &room_jid, Some(&args.name)).await
         {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &actor, &persisted_members)
+                .await;
             return Err(error);
         }
     }
@@ -2133,6 +2174,7 @@ async fn run_group_dm_leave(
     resources.sort();
     resources.dedup();
 
+    admit_managed_room_mutation(state, &actor, &args.room_jid).await?;
     delete_group_dm_member_tuple(state, &channel_id, &caller_bare)
         .await
         .map_err(|error| Box::new(CommandResult::Error(error)))?;
@@ -2147,6 +2189,10 @@ async fn run_group_dm_leave(
         })
         .await
     {
+        // The actor rejected the affiliation mutation, so restore the
+        // external membership projections before classifying the typed
+        // ownership error. `NotOwner`/`OwnershipUncertain` are explicitly
+        // no-effect outcomes and must not strand a half-completed leave.
         let _ = persist_group_dm_member_tuple(state, &channel_id, &caller_bare).await;
         let _ = publish_group_dm_bookmark(
             state,
@@ -2155,16 +2201,47 @@ async fn run_group_dm_leave(
             group_dm_shared_name(&record.name),
         )
         .await;
+        if matches!(
+            &error,
+            kameo::error::SendError::HandlerError(RoomMutationError::NotOwner)
+        ) {
+            demote_retained_room_actor(state, &args.room_jid, &actor).await;
+            return Err(ownership_retry(
+                "This room's ownership recently moved to another node; please retry.",
+            ));
+        }
+        if matches!(
+            &error,
+            kameo::error::SendError::HandlerError(RoomMutationError::OwnershipUncertain)
+        ) {
+            return Err(ownership_retry(
+                "This room's ownership cannot currently be verified; please retry.",
+            ));
+        }
         return Err(send_err("room actor ChangeAffiliation")(error));
     }
     for resource in resources {
-        if let Some(outcome) = actor
+        let leave = actor
             .ask(LeaveByRealJid {
                 sender_jid: resource.clone(),
             })
-            .await
-            .map_err(send_err("room actor LeaveByRealJid"))?
-        {
+            .await;
+        let outcome = match leave {
+            Ok(outcome) => outcome,
+            Err(kameo::error::SendError::HandlerError(RoomMutationError::NotOwner)) => {
+                demote_retained_room_actor(state, &args.room_jid, &actor).await;
+                return Err(ownership_retry(
+                    "This room's ownership recently moved to another node; please retry.",
+                ));
+            }
+            Err(kameo::error::SendError::HandlerError(RoomMutationError::OwnershipUncertain)) => {
+                return Err(ownership_retry(
+                    "This room's ownership cannot currently be verified; please retry.",
+                ));
+            }
+            Err(error) => return Err(send_err("room actor LeaveByRealJid")(error)),
+        };
+        if let Some(outcome) = outcome {
             broadcast_group_dm_leave(
                 state,
                 connections,
@@ -2241,7 +2318,9 @@ async fn run_group_dm_rename(
         .await
     {
         Ok(snapshot) => snapshot,
-        Err(error) => return Err(group_dm_rename_update_error(state, &args.room_jid, error).await),
+        Err(error) => {
+            return Err(group_dm_rename_update_error(state, &args.room_jid, &actor, error).await)
+        }
     };
     let expected_revision = updated_snapshot.config_revision;
     if find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none() {
@@ -2610,6 +2689,7 @@ fn group_dm_shared_name(name: &str) -> Option<&str> {
 async fn group_dm_rename_update_error(
     state: &AppState,
     room_jid: &BareJid,
+    room_actor: &ActorRef<RoomActor>,
     error: kameo::error::SendError<
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember,
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError,
@@ -2638,8 +2718,11 @@ async fn group_dm_rename_update_error(
             // retry-able error, same flavor `dispatch_to_room`'s own
             // ownership-gap bounce uses.
             UpdateGroupDmConfigByMemberError::NotOwner => {
-                state.clustering_claims.demote_room_actor(room_jid).await;
+                demote_retained_room_actor(state, room_jid, room_actor).await;
                 unavailable("This room's ownership recently moved to another node; please retry.")
+            }
+            UpdateGroupDmConfigByMemberError::OwnershipUncertain => {
+                unavailable("This room's ownership cannot currently be verified; please retry.")
             }
             UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
                 "group-DM rename applied but durable persist failed: {detail}"
@@ -2719,6 +2802,7 @@ async fn rollback_group_dm_create(
     state: &AppState,
     group_dm_id: &str,
     room_jid: &BareJid,
+    room_actor: &ActorRef<RoomActor>,
     persisted_members: &[BareJid],
 ) {
     for persisted_member in persisted_members {
@@ -2726,12 +2810,21 @@ async fn rollback_group_dm_create(
         let _ = delete_group_dm_member_tuple(state, group_dm_id, persisted_member).await;
     }
     let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), group_dm_id).await;
-    let _ = state
-        .room_registry
-        .ask(DestroyRoom {
-            room_jid: room_jid.clone(),
-        })
-        .await;
+    rollback_created_room(&state.room_registry, room_jid, room_actor).await;
+}
+
+/// Roll back only the actor incarnation created by the operation.
+///
+/// Catalog, tuple, and bookmark cleanup all await external work. A room can
+/// therefore be deleted and recreated under the same JID before rollback
+/// reaches the registry; a room-only destroy would incorrectly delete that
+/// replacement.
+async fn rollback_created_room(
+    room_registry: &ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    room_jid: &BareJid,
+    room_actor: &ActorRef<RoomActor>,
+) {
+    remove_retained_room_actor(room_registry, room_jid, room_actor).await;
 }
 
 pub(crate) async fn persist_group_dm_member_tuple(
@@ -3029,12 +3122,36 @@ async fn run_update(
         None
     };
 
-    let expected_revision = actor
+    let expected_revision = match actor
         .ask(UpdateConfig {
             config: updated.clone(),
         })
         .await
-        .map_err(send_err("room actor UpdateConfig"))?;
+    {
+        Ok(revision) => revision,
+        Err(kameo::error::SendError::HandlerError(RoomMutationError::NotOwner)) => {
+            demote_retained_room_actor(state, &args.channel_jid, &actor).await;
+            return Err(ownership_retry(
+                "This room's ownership recently moved to another node; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(RoomMutationError::OwnershipUncertain)) => {
+            return Err(ownership_retry(
+                "This room's ownership cannot currently be verified; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(RoomMutationError::PersistFailed(detail))) => {
+            return Err(Box::new(CommandResult::Error(
+                XmppError::internal_server_error(Some(detail)),
+            )));
+        }
+        Err(error) => return Err(send_err("room actor UpdateConfig")(error)),
+    };
+
+    // Re-admit immediately before the first managed catalog/bookmark write.
+    // Ownership may have moved after the actor mutation linearized; a stale
+    // node must not then publish external channel state.
+    admit_managed_room_mutation(state, &actor, &args.channel_jid).await?;
 
     if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated, new_channel_type).await
     {
@@ -3085,12 +3202,35 @@ async fn run_update(
     }
 
     if let Some(explicit_affiliations) = members_only_enforcement_affiliations {
-        let updates = actor
+        let updates = match actor
             .ask(EnforceMembersOnlyAffiliations {
                 affiliations: explicit_affiliations,
             })
             .await
-            .map_err(send_err("room actor EnforceMembersOnlyAffiliations"))?;
+        {
+            Ok(updates) => updates,
+            Err(kameo::error::SendError::HandlerError(RoomMutationError::NotOwner)) => {
+                demote_retained_room_actor(state, &args.channel_jid, &actor).await;
+                return Err(ownership_retry(
+                    "This room's ownership recently moved to another node; please retry.",
+                ));
+            }
+            Err(kameo::error::SendError::HandlerError(RoomMutationError::OwnershipUncertain)) => {
+                return Err(ownership_retry(
+                    "This room's ownership cannot currently be verified; please retry.",
+                ));
+            }
+            Err(kameo::error::SendError::HandlerError(RoomMutationError::PersistFailed(
+                detail,
+            ))) => {
+                return Err(Box::new(CommandResult::Error(
+                    XmppError::internal_server_error(Some(detail)),
+                )));
+            }
+            Err(error) => {
+                return Err(send_err("room actor EnforceMembersOnlyAffiliations")(error));
+            }
+        };
         broadcast_presence_updates(connections, updates).await;
     }
 
@@ -3310,6 +3450,10 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         }
     }
 
+    // This is the explicit administrator delete operation for the logical
+    // room JID, not rollback of a retained actor incarnation. Deleting the
+    // current room is therefore intentional even if it was recreated while
+    // the preceding catalog/bookmark cleanup awaited.
     match state
         .room_registry
         .ask(DestroyRoom {
@@ -3582,6 +3726,7 @@ async fn run_set_affiliation(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
+    admit_managed_room_mutation(state, &actor, &args.channel_jid).await?;
     let previous_affiliation = actor
         .ask(GetAffiliation {
             jid: args.member_jid.clone(),
@@ -3628,6 +3773,30 @@ async fn run_set_affiliation(
     {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
+        )) => {
+            demote_retained_room_actor(state, &args.channel_jid, &actor).await;
+            return Err(ownership_retry(
+                "This room's ownership recently moved to another node; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUncertain,
+        )) => {
+            return Err(ownership_retry(
+                "This room's ownership cannot currently be verified; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed(detail),
+        )) => {
+            return Err(Box::new(CommandResult::Error(
+                XmppError::internal_server_error(Some(format!(
+                    "Affiliation mutation could not converge durably: {detail}"
+                ))),
+            )));
+        }
+        Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
             let _ = persist_channel_affiliation(
@@ -3652,27 +3821,50 @@ async fn run_set_affiliation(
             return Err(send_err("room actor ApplyAffiliationChange")(error));
         }
     };
+    let persist_failure = applied.persist_failure.clone();
     broadcast_presence_updates(connections, applied.presence_updates).await;
     // Membership-scoped visibility (#935): an admin-V2 ban (Outcast)
     // ends the occupant's room membership, so their live SFU call
     // participation ends with it. Fire-and-forget inside the SFU
     // layer; the moderation result is never blocked on LiveKit.
     evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+    if let Some(error) = persist_failure {
+        return Err(Box::new(CommandResult::Error(
+            XmppError::internal_server_error(Some(format!(
+                "Affiliation effects were applied but durable convergence failed: {error}"
+            ))),
+        )));
+    }
     Ok(ChannelsSetAffiliationResult {
         member_jid: args.member_jid.clone(),
         affiliation: args.affiliation,
     })
 }
 
-async fn sync_private_kick_affiliation_revocation(
-    state: &AppState,
-    connections: &ConnectionRegistry,
-    actor: &ActorRef<RoomActor>,
-    channel_id: &str,
-    caller_bare: &BareJid,
-    occupant_jid: &BareJid,
+struct PrivateKickAffiliationSync<'a> {
+    state: &'a AppState,
+    connections: &'a ConnectionRegistry,
+    actor: &'a ActorRef<RoomActor>,
+    room_jid: &'a BareJid,
+    channel_id: &'a str,
+    caller_bare: &'a BareJid,
+    occupant_jid: &'a BareJid,
     durable_previous_affiliation: Affiliation,
+}
+
+async fn sync_private_kick_affiliation_revocation(
+    context: PrivateKickAffiliationSync<'_>,
 ) -> Result<(), AdminErr> {
+    let PrivateKickAffiliationSync {
+        state,
+        connections,
+        actor,
+        room_jid,
+        channel_id,
+        caller_bare,
+        occupant_jid,
+        durable_previous_affiliation,
+    } = context;
     match actor
         .ask(ApplyAffiliationChange {
             actor: Some(caller_bare.clone()),
@@ -3682,9 +3874,35 @@ async fn sync_private_kick_affiliation_revocation(
         .await
     {
         Ok(applied) => {
+            let persist_failure = applied.persist_failure.clone();
             broadcast_presence_updates(connections, applied.presence_updates).await;
-            Ok(())
+            match persist_failure {
+                Some(error) => Err(Box::new(CommandResult::Error(
+                    XmppError::internal_server_error(Some(format!(
+                        "Kick affiliation effects applied but durable convergence failed: {error}"
+                    ))),
+                ))),
+                None => Ok(()),
+            }
         }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
+        )) => {
+            demote_retained_room_actor(state, room_jid, actor).await;
+            Err(ownership_retry(
+                "This room's ownership recently moved to another node; please retry.",
+            ))
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUncertain,
+        )) => Err(ownership_retry(
+            "This room's ownership cannot currently be verified; please retry.",
+        )),
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed(detail),
+        )) => Err(Box::new(CommandResult::Error(
+            XmppError::internal_server_error(Some(detail)),
+        ))),
         Err(error) => {
             let _ = persist_channel_affiliation(
                 state,
@@ -3729,6 +3947,7 @@ async fn run_kick(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
+    admit_managed_room_mutation(state, &actor, &args.channel_jid).await?;
     let config = actor
         .ask(GetConfig)
         .await
@@ -3774,15 +3993,16 @@ async fn run_kick(
         .map(|info| info.nick)
     else {
         if revoke_members_only_member {
-            sync_private_kick_affiliation_revocation(
+            sync_private_kick_affiliation_revocation(PrivateKickAffiliationSync {
                 state,
                 connections,
-                &actor,
-                &channel_id,
-                &caller_bare,
-                &args.occupant_jid,
+                actor: &actor,
+                room_jid: &args.channel_jid,
+                channel_id: &channel_id,
+                caller_bare: &caller_bare,
+                occupant_jid: &args.occupant_jid,
                 durable_previous_affiliation,
-            )
+            })
             .await?;
         }
         return Ok(ChannelsKickResult {
@@ -3816,17 +4036,40 @@ async fn run_kick(
     {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
+        )) => {
+            demote_retained_room_actor(state, &args.channel_jid, &actor).await;
+            return Err(ownership_retry(
+                "This room's ownership recently moved to another node; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUncertain,
+        )) => {
+            return Err(ownership_retry(
+                "This room's ownership cannot currently be verified; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed(detail),
+        )) => {
+            return Err(Box::new(CommandResult::Error(
+                XmppError::internal_server_error(Some(detail)),
+            )));
+        }
+        Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(_),
         )) if revoke_members_only_member => {
-            sync_private_kick_affiliation_revocation(
+            sync_private_kick_affiliation_revocation(PrivateKickAffiliationSync {
                 state,
                 connections,
-                &actor,
-                &channel_id,
-                &caller_bare,
-                &args.occupant_jid,
+                actor: &actor,
+                room_jid: &args.channel_jid,
+                channel_id: &channel_id,
+                caller_bare: &caller_bare,
+                occupant_jid: &args.occupant_jid,
                 durable_previous_affiliation,
-            )
+            })
             .await?;
             return Ok(ChannelsKickResult {
                 occupant_jid: args.occupant_jid.clone(),
@@ -3867,6 +4110,7 @@ async fn run_kick(
     // fallible affiliation-revocation ask below, so an actor-
     // infrastructure failure there can't strand an applied kick with
     // no occupant notification and a live call session (#935 review).
+    let persist_failure = applied.persist_failure.clone();
     for (recipient, presence) in applied.presence_updates {
         let _ = connections
             .send_to(&recipient, Stanza::Presence(presence))
@@ -3877,16 +4121,25 @@ async fn run_kick(
     // participation ends with it.
     evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
 
+    if let Some(error) = persist_failure {
+        return Err(Box::new(CommandResult::Error(
+            XmppError::internal_server_error(Some(format!(
+                "Kick effects were applied but durable convergence failed: {error}"
+            ))),
+        )));
+    }
+
     if revoke_members_only_member {
-        sync_private_kick_affiliation_revocation(
+        sync_private_kick_affiliation_revocation(PrivateKickAffiliationSync {
             state,
             connections,
-            &actor,
-            &channel_id,
-            &caller_bare,
-            &args.occupant_jid,
+            actor: &actor,
+            room_jid: &args.channel_jid,
+            channel_id: &channel_id,
+            caller_bare: &caller_bare,
+            occupant_jid: &args.occupant_jid,
             durable_previous_affiliation,
-        )
+        })
         .await?;
     }
 
@@ -4107,6 +4360,97 @@ pub fn build_kick_form(result: &ChannelsKickResult) -> DataForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kameo::actor::Spawn;
+    use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    enum DelayedCleanup {
+        CreateRollback,
+        NotOwnerDemotion,
+    }
+
+    async fn assert_delayed_cleanup_preserves_replacement(
+        room_name: &str,
+        cleanup: DelayedCleanup,
+    ) {
+        let registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::new(vec![b'a'; 32]).expect("test secret"),
+        ));
+        let room_jid: BareJid = format!("{room_name}@muc.example.com")
+            .parse()
+            .expect("room JID");
+        let stale_actor = registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test".to_string(),
+                channel_id: room_name.to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create original actor");
+        registry
+            .ask(DestroyRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("replace: destroy original actor");
+        let replacement = registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "replacement".to_string(),
+                channel_id: format!("{room_name}-replacement"),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create replacement actor");
+
+        match cleanup {
+            DelayedCleanup::CreateRollback => {
+                rollback_created_room(&registry, &room_jid, &stale_actor).await;
+            }
+            DelayedCleanup::NotOwnerDemotion => {
+                remove_retained_room_actor(&registry, &room_jid, &stale_actor).await;
+            }
+        }
+
+        let current = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup replacement")
+            .expect("replacement remains registered");
+        assert_eq!(current, replacement);
+        assert!(replacement.is_alive());
+    }
+
+    #[tokio::test]
+    async fn delayed_channel_create_rollback_does_not_destroy_replacement() {
+        assert_delayed_cleanup_preserves_replacement(
+            "channel-rollback",
+            DelayedCleanup::CreateRollback,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn delayed_group_dm_create_rollback_does_not_destroy_replacement() {
+        assert_delayed_cleanup_preserves_replacement(
+            "group-dm-rollback",
+            DelayedCleanup::CreateRollback,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn delayed_not_owner_demotion_does_not_destroy_replacement() {
+        assert_delayed_cleanup_preserves_replacement(
+            "not-owner-demotion",
+            DelayedCleanup::NotOwnerDemotion,
+        )
+        .await;
+    }
 
     #[test]
     fn wire_affiliation_round_trips() {

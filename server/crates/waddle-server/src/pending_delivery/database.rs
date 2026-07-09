@@ -135,7 +135,7 @@ fn claim_error_to_pending_storage_error(error: ClaimError, entity: Entity) -> Pe
         ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining => {
             PendingStorageError::NotOwner { entity }
         }
-        ClaimError::Backend(_) | ClaimError::Poisoned => {
+        ClaimError::Backend(_) | ClaimError::Poisoned | ClaimError::EpochExhausted => {
             PendingStorageError::Other(error.to_string())
         }
         // Defensive only: `ensure_claimed` never actually returns this
@@ -414,7 +414,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
 
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
 
@@ -427,8 +427,21 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), origin_stream_id);
         let mut fence_rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![entity_key, identity.node_id.clone(), epoch.0],
+                "WITH locked AS MATERIALIZED ( \
+                     SELECT n.heartbeat, n.expired, n.lease_ttl_ms \
+                     FROM clustering_claims c \
+                     JOIN clustering_nodes n ON n.node_id = c.node_id AND n.node_epoch = c.node_epoch \
+                     WHERE c.entity = ? AND c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ? \
+                     FOR SHARE OF c, n \
+                 ) \
+                 SELECT 1 FROM locked WHERE NOT expired \
+                   AND heartbeat >= clock_timestamp() - (lease_ttl_ms::text || ' milliseconds')::interval",
+                crate::db_params![
+                    entity_key,
+                    identity.node_id.clone(),
+                    identity.node_epoch.clone(),
+                    epoch.0,
+                ],
             )
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;

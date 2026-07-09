@@ -22,10 +22,13 @@
 //! registry is created later in `server/http.rs`, then wired into the handle
 //! that `start_if_enabled` already handed to `run_node_lease`.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
 use waddle_xmpp::muc::room_actor::HealthCheck;
@@ -33,12 +36,13 @@ use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::ownership::{Entity, EntityType};
 use waddle_xmpp::registry::user_actor::HealthCheck as UserHealthCheck;
 use waddle_xmpp::registry::{
-    ConnectionRegistry, DemoteUserActor, ForceDetachOutcome, ForceDetachRequest, GetResources,
-    GetUserForLocalClaim, ListUsers, UserRegistryActor,
+    ConnectionEntry, ConnectionPlacement, ConnectionRegistry, DemoteAllUserActors, DemoteUserActor,
+    ForceDetachOutcome, ForceDetachReason, ForceDetachRequest, GetUserForLocalClaim, ListUsers,
+    UserRegistryActor,
 };
-use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, ReclaimedSessionHydration};
 
-use super::self_fence::LocallyClaimedEntities;
+use super::self_fence::{LocallyClaimedEntities, ReclaimedEntityHydration};
 
 /// Bound on the health-ask this impl issues against a locally-claimed
 /// room's `RoomActor` (ADR-0017 Phase 3 Slice 7's `RoomActor` counterpart
@@ -48,10 +52,12 @@ use super::self_fence::LocallyClaimedEntities;
 const ROOM_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_FORCE_DETACH_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const USER_HARD_RETIRE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// See the module doc for the construction-order rationale.
 pub struct SmSessionLocalClaims {
     registry: OnceLock<Arc<InMemorySmSessionRegistry>>,
+    initialized: AtomicBool,
 }
 
 impl SmSessionLocalClaims {
@@ -59,6 +65,7 @@ impl SmSessionLocalClaims {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             registry: OnceLock::new(),
+            initialized: AtomicBool::new(false),
         })
     }
 
@@ -70,9 +77,15 @@ impl SmSessionLocalClaims {
         if self.registry.set(registry).is_err() {
             tracing::error!(
                 "SmSessionLocalClaims::wire called more than once; the SM session \
-                 registry handle was already wired (ignoring this call)"
+                registry handle was already wired (ignoring this call)"
             );
+            return;
         }
+        // `wire` is intentionally called only after startup restoration has
+        // completed. Release-publishing this bit makes a concurrent
+        // self-fence retry observe both the registry pointer and all sessions
+        // restored before it is allowed to rotate the node epoch.
+        self.initialized.store(true, Ordering::Release);
     }
 }
 
@@ -88,6 +101,25 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             .into_iter()
             .map(|stream_id| Entity::new(EntityType::SmSession, stream_id))
             .collect()
+    }
+
+    async fn demote_all_on_self_fence(&self) -> bool {
+        if !self.initialized.load(Ordering::Acquire) {
+            tracing::warn!("SM local claims are not initialized; refusing node-epoch recovery");
+            return false;
+        }
+        let Some(registry) = self.registry.get() else {
+            return false;
+        };
+        let Some(stream_ids) = registry.live_session_ids() else {
+            return false;
+        };
+        for stream_id in stream_ids {
+            if !registry.forget_claim_locally(&stream_id).await {
+                return false;
+            }
+        }
+        true
     }
 
     async fn demote(&self, entity: &Entity) {
@@ -118,15 +150,37 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
     /// reclaim and the general reaper share one hydration implementation.
     /// A no-op before `wire` runs, mirroring `demote`/`owned`'s identical
     /// unwired behavior.
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, waddle_xmpp::ownership::ClaimEpoch)]) {
+    async fn hydrate_reclaimed(
+        &self,
+        owner: &waddle_xmpp::ownership::NodeIdentity,
+        entity: &Entity,
+        epoch: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> ReclaimedEntityHydration {
+        if !self.initialized.load(Ordering::Acquire) {
+            return ReclaimedEntityHydration::Retry;
+        }
         let Some(registry) = self.registry.get() else {
-            return;
+            return ReclaimedEntityHydration::Retry;
         };
-        if let Err(error) = registry.hydrate_reclaimed(entities).await {
-            tracing::warn!(
-                %error,
-                "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
-            );
+        match registry
+            .hydrate_reclaimed_one_as(entity, epoch, owner)
+            .await
+        {
+            Ok(ReclaimedSessionHydration::Hydrated | ReclaimedSessionHydration::AlreadyLocal) => {
+                ReclaimedEntityHydration::Local
+            }
+            Ok(ReclaimedSessionHydration::Elsewhere) => ReclaimedEntityHydration::Elsewhere,
+            Ok(ReclaimedSessionHydration::TerminallyReleased) => {
+                ReclaimedEntityHydration::TerminallyReleased
+            }
+            Ok(ReclaimedSessionHydration::Retry) => ReclaimedEntityHydration::Retry,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "SmSessionLocalClaims::hydrate_reclaimed: strict hydration failed"
+                );
+                ReclaimedEntityHydration::Retry
+            }
         }
     }
 }
@@ -191,6 +245,30 @@ impl RoomLocalClaims {
             }
         }
     }
+
+    pub async fn demote_if_superseded(
+        &self,
+        entity: &Entity,
+        expected_owner: waddle_xmpp::ownership::NodeIdentity,
+        new_epoch: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> bool {
+        let Some(registry) = self.registry.get() else {
+            return false;
+        };
+        let Some(room_jid) = Self::room_jid(entity) else {
+            return false;
+        };
+        match registry
+            .demote_room_if_superseded(room_jid, expected_owner, new_epoch)
+            .await
+        {
+            Ok(demoted) => demoted,
+            Err(error) => {
+                tracing::warn!(%error, %entity, "failed exact-incarnation RoomActor demotion");
+                false
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -221,6 +299,25 @@ impl LocallyClaimedEntities for RoomLocalClaims {
                      cannot itself observe)"
                 );
                 Vec::new()
+            }
+        }
+    }
+
+    async fn demote_all_on_self_fence(&self) -> bool {
+        let Some(registry) = self.registry.get() else {
+            return true;
+        };
+        match registry.demote_all_rooms().await {
+            Ok(count) => {
+                tracing::warn!(count, "demoted every local RoomActor after node self-fence");
+                true
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "failed to demote every local RoomActor after node self-fence"
+                );
+                false
             }
         }
     }
@@ -353,6 +450,7 @@ impl LocallyClaimedEntities for RoomLocalClaims {
 pub struct UserLocalClaims {
     registry: OnceLock<ActorRef<UserRegistryActor>>,
     connection_registry: OnceLock<Arc<ConnectionRegistry>>,
+    remote_resource_bridge: OnceLock<Arc<super::route_bridge::OrderedRelayDeliveryBridge>>,
 }
 
 impl UserLocalClaims {
@@ -360,6 +458,7 @@ impl UserLocalClaims {
         Arc::new(Self {
             registry: OnceLock::new(),
             connection_registry: OnceLock::new(),
+            remote_resource_bridge: OnceLock::new(),
         })
     }
 
@@ -381,6 +480,17 @@ impl UserLocalClaims {
         }
     }
 
+    pub fn wire_remote_resource_bridge(
+        &self,
+        bridge: Arc<super::route_bridge::OrderedRelayDeliveryBridge>,
+    ) {
+        if self.remote_resource_bridge.set(bridge).is_err() {
+            tracing::error!(
+                "UserLocalClaims::wire_remote_resource_bridge called more than once; ignoring"
+            );
+        }
+    }
+
     fn user_jid(entity: &Entity) -> Option<BareJid> {
         if entity.entity_type != EntityType::UserActor {
             return None;
@@ -398,193 +508,233 @@ impl UserLocalClaims {
         }
     }
 
-    async fn actor_resources(
-        registry: &ActorRef<UserRegistryActor>,
-        bare_jid: &BareJid,
-    ) -> Vec<FullJid> {
-        let actor_ref = match registry
-            .ask(GetUserForLocalClaim {
-                bare_jid: bare_jid.clone(),
-            })
-            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
-            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
-            .await
-        {
-            Ok(Some(actor_ref)) => actor_ref,
-            Ok(None) => return Vec::new(),
-            Err(error) => {
-                tracing::warn!(
-                    jid = %bare_jid,
-                    ?error,
-                    "UserLocalClaims::demote: user registry lookup failed before force-detach"
-                );
-                return Vec::new();
-            }
-        };
-        match actor_ref
-            .ask(GetResources)
-            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
-            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
-            .await
-        {
-            Ok(resources) => resources,
-            Err(error) => {
-                tracing::warn!(
-                    jid = %bare_jid,
-                    ?error,
-                    "UserLocalClaims::demote: UserActor resource enumeration failed before force-detach"
-                );
-                Vec::new()
-            }
-        }
-    }
-
     fn connection_registry_resources(
         connection_registry: &ConnectionRegistry,
-        bare_jid: &BareJid,
-    ) -> Vec<FullJid> {
+    ) -> Vec<(FullJid, ConnectionEntry)> {
         connection_registry
             .list_connections()
             .into_iter()
-            .filter(|jid| jid.to_bare() == *bare_jid)
+            .filter_map(|jid| {
+                let entry = connection_registry.get_entry(&jid)?;
+                Some((jid, entry))
+            })
             .collect()
     }
 
-    fn merge_resources(resources: &mut Vec<FullJid>, extra: Vec<FullJid>) {
-        for jid in extra {
-            if !resources.contains(&jid) {
-                resources.push(jid);
+    fn merge_resource_targets(
+        resources: &mut Vec<(FullJid, ConnectionEntry)>,
+        extra: Vec<(FullJid, ConnectionEntry)>,
+    ) {
+        let mut seen: HashMap<FullJid, Vec<Arc<std::sync::atomic::AtomicBool>>> = HashMap::new();
+        for (jid, entry) in resources.iter() {
+            seen.entry(jid.clone())
+                .or_default()
+                .push(entry.carbons_handle());
+        }
+        for (jid, entry) in extra {
+            let owner = entry.carbons_handle();
+            let owners = seen.entry(jid.clone()).or_default();
+            if owners.iter().any(|existing| Arc::ptr_eq(existing, &owner)) {
+                continue;
             }
+            owners.push(owner);
+            resources.push((jid, entry));
         }
     }
 
-    async fn force_detach_resources(&self, bare_jid: &BareJid, resources: Vec<FullJid>) {
+    async fn force_detach_resources(
+        &self,
+        resources: Vec<(FullJid, ConnectionEntry)>,
+        reason: ForceDetachReason,
+    ) -> bool {
         if resources.is_empty() {
-            return;
+            return true;
         }
         let Some(connection_registry) = self.connection_registry.get() else {
             tracing::warn!(
-                jid = %bare_jid,
                 resource_count = resources.len(),
-                "UserLocalClaims::demote: no ConnectionRegistry wired; cannot force-detach live resources"
+                ?reason,
+                "UserLocalClaims::force_detach_resources: no ConnectionRegistry wired; cannot force-detach live resources"
             );
-            return;
+            return false;
         };
-        for jid in resources {
-            let Some(entry) = connection_registry.get_entry(&jid) else {
-                continue;
-            };
-            let owner = entry.carbons_handle();
-            let (ack, ack_rx) = tokio::sync::oneshot::channel();
-            let request = ForceDetachRequest {
-                requester_bare_jid: bare_jid.clone(),
-                ack,
-            };
-            let mut remove_after_wait = false;
-            match entry.force_detach_sender().try_send(request) {
-                Ok(()) => match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
-                    Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {
-                        remove_after_wait = true;
-                        tracing::debug!(
-                            jid = %jid,
-                            "UserLocalClaims::demote: connection task acknowledged force-detach"
-                        );
-                    }
-                    Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
-                        remove_after_wait = false;
-                        tracing::warn!(
-                            jid = %jid,
-                            requester = %bare_jid,
-                            "UserLocalClaims::demote: force-detach identity mismatch; leaving registry entry untouched"
-                        );
-                    }
-                    Ok(Err(_closed)) => {
-                        tracing::warn!(
-                            jid = %jid,
-                            "UserLocalClaims::demote: force-detach ack channel closed before response; leaving registry entry for connection-owned cleanup"
-                        );
-                    }
-                    Err(_elapsed) => {
-                        tracing::warn!(
-                            jid = %jid,
-                            timeout_ms = USER_FORCE_DETACH_ACK_TIMEOUT.as_millis() as u64,
-                            "UserLocalClaims::demote: force-detach timed out; leaving registry entry so the connection task does not misclassify cleanup as superseded"
-                        );
-                    }
-                },
+
+        let retirements = resources.into_iter().map(|(jid, entry)| async move {
+            self.force_detach_resource(connection_registry, jid, entry, reason)
+                .await
+        });
+        join_all(retirements)
+            .await
+            .into_iter()
+            .all(|retired| retired)
+    }
+
+    async fn force_detach_resource(
+        &self,
+        connection_registry: &ConnectionRegistry,
+        jid: FullJid,
+        entry: ConnectionEntry,
+        reason: ForceDetachReason,
+    ) -> bool {
+        let owner = entry.carbons_handle();
+        let requester_bare_jid = jid.to_bare();
+        let (ack, ack_rx) = tokio::sync::oneshot::channel();
+        let request = ForceDetachRequest {
+            requester_bare_jid: requester_bare_jid.clone(),
+            reason,
+            ack,
+        };
+
+        if entry.placement() == ConnectionPlacement::RemoteMirror {
+            let relayed = match entry.force_detach_sender().try_send(request) {
+                Ok(()) => matches!(
+                    tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await,
+                    Ok(Ok(
+                        ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted
+                    ))
+                ),
                 Err(error) => {
                     tracing::warn!(
                         jid = %jid,
+                        ?reason,
                         ?error,
-                        "UserLocalClaims::demote: force-detach request could not be queued; leaving registry entry for connection-owned cleanup"
+                        "remote-mirror force-detach control queue unavailable; attempting direct terminal compensation"
                     );
+                    false
                 }
+            };
+            let retired = if relayed {
+                true
+            } else {
+                let Some(bridge) = self.remote_resource_bridge.get() else {
+                    tracing::error!(
+                        jid = %jid,
+                        ?reason,
+                        "remote-mirror force-detach is uncertain and no direct compensation bridge is wired"
+                    );
+                    return false;
+                };
+                bridge
+                    .terminally_force_detach_remote_mirror_if_owner(&jid, &owner, reason)
+                    .await
+            };
+            if !retired {
+                tracing::error!(
+                    jid = %jid,
+                    ?reason,
+                    "remote physical socket retirement remains uncertain; keeping terminal teardown incomplete"
+                );
+                return false;
             }
-            if remove_after_wait
-                && connection_registry
-                    .unregister_if_owner(&jid, &owner)
-                    .is_some()
-            {
+            connection_registry.unregister_if_owner(&jid, &owner);
+            self.forget_remote_resource_state(&jid, &owner, entry.placement())
+                .await;
+            return true;
+        }
+
+        let retired = match entry.force_detach_sender().try_send(request) {
+            Ok(()) => match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
+                Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {
+                    connection_registry.unregister_if_owner(&jid, &owner);
+                    tracing::debug!(
+                        jid = %jid,
+                        ?reason,
+                        "local connection acknowledged force-detach"
+                    );
+                    true
+                }
+                Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
+                    tracing::error!(
+                        jid = %jid,
+                        requester = %requester_bare_jid,
+                        ?reason,
+                        "local connection refused force-detach identity; not hard-aborting"
+                    );
+                    false
+                }
+                Ok(Err(_closed)) => {
+                    tracing::warn!(jid = %jid, ?reason, "force-detach ack channel closed; hard-retiring local socket");
+                    Self::hard_retire_local_resource(connection_registry, &jid, &entry, &owner)
+                        .await
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        jid = %jid,
+                        ?reason,
+                        timeout_ms = USER_FORCE_DETACH_ACK_TIMEOUT.as_millis() as u64,
+                        "force-detach timed out; hard-retiring local socket"
+                    );
+                    Self::hard_retire_local_resource(connection_registry, &jid, &entry, &owner)
+                        .await
+                }
+            },
+            Err(error) => {
                 tracing::warn!(
                     jid = %jid,
-                    "UserLocalClaims::demote: removed deposed resource from ConnectionRegistry"
+                    ?reason,
+                    ?error,
+                    "force-detach request could not be queued; hard-retiring local socket"
                 );
+                Self::hard_retire_local_resource(connection_registry, &jid, &entry, &owner).await
             }
+        };
+        if retired {
+            self.forget_remote_resource_state(&jid, &owner, entry.placement())
+                .await;
         }
-    }
-}
-
-#[async_trait]
-impl LocallyClaimedEntities for UserLocalClaims {
-    async fn owned(&self) -> Vec<Entity> {
-        let mut owned = Vec::new();
-        if let Some(registry) = self.registry.get() {
-            match registry
-                .ask(ListUsers)
-                .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
-                .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
-                .await
-            {
-                Ok(jids) => {
-                    owned.extend(
-                        jids.into_iter()
-                            .map(|jid| Entity::new(EntityType::UserActor, jid.to_string())),
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        "UserLocalClaims::owned: user registry list_users failed; \
-                         falling back to ConnectionRegistry resource enumeration"
-                    );
-                }
-            }
-        }
-        if let Some(connection_registry) = self.connection_registry.get() {
-            for jid in connection_registry.list_connections() {
-                let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
-                if !owned.contains(&entity) {
-                    owned.push(entity);
-                }
-            }
-        }
-        owned
+        retired
     }
 
-    async fn demote(&self, entity: &Entity) {
-        let Some(registry) = self.registry.get() else {
-            return;
-        };
-        let Some(bare_jid) = Self::user_jid(entity) else {
-            return;
-        };
-        let mut resources = Self::actor_resources(registry, &bare_jid).await;
-        if let Some(connection_registry) = self.connection_registry.get() {
-            Self::merge_resources(
-                &mut resources,
-                Self::connection_registry_resources(connection_registry, &bare_jid),
+    async fn forget_remote_resource_state(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<std::sync::atomic::AtomicBool>,
+        placement: ConnectionPlacement,
+    ) {
+        if let Some(bridge) = self.remote_resource_bridge.get() {
+            bridge
+                .forget_remote_resource_state_if_owner(jid, owner, placement)
+                .await;
+        }
+    }
+
+    async fn hard_retire_local_resource(
+        connection_registry: &ConnectionRegistry,
+        jid: &FullJid,
+        entry: &ConnectionEntry,
+        owner: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let Some(retirement) = entry.retirement_handle() else {
+            tracing::error!(
+                jid = %jid,
+                "local socket has no hard-retirement handle; keeping terminal teardown incomplete"
             );
+            return false;
+        };
+        retirement.abort();
+        if tokio::time::timeout(USER_HARD_RETIRE_TIMEOUT, retirement.terminated())
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                jid = %jid,
+                timeout_ms = USER_HARD_RETIRE_TIMEOUT.as_millis() as u64,
+                "hard-retired socket did not terminate; keeping terminal teardown incomplete"
+            );
+            return false;
         }
+        connection_registry.unregister_if_owner(jid, owner);
+        tracing::warn!(jid = %jid, "hard-retired non-cooperative local socket");
+        true
+    }
+
+    async fn demote_user_actor(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Option<Vec<(FullJid, ConnectionEntry)>> {
+        let Some(registry) = self.registry.get() else {
+            return Some(Vec::new());
+        };
         match registry
             .ask(DemoteUserActor {
                 bare_jid: bare_jid.clone(),
@@ -593,23 +743,118 @@ impl LocallyClaimedEntities for UserLocalClaims {
             .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
             .await
         {
-            Ok(true) => {
+            Ok(resources) => {
                 tracing::warn!(
                     jid = %bare_jid,
+                    resource_count = resources.len(),
                     "demoted (hard-killed) a locally-claimed UserActor: Postgres \
                      no longer attributes this user claim to this node"
                 );
+                Some(resources)
             }
-            Ok(false) => {}
             Err(error) => {
                 tracing::warn!(
                     jid = %bare_jid,
                     ?error,
                     "UserLocalClaims::demote: user registry demotion failed"
                 );
+                None
             }
         }
-        self.force_detach_resources(&bare_jid, resources).await;
+    }
+
+    async fn demote_all_user_actors(&self) -> Option<Vec<(FullJid, ConnectionEntry)>> {
+        let Some(registry) = self.registry.get() else {
+            return Some(Vec::new());
+        };
+        match registry
+            .ask(DemoteAllUserActors)
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(resources) => {
+                tracing::warn!(
+                    resource_count = resources.len(),
+                    "demoted every local UserActor after node self-fence"
+                );
+                Some(resources)
+            }
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "failed to demote every local UserActor after node self-fence"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LocallyClaimedEntities for UserLocalClaims {
+    async fn owned(&self) -> Vec<Entity> {
+        let Some(registry) = self.registry.get() else {
+            return Vec::new();
+        };
+        match registry
+            .ask(ListUsers)
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(jids) => jids
+                .into_iter()
+                .map(|jid| Entity::new(EntityType::UserActor, jid.to_string()))
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "UserLocalClaims::owned: authoritative user registry enumeration failed; \
+                     skipping UserActor reconciliation this interval"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    async fn demote_all_on_self_fence(&self) -> bool {
+        let mut resources = self
+            .connection_registry
+            .get()
+            .map(|registry| Self::connection_registry_resources(registry))
+            .unwrap_or_default();
+        let Some(actor_resources) = self.demote_all_user_actors().await else {
+            return false;
+        };
+        Self::merge_resource_targets(&mut resources, actor_resources);
+        if !self
+            .force_detach_resources(resources, ForceDetachReason::NodeSelfFenced)
+            .await
+        {
+            return false;
+        }
+        let Some(bridge) = self.remote_resource_bridge.get() else {
+            return true;
+        };
+        tokio::time::timeout(
+            USER_HARD_RETIRE_TIMEOUT,
+            bridge.clear_remote_resource_state_on_self_fence(),
+        )
+        .await
+        .is_ok()
+    }
+
+    async fn demote(&self, entity: &Entity) {
+        let Some(bare_jid) = Self::user_jid(entity) else {
+            return;
+        };
+        let Some(resources) = self.demote_user_actor(&bare_jid).await else {
+            return;
+        };
+        let _ = self
+            .force_detach_resources(resources, ForceDetachReason::OwnershipLost)
+            .await;
     }
 
     async fn health_check(&self, entity: &Entity) -> bool {
@@ -702,6 +947,15 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         owned
     }
 
+    async fn demote_all_on_self_fence(&self) -> bool {
+        let (sm, room, user) = tokio::join!(
+            self.sm.demote_all_on_self_fence(),
+            self.room.demote_all_on_self_fence(),
+            self.user.demote_all_on_self_fence(),
+        );
+        sm && room && user
+    }
+
     async fn demote(&self, entity: &Entity) {
         match entity.entity_type {
             EntityType::SmSession => self.sm.demote(entity).await,
@@ -718,19 +972,17 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         }
     }
 
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, waddle_xmpp::ownership::ClaimEpoch)]) {
-        let (sm_entities, rest): (Vec<_>, Vec<_>) = entities
-            .iter()
-            .cloned()
-            .partition(|(entity, _)| entity.entity_type == EntityType::SmSession);
-        if !sm_entities.is_empty() {
-            self.sm.hydrate_reclaimed(&sm_entities).await;
+    async fn hydrate_reclaimed(
+        &self,
+        owner: &waddle_xmpp::ownership::NodeIdentity,
+        entity: &Entity,
+        epoch: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> ReclaimedEntityHydration {
+        if entity.entity_type == EntityType::SmSession {
+            self.sm.hydrate_reclaimed(owner, entity, epoch).await
+        } else {
+            ReclaimedEntityHydration::Retry
         }
-        // `RoomLocalClaims`/`UserLocalClaims` have no reclaim-hydration
-        // consumer yet (they are created through their registries' own
-        // `ensure_claimed`/`steal_stale` paths), so `rest` is intentionally
-        // not forwarded anywhere.
-        let _ = rest;
     }
 
     /// ADR-0017 Phase 3 Slice 10 FIX 1: dispatch by `EntityType`, mirroring
@@ -789,6 +1041,21 @@ mod tests {
     async fn unwired_instance_owns_nothing() {
         let local_claims = SmSessionLocalClaims::new();
         assert!(local_claims.owned().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unwired_instance_blocks_terminal_recovery_until_post_restore_wire() {
+        let local_claims = SmSessionLocalClaims::new();
+        assert!(
+            !local_claims.demote_all_on_self_fence().await,
+            "an unwired startup registry must keep node-epoch recovery fenced"
+        );
+
+        local_claims.wire(Arc::new(InMemorySmSessionRegistry::new()));
+        assert!(
+            local_claims.demote_all_on_self_fence().await,
+            "post-restore wiring publishes initialization to the recovery loop"
+        );
     }
 
     #[tokio::test]
@@ -875,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_owned_falls_back_to_connection_registry_resources() {
+    async fn user_reconciliation_ownership_excludes_connection_only_resources() {
         let user_local_claims = UserLocalClaims::new();
         let connection_registry = Arc::new(ConnectionRegistry::new());
         user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
@@ -886,10 +1153,216 @@ mod tests {
         let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
         connection_registry.register(jid.clone(), outbound_tx);
 
-        assert_eq!(
-            user_local_claims.owned().await,
-            vec![Entity::new(EntityType::UserActor, jid.to_bare().to_string())],
-            "terminal self-fence must still see live user resources when the user registry cannot be enumerated"
+        assert!(
+            user_local_claims.owned().await.is_empty(),
+            "a physically hosted resource is not an authoritative local UserActor claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_self_fence_force_detaches_connection_only_resources() {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "remote-socket@example.com/web"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = jid.to_bare();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection task owns force-detach receiver");
+        let force_detach_task = tokio::spawn(async move {
+            let request = force_detach_rx.recv().await.expect("force-detach request");
+            assert_eq!(request.requester_bare_jid, bare_jid);
+            assert_eq!(request.reason, ForceDetachReason::NodeSelfFenced);
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        });
+
+        assert!(user_local_claims.demote_all_on_self_fence().await);
+        force_detach_task.await.expect("force-detach task");
+
+        assert!(
+            !connection_registry.is_connected(&jid),
+            "whole-node self-fence must still close every socket physically hosted here"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn user_self_fence_force_detach_timeout_is_concurrent_across_resources() {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let mut receivers = Vec::new();
+        for resource in ["phone", "tablet", "desktop"] {
+            let jid: FullJid = format!("remote-socket@example.com/{resource}")
+                .parse()
+                .expect("valid full JID");
+            let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+            let owner = connection_registry.register(jid.clone(), outbound_tx);
+            let entry = connection_registry
+                .entry_if_owner(&jid, &owner)
+                .expect("registered entry");
+            receivers.push(
+                entry
+                    .take_force_detach_rx()
+                    .expect("connection task owns force-detach receiver"),
+            );
+        }
+
+        let teardown = tokio::spawn({
+            let user_local_claims = Arc::clone(&user_local_claims);
+            async move { user_local_claims.demote_all_on_self_fence().await }
+        });
+        let mut pending_requests = Vec::new();
+        for receiver in &mut receivers {
+            let request = receiver.recv().await.expect("force-detach request");
+            assert_eq!(request.reason, ForceDetachReason::NodeSelfFenced);
+            pending_requests.push(request);
+        }
+
+        tokio::time::advance(USER_FORCE_DETACH_ACK_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            teardown.is_finished(),
+            "three unresponsive resources must share one timeout window, not wait serially"
+        );
+        assert!(
+            !teardown.await.expect("terminal teardown task"),
+            "an unacknowledged physical socket must keep terminal teardown incomplete"
+        );
+        drop(pending_requests);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn user_self_fence_hard_retires_non_cooperative_local_socket() {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "wedged@example.com/phone".parse().expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection owns force-detach receiver");
+        let (abort, abort_registration) = futures::future::AbortHandle::new_pair();
+        let terminated = tokio_util::sync::CancellationToken::new();
+        assert!(entry.install_retirement_handle(
+            waddle_xmpp::registry::ConnectionRetirementHandle::new(abort, terminated.clone(),)
+        ));
+        let connection_task = tokio::spawn(async move {
+            let _ =
+                futures::future::Abortable::new(std::future::pending::<()>(), abort_registration)
+                    .await;
+            terminated.cancel();
+        });
+
+        let teardown = tokio::spawn({
+            let user_local_claims = Arc::clone(&user_local_claims);
+            async move { user_local_claims.demote_all_on_self_fence().await }
+        });
+        let pending_request = force_detach_rx.recv().await.expect("force-detach request");
+        tokio::time::advance(USER_FORCE_DETACH_ACK_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(teardown.await.expect("terminal teardown task"));
+        assert!(!connection_registry.is_connected(&jid));
+        connection_task.await.expect("hard-retired connection task");
+        drop(pending_request);
+    }
+
+    #[tokio::test]
+    async fn user_self_fence_retires_remote_mirror_after_confirmed_socket_retirement() {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "remote-mirror@example.com/tablet"
+            .parse()
+            .expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let entry = ConnectionEntry::new_remote_mirror(outbound_tx);
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("mirror forwarder owns force-detach receiver");
+        connection_registry.register_entry(jid.clone(), entry);
+
+        let teardown = tokio::spawn({
+            let user_local_claims = Arc::clone(&user_local_claims);
+            async move { user_local_claims.demote_all_on_self_fence().await }
+        });
+        let request = force_detach_rx.recv().await.expect("relay request");
+        assert_eq!(request.reason, ForceDetachReason::NodeSelfFenced);
+        request
+            .ack
+            .send(ForceDetachOutcome::NotPersisted)
+            .expect("confirmed remote socket retirement");
+        assert!(teardown.await.expect("terminal teardown task"));
+        assert!(
+            !connection_registry.is_connected(&jid),
+            "owner-side proxy state must not pin this node's readiness on a remote relay"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_remote_mirror_control_queue_cannot_claim_terminal_teardown_without_compensation(
+    ) {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "remote-mirror@example.com/closed"
+            .parse()
+            .expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let entry = ConnectionEntry::new_remote_mirror(outbound_tx);
+        drop(
+            entry
+                .take_force_detach_rx()
+                .expect("mirror forwarder owns force-detach receiver"),
+        );
+        connection_registry.register_entry(jid.clone(), entry);
+
+        assert!(
+            !user_local_claims.demote_all_on_self_fence().await,
+            "without a relay compensation bridge, a closed queue must keep terminal teardown incomplete"
+        );
+        assert!(
+            connection_registry.is_connected(&jid),
+            "uncertain physical-socket retirement must retain proxy state for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_self_fence_bulk_demotes_every_actor_in_one_registry_operation() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry.clone());
+        for username in ["one", "two", "three"] {
+            registry
+                .ask(waddle_xmpp::registry::GetOrCreateUser {
+                    bare_jid: user_jid(username),
+                })
+                .await
+                .expect("create user actor");
+        }
+        assert_eq!(user_local_claims.owned().await.len(), 3);
+
+        assert!(user_local_claims.demote_all_on_self_fence().await);
+
+        assert!(
+            user_local_claims.owned().await.is_empty(),
+            "terminal bulk demotion must atomically drain the user registry"
         );
     }
 
@@ -1061,6 +1534,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_demote_detaches_exact_stale_actor_entry_not_same_jid_replacement() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "replacement@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let (old_tx, _old_outbound_rx) = tokio::sync::mpsc::channel(4);
+        let old_owner = connection_registry.register(jid.clone(), old_tx);
+        let old_entry = connection_registry
+            .entry_if_owner(&jid, &old_owner)
+            .expect("old entry");
+        let mut old_force_detach_rx = old_entry
+            .take_force_detach_rx()
+            .expect("old connection owns force-detach receiver");
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry: old_entry,
+            })
+            .await
+            .expect("register old actor resource");
+
+        let (new_tx, _new_outbound_rx) = tokio::sync::mpsc::channel(4);
+        let new_owner = connection_registry.register(jid.clone(), new_tx);
+        let new_entry = connection_registry
+            .entry_if_owner(&jid, &new_owner)
+            .expect("replacement entry");
+        let mut new_force_detach_rx = new_entry
+            .take_force_detach_rx()
+            .expect("replacement owns force-detach receiver");
+        let old_detach = tokio::spawn(async move {
+            let request = old_force_detach_rx
+                .recv()
+                .await
+                .expect("old exact entry receives force-detach");
+            assert_eq!(request.reason, ForceDetachReason::OwnershipLost);
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        });
+
+        user_local_claims
+            .demote(&Entity::new(
+                EntityType::UserActor,
+                jid.to_bare().to_string(),
+            ))
+            .await;
+        old_detach.await.expect("old detach task");
+
+        assert!(matches!(
+            new_force_detach_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(
+            connection_registry
+                .entry_if_owner(&jid, &new_owner)
+                .is_some(),
+            "reconciling the stale actor must not detach its same-JID replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_self_fence_detaches_actor_only_and_current_same_jid_incarnations() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "fence-race@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let (old_tx, _old_outbound_rx) = tokio::sync::mpsc::channel(4);
+        let old_owner = connection_registry.register(jid.clone(), old_tx);
+        let old_entry = connection_registry
+            .entry_if_owner(&jid, &old_owner)
+            .expect("old entry");
+        let mut old_rx = old_entry
+            .take_force_detach_rx()
+            .expect("old connection receiver");
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry: old_entry,
+            })
+            .await
+            .expect("register old actor resource");
+
+        let (new_tx, _new_outbound_rx) = tokio::sync::mpsc::channel(4);
+        let new_owner = connection_registry.register(jid.clone(), new_tx);
+        let new_entry = connection_registry
+            .entry_if_owner(&jid, &new_owner)
+            .expect("new entry");
+        let mut new_rx = new_entry
+            .take_force_detach_rx()
+            .expect("new connection receiver");
+        let old_detach = tokio::spawn(async move {
+            let request = old_rx.recv().await.expect("old detach");
+            assert_eq!(request.reason, ForceDetachReason::NodeSelfFenced);
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        });
+        let new_detach = tokio::spawn(async move {
+            let request = new_rx.recv().await.expect("new detach");
+            assert_eq!(request.reason, ForceDetachReason::NodeSelfFenced);
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        });
+
+        assert!(user_local_claims.demote_all_on_self_fence().await);
+        old_detach.await.expect("old detach task");
+        new_detach.await.expect("new detach task");
+        assert!(!connection_registry.is_connected(&jid));
+    }
+
+    #[tokio::test]
     async fn combined_local_claims_routes_user_actor_operations() {
         let sm_local_claims = SmSessionLocalClaims::new();
         let room_local_claims = RoomLocalClaims::new();
@@ -1122,6 +1711,39 @@ mod tests {
         assert!(
             !room_local_claims.health_check(&entity).await,
             "no live local actor must report unhealthy, never healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_self_fence_bulk_demotes_every_actor_in_one_registry_operation() {
+        let room_local_claims = RoomLocalClaims::new();
+        let registry = waddle_xmpp::muc::RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            test_occupant_id_secret(),
+            None,
+        );
+        room_local_claims.wire(registry.clone());
+        for room in ["one", "two", "three"] {
+            let room_jid: jid::BareJid = format!("{room}@muc.example.com")
+                .parse()
+                .expect("valid room JID");
+            registry
+                .get_or_create_room(
+                    room_jid,
+                    format!("waddle-{room}"),
+                    format!("channel-{room}"),
+                    waddle_xmpp::muc::RoomConfig::default(),
+                )
+                .await
+                .expect("create room");
+        }
+        assert_eq!(room_local_claims.owned().await.len(), 3);
+
+        assert!(room_local_claims.demote_all_on_self_fence().await);
+
+        assert!(
+            room_local_claims.owned().await.is_empty(),
+            "terminal bulk demotion must atomically drain the room registry"
         );
     }
 

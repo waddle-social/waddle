@@ -12,8 +12,8 @@
 //! `record_promotion_failure`) each need the fencing SELECT inside one
 //! `Transaction`. Two trait-shape divergences from the portable impl are
 //! explicit and accepted: (a) detach writes ignore the caller-supplied
-//! `detached_at` and stamp/re-read Postgres `now()`... (b) expiry listing
-//! evaluates the window in SQL against Postgres `now()`, treating the
+//! `detached_at` and stamp/re-read Postgres `clock_timestamp()`... (b) expiry listing
+//! evaluates the window in SQL against Postgres `clock_timestamp()`, treating the
 //! trait's `now` parameter as advisory in the fenced impl. The portable
 //! impl and schema remain byte-identical for SQLite."*
 //!
@@ -31,7 +31,8 @@
 //!
 //! Every method that writes `sm_sessions`/`sm_unacked` on behalf of an
 //! SM-session entity runs its own `SELECT 1 FROM clustering_claims WHERE
-//! entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE` — the exact
+//! entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR
+//! SHARE` — the exact
 //! fencing-transaction SQL shape ADR-0017 Phase 3 Slice 1 locks — as the
 //! first statement inside the *same* [`crate::db::Transaction`] as the
 //! write(s) it guards, all on the **main pool**
@@ -164,7 +165,7 @@ fn claim_error_to_sm_persistence_error(error: ClaimError, entity: Entity) -> SmP
         ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining => {
             SmPersistenceError::NotOwner { entity }
         }
-        ClaimError::Backend(_) | ClaimError::Poisoned => {
+        ClaimError::Backend(_) | ClaimError::Poisoned | ClaimError::EpochExhausted => {
             SmPersistenceError::Other(error.to_string())
         }
         // Defensive only: `ensure_claimed`/`acquire` never actually return
@@ -220,6 +221,45 @@ pub struct PostgresFencedSmPersistence {
     /// an already-populated, now-stale cell from the map entirely so a
     /// later call builds a brand-new one.
     claim_epochs: Arc<DashMap<SmSessionId, Arc<OnceCell<ClaimEpoch>>>>,
+    /// Unit-test-only rendezvous used to hold a real multi-statement write
+    /// immediately after its fencing SELECT has acquired the claim/node row
+    /// locks. This field and every call site compile out of production.
+    #[cfg(test)]
+    fenced_write_test_barrier: Option<FencedWriteTestBarrier>,
+}
+
+/// Two-phase test rendezvous for deterministic expiry-vs-write interleavings.
+/// The first barrier proves the real fencing SELECT returned `Ok`; the second
+/// keeps that transaction open until the test has launched the exact expiry
+/// CAS that must block on its node-row lock.
+#[cfg(test)]
+#[derive(Clone)]
+struct FencedWriteTestBarrier {
+    fenced: Arc<tokio::sync::Barrier>,
+    resume: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+impl FencedWriteTestBarrier {
+    fn new() -> Self {
+        Self {
+            fenced: Arc::new(tokio::sync::Barrier::new(2)),
+            resume: Arc::new(tokio::sync::Barrier::new(2)),
+        }
+    }
+
+    async fn pause_writer(&self) {
+        self.fenced.wait().await;
+        self.resume.wait().await;
+    }
+
+    async fn wait_until_fenced(&self) {
+        self.fenced.wait().await;
+    }
+
+    async fn resume_writer(&self) {
+        self.resume.wait().await;
+    }
 }
 
 impl PostgresFencedSmPersistence {
@@ -257,12 +297,28 @@ impl PostgresFencedSmPersistence {
             claim_store,
             node_identity,
             claim_epochs: Arc::new(DashMap::new()),
+            #[cfg(test)]
+            fenced_write_test_barrier: None,
         };
         storage.ensure_schema().await?;
         tracing::info!(
             "Postgres-fenced SM persistence storage initialized (ADR-0017 Phase 3 Slice 4)"
         );
         Ok(storage)
+    }
+
+    #[cfg(test)]
+    fn install_fenced_write_test_barrier(&mut self) -> FencedWriteTestBarrier {
+        let barrier = FencedWriteTestBarrier::new();
+        self.fenced_write_test_barrier = Some(barrier.clone());
+        barrier
+    }
+
+    #[cfg(test)]
+    async fn pause_fenced_write_for_test(&self) {
+        if let Some(barrier) = &self.fenced_write_test_barrier {
+            barrier.pause_writer().await;
+        }
     }
 
     async fn ensure_schema(&self) -> Result<(), SmPersistenceError> {
@@ -425,8 +481,22 @@ impl PostgresFencedSmPersistence {
         let key = sm_session_entity_key(stream_id);
         let mut rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![key, identity.node_id.clone(), epoch.0],
+                "WITH locked AS MATERIALIZED ( \
+                     SELECT n.heartbeat, n.expired, n.lease_ttl_ms \
+                     FROM clustering_claims c \
+                     JOIN clustering_nodes n ON n.node_id = c.node_id AND n.node_epoch = c.node_epoch \
+                     WHERE c.entity = ? AND c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ? \
+                     FOR SHARE OF c, n \
+                 ) \
+                 SELECT 1 FROM locked \
+                 WHERE NOT expired \
+                   AND heartbeat >= clock_timestamp() - (lease_ttl_ms::text || ' milliseconds')::interval",
+                crate::db_params![
+                    key,
+                    identity.node_id.clone(),
+                    identity.node_epoch.clone(),
+                    epoch.0,
+                ],
             )
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -443,6 +513,36 @@ impl PostgresFencedSmPersistence {
                 entity: sm_session_entity(stream_id),
             })
         }
+    }
+
+    /// Serialize an absent session row and wait out any existing row writer
+    /// before computing the database-owned detach timestamp. Evaluating
+    /// `clock_timestamp()` directly in an `INSERT .. ON CONFLICT` is not
+    /// enough: Postgres may evaluate the VALUES expression before waiting on
+    /// the conflicting row lock.
+    async fn lock_session_effect_row(
+        &self,
+        tx: &mut Transaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<(), SmPersistenceError> {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, 8720))",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM sm_sessions WHERE stream_id = ? FOR UPDATE",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let _ = rows
+            .next()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        Ok(())
     }
 
     async fn guard_query(
@@ -473,13 +573,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, &stream_id, epoch).await?;
+        self.lock_session_effect_row(&mut tx, &stream_id).await?;
 
         // Divergence (a): ignore `session.detached_at`; stamp Postgres
-        // `now()` in SQL instead (both the fresh-insert VALUES and the
+        // `clock_timestamp()` in SQL instead (both the fresh-insert VALUES and the
         // ON CONFLICT UPDATE's `excluded.detached_at_ms` read the same
         // server-computed literal, so both paths agree).
         tx.execute(
@@ -490,7 +591,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through,
                 presence_payloads
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -572,10 +673,12 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let epoch = self.claim_epoch_for(stream_id).await?;
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, stream_id, epoch).await?;
+        #[cfg(test)]
+        self.pause_fenced_write_for_test().await;
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
@@ -610,7 +713,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, &stream_id, epoch).await?;
@@ -640,7 +743,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let epoch = self.claim_epoch_for(stream_id).await?;
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, stream_id, epoch).await?;
@@ -665,7 +768,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let epoch = self.claim_epoch_for(stream_id).await?;
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, stream_id, epoch).await?;
@@ -791,15 +894,18 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, &stream_id, epoch).await?;
+        #[cfg(test)]
+        self.pause_fenced_write_for_test().await;
+        self.lock_session_effect_row(&mut tx, &stream_id).await?;
 
         // Drop any pre-existing unacked rows first (see the portable
         // impl's identical comment on this statement's ordering
         // rationale), then upsert the session row (divergence (a):
-        // Postgres `now()`, not `session.detached_at`), then append every
+        // Postgres `clock_timestamp()`, not `session.detached_at`), then append every
         // supplied unacked stanza.
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
@@ -816,7 +922,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through,
                 presence_payloads
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -889,10 +995,12 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let epoch = self.claim_epoch_for(stream_id).await?;
         let mut tx = self
             .db
-            .begin()
+            .begin_fenced()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced(&mut tx, stream_id, epoch).await?;
+        #[cfg(test)]
+        self.pause_fenced_write_for_test().await;
         let mut rows = tx
             .query(
                 "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \

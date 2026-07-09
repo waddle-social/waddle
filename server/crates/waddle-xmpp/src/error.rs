@@ -1,5 +1,6 @@
 //! Error types for the XMPP server.
 
+use jid::BareJid;
 use thiserror::Error;
 use waddle_xmpp_core::CoreError;
 
@@ -49,6 +50,12 @@ pub enum XmppError {
     /// Internal server error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// A room-scoped durable write reached its transaction fence after the
+    /// node had lost the exact room claim. Kept distinct from backend errors
+    /// so callers can demote the stale actor and suppress old-owner effects.
+    #[error("room ownership lost before durable write: {0}")]
+    RoomOwnershipLost(BareJid),
 
     /// Stanza error (for IQ error responses)
     #[error("Stanza error: {condition}")]

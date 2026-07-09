@@ -4,7 +4,7 @@ use super::super::{
     handlers::{self, presence::handle_muc_join},
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
-    state::WsConnState,
+    state::{WebSocketState, WsConnState},
     stream_management::is_countable_stanza,
     transport_xml::{build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml},
 };
@@ -25,6 +25,15 @@ use waddle_xmpp::{
     Stanza,
 };
 use xmpp_parsers::minidom::Element;
+
+fn capture_clustering_admission(state: &WebSocketState, conn: &mut WsConnState) {
+    conn.clustering_admission = state
+        .deps
+        .app_state
+        .clustering_readiness
+        .capture_admission();
+    assert!(conn.clustering_admission.is_some());
+}
 
 fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
     element_to_xml(
@@ -635,6 +644,153 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
     .await;
     let ack2_el = Element::from_str(&ack2[0]).expect("xml");
     assert_eq!(ack2_el.attr("h"), Some("1"));
+}
+
+#[cfg(feature = "clustering")]
+mod sm_enable_claim_admission {
+    use super::*;
+    use crate::clustering::{ClusteringHandles, ClusteringReadiness};
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use std::sync::Arc;
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimError, ClaimGrant, ClaimSnapshot, ClaimStore, Entity, NodeIdentity,
+        ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
+    };
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    /// Deterministic control-plane outage: the only operation the enable
+    /// path should reach is `ensure_claimed`, and that operation always
+    /// fails. The remaining methods make this a complete typed ClaimStore
+    /// rather than relying on a database or scheduling-dependent race.
+    struct RejectingClaimStore;
+
+    #[async_trait::async_trait]
+    impl ClaimStore for RejectingClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn acquire(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            Err(ClaimError::Backend("test control-plane outage".to_string()))
+        }
+
+        async fn ensure_claimed(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            Err(ClaimError::Backend("test control-plane outage".to_string()))
+        }
+
+        async fn steal_stale(
+            &self,
+            _entity: &Entity,
+            _observed: ClaimEpoch,
+            _staleness: StalePredicate,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            Err(ClaimError::Conflict)
+        }
+
+        async fn steal_for_resume(
+            &self,
+            _entity: &Entity,
+            _observed: ClaimEpoch,
+            _witness: ResumeIdentityProof,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            Err(ClaimError::Conflict)
+        }
+
+        async fn current_claim(
+            &self,
+            _entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            Ok(None)
+        }
+
+        async fn fence(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+            _mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            Ok(false)
+        }
+
+        async fn release(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+            _mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn release_many(&self, _grants: &[ClaimGrant]) -> Result<(), ClaimError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sm_enable_fails_closed_when_the_authoritative_claim_cannot_be_acquired() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(RejectingClaimStore);
+        let identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+        let sm_session_registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_claim_store(Arc::clone(&claim_store), identity.clone()),
+        );
+        let clustering = ClusteringHandles {
+            claim_store: Some(claim_store),
+            node_identity: Some(identity),
+            ..ClusteringHandles::default()
+        };
+        let state =
+            create_test_websocket_state_with_clustering(clustering, sm_session_registry).await;
+        // The fixture is clustering-enabled but has no lease task. Mark it
+        // ready explicitly so this test isolates claim admission failure.
+        let readiness: &ClusteringReadiness = &state.deps.app_state.clustering_readiness;
+        readiness.set_ready(true);
+
+        let mut conn = WsConnState::new();
+        capture_clustering_admission(state.as_ref(), &mut conn);
+        conn.phase = ConnectionPhase::ready(
+            "alice@example.com/web"
+                .parse::<FullJid>()
+                .expect("valid jid"),
+            false,
+        );
+
+        let responses = handle_xmpp_frame(
+            "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let failed = Element::from_str(&responses[0]).expect("failed xml");
+        assert_eq!(failed.name(), "failed");
+        assert!(
+            failed
+                .get_child(
+                    "internal-server-error",
+                    "urn:ietf:params:xml:ns:xmpp-stanzas"
+                )
+                .is_some(),
+            "claim admission failure must be an explicit retryable SM failure: {responses:?}"
+        );
+        assert!(
+            !conn.sm_state.enabled,
+            "a stream without an authoritative claim must never enter the enabled state"
+        );
+        assert!(conn.sm_state.stream_id.is_none());
+    }
 }
 
 /// Enable SM on a fresh ready connection and return the negotiated
@@ -3220,7 +3376,9 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
 #[cfg(feature = "clustering")]
 mod fix3_shutdown_race {
     use super::*;
-    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::clustering::claims::{
+        clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+    };
     use crate::clustering::ClusteringHandles;
     use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
@@ -3250,7 +3408,8 @@ mod fix3_shutdown_race {
     impl RemoteResumeAsker for HangingAsker {
         async fn ask_remote_detach(
             &self,
-            _node_id: &str,
+            _expected_owner: &waddle_xmpp::ownership::NodeIdentity,
+            _observed: waddle_xmpp::ownership::ClaimEpoch,
             _stream_id: &str,
             _requester_bare_jid: &BareJid,
         ) -> RemoteResumeAskOutcome {
@@ -3292,6 +3451,10 @@ mod fix3_shutdown_race {
         // actually dispatches into branch 2/3 (live handshake) instead of
         // short-circuiting.
         let owner = node_identity();
+        claim_store
+            .register(&owner, None)
+            .await
+            .expect("register foreign owner incarnation");
         let entity = Entity::new(EntityType::SmSession, "stream-shutdown-race".to_string());
         claim_store
             .acquire(&entity, &owner)
@@ -3299,6 +3462,10 @@ mod fix3_shutdown_race {
             .expect("owner claims the entity");
 
         let resuming_identity = node_identity();
+        claim_store
+            .register(&resuming_identity, None)
+            .await
+            .expect("register resuming node incarnation");
         let resuming_identity_handle = SharedNodeIdentity::new(resuming_identity.clone());
         let resuming_claim_store: Arc<dyn ClaimStore> =
             Arc::new(PostgresClaimStore::new(db.clone()));
@@ -3325,6 +3492,7 @@ mod fix3_shutdown_race {
             muc_durable_store: None,
             isr_token_store: None,
             node_lease: None,
+            remote_resource_admission_store: None,
             lease_ttl: None,
             pod_template_hash: None,
             resume_bridge: None,
@@ -3393,7 +3561,9 @@ mod fix3_shutdown_race {
 #[cfg(feature = "clustering")]
 mod fix_a_post_cas_shutdown {
     use super::*;
-    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::clustering::claims::{
+        clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+    };
     use crate::clustering::ClusteringHandles;
     use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
@@ -3513,10 +3683,9 @@ mod fix_a_post_cas_shutdown {
 
         async fn release_many(
             &self,
-            entities: &[Entity],
-            me: &NodeIdentity,
+            grants: &[waddle_xmpp::ownership::ClaimGrant],
         ) -> Result<(), ClaimError> {
-            self.inner.release_many(entities, me).await
+            self.inner.release_many(grants).await
         }
     }
 
@@ -3574,6 +3743,10 @@ mod fix_a_post_cas_shutdown {
         // a genuine persisted row (branch 1's fast path) rather than
         // needing a live-handshake asker at all.
         let owner_identity = SharedNodeIdentity::new(node_identity());
+        PostgresClaimStore::new(db.clone())
+            .register(&owner_identity.current(), None)
+            .await
+            .expect("register owner node incarnation");
         let owner_claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
         let owner_persistence = PostgresFencedSmPersistence::open(
             db.clone(),
@@ -3616,6 +3789,10 @@ mod fix_a_post_cas_shutdown {
         // test. Its `ClaimStore` is gated on `ensure_claimed` — the call
         // `hydrate_reclaimed` issues right after `steal_for_resume` wins.
         let resuming_identity = node_identity();
+        PostgresClaimStore::new(db.clone())
+            .register(&resuming_identity, None)
+            .await
+            .expect("register resuming node incarnation");
         let resuming_identity_handle = SharedNodeIdentity::new(resuming_identity.clone());
         let real_claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
         let arrived = Arc::new(tokio::sync::Notify::new());
@@ -3656,6 +3833,7 @@ mod fix_a_post_cas_shutdown {
             muc_durable_store: None,
             isr_token_store: None,
             node_lease: None,
+            remote_resource_admission_store: None,
             lease_ttl: None,
             pod_template_hash: None,
             resume_bridge: None,
@@ -3841,6 +4019,7 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
         .expect("store");
 
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     conn.phase = ConnectionPhase::authenticated(&jid);
     let responses = handle_xmpp_frame(
         &resume_frame_xml("stream-idle", 0),
@@ -3919,6 +4098,7 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
         .expect("store");
 
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     conn.phase = ConnectionPhase::authenticated(&jid);
     let responses = handle_xmpp_frame(
         &resume_frame_xml("stream-claimed", 0),
@@ -3999,6 +4179,7 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
         .expect("store");
 
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     conn.phase = ConnectionPhase::authenticated(&jid);
     let responses = handle_xmpp_frame(
         &resume_frame_xml("stream-claimed-unavail", 0),
@@ -4074,6 +4255,7 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
         .expect("store");
 
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     conn.phase = ConnectionPhase::authenticated(&jid);
     let responses = handle_xmpp_frame(
         &resume_frame_xml("stream-unclaimed", 0),

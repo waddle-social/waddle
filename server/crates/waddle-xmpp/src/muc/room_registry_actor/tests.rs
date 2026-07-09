@@ -1,6 +1,7 @@
 use super::*;
 use kameo::actor::Spawn;
 use kameo::error::SendError;
+use waddle_xmpp_core::{Affiliation, Role};
 
 fn test_room_jid(name: &str) -> BareJid {
     format!("{}@muc.example.com", name)
@@ -150,7 +151,7 @@ async fn test_destroy_room() {
     let registry = spawn_registry().await;
     let jid = test_room_jid("doomed");
 
-    registry
+    let actor = registry
         .ask(CreateRoom {
             room_jid: jid.clone(),
             waddle_id: "w-1".to_string(),
@@ -167,12 +168,265 @@ async fn test_destroy_room() {
         .await
         .expect("destroy");
     assert!(removed);
+    tokio::task::yield_now().await;
+    assert!(
+        !actor.is_alive(),
+        "registry removal must hard-kill retained actor refs"
+    );
 
     let exists: bool = registry
         .ask(RoomExists { room_jid: jid })
         .await
         .expect("exists");
     assert!(!exists);
+}
+
+#[tokio::test]
+async fn stale_exact_destroy_cannot_remove_a_replacement_actor() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("destroy-aba");
+    let e1 = registry
+        .ask(CreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create E1");
+    assert!(registry
+        .ask(DestroyRoomExact {
+            room_jid: jid.clone(),
+            expected_actor: e1.clone(),
+        })
+        .await
+        .expect("destroy E1"));
+
+    let e2 = registry
+        .ask(CreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-2".to_string(),
+            channel_id: "c-2".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create E2");
+
+    assert!(
+        !registry
+            .ask(DestroyRoomExact {
+                room_jid: jid.clone(),
+                expected_actor: e1,
+            })
+            .await
+            .expect("stale E1 destroy CAS"),
+        "retained E1 must not remove or release the replacement E2"
+    );
+    let current = registry
+        .ask(GetRoom { room_jid: jid })
+        .await
+        .expect("get E2")
+        .expect("E2 remains registered");
+    assert_eq!(current, e2);
+    assert!(e2.is_alive());
+}
+
+#[tokio::test]
+async fn exact_effect_barrier_blocks_replacement_until_effects_finish() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("destroy-effect-barrier");
+    let e1 = registry
+        .ask(CreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create E1");
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("Alice JID");
+    e1.tell(crate::muc::room_actor::Join {
+        nick: "alice".to_string(),
+        real_jid: alice.clone(),
+        role: Role::Moderator,
+        affiliation: Affiliation::Owner,
+    })
+    .await
+    .expect("queue Alice before owner-destroy seal");
+
+    let (reserved_sender, reserved_receiver) = tokio::sync::oneshot::channel();
+    let (done_sender, done_receiver) = tokio::sync::oneshot::channel();
+    let destroy_registry = registry.clone();
+    let destroy_jid = jid.clone();
+    let destroy_e1 = e1.clone();
+    let destroy = tokio::spawn(async move {
+        destroy_registry
+            .ask(DestroyRoomExactAfterEffects {
+                room_jid: destroy_jid,
+                expected_actor: destroy_e1,
+                effects_reserved: reserved_sender,
+                effects_done: done_receiver,
+            })
+            .await
+    });
+
+    let RoomDestroyEffectsReserved { snapshot } =
+        reserved_receiver.await.expect("E1 effect reservation");
+    assert_eq!(
+        snapshot.room.find_nick_by_real_jid(&alice),
+        Some("alice"),
+        "the reserved final snapshot includes joins committed before the seal"
+    );
+    tokio::task::yield_now().await;
+    assert!(!e1.is_alive(), "the reserved E1 must already be stopped");
+
+    let create_registry = registry.clone();
+    let create_jid = jid.clone();
+    let mut create_e2 = tokio::spawn(async move {
+        create_registry
+            .ask(CreateRoom {
+                room_jid: create_jid,
+                waddle_id: "w-2".to_string(),
+                channel_id: "c-2".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut create_e2)
+            .await
+            .is_err(),
+        "the serialized registry must not process E2 while E1 effects are reserved"
+    );
+
+    done_sender
+        .send(RoomDestroyEffectsDone)
+        .expect("acknowledge E1 effects");
+    assert!(destroy.await.expect("destroy task").expect("destroy E1"));
+    let e2 = create_e2
+        .await
+        .expect("create task")
+        .expect("create E2 after E1 effects");
+    assert!(e2.is_alive());
+}
+
+#[tokio::test]
+async fn dropping_effect_acknowledgement_unblocks_exact_destroy() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("destroy-effect-cancel");
+    let e1 = registry
+        .ask(CreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create E1");
+
+    let (reserved_sender, reserved_receiver) = tokio::sync::oneshot::channel();
+    let (done_sender, done_receiver) = tokio::sync::oneshot::channel();
+    let destroy_registry = registry.clone();
+    let destroy_jid = jid.clone();
+    let destroy = tokio::spawn(async move {
+        destroy_registry
+            .ask(DestroyRoomExactAfterEffects {
+                room_jid: destroy_jid,
+                expected_actor: e1,
+                effects_reserved: reserved_sender,
+                effects_done: done_receiver,
+            })
+            .await
+    });
+
+    let RoomDestroyEffectsReserved { snapshot } =
+        reserved_receiver.await.expect("E1 effect reservation");
+    assert!(snapshot.room.occupants.is_empty());
+    drop(done_sender);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), destroy)
+            .await
+            .expect("destroy must unblock when caller is cancelled")
+            .expect("destroy task")
+            .expect("destroy E1")
+    );
+
+    let e2 = registry
+        .ask(CreateRoom {
+            room_jid: jid,
+            waddle_id: "w-2".to_string(),
+            channel_id: "c-2".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("replacement after cancelled effect caller");
+    assert!(e2.is_alive());
+}
+
+#[tokio::test]
+async fn concurrent_exact_effect_barriers_reserve_effects_once() {
+    let registry = spawn_registry().await;
+    let jid = test_room_jid("destroy-effect-single-winner");
+    let e1 = registry
+        .ask(CreateRoom {
+            room_jid: jid.clone(),
+            waddle_id: "w-1".to_string(),
+            channel_id: "c-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create E1");
+
+    let (reserved_one_sender, reserved_one_receiver) = tokio::sync::oneshot::channel();
+    let (done_one_sender, done_one_receiver) = tokio::sync::oneshot::channel();
+    let first_registry = registry.clone();
+    let first_jid = jid.clone();
+    let first_e1 = e1.clone();
+    let first = tokio::spawn(async move {
+        first_registry
+            .ask(DestroyRoomExactAfterEffects {
+                room_jid: first_jid,
+                expected_actor: first_e1,
+                effects_reserved: reserved_one_sender,
+                effects_done: done_one_receiver,
+            })
+            .await
+    });
+    let RoomDestroyEffectsReserved { snapshot } = reserved_one_receiver
+        .await
+        .expect("first effect reservation");
+    assert!(snapshot.room.occupants.is_empty());
+
+    let (reserved_two_sender, reserved_two_receiver) = tokio::sync::oneshot::channel();
+    let (done_two_sender, done_two_receiver) = tokio::sync::oneshot::channel();
+    let second_registry = registry.clone();
+    let second = tokio::spawn(async move {
+        second_registry
+            .ask(DestroyRoomExactAfterEffects {
+                room_jid: jid,
+                expected_actor: e1,
+                effects_reserved: reserved_two_sender,
+                effects_done: done_two_receiver,
+            })
+            .await
+    });
+
+    done_one_sender
+        .send(RoomDestroyEffectsDone)
+        .expect("complete first effects");
+    assert!(first.await.expect("first task").expect("first destroy"));
+    drop(done_two_sender);
+    assert!(
+        !second
+            .await
+            .expect("second task")
+            .expect("second destroy reply"),
+        "only the exact first barrier may win"
+    );
+    assert!(
+        reserved_two_receiver.await.is_err(),
+        "the losing barrier must never receive effect authority"
+    );
 }
 
 /// #1134: the "did this call create the room?" bit must come from the
@@ -321,15 +575,12 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
 }
 
 /// #1108 second half: a caller that grabbed the ActorRef before the
-/// guarded destroy and sends its join afterwards must get a typed,
-/// retryable refusal (the sealed actor never silently admits an
-/// occupant into a destroyed room), so the join handler can re-run
-/// the registry lookup and respawn the room.
+/// guarded destroy cannot send a join afterwards. Registry removal now
+/// hard-kills every actor incarnation, so the stale ref is stopped rather
+/// than remaining alive merely to return `RoomSealed`.
 #[tokio::test]
-async fn sealed_room_refuses_late_join_with_retryable_error() {
-    use crate::muc::room_actor::{
-        IsDormant, JoinAffiliationGrant, JoinWithAffiliation, RoomActorError, SealGuard,
-    };
+async fn removed_room_hard_kills_stale_actor_ref() {
+    use crate::muc::room_actor::{IsDormant, JoinAffiliationGrant, JoinWithAffiliation, SealGuard};
     use crate::types::Affiliation;
 
     let registry = spawn_registry().await;
@@ -370,10 +621,10 @@ async fn sealed_room_refuses_late_join_with_retryable_error() {
     assert!(
         matches!(
             result,
-            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+            Err(SendError::ActorNotRunning(_)) | Err(SendError::ActorStopped)
         ),
-        "a sealed room actor refuses late joins with the typed retryable \
-         error instead of admitting an occupant into a destroyed room; \
+        "a removed room actor must be stopped instead of admitting an \
+         occupant through a retained ref; \
          got: {result:?}"
     );
 }
@@ -834,12 +1085,12 @@ mod ownership_claims_tests {
     use crate::muc::room_actor::{GetAffiliation, GetConfig};
     use crate::muc::subject::SubjectState;
     use crate::ownership::{
-        ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore,
-        NodeIdentity, ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
+        ClaimEpoch, ClaimError, ClaimGrant, ClaimSnapshot, ClaimStore, Entity, EntityType,
+        InProcessClaimStore, NodeIdentity, ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
     };
     use crate::types::Affiliation;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn foreign_identity() -> NodeIdentity {
@@ -848,6 +1099,162 @@ mod ownership_claims_tests {
 
     fn this_identity() -> NodeIdentity {
         NodeIdentity::new("this-node", "this-epoch")
+    }
+
+    /// Delegates to the production single-node store but injects a bounded
+    /// sequence of release backend failures. This preserves the real global
+    /// epoch allocator, so the regression can prove E2 receives a fresh
+    /// generation after the unresolved E1 release is finally retried.
+    struct ReleaseFailingClaimStore {
+        inner: InProcessClaimStore,
+        fence_allowed: AtomicBool,
+        fence_backend_error: AtomicBool,
+        release_failures_remaining: AtomicUsize,
+        release_calls: AtomicUsize,
+        ensure_claimed_calls: AtomicUsize,
+    }
+
+    impl ReleaseFailingClaimStore {
+        fn new(release_failures: usize) -> Self {
+            Self {
+                inner: InProcessClaimStore::new(),
+                fence_allowed: AtomicBool::new(true),
+                fence_backend_error: AtomicBool::new(false),
+                release_failures_remaining: AtomicUsize::new(release_failures),
+                release_calls: AtomicUsize::new(0),
+                ensure_claimed_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn should_fail_release(&self) -> bool {
+            self.release_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        }
+
+        fn set_fence_allowed(&self, allowed: bool) {
+            self.fence_allowed.store(allowed, Ordering::SeqCst);
+        }
+
+        fn set_fence_backend_error(&self, fail: bool) {
+            self.fence_backend_error.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ClaimStore for ReleaseFailingClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.ensure_claimed_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.ensure_claimed(entity, me).await
+        }
+
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            if self.fence_backend_error.load(Ordering::SeqCst) {
+                return Err(ClaimError::Backend(
+                    "injected room-claim fence failure".to_string(),
+                ));
+            }
+            if !self.fence_allowed.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            self.inner.fence(entity, me, mine).await
+        }
+
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.release_calls.fetch_add(1, Ordering::SeqCst);
+            if self.should_fail_release() {
+                return Err(ClaimError::Backend(
+                    "injected room-claim release failure".to_string(),
+                ));
+            }
+            self.inner.release(entity, me, mine).await
+        }
+
+        async fn release_many(&self, grants: &[ClaimGrant]) -> Result<(), ClaimError> {
+            self.inner.release_many(grants).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_grant_cannot_overwrite_pending_exact_release_evidence() {
+        let mut registry = RoomRegistryActor::new(
+            "rooms.test".to_string(),
+            OccupantIdSecret::new(vec![0x42; 32]).expect("valid test secret"),
+        );
+        let failing_store = Arc::new(ReleaseFailingClaimStore::new(1));
+        registry.claim_store = failing_store.clone();
+
+        let jid = test_room_jid("pending-release-invariant");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let pending = ClaimGrant::new(entity.clone(), this_identity(), ClaimEpoch(7));
+        let unexpected = ClaimGrant::new(entity, foreign_identity(), ClaimEpoch(8));
+        registry
+            .pending_claim_releases
+            .insert(jid.clone(), pending.clone());
+
+        registry.release_room_claim(&jid, unexpected).await;
+
+        assert_eq!(registry.pending_claim_releases.get(&jid), Some(&pending));
+        assert_eq!(failing_store.release_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -901,6 +1308,239 @@ mod ownership_claims_tests {
             "DestroyRoom must release the Postgres claim (element 7's \
              'graceful release')"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_effect_barrier_demotes_room_without_effects_when_final_claim_is_lost() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(ReleaseFailingClaimStore::new(0));
+        let claim_store: Arc<dyn ClaimStore> = store.clone();
+        registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire claim store");
+
+        let jid = test_room_jid("destroy-final-fence-refusal");
+        let e1 = registry
+            .ask(CreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create E1");
+        store.set_fence_allowed(false);
+
+        let (reserved_sender, reserved_receiver) = tokio::sync::oneshot::channel();
+        let (_done_sender, done_receiver) = tokio::sync::oneshot::channel();
+        assert!(!registry
+            .ask(DestroyRoomExactAfterEffects {
+                room_jid: jid.clone(),
+                expected_actor: e1.clone(),
+                effects_reserved: reserved_sender,
+                effects_done: done_receiver,
+            })
+            .await
+            .expect("barrier refusal"));
+        assert!(
+            reserved_receiver.await.is_err(),
+            "a failed final claim proof must not authorize any effect"
+        );
+        let current = registry
+            .ask(GetRoom { room_jid: jid })
+            .await
+            .expect("get after E1 demotion");
+        assert!(current.is_none(), "the definitively deposed E1 is removed");
+        tokio::task::yield_now().await;
+        assert!(!e1.is_alive());
+    }
+
+    #[tokio::test]
+    async fn exact_effect_barrier_retains_room_on_final_claim_backend_uncertainty() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(ReleaseFailingClaimStore::new(0));
+        let claim_store: Arc<dyn ClaimStore> = store.clone();
+        registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire claim store");
+
+        let jid = test_room_jid("destroy-final-fence-error");
+        let e1 = registry
+            .ask(CreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create E1");
+        store.set_fence_backend_error(true);
+
+        let (reserved_sender, reserved_receiver) = tokio::sync::oneshot::channel();
+        let (_done_sender, done_receiver) = tokio::sync::oneshot::channel();
+        assert!(!registry
+            .ask(DestroyRoomExactAfterEffects {
+                room_jid: jid.clone(),
+                expected_actor: e1.clone(),
+                effects_reserved: reserved_sender,
+                effects_done: done_receiver,
+            })
+            .await
+            .expect("barrier uncertainty"));
+        assert!(
+            reserved_receiver.await.is_err(),
+            "backend uncertainty must not authorize any effect"
+        );
+        let current = registry
+            .ask(GetRoom { room_jid: jid })
+            .await
+            .expect("get retained E1")
+            .expect("uncertain E1 remains registered");
+        assert_eq!(current, e1);
+        assert!(e1.is_alive());
+        e1.ask(crate::muc::room_actor::Join {
+            nick: "alice".to_string(),
+            real_jid: "alice@example.com/web".parse().expect("Alice JID"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("backend uncertainty must retain E1 unsealed and joinable");
+    }
+
+    #[tokio::test]
+    async fn unresolved_exact_release_blocks_replacement_until_old_grant_is_released() {
+        let registry = spawn_registry().await;
+        // The first failure occurs during DestroyRoom; the second occurs on
+        // the first replacement attempt. Only the following retry succeeds.
+        let failing_store = Arc::new(ReleaseFailingClaimStore::new(2));
+        let claim_store: Arc<dyn ClaimStore> = failing_store.clone();
+        let first_identity = this_identity();
+        let replacement_identity = NodeIdentity::new("this-node", "replacement-epoch");
+        let shared_identity = SharedNodeIdentity::new(first_identity.clone());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: shared_identity.clone(),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("release-failure");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let first_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create E1")
+            .actor_ref;
+        let first_claim = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read E1 claim")
+            .expect("E1 claim exists");
+
+        assert!(registry
+            .ask(DestroyRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("destroy E1"));
+        assert_eq!(failing_store.release_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("read unresolved E1 claim")
+                .expect("failed release must leave E1 claim"),
+            first_claim
+        );
+
+        // With the same current identity, the old implementation would call
+        // ensure_claimed here, self-reacquire E1's surviving row, and spawn
+        // E2 under the exact same epoch. A second release failure must stop
+        // before acquisition instead.
+        let blocked = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await;
+        assert!(matches!(
+            blocked,
+            Err(SendError::HandlerError(
+                RoomRegistryError::ClaimReleasePending(ref room)
+            )) if *room == jid
+        ));
+        assert_eq!(
+            failing_store.ensure_claimed_calls.load(Ordering::SeqCst),
+            1,
+            "a replacement must not call ensure_claimed while E1's release is unresolved"
+        );
+        assert_eq!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("read still-unresolved E1 claim")
+                .expect("E1 claim must still exist after failed retry"),
+            first_claim
+        );
+
+        // Now rotate the registry identity and run terminal self-fence
+        // demotion. Demotion must retain already-pending release evidence,
+        // and the successful retry must still carry E1's captured owner
+        // rather than using this newer identity for an epoch-gated no-op.
+        shared_identity.set(replacement_identity.clone());
+        assert_eq!(
+            registry
+                .ask(DemoteAllRooms)
+                .await
+                .expect("demote after identity rotation"),
+            0
+        );
+        let replacement = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("release E1 and create E2");
+        let replacement_claim = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read E2 claim")
+            .expect("E2 claim exists");
+
+        assert_ne!(replacement.actor_ref, first_actor);
+        assert_eq!(replacement_claim.owner, replacement_identity);
+        assert!(
+            replacement_claim.claim_epoch > first_claim.claim_epoch,
+            "E2 must receive a globally fresh epoch rather than self-reacquiring E1's epoch"
+        );
+        assert_eq!(failing_store.release_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(failing_store.ensure_claimed_calls.load(Ordering::SeqCst), 2);
     }
 
     /// ADR-0017 Phase 3 Slice 7 FIX 3 (council-adjudicated): `live_room`'s
@@ -1150,12 +1790,16 @@ mod ownership_claims_tests {
 
         async fn release_many(
             &self,
-            _entities: &[Entity],
-            me: &NodeIdentity,
+            grants: &[crate::ownership::ClaimGrant],
         ) -> Result<(), ClaimError> {
             let mut state = self.state.lock().expect("lock");
-            if matches!(&*state, Some((owner, _)) if owner == me) {
-                *state = None;
+            if let Some((owner, epoch)) = &*state {
+                if grants
+                    .iter()
+                    .any(|grant| grant.owner == *owner && grant.epoch == *epoch)
+                {
+                    *state = None;
+                }
             }
             Ok(())
         }

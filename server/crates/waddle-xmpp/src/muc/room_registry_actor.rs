@@ -12,30 +12,31 @@ use kameo::actor::{ActorRef, Spawn};
 use kameo::message::Context;
 use kameo::Actor;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{
-    HydrateDurableRecipients, IsSealed, RestoreDurableRoomState, RoomActor, SealGuard,
-    SealIfInactive,
+    BindRoomClaimFence, HydrateDurableRecipients, IsSealed, RestoreDurableRoomState, RoomActor,
+    RoomSnapshot, SealForOwnerDestroy, SealGuard, SealIfInactive,
 };
-use super::{MucRoom, RoomConfig};
+use super::{MucRoom, RoomClaimFenceContext, RoomConfig};
 use crate::metrics;
 use crate::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
-    RolloutBackoff, SharedNodeIdentity, StalePredicate,
+    ClaimEpoch, ClaimError, ClaimGrant, ClaimStore, Entity, EntityType, InProcessClaimStore,
+    NodeIdentity, RolloutBackoff, SharedNodeIdentity, StalePredicate,
 };
 use crate::xep::xep0421::OccupantIdSecret;
 
-/// A locally-spawned room's actor ref plus the Postgres claim epoch this
-/// node acquired/won it under (ADR-0017 Phase 3 Slice 7). The epoch
-/// travels with the actor ref so [`RoomRegistryActor::DestroyRoom`] can
-/// release the exact claim this incarnation holds.
+/// A locally-spawned room's actor ref plus the exact Postgres claim grant
+/// this actor incarnation was spawned under. The owner identity must travel
+/// with the epoch: [`SharedNodeIdentity`] can rotate after self-fencing, and
+/// using its later value to release this actor's claim would turn an intended
+/// release into a silent epoch-gated no-op.
 #[derive(Clone)]
 struct RoomEntry {
     actor_ref: ActorRef<RoomActor>,
-    claim_epoch: ClaimEpoch,
+    claim_grant: ClaimGrant,
 }
 
 /// Actor that owns the mapping from room JIDs to per-room actors.
@@ -46,6 +47,11 @@ struct RoomEntry {
 pub struct RoomRegistryActor {
     rooms: HashMap<BareJid, RoomEntry>,
     poisoned_rooms: HashSet<BareJid>,
+    /// Exact grants whose terminal release returned backend uncertainty.
+    /// A room cannot be acquired or respawned while an entry remains here:
+    /// otherwise `ensure_claimed` could self-reacquire the surviving claim
+    /// and spawn E2 under E1's fencing epoch.
+    pending_claim_releases: HashMap<BareJid, ClaimGrant>,
     muc_domain: String,
     /// Per-deployment XEP-0421 occupant-id HMAC key. Forwarded to every
     /// `RoomActor` at spawn so all rooms in this deployment share the
@@ -88,6 +94,8 @@ pub enum RoomRegistryError {
     RoomAlreadyExists(BareJid),
     #[error("room actor state for {0} was lost; explicit destroy/recreate is required")]
     RoomActorStateLost(BareJid),
+    #[error("room {0}'s previous ownership claim release is still unresolved")]
+    ClaimReleasePending(BareJid),
     /// A request to the registry actor exceeded
     /// [`ROOM_REGISTRY_REPLY_TIMEOUT`](crate::muc::room_registry_handle::ROOM_REGISTRY_REPLY_TIMEOUT)
     /// without a reply. Surfaced (instead of hanging the caller indefinitely)
@@ -119,6 +127,7 @@ impl RoomRegistryActor {
         Self {
             rooms: HashMap::new(),
             poisoned_rooms: HashSet::new(),
+            pending_claim_releases: HashMap::new(),
             muc_domain,
             occupant_id_secret,
             membership_source: None,
@@ -139,8 +148,9 @@ impl RoomRegistryActor {
 
     /// Acquire this room's Postgres claim (ADR-0017 Phase 3 Slice 7),
     /// stealing from a dead owner (re-election) when the current owner's
-    /// own node lease is no longer fresh. Returns the epoch this node now
-    /// holds the claim under.
+    /// own node lease is no longer fresh. Returns the exact entity, owner
+    /// incarnation, and epoch this actor must remain bound to across every
+    /// later identity rotation.
     ///
     /// A live foreign owner (steal not applicable) is reported as
     /// [`RoomRegistryError::ClaimHeldByAnotherNode`] rather than
@@ -149,20 +159,21 @@ impl RoomRegistryActor {
     async fn acquire_room_claim(
         &self,
         room_jid: &BareJid,
-    ) -> Result<ClaimEpoch, RoomRegistryError> {
+    ) -> Result<ClaimGrant, RoomRegistryError> {
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
         let identity = self.node_identity.current();
-        match self.claim_store.ensure_claimed(&entity, &identity).await {
-            Ok(epoch) => Ok(epoch),
+        let epoch = match self.claim_store.ensure_claimed(&entity, &identity).await {
+            Ok(epoch) => epoch,
             Err(ClaimError::AlreadyClaimed) => {
                 self.steal_from_dead_owner(&entity, room_jid, &identity)
-                    .await
+                    .await?
             }
             Err(error) => {
                 warn!(room = %room_jid, %error, "room claim acquisition failed");
-                Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()))
+                return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()));
             }
-        }
+        };
+        Ok(ClaimGrant::new(entity, identity, epoch))
     }
 
     /// The re-election path: `entity`'s claim is held by another node —
@@ -272,12 +283,28 @@ impl RoomRegistryActor {
         waddle_id: String,
         channel_id: String,
         config: RoomConfig,
-        claim_epoch: ClaimEpoch,
+        claim_grant: ClaimGrant,
     ) -> ActorRef<RoomActor> {
+        debug_assert_eq!(
+            claim_grant.entity,
+            Entity::new(EntityType::RoomActor, room_jid.to_string())
+        );
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
         let actor_ref = RoomActor::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
         if let Some(store) = &self.durable_store {
-            store.record_claim_epoch(&room_jid, claim_epoch);
+            store.record_claim_epoch(&room_jid, claim_grant.epoch);
+            let fence = RoomClaimFenceContext {
+                entity: claim_grant.entity.clone(),
+                epoch: claim_grant.epoch,
+                owner: claim_grant.owner.clone(),
+            };
+            if let Err(error) = actor_ref.tell(BindRoomClaimFence { fence }).await {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "failed to bind exact room-actor claim fence"
+                );
+            }
             if let Err(error) = actor_ref
                 .tell(RestoreDurableRoomState {
                     store: Arc::clone(store),
@@ -311,7 +338,7 @@ impl RoomRegistryActor {
             room_jid,
             RoomEntry {
                 actor_ref: actor_ref.clone(),
-                claim_epoch,
+                claim_grant,
             },
         );
         actor_ref
@@ -326,14 +353,15 @@ impl RoomRegistryActor {
     /// epoch needed to release it, once `self.rooms.remove` ran) until
     /// this node's own liveness lease eventually looked stale to another
     /// node's `OwnerStale` steal. This capture-then-release closes that
-    /// gap: the claim epoch is read BEFORE the entry is removed, and
-    /// [`Self::release_room_claim`] runs on it — the exact same
-    /// best-effort, epoch-gated release [`DestroyRoom`]'s handler already
-    /// uses for the graceful-destroy path.
+    /// gap: the full claim grant is captured BEFORE the entry is removed,
+    /// and [`Self::release_room_claim`] retains it across backend failure —
+    /// the exact same fail-closed release [`DestroyRoom`]'s handler uses for
+    /// the graceful-destroy path.
     async fn live_room(
         &mut self,
         room_jid: &BareJid,
     ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
+        self.retry_pending_claim_release(room_jid).await?;
         if self.poisoned_rooms.contains(room_jid) {
             return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
         }
@@ -341,7 +369,7 @@ impl RoomRegistryActor {
             if entry.actor_ref.is_alive() {
                 return Ok(Some(entry.actor_ref.clone()));
             }
-            let claim_epoch = entry.claim_epoch;
+            let claim_grant = entry.claim_grant.clone();
             self.rooms.remove(room_jid);
             self.poisoned_rooms.insert(room_jid.clone());
             warn!(
@@ -354,29 +382,77 @@ impl RoomRegistryActor {
             // claim (this node holds it in Postgres but has no way left
             // to act on it), not merely a "fail fast and let the caller
             // retry" situation.
-            self.release_room_claim(room_jid, claim_epoch).await;
+            self.release_room_claim(room_jid, claim_grant).await;
             return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
         }
         Ok(None)
     }
 
-    /// Best-effort release of `room_jid`'s Postgres claim (dormancy
-    /// eviction / explicit destroy, element 7's "graceful release").
-    /// Epoch-gated and best-effort per [`ClaimStore::release`]'s own
-    /// contract — a claim already stolen out from under this node is a
-    /// no-op, not an error.
-    async fn release_room_claim(&self, room_jid: &BareJid, claim_epoch: ClaimEpoch) {
-        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
-        let identity = self.node_identity.current();
-        if let Err(error) = self
+    /// Queue and attempt an exact room-claim release. A backend error is
+    /// uncertainty, not permission to forget the grant: the surviving row
+    /// may still belong to the removed actor incarnation. Keeping it blocks
+    /// replacement until a retry proves the exact release completed (or was
+    /// already made irrelevant by a newer exact grant).
+    async fn release_room_claim(&mut self, room_jid: &BareJid, claim_grant: ClaimGrant) {
+        debug_assert_eq!(
+            claim_grant.entity,
+            Entity::new(EntityType::RoomActor, room_jid.to_string())
+        );
+        if let Some(existing) = self.pending_claim_releases.get(room_jid) {
+            if existing != &claim_grant {
+                error!(
+                    room = %room_jid,
+                    pending_owner = %existing.owner.node_id,
+                    pending_owner_epoch = %existing.owner.node_epoch,
+                    pending_claim_epoch = existing.epoch.0,
+                    rejected_owner = %claim_grant.owner.node_id,
+                    rejected_owner_epoch = %claim_grant.owner.node_epoch,
+                    rejected_claim_epoch = claim_grant.epoch.0,
+                    "refused to overwrite unresolved room-claim release evidence"
+                );
+            }
+        } else {
+            self.pending_claim_releases
+                .insert(room_jid.clone(), claim_grant);
+        }
+        let _ = self.retry_pending_claim_release(room_jid).await;
+    }
+
+    /// Retry the exact unresolved release before any room lookup can proceed
+    /// to acquisition. The captured owner is deliberate: the registry's
+    /// shared current identity may have rotated since E1 acquired the claim.
+    async fn retry_pending_claim_release(
+        &mut self,
+        room_jid: &BareJid,
+    ) -> Result<(), RoomRegistryError> {
+        let Some(claim_grant) = self.pending_claim_releases.get(room_jid).cloned() else {
+            return Ok(());
+        };
+        match self
             .claim_store
-            .release(&entity, &identity, claim_epoch)
+            .release(&claim_grant.entity, &claim_grant.owner, claim_grant.epoch)
             .await
         {
-            warn!(room = %room_jid, %error, "failed to release room ownership claim");
-        }
-        if let Some(store) = &self.durable_store {
-            store.forget_claim_epoch(room_jid);
+            Ok(()) => {
+                self.pending_claim_releases.remove(room_jid);
+                if !self.rooms.contains_key(room_jid) {
+                    if let Some(store) = &self.durable_store {
+                        store.forget_claim_epoch(room_jid);
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    owner = %claim_grant.owner.node_id,
+                    owner_epoch = %claim_grant.owner.node_epoch,
+                    claim_epoch = claim_grant.epoch.0,
+                    %error,
+                    "room ownership claim release remains unresolved; replacement is fenced"
+                );
+                Err(RoomRegistryError::ClaimReleasePending(room_jid.clone()))
+            }
         }
     }
 }
@@ -481,7 +557,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
             });
         }
 
-        let claim_epoch = self.acquire_room_claim(&msg.room_jid).await?;
+        let claim_grant = self.acquire_room_claim(&msg.room_jid).await?;
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
         self.poisoned_rooms.remove(&msg.room_jid);
         let actor_ref = self
@@ -490,7 +566,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
                 msg.waddle_id,
                 msg.channel_id,
                 msg.config,
-                claim_epoch,
+                claim_grant,
             )
             .await;
         Ok(RoomAcquisition {
@@ -534,10 +610,10 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
             ..RoomConfig::default()
         };
 
-        let claim_epoch = self.acquire_room_claim(&msg.room_jid).await?;
+        let claim_grant = self.acquire_room_claim(&msg.room_jid).await?;
         self.poisoned_rooms.remove(&msg.room_jid);
         let actor_ref = self
-            .spawn_room(msg.room_jid, waddle_id, channel_id, config, claim_epoch)
+            .spawn_room(msg.room_jid, waddle_id, channel_id, config, claim_grant)
             .await;
         Ok(RoomAcquisition {
             actor_ref,
@@ -566,7 +642,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
             return Err(RoomRegistryError::RoomAlreadyExists(msg.room_jid));
         }
 
-        let claim_epoch = self.acquire_room_claim(&msg.room_jid).await?;
+        let claim_grant = self.acquire_room_claim(&msg.room_jid).await?;
         info!(room = %msg.room_jid, "Creating new room");
         self.poisoned_rooms.remove(&msg.room_jid);
         let actor_ref = self
@@ -575,7 +651,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
                 msg.waddle_id,
                 msg.channel_id,
                 msg.config,
-                claim_epoch,
+                claim_grant,
             )
             .await;
         Ok(actor_ref)
@@ -600,16 +676,12 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         let removed_entry = self.rooms.remove(&msg.room_jid);
         let removed_room = removed_entry.is_some();
         let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
-        // ADR-0017 Phase 3 Slice 7: release the Postgres claim on every
-        // terminal path (explicit destroy, dormancy-eviction sweep) —
-        // "graceful release" per element 7. A poisoned-only removal (the
-        // actor died and was already detected by `live_room`) has no
-        // known epoch to release; the claim is instead reclaimed by
-        // another node's `OwnerStale` steal once this node's own liveness
-        // lease is what it takes to look stale (bounded residual gap,
-        // same class as FIX 6e's fail-open-detach gap).
+        // Release the exact grant on every terminal path. A poisoned-only
+        // removal keeps any unresolved grant in `pending_claim_releases`;
+        // clearing the poison is not allowed to discard that evidence.
         if let Some(entry) = removed_entry {
-            self.release_room_claim(&msg.room_jid, entry.claim_epoch)
+            entry.actor_ref.kill();
+            self.release_room_claim(&msg.room_jid, entry.claim_grant)
                 .await;
         }
         if removed_room || removed_poison {
@@ -619,6 +691,211 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
             warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
             false
         }
+    }
+}
+
+/// Destroy only the exact actor incarnation observed by the caller.
+///
+/// Long-running owner/moderation flows may retain E1 across snapshot or
+/// storage awaits while the registry advances the same room to E2. This
+/// actor-ref CAS prevents the stale flow from removing E2 or releasing E2's
+/// claim when it eventually reaches its destroy step.
+pub struct DestroyRoomExact {
+    pub room_jid: BareJid,
+    pub expected_actor: ActorRef<RoomActor>,
+}
+
+impl kameo::message::Message<DestroyRoomExact> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyRoomExact,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let is_expected_incarnation = self
+            .rooms
+            .get(&msg.room_jid)
+            .is_some_and(|entry| entry.actor_ref == msg.expected_actor);
+        if !is_expected_incarnation {
+            warn!(
+                room = %msg.room_jid,
+                "Refused exact room destroy because the registry now holds a different actor incarnation"
+            );
+            return false;
+        }
+
+        let Some(entry) = self.rooms.remove(&msg.room_jid) else {
+            return false;
+        };
+        entry.actor_ref.kill();
+        self.poisoned_rooms.remove(&msg.room_jid);
+        self.release_room_claim(&msg.room_jid, entry.claim_grant)
+            .await;
+        info!(room = %msg.room_jid, "Destroyed exact room actor incarnation");
+        true
+    }
+}
+
+/// Typed signal that the registry removed and killed the exact actor named by
+/// an owner-destroy flow while retaining its claim grant.
+///
+/// The registry does not process another room message until it receives
+/// [`RoomDestroyEffectsDone`] (or observes that signal's sender was dropped),
+/// so no replacement actor can appear while the caller emits the final
+/// XEP-0045 unavailable-presence and SFU effects.
+#[derive(Debug, Clone)]
+pub struct RoomDestroyEffectsReserved {
+    pub snapshot: RoomSnapshot,
+}
+
+/// Typed acknowledgement that the exact owner-destroy effects were emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomDestroyEffectsDone;
+
+/// Destroy one exact room actor while serializing its external effects with
+/// replacement admission.
+///
+/// A plain check-then-destroy leaves a gap: E1 can pass its ownership check,
+/// another request can replace it with E2, and E1 can still emit unavailable
+/// presence or tear down E2's SFU participant before its final actor-ref CAS
+/// loses. This message makes the registry itself the barrier:
+///
+/// 1. actor-ref-CAS and re-prove E1's exact claim;
+/// 2. seal E1's admission mailbox and capture its final occupant snapshot;
+/// 3. remove and kill E1 while retaining its exact claim grant;
+/// 4. notify the caller that it alone may emit the snapshot's effects;
+/// 5. keep the registry mailbox blocked until the caller acknowledges the
+///    effects (dropping the acknowledgement sender also unblocks it);
+/// 6. release E1's exact claim before serving any queued E2 admission.
+pub struct DestroyRoomExactAfterEffects {
+    pub room_jid: BareJid,
+    pub expected_actor: ActorRef<RoomActor>,
+    pub effects_reserved: tokio::sync::oneshot::Sender<RoomDestroyEffectsReserved>,
+    pub effects_done: tokio::sync::oneshot::Receiver<RoomDestroyEffectsDone>,
+}
+
+impl kameo::message::Message<DestroyRoomExactAfterEffects> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyRoomExactAfterEffects,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(entry) = self.rooms.get(&msg.room_jid).cloned() else {
+            return false;
+        };
+        if entry.actor_ref != msg.expected_actor {
+            warn!(
+                room = %msg.room_jid,
+                "Refused effect-serialized room destroy because the registry now holds a different actor incarnation"
+            );
+            return false;
+        }
+
+        // First re-prove the registry entry's exact grant against the claim
+        // store. Backend uncertainty leaves E1 untouched and unsealed; a
+        // definitive loss demotes it without effects.
+        match self
+            .claim_store
+            .fence(
+                &entry.claim_grant.entity,
+                &entry.claim_grant.owner,
+                entry.claim_grant.epoch,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    room = %msg.room_jid,
+                    "Refused effect-serialized room destroy because its exact claim is no longer authoritative; demoting E1 without effects"
+                );
+                let Some(entry) = self.rooms.remove(&msg.room_jid) else {
+                    return false;
+                };
+                entry.actor_ref.kill();
+                self.poisoned_rooms.remove(&msg.room_jid);
+                self.release_room_claim(&msg.room_jid, entry.claim_grant)
+                    .await;
+                return false;
+            }
+            Err(error) => {
+                warn!(
+                    room = %msg.room_jid,
+                    %error,
+                    "Refused effect-serialized room destroy because exact claim authority could not be verified"
+                );
+                return false;
+            }
+        }
+
+        // The actor's mutation gate is the final cross-node proof and its
+        // mailbox is the final admission boundary. Joins queued before this
+        // message are included in the returned snapshot; later joins fail
+        // with RoomSealed. After this succeeds there is no fallible authority
+        // check before E1 is removed and the effect reservation is granted.
+        let snapshot = match entry.actor_ref.ask(SealForOwnerDestroy).await {
+            Ok(snapshot) => snapshot,
+            Err(kameo::error::SendError::HandlerError(
+                super::room_actor::RoomActorError::NotOwner,
+            )) => {
+                warn!(
+                    room = %msg.room_jid,
+                    "Owner-destroy seal proved E1 lost ownership; demoting without effects"
+                );
+                let Some(entry) = self.rooms.remove(&msg.room_jid) else {
+                    return false;
+                };
+                entry.actor_ref.kill();
+                self.poisoned_rooms.remove(&msg.room_jid);
+                self.release_room_claim(&msg.room_jid, entry.claim_grant)
+                    .await;
+                return false;
+            }
+            Err(error) => {
+                warn!(
+                    room = %msg.room_jid,
+                    ?error,
+                    "Owner-destroy could not seal E1 and capture its final occupant snapshot"
+                );
+                return false;
+            }
+        };
+
+        let Some(entry) = self.rooms.remove(&msg.room_jid) else {
+            return false;
+        };
+        entry.actor_ref.kill();
+        self.poisoned_rooms.remove(&msg.room_jid);
+
+        if msg
+            .effects_reserved
+            .send(RoomDestroyEffectsReserved { snapshot })
+            .is_ok()
+        {
+            match msg.effects_done.await {
+                Ok(RoomDestroyEffectsDone) => {}
+                Err(_) => debug!(
+                    room = %msg.room_jid,
+                    "Owner-destroy caller ended before acknowledging effects; completing exact claim release"
+                ),
+            }
+        } else {
+            debug!(
+                room = %msg.room_jid,
+                "Owner-destroy caller ended before accepting its effect reservation"
+            );
+        }
+
+        self.release_room_claim(&msg.room_jid, entry.claim_grant)
+            .await;
+        info!(
+            room = %msg.room_jid,
+            "Destroyed exact room actor after serialized owner-destroy effects"
+        );
+        true
     }
 }
 
@@ -671,12 +948,13 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
             Ok(true) => {
                 self.rooms.remove(&msg.room_jid);
                 self.poisoned_rooms.remove(&msg.room_jid);
+                entry.actor_ref.kill();
                 // ADR-0017 Phase 3 Slice 7: this is a terminal removal from
                 // `self.rooms` exactly like `DestroyRoom` — release the
                 // Postgres claim here too, or every guarded dormancy-evicted
                 // room leaks its claim until this node's own liveness lease
                 // looks stale to another node's `OwnerStale` steal.
-                self.release_room_claim(&msg.room_jid, entry.claim_epoch)
+                self.release_room_claim(&msg.room_jid, entry.claim_grant)
                     .await;
                 info!(room = %msg.room_jid, "Destroyed inactive room (guarded)");
                 true
@@ -734,7 +1012,7 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
             self.poisoned_rooms.remove(&msg.room_jid);
             // ADR-0017 Phase 3 Slice 7: same terminal-removal claim release
             // as the `live_room` dead-actor path and `DestroyRoom`.
-            self.release_room_claim(&msg.room_jid, entry.claim_epoch)
+            self.release_room_claim(&msg.room_jid, entry.claim_grant)
                 .await;
             info!(room = %msg.room_jid, "Reaped dead room actor during sealed-room purge");
             return true;
@@ -749,9 +1027,10 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
             Ok(true) => {
                 self.rooms.remove(&msg.room_jid);
                 self.poisoned_rooms.remove(&msg.room_jid);
+                entry.actor_ref.kill();
                 // ADR-0017 Phase 3 Slice 7: same terminal-removal claim
                 // release as the guarded-destroy path above.
-                self.release_room_claim(&msg.room_jid, entry.claim_epoch)
+                self.release_room_claim(&msg.room_jid, entry.claim_grant)
                     .await;
                 info!(
                     room = %msg.room_jid,
@@ -830,6 +1109,70 @@ impl kameo::message::Message<ListRooms> for RoomRegistryActor {
             }
         }
         Ok(live_rooms)
+    }
+}
+
+/// Forget and hard-kill every locally held room actor after this entire node
+/// loses its cluster lease. The registry map is drained atomically in one
+/// mailbox message so terminal fencing is not serialized into one bounded ask
+/// per room. Claims are intentionally not released under the fenced identity.
+pub struct DemoteAllRooms;
+
+impl kameo::message::Message<DemoteAllRooms> for RoomRegistryActor {
+    type Reply = usize;
+
+    async fn handle(
+        &mut self,
+        _msg: DemoteAllRooms,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let rooms = std::mem::take(&mut self.rooms);
+        let count = rooms.len();
+        self.poisoned_rooms.clear();
+        // Do not clear `pending_claim_releases`: those grants already belong
+        // to removed actors and retain the exact pre-rotation owner needed
+        // for a safe retry after this self-fence changes node identity.
+        for entry in rooms.into_values() {
+            entry.actor_ref.kill();
+        }
+        debug!(count, "Demoted every local RoomActor after node self-fence");
+        count
+    }
+}
+
+/// Demote one room only when the relay request names the exact local node
+/// incarnation that held the superseded claim and the local actor has not
+/// already advanced to the carried winning claim epoch (or beyond).
+pub struct DemoteRoomIfSuperseded {
+    pub room_jid: BareJid,
+    pub expected_owner: NodeIdentity,
+    pub new_epoch: ClaimEpoch,
+}
+
+impl kameo::message::Message<DemoteRoomIfSuperseded> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DemoteRoomIfSuperseded,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let should_demote = self.rooms.get(&msg.room_jid).is_some_and(|entry| {
+            entry.claim_grant.owner == msg.expected_owner && entry.claim_grant.epoch < msg.new_epoch
+        });
+        if !should_demote {
+            return false;
+        }
+        let Some(entry) = self.rooms.remove(&msg.room_jid) else {
+            return false;
+        };
+        entry.actor_ref.kill();
+        debug!(
+            room = %msg.room_jid,
+            winning_epoch = msg.new_epoch.0,
+            "Demoted superseded local RoomActor"
+        );
+        true
     }
 }
 

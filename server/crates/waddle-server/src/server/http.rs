@@ -463,6 +463,13 @@ async fn create_websocket_state(
     if let Some(user_local_claims) = &state.clustering_claims.user_local_claims {
         user_local_claims.wire(user_registry.clone());
         user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+        if let Some(bridge) = state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        {
+            user_local_claims.wire_remote_resource_bridge(Arc::clone(bridge));
+        }
     }
 
     // Read the MUC room registry and PubSub storage off the shared
@@ -768,10 +775,14 @@ async fn create_websocket_state(
         &state.clustering_claims.ordered_relay_delivery_bridge,
         state.clustering_claims.claim_pair(),
     ) {
-        if let Some(node_lease) = &state.clustering_claims.node_lease {
+        if let (Some(node_lease), Some(remote_resource_admission_store)) = (
+            &state.clustering_claims.node_lease,
+            &state.clustering_claims.remote_resource_admission_store,
+        ) {
             bridge.wire(Arc::new(
                 crate::clustering::route_bridge::OrderedRelayDeliveryServices {
                     claim_store,
+                    remote_resource_admission_store: Arc::clone(remote_resource_admission_store),
                     allowlist_store: Arc::new(
                         crate::clustering::allowlist::PostgresAllowlistStore::new(
                             state.db_pool.global().clone(),
@@ -791,7 +802,9 @@ async fn create_websocket_state(
                 },
             ));
         } else {
-            warn!("ordered relay delivery bridge not wired: clustering node lease handle missing");
+            warn!(
+                "ordered relay delivery bridge not wired: clustering control-plane handle missing"
+            );
         }
     }
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(

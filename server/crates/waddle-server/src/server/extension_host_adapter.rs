@@ -121,7 +121,7 @@ impl ExtensionHostAdapter {
                 let room_sender = self.plugin_actor_jid(&invocation.plugin_id)?;
                 let result = interpret::dispatch_extension_bot_groupchat_response(
                     &deps,
-                    room,
+                    room.clone(),
                     room_sender,
                     response,
                 )
@@ -131,6 +131,9 @@ impl ExtensionHostAdapter {
                     return Err(ExtensionHostAdapterError::Protocol(
                         "bot groupchat dispatch requested transport close".to_string(),
                     ));
+                }
+                if result.outcome.room_ownership_uncertain {
+                    return Err(ExtensionHostAdapterError::RoomOwnershipUncertain(room));
                 }
                 Ok(result.stanza_id)
             }
@@ -265,6 +268,25 @@ impl ExtensionHostAdapter {
             inbox_storage: Some(&self.state.deps.protocol.inbox_storage),
             extension_manager: Some(&self.state.deps.protocol.extension_manager),
             room_registry: Some(&self.state.deps.protocol.room_registry),
+            room_actor_incarnation: None,
+            #[cfg(feature = "clustering")]
+            muc_durable_store: self
+                .state
+                .deps
+                .app_state
+                .clustering_claims
+                .muc_durable_store
+                .as_ref(),
+            #[cfg(feature = "clustering")]
+            clustered_muc_ownership_required: self
+                .state
+                .deps
+                .app_state
+                .clustering_claims
+                .claim_store
+                .is_some(),
+            #[cfg(feature = "clustering")]
+            room_claim_fence: None,
             web_socket_state: Some(&self.state),
             authenticated_session: session,
             local_domain: self.state.deps.auth_state.xmpp_domain.as_str(),

@@ -123,6 +123,10 @@ async fn node_registry_with_claim_store(
     claim_store: Arc<dyn ClaimStore>,
     asker: Option<Arc<dyn RemoteResumeAsker>>,
 ) -> (Arc<InMemorySmSessionRegistry>, SharedNodeIdentity) {
+    PostgresClaimStore::new(db.clone())
+        .register(&identity, None)
+        .await
+        .expect("register simulated node incarnation");
     let shared_identity = SharedNodeIdentity::new(identity);
     let persistence = PostgresFencedSmPersistence::open(
         db.clone(),
@@ -206,7 +210,8 @@ impl FakeAsker {
 impl RemoteResumeAsker for FakeAsker {
     async fn ask_remote_detach(
         &self,
-        _node_id: &str,
+        _expected_owner: &NodeIdentity,
+        _observed: ClaimEpoch,
         _stream_id: &str,
         requester_bare_jid: &BareJid,
     ) -> RemoteResumeAskOutcome {
@@ -236,7 +241,8 @@ struct UnreachableAsker;
 impl RemoteResumeAsker for UnreachableAsker {
     async fn ask_remote_detach(
         &self,
-        _node_id: &str,
+        _expected_owner: &NodeIdentity,
+        _observed: ClaimEpoch,
         _stream_id: &str,
         _requester_bare_jid: &BareJid,
     ) -> RemoteResumeAskOutcome {
@@ -1055,8 +1061,11 @@ impl ClaimStore for EnsureClaimedFailsOnceClaimStore {
         self.inner.release(entity, me, mine).await
     }
 
-    async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError> {
-        self.inner.release_many(entities, me).await
+    async fn release_many(
+        &self,
+        grants: &[waddle_xmpp::ownership::ClaimGrant],
+    ) -> Result<(), ClaimError> {
+        self.inner.release_many(grants).await
     }
 }
 

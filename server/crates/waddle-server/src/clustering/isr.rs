@@ -76,7 +76,7 @@ use subtle::ConstantTimeEq;
 use waddle_xmpp::isr::{
     generate_isr_token, IsrConsumeOutcome, IsrTokenStore, IsrTokenStoreError, IssuedIsrToken,
 };
-use waddle_xmpp::ownership::{ClaimEpoch, EntityType, NodeIdentity};
+use waddle_xmpp::ownership::{ClaimEpoch, ClaimGrant, EntityType, NodeIdentity};
 
 use crate::db::{Database, DatabaseError};
 
@@ -112,6 +112,32 @@ impl PostgresIsrTokenStore {
     pub fn new(db: Database) -> Self {
         Self { db }
     }
+
+    /// Wait for the exact token row (or serialize its absence) before a
+    /// caller computes a database-owned effect timestamp. PostgreSQL may
+    /// evaluate an `INSERT .. ON CONFLICT` VALUES expression before it
+    /// waits on the conflicting row, so the explicit lock must precede
+    /// `clock_timestamp()`.
+    async fn lock_token_effect_row(
+        tx: &mut crate::db::Transaction<'_>,
+        sm_id: &str,
+    ) -> Result<(), IsrTokenStoreError> {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, 8721))",
+            crate::db_params![sm_id.to_string()],
+        )
+        .await
+        .map_err(db_err)?;
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM clustering_isr_tokens WHERE sm_id = ? FOR UPDATE",
+                crate::db_params![sm_id.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        let _ = rows.next().await.map_err(db_err)?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -138,18 +164,49 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         &self,
         sm_id: &str,
         mechanism: &str,
+        grant: &ClaimGrant,
     ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
         let token = generate_isr_token();
-        let conn = self.db.guard().await.map_err(db_err)?;
-        conn.execute(
+        if grant.entity.entity_type != EntityType::SmSession || grant.entity.id != sm_id {
+            return Err(IsrTokenStoreError::NotOwner);
+        }
+        let mut tx = self.db.begin_fenced().await.map_err(db_err)?;
+        let mut fence_rows = tx
+            .query(
+                "WITH locked AS MATERIALIZED ( \
+                     SELECT n.heartbeat, n.expired, n.lease_ttl_ms \
+                     FROM clustering_claims c \
+                     JOIN clustering_nodes n ON n.node_id = c.node_id AND n.node_epoch = c.node_epoch \
+                     WHERE c.entity = ? AND c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ? \
+                     FOR SHARE OF c, n \
+                 ) \
+                 SELECT 1 FROM locked WHERE NOT expired \
+                   AND heartbeat >= clock_timestamp() - (lease_ttl_ms::text || ' milliseconds')::interval",
+                crate::db_params![
+                    sm_session_entity_key(sm_id),
+                    grant.owner.node_id.clone(),
+                    grant.owner.node_epoch.clone(),
+                    grant.epoch.0,
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let fenced = fence_rows.next().await.map_err(db_err)?.is_some();
+        drop(fence_rows);
+        if !fenced {
+            return Err(IsrTokenStoreError::NotOwner);
+        }
+        Self::lock_token_effect_row(&mut tx, sm_id).await?;
+        tx.execute(
             "INSERT INTO clustering_isr_tokens (sm_id, token, mechanism, created_at) \
-             VALUES (?, ?, ?, now()) \
+             VALUES (?, ?, ?, clock_timestamp()) \
              ON CONFLICT (sm_id) DO UPDATE SET \
-                 token = EXCLUDED.token, mechanism = EXCLUDED.mechanism, created_at = now()",
+                 token = EXCLUDED.token, mechanism = EXCLUDED.mechanism, created_at = clock_timestamp()",
             crate::db_params![sm_id.to_string(), token.clone(), mechanism.to_string()],
         )
         .await
         .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
         Ok(IssuedIsrToken {
             token,
             mechanism: mechanism.to_string(),
@@ -164,7 +221,7 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
-        let mut tx = self.db.begin().await.map_err(db_err)?;
+        let mut tx = self.db.begin_fenced().await.map_err(db_err)?;
 
         // Fencing check: identical shape to `assert_fenced` in
         // `sm_persistence_fenced.rs`/`muc_durable.rs` — one connection, one
@@ -172,8 +229,16 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         let key = sm_session_entity_key(sm_id);
         let mut fence_rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![key, me.node_id.clone(), mine.0],
+                "WITH locked AS MATERIALIZED ( \
+                     SELECT n.heartbeat, n.expired, n.lease_ttl_ms \
+                     FROM clustering_claims c \
+                     JOIN clustering_nodes n ON n.node_id = c.node_id AND n.node_epoch = c.node_epoch \
+                     WHERE c.entity = ? AND c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ? \
+                     FOR SHARE OF c, n \
+                 ) \
+                 SELECT 1 FROM locked WHERE NOT expired \
+                   AND heartbeat >= clock_timestamp() - (lease_ttl_ms::text || ' milliseconds')::interval",
+                crate::db_params![key, me.node_id.clone(), me.node_epoch.clone(), mine.0],
             )
             .await
             .map_err(db_err)?;
@@ -293,7 +358,7 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         let rotated_token = generate_isr_token();
         tx.execute(
             "INSERT INTO clustering_isr_tokens (sm_id, token, mechanism, created_at) \
-             VALUES (?, ?, ?, now())",
+             VALUES (?, ?, ?, clock_timestamp())",
             crate::db_params![
                 sm_id.to_string(),
                 rotated_token.clone(),
@@ -340,7 +405,9 @@ impl IsrTokenStore for PostgresIsrTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::clustering::claims::{
+        clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+    };
     use crate::db::{DatabaseConfig, DatabaseDriver};
     use waddle_xmpp::ownership::{ClaimStore, Entity};
 
@@ -371,17 +438,22 @@ mod tests {
     /// `consume` test can present a genuinely fenced `(me, epoch)` pair —
     /// mirrors how `sm_persistence_fenced.rs`'s own Postgres-gated tests
     /// establish a fenceable claim before exercising a fenced write.
-    async fn claim_sm_session(db: &Database, sm_id: &str, me: &NodeIdentity) -> ClaimEpoch {
+    async fn claim_sm_session(db: &Database, sm_id: &str, me: &NodeIdentity) -> ClaimGrant {
         let claim_store = PostgresClaimStore::new(db.clone());
         claim_store
             .ensure_schema()
             .await
             .expect("ensure claims schema");
-        let entity = Entity::new(EntityType::SmSession, sm_id.to_string());
         claim_store
+            .register(me, None)
+            .await
+            .expect("register live claimant");
+        let entity = Entity::new(EntityType::SmSession, sm_id.to_string());
+        let epoch = claim_store
             .acquire(&entity, me)
             .await
-            .expect("acquire sm_session claim")
+            .expect("acquire sm_session claim");
+        ClaimGrant::new(entity, me.clone(), epoch)
     }
 
     #[tokio::test]
@@ -394,11 +466,11 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
         let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
-        let epoch = claim_sm_session(&db, &sm_id, &me).await;
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
 
-        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
         let outcome = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         let IsrConsumeOutcome::Matched { rotated } = outcome else {
@@ -408,7 +480,7 @@ mod tests {
 
         // Single-use: the OLD token fails now, even under the same fence.
         let replay = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         assert_eq!(replay, IsrConsumeOutcome::Mismatched);
@@ -424,11 +496,11 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
         let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
-        let epoch = claim_sm_session(&db, &sm_id, &me).await;
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
 
-        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
         let outcome = store
-            .consume(&sm_id, b"not-the-token", "PLAIN", &me, epoch)
+            .consume(&sm_id, b"not-the-token", "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
@@ -438,7 +510,7 @@ mod tests {
         // from the genuine `Mismatched` above), proving unconditional
         // destruction happened.
         let second = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         assert_eq!(second, IsrConsumeOutcome::NoSuchToken);
@@ -460,10 +532,10 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
         let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
-        let epoch = claim_sm_session(&db, &sm_id, &me).await;
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
 
         let outcome = store
-            .consume(&sm_id, b"anything", "PLAIN", &me, epoch)
+            .consume(&sm_id, b"anything", "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::NoSuchToken);
@@ -471,9 +543,9 @@ mod tests {
         // Nothing was touched: issuing a token AFTER this failed attempt
         // and consuming it must succeed normally — proving the no-row
         // branch never wrote anything that could poison a later issuance.
-        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
         let second = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         assert!(matches!(second, IsrConsumeOutcome::Matched { .. }));
@@ -513,12 +585,15 @@ mod tests {
 
         let fresh_sm_id = format!("sm-{}", uuid::Uuid::new_v4());
         let stale_sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let me = node_identity();
+        let fresh_grant = claim_sm_session(&db, &fresh_sm_id, &me).await;
+        let stale_grant = claim_sm_session(&db, &stale_sm_id, &me).await;
         store
-            .issue(&fresh_sm_id, "PLAIN")
+            .issue(&fresh_sm_id, "PLAIN", &fresh_grant)
             .await
             .expect("issue fresh token");
         store
-            .issue(&stale_sm_id, "PLAIN")
+            .issue(&stale_sm_id, "PLAIN", &stale_grant)
             .await
             .expect("issue stale token");
 
@@ -542,11 +617,8 @@ mod tests {
 
         // The fresh row survives; the stale one is gone (a subsequent
         // consume for it finds no row at all).
-        let me = node_identity();
-        let fresh_epoch = claim_sm_session(&db, &fresh_sm_id, &me).await;
-        let stale_epoch = claim_sm_session(&db, &stale_sm_id, &me).await;
         let stale_outcome = store
-            .consume(&stale_sm_id, b"anything", "PLAIN", &me, stale_epoch)
+            .consume(&stale_sm_id, b"anything", "PLAIN", &me, stale_grant.epoch)
             .await
             .expect("consume stale");
         assert_eq!(stale_outcome, IsrConsumeOutcome::NoSuchToken);
@@ -556,7 +628,7 @@ mod tests {
                 b"wrong-token-but-row-must-exist",
                 "PLAIN",
                 &me,
-                fresh_epoch,
+                fresh_grant.epoch,
             )
             .await
             .expect("consume fresh");
@@ -578,10 +650,10 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
         let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
-        let epoch = claim_sm_session(&db, &sm_id, &me).await;
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
 
-        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
-        let wrong_epoch = ClaimEpoch(epoch.0 + 1);
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
+        let wrong_epoch = ClaimEpoch(grant.epoch.0 + 1);
         let outcome = store
             .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, wrong_epoch)
             .await;
@@ -589,10 +661,289 @@ mod tests {
 
         // Fencing failure must not have touched the token row.
         let still_valid = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, grant.epoch)
             .await
             .expect("consume");
         assert!(matches!(still_valid, IsrConsumeOutcome::Matched { .. }));
+    }
+
+    #[tokio::test]
+    async fn issue_and_consume_reject_a_lapsed_owner_before_committed_expiry() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure isr schema");
+        let me = node_identity();
+        let sm_id = format!("sm-lapsed-{}", uuid::Uuid::new_v4());
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
+
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET heartbeat = now() - interval '1 hour', expired = false \
+             WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![me.node_id.clone(), me.node_epoch.clone()],
+        )
+        .await
+        .expect("lapse owner heartbeat");
+        drop(conn);
+
+        assert!(matches!(
+            store.issue(&sm_id, "PLAIN", &grant).await,
+            Err(IsrTokenStoreError::NotOwner)
+        ));
+        assert!(matches!(
+            store
+                .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, grant.epoch)
+                .await,
+            Err(IsrTokenStoreError::NotOwner)
+        ));
+
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT token FROM clustering_isr_tokens WHERE sm_id = ?",
+                crate::db_params![sm_id],
+            )
+            .await
+            .expect("query untouched token");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row read")
+                .expect("token remains")
+                .get::<String>(0)
+                .expect("token"),
+            issued.token
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_revalidates_wall_clock_after_node_lock_wait() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.unwrap();
+        let me = node_identity();
+        let sm_id = format!("sm-clock-{}", uuid::Uuid::new_v4());
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
+        db.guard()
+            .await
+            .unwrap()
+            .execute(
+                "UPDATE clustering_nodes SET heartbeat = clock_timestamp(), lease_ttl_ms = 50 WHERE node_id = ? AND node_epoch = ?",
+                crate::db_params![me.node_id.clone(), me.node_epoch.clone()],
+            )
+            .await
+            .unwrap();
+        let mut blocker = db.begin().await.unwrap();
+        let mut rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_nodes WHERE node_id = ? AND node_epoch = ? FOR UPDATE",
+                crate::db_params![me.node_id.clone(), me.node_epoch.clone()],
+            )
+            .await
+            .unwrap();
+        assert!(rows.next().await.unwrap().is_some());
+        drop(rows);
+        let task_store = PostgresIsrTokenStore::new(db.clone());
+        let task = tokio::spawn(async move { task_store.issue(&sm_id, "PLAIN", &grant).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !task.is_finished(),
+            "ISR issue must wait on the held node row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        blocker.commit().await.unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(IsrTokenStoreError::NotOwner)
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_stamps_created_at_after_token_row_lock_wait() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.unwrap();
+        let me = node_identity();
+        let sm_id = format!("sm-created-at-{}", uuid::Uuid::new_v4());
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
+        store.issue(&sm_id, "PLAIN", &grant).await.unwrap();
+
+        let mut blocker = db.begin().await.unwrap();
+        let mut rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_isr_tokens WHERE sm_id = ? FOR UPDATE",
+                crate::db_params![sm_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert!(rows.next().await.unwrap().is_some());
+        drop(rows);
+
+        let task_store = PostgresIsrTokenStore::new(db.clone());
+        let task_sm_id = sm_id.clone();
+        let task =
+            tokio::spawn(async move { task_store.issue(&task_sm_id, "PLAIN", &grant).await });
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        assert!(!task.is_finished(), "issue must wait on the token row");
+        tokio::time::sleep(std::time::Duration::from_millis(360)).await;
+        blocker.commit().await.unwrap();
+        task.await.unwrap().unwrap();
+
+        let mut rows = db
+            .guard()
+            .await
+            .unwrap()
+            .query(
+                "SELECT (EXTRACT(EPOCH FROM clock_timestamp() - created_at) * 1000)::double precision FROM clustering_isr_tokens WHERE sm_id = ?",
+                crate::db_params![sm_id],
+            )
+            .await
+            .unwrap();
+        let age_ms = rows.next().await.unwrap().unwrap().get::<f64>(0).unwrap();
+        assert!(
+            age_ms < 200.0,
+            "created_at must start after the 400ms token-row wait, got {age_ms}ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_rejects_the_old_grant_after_same_node_id_recovery() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure isr schema");
+        let old = node_identity();
+        let sm_id = format!("sm-issue-same-node-{}", uuid::Uuid::new_v4());
+        let grant = claim_sm_session(&db, &sm_id, &old).await;
+        let original = store
+            .issue(&sm_id, "PLAIN", &grant)
+            .await
+            .expect("initial issue");
+
+        // Rotate only the node-liveness row. The claim intentionally still
+        // names the old incarnation, so a fence that checked claim columns
+        // alone would incorrectly authorize this stale issuer.
+        let recovered = NodeIdentity::new(old.node_id.clone(), uuid::Uuid::new_v4().to_string());
+        let claim_store = PostgresClaimStore::new(db.clone());
+        claim_store
+            .register_draining_with_peer_id(
+                &old,
+                &recovered,
+                None,
+                None,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("rotate node row without moving claim");
+
+        let stale_issue = store.issue(&sm_id, "PLAIN", &grant).await;
+        assert!(
+            matches!(stale_issue, Err(IsrTokenStoreError::NotOwner)),
+            "the deposed node incarnation must not rotate the token: {stale_issue:?}"
+        );
+
+        let recovered_epoch = claim_store
+            .reclaim_after_self_fence(
+                &grant.entity,
+                grant.epoch,
+                &old,
+                &recovered,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("reclaim exact old claim");
+        assert!(claim_store
+            .activate(&recovered, std::time::Duration::from_secs(30))
+            .await
+            .expect("activate recovered incarnation"));
+        let current = store
+            .consume(
+                &sm_id,
+                original.token.as_bytes(),
+                "PLAIN",
+                &recovered,
+                recovered_epoch,
+            )
+            .await
+            .expect("current incarnation consumes original token");
+        assert!(
+            matches!(current, IsrConsumeOutcome::Matched { .. }),
+            "stale issuance failure must leave the original token untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_rejects_the_old_epoch_after_same_node_id_recovery() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure isr schema");
+        let old = node_identity();
+        let sm_id = format!("sm-same-node-{}", uuid::Uuid::new_v4());
+        let grant = claim_sm_session(&db, &sm_id, &old).await;
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
+
+        let recovered = NodeIdentity::new(old.node_id.clone(), uuid::Uuid::new_v4().to_string());
+        let claim_store = PostgresClaimStore::new(db.clone());
+        claim_store
+            .register_draining_with_peer_id(
+                &old,
+                &recovered,
+                None,
+                None,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("rotate node row without moving claim");
+
+        let stale = store
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &old, grant.epoch)
+            .await;
+        assert!(
+            matches!(stale, Err(IsrTokenStoreError::NotOwner)),
+            "the old node epoch must fail before consuming the token: {stale:?}"
+        );
+
+        let recovered_epoch = claim_store
+            .reclaim_after_self_fence(
+                &grant.entity,
+                grant.epoch,
+                &old,
+                &recovered,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("reclaim exact old claim");
+        assert!(claim_store
+            .activate(&recovered, std::time::Duration::from_secs(30))
+            .await
+            .expect("activate recovered incarnation"));
+
+        let current = store
+            .consume(
+                &sm_id,
+                issued.token.as_bytes(),
+                "PLAIN",
+                &recovered,
+                recovered_epoch,
+            )
+            .await
+            .expect("current incarnation consumes untouched token");
+        assert!(matches!(current, IsrConsumeOutcome::Matched { .. }));
     }
 
     /// Council-adjudicated FIX 1: strengthens the pre-existing exactly-once
@@ -630,8 +981,9 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
         let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
-        let epoch = claim_sm_session(&db, &sm_id, &me).await;
-        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
+        let grant = claim_sm_session(&db, &sm_id, &me).await;
+        let issued = store.issue(&sm_id, "PLAIN", &grant).await.expect("issue");
+        let epoch = grant.epoch;
 
         // Manually hold the token row's lock open — standing in for
         // `consume()`'s own winning transaction, but under this test's

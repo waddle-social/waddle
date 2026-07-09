@@ -502,6 +502,35 @@ impl<'a> Transaction<'a> {
         Ok(Self { inner })
     }
 
+    /// Install Postgres 17's database-side deadlines before this transaction
+    /// takes any ownership lock. `transaction_timeout` is the hard outer
+    /// bound; the other settings release locks promptly for each individual
+    /// wait and for a task that becomes idle between statements.
+    pub(crate) async fn configure_fenced(
+        &mut self,
+        budget: waddle_xmpp::ownership::FencedTransactionBudget,
+    ) -> Result<(), DatabaseError> {
+        let TransactionInner::Postgres(tx) = &mut self.inner else {
+            return Err(DatabaseError::QueryFailed(
+                "fenced transactions require Postgres".to_string(),
+            ));
+        };
+        let timeout = budget.postgres_timeout();
+        sqlx::query(
+            r#"
+            SELECT
+                set_config('lock_timeout', $1, true),
+                set_config('statement_timeout', $1, true),
+                set_config('idle_in_transaction_session_timeout', $1, true),
+                set_config('transaction_timeout', $1, true)
+            "#,
+        )
+        .bind(timeout)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     /// Execute a write statement inside the transaction.
     pub async fn execute(
         &mut self,
@@ -563,6 +592,15 @@ impl<'a> Transaction<'a> {
         match self.inner {
             TransactionInner::Sqlite(tx) => tx.commit().await?,
             TransactionInner::Postgres(tx) => tx.commit().await?,
+        }
+        Ok(())
+    }
+
+    /// Roll back this transaction explicitly.
+    pub async fn rollback(self) -> Result<(), DatabaseError> {
+        match self.inner {
+            TransactionInner::Sqlite(tx) => tx.rollback().await?,
+            TransactionInner::Postgres(tx) => tx.rollback().await?,
         }
         Ok(())
     }

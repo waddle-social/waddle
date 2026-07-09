@@ -808,7 +808,7 @@ mod orphan_reaper_sweep_tests {
     use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
     use chrono::{TimeZone, Utc};
     use waddle_xmpp::ownership::{
-        ClaimEpoch, ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
     };
     use waddle_xmpp::pending_delivery::SmSessionId;
     use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenceStorage};
@@ -917,11 +917,11 @@ mod orphan_reaper_sweep_tests {
             .expect("seed persisted session as its current claim-holding owner");
     }
 
-    /// Register `dead_owner`, then backdate its heartbeat while leaving
-    /// `expired = false`. The sweep's stale-node watchdog must discover
-    /// this row, commit `NodeLeaseStore::expire`, and only then make its
-    /// SM-session claims visible to `list_orphaned_sm_session_claims`.
-    async fn register_and_backdate_dead_owner(
+    /// Register `dead_owner` while it is still serving-eligible. Callers seed
+    /// its claim and persisted session before backdating the heartbeat: a real
+    /// node acquires/persists while live, then becomes stale. Acquiring after
+    /// the backdate is correctly rejected as `ClaimError::Draining`.
+    async fn register_dead_owner(
         claim_store: &PostgresClaimStore,
         db: &Database,
         dead_owner: &NodeIdentity,
@@ -934,6 +934,12 @@ mod orphan_reaper_sweep_tests {
             !expired_flag(db, &dead_owner.node_id).await,
             "freshly registered node must start non-expired"
         );
+    }
+
+    /// Make an already-seeded owner heartbeat-stale while leaving
+    /// `expired = false`. The sweep's watchdog must commit expiry before the
+    /// orphan claim becomes eligible for stealing.
+    async fn backdate_dead_owner(db: &Database, dead_owner: &NodeIdentity) {
         backdate_heartbeat(db, &dead_owner.node_id).await;
         assert!(
             !expired_flag(db, &dead_owner.node_id).await,
@@ -1026,6 +1032,7 @@ mod orphan_reaper_sweep_tests {
             muc_durable_store: None,
             isr_token_store: None,
             node_lease: Some(sweeper_node_lease),
+            remote_resource_admission_store: None,
             lease_ttl: Some(lease_ttl),
             pod_template_hash: None,
             resume_bridge: None,
@@ -1042,7 +1049,7 @@ mod orphan_reaper_sweep_tests {
 
         // ============ Leg 1: single-sweep steal + targeted hydrate ============
         let dead_owner = node_identity();
-        register_and_backdate_dead_owner(&claim_store, &db, &dead_owner).await;
+        register_dead_owner(&claim_store, &db, &dead_owner).await;
 
         let stream_id = "orphan-reaper-stream-1";
         let entity = sm_entity(stream_id);
@@ -1051,6 +1058,7 @@ mod orphan_reaper_sweep_tests {
             .await
             .expect("acquire claim under dead owner");
         seed_persisted_session_as_owner(&db, &dead_owner, stream_id).await;
+        backdate_dead_owner(&db, &dead_owner).await;
 
         run_orphan_reaper_sweep(&state).await;
 
@@ -1058,14 +1066,18 @@ mod orphan_reaper_sweep_tests {
             expired_flag(&db, &dead_owner.node_id).await,
             "the stale-node watchdog must commit dead owner's clustering_nodes row expired"
         );
-        let steal_landed = claim_store
-            .fence(&entity, &sweeper_identity, ClaimEpoch(orphan_epoch.0 + 1))
+        let reclaimed = claim_store
+            .current_claim(&entity)
             .await
-            .expect("fence call");
+            .expect("read reclaimed claim")
+            .expect("reclaimed claim remains present");
+        assert_eq!(
+            reclaimed.owner, sweeper_identity,
+            "steal must land under the sweeping node"
+        );
         assert!(
-            steal_landed,
-            "steal must land: the sweeping node must now own the entity at the \
-             bumped epoch"
+            reclaimed.claim_epoch > orphan_epoch,
+            "steal must advance the global claim epoch"
         );
         let hydrated = sm_session_registry
             .peek_session(stream_id)
@@ -1078,7 +1090,7 @@ mod orphan_reaper_sweep_tests {
 
         // ============ Leg 2: two concurrent sweeps, exactly-once steal ============
         let dead_owner_2 = node_identity();
-        register_and_backdate_dead_owner(&claim_store, &db, &dead_owner_2).await;
+        register_dead_owner(&claim_store, &db, &dead_owner_2).await;
 
         let stream_id_2 = "orphan-reaper-stream-2";
         let entity_2 = sm_entity(stream_id_2);
@@ -1087,6 +1099,7 @@ mod orphan_reaper_sweep_tests {
             .await
             .expect("acquire claim under dead owner 2");
         seed_persisted_session_as_owner(&db, &dead_owner_2, stream_id_2).await;
+        backdate_dead_owner(&db, &dead_owner_2).await;
 
         let state_a = Arc::clone(&state);
         let state_b = Arc::clone(&state);
@@ -1100,19 +1113,18 @@ mod orphan_reaper_sweep_tests {
             expired_flag(&db, &dead_owner_2.node_id).await,
             "dead owner 2's clustering_nodes row must be committed-expired"
         );
-        let steal_landed_exactly_once = claim_store
-            .fence(
-                &entity_2,
-                &sweeper_identity,
-                ClaimEpoch(orphan_epoch_2.0 + 1),
-            )
+        let reclaimed_2 = claim_store
+            .current_claim(&entity_2)
             .await
-            .expect("fence call");
+            .expect("read concurrently reclaimed claim")
+            .expect("concurrently reclaimed claim remains present");
+        assert_eq!(
+            reclaimed_2.owner, sweeper_identity,
+            "exactly one concurrent sweep must reclaim under the sweeping node"
+        );
         assert!(
-            steal_landed_exactly_once,
-            "exactly one of the two concurrent sweeps must have won the steal — the \
-             epoch must be bumped by exactly 1, not 2 (a double-steal would fence at \
-             +1 as false, since the epoch would actually be +2)"
+            reclaimed_2.claim_epoch > orphan_epoch_2,
+            "the winning concurrent sweep must advance the global claim epoch"
         );
         let hydrated_2 = sm_session_registry
             .peek_session(stream_id_2)
@@ -1146,7 +1158,7 @@ mod orphan_reaper_sweep_tests {
         }
 
         let dead_owner_3 = node_identity();
-        register_and_backdate_dead_owner(&claim_store, &db, &dead_owner_3).await;
+        register_dead_owner(&claim_store, &db, &dead_owner_3).await;
         let stream_id_3 = "orphan-reaper-stream-stale-sweeper";
         let entity_3 = sm_entity(stream_id_3);
         let orphan_epoch_3 = claim_store
@@ -1154,26 +1166,22 @@ mod orphan_reaper_sweep_tests {
             .await
             .expect("acquire claim under dead owner 3");
         seed_persisted_session_as_owner(&db, &dead_owner_3, stream_id_3).await;
+        backdate_dead_owner(&db, &dead_owner_3).await;
 
         run_orphan_reaper_sweep(&state).await;
 
-        assert!(
-            claim_store
-                .fence(&entity_3, &dead_owner_3, orphan_epoch_3)
-                .await
-                .expect("fence dead-owner claim after heartbeat-stale sweeper"),
+        let unchanged = claim_store
+            .current_claim(&entity_3)
+            .await
+            .expect("read claim after heartbeat-stale sweep")
+            .expect("dead-owner claim remains present");
+        assert_eq!(
+            unchanged.owner, dead_owner_3,
             "a heartbeat-stale sweeping node must not steal the orphaned claim"
         );
-        assert!(
-            !claim_store
-                .fence(
-                    &entity_3,
-                    &sweeper_identity,
-                    ClaimEpoch(orphan_epoch_3.0 + 1)
-                )
-                .await
-                .expect("fence heartbeat-stale sweeper after failed steal"),
-            "the heartbeat-stale sweeping node must not own the bumped claim epoch"
+        assert_eq!(
+            unchanged.claim_epoch, orphan_epoch_3,
+            "a rejected sweep must not advance the global claim epoch"
         );
         let not_hydrated = sm_session_registry
             .peek_session(stream_id_3)

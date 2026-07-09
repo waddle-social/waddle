@@ -208,7 +208,7 @@ pub(super) fn build_system_shutdown_stream_error() -> String {
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 
-/// Build the RFC 6120 §4.9.3.1 `<stream:error><conflict/>` frame sent to a
+/// Build the RFC 6120 §4.9.3.3 `<stream:error><conflict/>` frame sent to a
 /// live stream that has just lost cross-node XEP-0198 resume claim-steal
 /// arbitration (ADR-0017 Phase 3 Slice 6): "If the former stream is resumed
 /// and the server still has the stream for the previously-identified

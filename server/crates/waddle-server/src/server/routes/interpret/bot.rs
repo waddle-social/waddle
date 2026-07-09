@@ -135,6 +135,12 @@ pub(super) async fn dispatch_bot_groupchat_response(
     outcome.frames.extend(nested.frames);
     outcome.close = nested.close;
     outcome.feedback.extend(nested.feedback);
+    outcome.keepalive_probes += nested.keepalive_probes;
+    outcome.timer_commands.extend(nested.timer_commands);
+    outcome
+        .archive_id_rewrites
+        .extend(nested.archive_id_rewrites);
+    outcome.room_ownership_uncertain |= nested.room_ownership_uncertain;
     Ok(ExtensionRoomDispatchResult { outcome, stanza_id })
 }
 
@@ -412,6 +418,12 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
     outcome.frames.extend(nested.outcome.frames);
     outcome.close = outcome.close || nested.outcome.close;
     outcome.feedback.extend(nested.outcome.feedback);
+    outcome.keepalive_probes += nested.outcome.keepalive_probes;
+    outcome.timer_commands.extend(nested.outcome.timer_commands);
+    outcome
+        .archive_id_rewrites
+        .extend(nested.outcome.archive_id_rewrites);
+    outcome.room_ownership_uncertain |= nested.outcome.room_ownership_uncertain;
     Ok(ExtensionRoomDispatchResult {
         outcome,
         stanza_id: nested.stanza_id,

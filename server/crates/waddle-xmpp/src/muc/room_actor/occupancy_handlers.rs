@@ -1,11 +1,9 @@
-use std::convert::Infallible;
-
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 
 use super::{
     affiliation_overflows_full_room, JoinExistingOccupant, JoinOutcome, LeaveOutcome,
-    PresenceUpdateOutcome, RoomActor, RoomActorError,
+    PresenceUpdateOutcome, RoomActor, RoomActorError, RoomMutationError,
 };
 use crate::muc::RoomConfig;
 use crate::types::Affiliation;
@@ -57,6 +55,10 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         // unresolved (a genuine backend failure, not a legitimate brand
         // -new room) — see `RoomActor::ensure_restored_before_join`.
         self.ensure_restored_before_join().await?;
+        // A live actor may outlast its exact clustered claim. Fence before
+        // applying resolver affiliation, creator ownership, occupancy, or
+        // producing any recipient fan-out snapshot.
+        self.gate_mutation().await?;
         if msg.admission_revision != self.admission_revision {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
@@ -200,13 +202,14 @@ pub struct LeaveByRealJid {
 }
 
 impl kameo::message::Message<LeaveByRealJid> for RoomActor {
-    type Reply = Result<Option<LeaveOutcome>, Infallible>;
+    type Reply = Result<Option<LeaveOutcome>, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -308,13 +311,14 @@ pub struct PresenceUpdateData {
 }
 
 impl kameo::message::Message<PresenceUpdateData> for RoomActor {
-    type Reply = Result<Option<PresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<PresenceUpdateOutcome>, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: PresenceUpdateData,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -379,13 +383,14 @@ pub struct MujiPresenceUpdateOutcome {
 }
 
 impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
-    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<MujiPresenceUpdateOutcome>, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: UpsertMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -425,13 +430,14 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
 }
 
 impl kameo::message::Message<ClearMujiPresence> for RoomActor {
-    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<MujiPresenceUpdateOutcome>, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: ClearMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -488,13 +494,14 @@ pub struct InCallPresenceUpdateOutcome {
 }
 
 impl kameo::message::Message<UpsertInCallState> for RoomActor {
-    type Reply = Result<Option<InCallPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<InCallPresenceUpdateOutcome>, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: UpsertInCallState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -604,7 +611,7 @@ pub enum ResolverAffiliationSyncOutcome {
 }
 
 impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
-    type Reply = ResolverAffiliationSyncOutcome;
+    type Reply = Result<ResolverAffiliationSyncOutcome, RoomMutationError>;
 
     async fn handle(
         &mut self,
@@ -612,11 +619,12 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.sealed {
-            return ResolverAffiliationSyncOutcome::RoomSealed;
+            return Ok(ResolverAffiliationSyncOutcome::RoomSealed);
         }
         if msg.expected_admission_revision != self.admission_revision {
-            return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
+            return Ok(ResolverAffiliationSyncOutcome::StaleAdmissionRevision);
         }
+        self.gate_mutation().await?;
         // An applied change is itself an admission-relevant affiliation
         // change, so it bumps the revision like `ChangeAffiliation` —
         // any join admitted against the pre-sync snapshot retries.
@@ -627,6 +635,6 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         {
             self.admission_revision = self.admission_revision.saturating_add(1);
         }
-        ResolverAffiliationSyncOutcome::Applied
+        Ok(ResolverAffiliationSyncOutcome::Applied)
     }
 }

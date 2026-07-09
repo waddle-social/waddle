@@ -9,7 +9,7 @@ use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 
 #[cfg(feature = "clustering")]
-async fn unregister_remote_user_resource_if_owner(
+pub(super) async fn unregister_remote_user_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -28,7 +28,7 @@ async fn unregister_remote_user_resource_if_owner(
 }
 
 #[cfg(not(feature = "clustering"))]
-async fn unregister_remote_user_resource_if_owner(
+pub(super) async fn unregister_remote_user_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
     _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -670,20 +670,11 @@ async fn cleanup_muc_presence_with_origin(
                 sender_jid: jid.clone(),
             })
             .await;
-        // SFU teardown runs *after* the room actor has dropped the
-        // session so the MUC's view of the world is the leading edge
-        // (the membership gate immediately reports the user as a
-        // non-occupant) and the SFU's view is the trailing edge —
-        // matches `handle_muc_leave`'s "XMPP says they left, then
-        // notify SFU" semantics. Tab close / SM-expiry: the client
-        // never sends a graceful `request-leave` on
-        // `urn:waddle:muc-call:0`, so without this call the SFU
-        // would otherwise hold the participant slot until its own
-        // (long) timeout. Idempotent on the SFU side — calling for
-        // rooms where the user was never in a call is a no-op.
-        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match leave_result {
             Ok(Some(outcome)) => {
+                // The actor mutation linearizes first; only then may SFU
+                // cleanup and occupant fan-out observe the leave.
+                super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -703,7 +694,14 @@ async fn cleanup_muc_presence_with_origin(
                 broadcast_muc_muji_clear_to_remaining(state, &room_jid, jid, &outcome).await;
                 maybe_evict_empty_room(state, &room_jid, &outcome).await;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+            }
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+            )) => {
+                super::handlers::iq::demote_exact_room_actor(state, &room_jid, &room_actor).await;
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -1129,19 +1127,6 @@ pub(crate) async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) 
         Ok(is_muc_jid) => is_muc_jid,
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to validate MUC JID");
-            false
-        }
-    }
-}
-
-pub(crate) async fn destroy_room_actor(state: &WebSocketState, room_jid: &BareJid) -> bool {
-    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .destroy_room(room_jid.clone())
-        .await
-    {
-        Ok(destroyed) => destroyed,
-        Err(error) => {
-            warn!(room = %room_jid, error = %error, "Failed to destroy room actor");
             false
         }
     }

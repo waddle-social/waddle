@@ -37,6 +37,31 @@ const STREAM_LOCK_SHARDS: usize = 256;
 /// lease call).
 pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Exact per-entity outcome of post-reclaim hydration.
+///
+/// Recovery callers must distinguish a locally usable session from a claim
+/// that moved elsewhere, a claim that was terminally released, and a
+/// transient failure that must keep the node not-ready. A count alone cannot
+/// express those states: `Ok(0)` used to collapse all three and could publish
+/// a fresh live claim with no corresponding in-memory session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimedSessionHydration {
+    /// The exact current claim is represented in this registry and its epoch
+    /// cache is bound to the supplied owner incarnation.
+    Hydrated,
+    /// The exact current claim was already represented locally; no durable
+    /// row was reloaded or overwritten.
+    AlreadyLocal,
+    /// A read after the reclaim attempt proves a different node owns it.
+    Elsewhere,
+    /// The exact claim was released (or was already absent) after the durable
+    /// session proved absent or unusable.
+    TerminallyReleased,
+    /// Ownership or storage is uncertain; recovery must retry or rotate the
+    /// candidate and must not restore readiness.
+    Retry,
+}
+
 /// In-memory implementation of the SM session registry, optionally
 /// backed by a [`SmPersistenceStorage`] so detached sessions survive
 /// process restarts (issue #209 slice (d) phase 3, locked Q8 = B).
@@ -488,132 +513,231 @@ impl InMemorySmSessionRegistry {
         &self,
         entities: &[(Entity, ClaimEpoch)],
     ) -> Result<usize, SmRegistryError> {
-        let Some(storage) = &self.persistence else {
-            return Ok(0);
-        };
+        let identity = self.node_identity.current();
+        self.hydrate_reclaimed_as(entities, &identity).await
+    }
+
+    /// Targeted hydration under an explicitly proven node incarnation.
+    ///
+    /// Post-self-fence recovery uses this variant while the process-wide
+    /// [`SharedNodeIdentity`] deliberately still points at the fenced epoch:
+    /// publishing the new identity before terminal recovery completes would
+    /// reopen unrelated claim admission. The caller has already won each
+    /// supplied claim for `identity`; this method still performs the same
+    /// bounded `ensure_claimed` recheck before hydrating any durable row.
+    pub async fn hydrate_reclaimed_as(
+        &self,
+        entities: &[(Entity, ClaimEpoch)],
+        identity: &NodeIdentity,
+    ) -> Result<usize, SmRegistryError> {
         let mut hydrated = 0usize;
-        for (entity, _caller_epoch) in entities {
-            if entity.entity_type != EntityType::SmSession {
-                debug!(
-                    entity = %entity,
-                    "hydrate_reclaimed: skipping a non-SmSession entity"
-                );
-                continue;
-            }
-            let stream_id = entity.id.clone();
-            let stream_lock = self.stream_lock(&stream_id)?;
-            let _stream_guard = stream_lock.lock().await;
-
-            let present = {
-                let sessions = self
-                    .sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                let claimed = self
-                    .claimed_sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
-            };
-            if present {
-                debug!(
-                    stream_id = %stream_id,
-                    "hydrate_reclaimed: already present in-memory (live session, or already \
-                     hydrated by an overlapping sweep); skipping"
-                );
-                continue;
-            }
-
-            // FIX 5: bounded — see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s
-            // doc comment. On timeout or a lost self-reacquire, skip this
-            // entity for this pass rather than insert a session this node
-            // can no longer prove it owns; the entity remains eligible for
-            // a future sweep.
-            let identity = self.node_identity.current();
-            let epoch = match tokio::time::timeout(
-                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                self.claim_store.ensure_claimed(entity, &identity),
-            )
-            .await
+        for (entity, caller_epoch) in entities {
+            if self
+                .hydrate_reclaimed_one_as(entity, *caller_epoch, identity)
+                .await?
+                == ReclaimedSessionHydration::Hydrated
             {
-                Ok(Ok(epoch)) => epoch,
-                Ok(Err(error)) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: ClaimStore ensure_claimed self-reacquire failed \
-                         (claim lost again since the caller's steal_stale); skipping"
-                    );
-                    continue;
-                }
-                Err(_timeout) => {
-                    tracing::warn!(
-                        stream_id = %stream_id,
-                        timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                        "hydrate_reclaimed: ClaimStore ensure_claimed timed out while holding \
-                         this stream's shard lock; skipping this entity for this pass"
-                    );
-                    continue;
-                }
-            };
-
-            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
-            let persisted = match storage.get_session(&session_id).await {
-                Ok(Some(row)) => row,
-                Ok(None) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        "hydrate_reclaimed: no durable row (already promoted/deleted by a \
-                         concurrent sweep); skipping"
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: get_session failed; skipping this entity for this pass"
-                    );
-                    continue;
-                }
-            };
-            let unacked = match storage.list_unacked(&session_id).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: list_unacked failed; skipping this entity for this pass"
-                    );
-                    continue;
-                }
-            };
-            let session = match persisted_to_detached(&persisted, &unacked) {
-                Ok(session) => session,
-                Err(error) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: row decode failed (poison pill); skipping"
-                    );
-                    self.release_claim_store_entry_under(&stream_id, epoch)
-                        .await;
-                    continue;
-                }
-            };
-            {
-                let mut sessions = self
-                    .sessions
-                    .write()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.insert(stream_id.clone(), session);
+                hydrated += 1;
             }
-            if let Ok(mut claim_epochs) = self.claim_epochs.write() {
-                claim_epochs.insert(stream_id, epoch);
-            }
-            hydrated += 1;
         }
         Ok(hydrated)
+    }
+
+    /// Strict, typed hydration of one exact recovery grant.
+    ///
+    /// Unlike [`Self::hydrate_reclaimed_as`]'s historical aggregate count,
+    /// this method never hides a transient failure inside `Ok(0)`. It is the
+    /// recovery state machine's readiness gate: a caller may proceed only on
+    /// `Hydrated`, `AlreadyLocal`, `Elsewhere`, or `TerminallyReleased`.
+    pub async fn hydrate_reclaimed_one_as(
+        &self,
+        entity: &Entity,
+        caller_epoch: ClaimEpoch,
+        identity: &NodeIdentity,
+    ) -> Result<ReclaimedSessionHydration, SmRegistryError> {
+        if entity.entity_type != EntityType::SmSession {
+            debug!(entity = %entity, "hydrate_reclaimed: non-SmSession entity");
+            return Ok(ReclaimedSessionHydration::Retry);
+        }
+        let Some(storage) = &self.persistence else {
+            return Ok(ReclaimedSessionHydration::Retry);
+        };
+        let stream_id = entity.id.clone();
+        let stream_lock = self.stream_lock(&stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+
+        // Re-prove the exact owner after the caller's reclaim CAS. If the
+        // bounded self-reacquire has an ambiguous outcome, an unlocked
+        // current-claim read classifies it without trusting the caller's
+        // stale observation.
+        let epoch = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.ensure_claimed(entity, identity),
+        )
+        .await
+        {
+            Ok(Ok(epoch)) => epoch,
+            Ok(Err(error)) => {
+                debug!(stream_id = %stream_id, %error, "strict hydration claim recheck failed");
+                return Ok(self
+                    .classify_reclaimed_owner(entity, identity, caller_epoch)
+                    .await);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                    "strict hydration claim recheck timed out"
+                );
+                return Ok(self
+                    .classify_reclaimed_owner(entity, identity, caller_epoch)
+                    .await);
+            }
+        };
+
+        let present = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+        };
+        if present {
+            self.claim_epochs
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .insert(stream_id, epoch);
+            return Ok(ReclaimedSessionHydration::AlreadyLocal);
+        }
+
+        let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+        let persisted = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            storage.get_session(&session_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(row))) => row,
+            Ok(Ok(None)) => {
+                debug!(stream_id = %stream_id, "strict hydration found no durable session");
+                return Ok(self.release_reclaimed_claim(entity, identity, epoch).await);
+            }
+            Ok(Err(error)) => {
+                debug!(stream_id = %stream_id, %error, "strict hydration durable load failed");
+                return Ok(ReclaimedSessionHydration::Retry);
+            }
+            Err(_) => return Ok(ReclaimedSessionHydration::Retry),
+        };
+        let unacked = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            storage.list_unacked(&session_id),
+        )
+        .await
+        {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(error)) => {
+                debug!(stream_id = %stream_id, %error, "strict hydration unacked load failed");
+                return Ok(ReclaimedSessionHydration::Retry);
+            }
+            Err(_) => return Ok(ReclaimedSessionHydration::Retry),
+        };
+        let session = match persisted_to_detached(&persisted, &unacked) {
+            Ok(session) => session,
+            Err(error) => {
+                debug!(stream_id = %stream_id, %error, "strict hydration found a poison row");
+                return Ok(self.release_reclaimed_claim(entity, identity, epoch).await);
+            }
+        };
+
+        // Durable reads can span a lease transition. Re-prove the exact
+        // owner and grant generation immediately before the synchronous
+        // local insert; a session stolen while storage was loading must
+        // never be hydrated here under stale authority.
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.current_claim(entity),
+        )
+        .await
+        {
+            Ok(Ok(Some(snapshot)))
+                if snapshot.owner == *identity
+                    && snapshot.claim_epoch == epoch
+                    && snapshot.owner_lease_fresh => {}
+            Ok(Ok(Some(snapshot))) if snapshot.owner != *identity => {
+                return Ok(ReclaimedSessionHydration::Elsewhere);
+            }
+            Ok(Ok(None)) => return Ok(ReclaimedSessionHydration::TerminallyReleased),
+            _ => return Ok(ReclaimedSessionHydration::Retry),
+        }
+
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut claim_epochs = self
+            .claim_epochs
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        sessions.insert(stream_id.clone(), session);
+        claim_epochs.insert(stream_id, epoch);
+        Ok(ReclaimedSessionHydration::Hydrated)
+    }
+
+    async fn classify_reclaimed_owner(
+        &self,
+        entity: &Entity,
+        identity: &NodeIdentity,
+        expected_epoch: ClaimEpoch,
+    ) -> ReclaimedSessionHydration {
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.current_claim(entity),
+        )
+        .await
+        {
+            Ok(Ok(Some(snapshot)))
+                if snapshot.owner == *identity && snapshot.claim_epoch == expected_epoch =>
+            {
+                // The ownership proof survived but the full hydration path
+                // has not run yet. Keep it pending rather than accepting the
+                // claim without local state.
+                ReclaimedSessionHydration::Retry
+            }
+            Ok(Ok(Some(snapshot))) if snapshot.owner != *identity => {
+                ReclaimedSessionHydration::Elsewhere
+            }
+            Ok(Ok(None)) => ReclaimedSessionHydration::TerminallyReleased,
+            _ => ReclaimedSessionHydration::Retry,
+        }
+    }
+
+    async fn release_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        identity: &NodeIdentity,
+        epoch: ClaimEpoch,
+    ) -> ReclaimedSessionHydration {
+        let _ = tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.release(entity, identity, epoch),
+        )
+        .await;
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.current_claim(entity),
+        )
+        .await
+        {
+            Ok(Ok(None)) => ReclaimedSessionHydration::TerminallyReleased,
+            Ok(Ok(Some(snapshot))) if snapshot.owner != *identity => {
+                ReclaimedSessionHydration::Elsewhere
+            }
+            _ => ReclaimedSessionHydration::Retry,
+        }
     }
 }
 

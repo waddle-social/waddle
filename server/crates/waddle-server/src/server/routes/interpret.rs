@@ -100,18 +100,20 @@ use waddle_xmpp::mam::{
     ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
     RichMessageId, RichText, STANZA_ID_NS,
 };
+#[cfg(feature = "clustering")]
+use waddle_xmpp::muc::room_actor::GetRoomClaimFence;
 use waddle_xmpp::muc::room_actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RoomActor, SetSubject,
 };
-// ADR-0017 Phase 3 Slice 7: `DestroyRoom` is used by `dispatch_to_room`'s
+// ADR-0017 Phase 3 Slice 7: exact destroy is used by the fenced room paths'
 // fenced pre-fan-out backstop, which only exists on `clustering`-feature
 // builds (the check itself is a no-op — `ClusteringHandles::
 // muc_durable_store` is `None` — whenever clustering is disabled, but the
 // import must still be feature-gated to avoid an unused-import warning on
 // a build that lacks the `clustering` feature entirely).
 #[cfg(feature = "clustering")]
-use waddle_xmpp::muc::room_registry_actor::DestroyRoom;
+use waddle_xmpp::muc::room_registry_actor::DestroyRoomExact;
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
@@ -164,13 +166,16 @@ mod handoff;
 mod notification_activity_ingest;
 mod offline_delivery;
 mod room_dispatch;
+mod room_effect_authority;
 mod room_pin;
 mod room_subject;
 mod room_system_message;
 mod route_to_connection;
 mod routing;
 
-use archive_groupchat_event::{archive_groupchat_event, ArchiveGroupchatEventOutcome};
+use archive_groupchat_event::{
+    archive_groupchat_event, exact_room_effect_authorized, ArchiveGroupchatEventOutcome,
+};
 use archive_lookup::{
     build_carbon_envelope, lookup_archived_message, waddle_id_for_room_jid, ToElementString,
 };
@@ -184,7 +189,7 @@ use direct_retraction::apply_retraction_tombstone;
 use displayed_marker::mark_inbox_read_from_displayed;
 use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
-    resolve_room_claim_fence, ArchiveGroupchatOutcome,
+    resolve_room_claim_fence, scrub_unacked_for_tombstone, ArchiveGroupchatOutcome,
 };
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
@@ -200,8 +205,9 @@ pub use handoff::{
 use offline_delivery::queue_offline_delivery;
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
 use room_dispatch::dispatch_to_room;
-use room_pin::apply_pin_change_event;
-use room_subject::persist_room_subject_event;
+use room_effect_authority::{exact_room_actor_for_effect, RoomEffectAuthorityError};
+use room_pin::{apply_pin_change_event, PinChangeOutcome};
+use room_subject::{persist_room_subject_event, PersistRoomSubjectOutcome};
 pub(crate) use route_to_connection::{fallback_reply_for_undeliverable_iq, route_to_connection};
 pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
 use routing::{run_fanout_recipient_pass, run_headless_recipient_pass, FanoutPassResult};
@@ -380,10 +386,15 @@ async fn interpret_with_depth(
     // per-occupant `RouteToConnection` fan-out for the same message, which
     // always follows the archive handler in the locked Q7 chain order) is
     // suppressed — "the message is NOT archived and NOT fanned out."
-    let mut ownership_lost = false;
+    let mut ownership_uncertain = false;
+    // A successful exact DB-backed check immediately before the room
+    // projection/fan-out tail. Later per-recipient routes still compare the
+    // registry's actor ref so same-claim E1/E2 replacement cannot inherit
+    // the old batch without paying a Postgres round trip per occupant.
+    let mut room_fanout_authorized = false;
 
     for mut event in events {
-        if ownership_lost {
+        if ownership_uncertain {
             continue;
         }
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
@@ -422,6 +433,32 @@ async fn interpret_with_depth(
             // content into logs.
             // -------------------------------------------------------
             OutboundEvent::RouteToConnection { jid, stanza } => {
+                let nested_room = if deps.room_actor_incarnation.is_some() {
+                    match stanza.as_ref() {
+                        Stanza::Message(message) => message.from.as_ref().map(Jid::to_bare),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if deps.room_actor_incarnation.is_some() {
+                    let Some(room) = nested_room.as_ref() else {
+                        ownership_uncertain = true;
+                        outcome.room_ownership_uncertain = true;
+                        continue;
+                    };
+                    let authorized = if room_fanout_authorized {
+                        exact_room_actor_for_effect(deps, room).await.is_ok()
+                    } else {
+                        exact_room_effect_authorized(deps, room).await
+                    };
+                    if !authorized {
+                        ownership_uncertain = true;
+                        outcome.room_ownership_uncertain = true;
+                        continue;
+                    }
+                    room_fanout_authorized = true;
+                }
                 for stanza in route_to_connection(deps, jid, stanza, recursion_depth).await {
                     match stanza.to_element_string() {
                         Ok(xml) => outcome.frames.push(xml),
@@ -431,6 +468,12 @@ async fn interpret_with_depth(
                                 "failed to serialize route fallback stanza; dropping frame"
                             );
                         }
+                    }
+                }
+                if let Some(room) = nested_room.as_ref() {
+                    if exact_room_actor_for_effect(deps, room).await.is_err() {
+                        ownership_uncertain = true;
+                        outcome.room_ownership_uncertain = true;
                     }
                 }
             }
@@ -455,6 +498,7 @@ async fn interpret_with_depth(
                     keepalive_probes: nested_probes,
                     timer_commands: nested_timer_commands,
                     archive_id_rewrites: nested_rewrites,
+                    room_ownership_uncertain: nested_ownership_uncertain,
                 } = nested;
                 outcome.frames.extend(nested_frames);
                 if nested_close {
@@ -466,6 +510,9 @@ async fn interpret_with_depth(
                 // Carry nested rewrites forward so later events in THIS
                 // batch see them too.
                 archive_id_rewrites.extend(nested_rewrites);
+                if nested_ownership_uncertain {
+                    ownership_uncertain = true;
+                }
             }
             OutboundEvent::ProjectInbox {
                 owner,
@@ -552,9 +599,12 @@ async fn interpret_with_depth(
                 {
                     ArchiveGroupchatEventOutcome::Rewrite(Some(rewrite)) => {
                         archive_id_rewrites.push(rewrite);
+                        room_fanout_authorized = true;
                     }
-                    ArchiveGroupchatEventOutcome::Rewrite(None) => {}
-                    ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {
+                    ArchiveGroupchatEventOutcome::Rewrite(None) => {
+                        room_fanout_authorized = true;
+                    }
+                    ArchiveGroupchatEventOutcome::OwnershipUncertain(bounce) => {
                         // FIX 1: not archived, not fanned out — suppress
                         // every remaining event in this batch (the
                         // reflector's fan-out for this same message) and
@@ -570,66 +620,180 @@ async fn interpret_with_depth(
                                 );
                             }
                         }
-                        ownership_lost = true;
+                        ownership_uncertain = true;
+                        outcome.room_ownership_uncertain = true;
                     }
                 }
             }
             OutboundEvent::ApplyPinChange { room, request } => {
-                apply_pin_change_event(deps, room, request, recursion_depth).await;
+                let pin_outcome =
+                    apply_pin_change_event(deps, room.clone(), request, recursion_depth).await;
+                if pin_outcome != PinChangeOutcome::Applied {
+                    // The retained-incarnation gate already exact-demotes E1
+                    // on `NotOwner`. A room-key demotion here could kill a
+                    // replacement E2.
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                }
             }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,
                 target_message_id,
                 retraction_message,
             } => {
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                    continue;
+                }
                 let Some(mam_storage) = deps.mam_storage else {
                     debug!(
                         room = %room,
                         target = %target_message_id,
                         "ApplyGroupchatRetractionTombstone: no mam_storage in Deps; skipping"
                     );
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
                     continue;
                 };
-                let tombstoned = apply_groupchat_retraction_tombstone(
+                let fence = resolve_room_claim_fence(deps, &room);
+                let tombstone_outcome = apply_groupchat_retraction_tombstone(
                     mam_storage,
-                    deps.sm_session_registry,
-                    deps.pending_delivery_storage,
                     &room,
                     &target_message_id,
                     &retraction_message,
+                    &fence,
                 )
                 .await;
-                if tombstoned {
-                    if let Some(state) = deps.web_socket_state {
-                        crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
-                            state.deps.app_state.db_pool.global_actor(),
-                            &room,
-                            &target_message_id,
-                        )
-                        .await;
-                    }
+                if tombstone_outcome
+                    != groupchat_archive::GroupchatRetractionTombstoneOutcome::Applied
+                {
+                    // Re-resolve through the exact actor helper so a retained
+                    // E1 is killed without ever applying a room-key demotion
+                    // to a replacement E2.
+                    let _ = exact_room_effect_authorized(deps, &room).await;
+                    warn!(
+                        room = %room,
+                        target = %target_message_id,
+                        ?tombstone_outcome,
+                        "groupchat retraction did not commit; suppressing remaining effects"
+                    );
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                    continue;
+                }
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                    continue;
+                }
+                let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+                    stanza_id: target_message_id.clone(),
+                    room: room.clone(),
+                };
+                scrub_unacked_for_tombstone(
+                    deps.sm_session_registry,
+                    deps.pending_delivery_storage,
+                    &scrub_target,
+                    "ApplyGroupchatRetractionTombstone",
+                )
+                .await;
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                    continue;
+                }
+                if let Some(state) = deps.web_socket_state {
+                    crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                        state.deps.app_state.db_pool.global_actor(),
+                        &room,
+                        &target_message_id,
+                    )
+                    .await;
+                }
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                    continue;
                 }
                 // #414: cascade XEP-0424 retraction to the room's pin
                 // list. If the retracted stanza-id is currently pinned,
                 // remove it from the projection and broadcast a
                 // synthetic unpin system message so live clients see the
                 // tab update without a separate poll.
-                room_pin::cascade_retraction_to_pin_list(
+                let pin_outcome = room_pin::cascade_retraction_to_pin_list(
                     deps,
-                    room,
-                    target_message_id,
+                    room.clone(),
+                    target_message_id.clone(),
                     recursion_depth,
                 )
                 .await;
+                if matches!(
+                    pin_outcome,
+                    PinChangeOutcome::NotOwner
+                        | PinChangeOutcome::OwnershipUncertain
+                        | PinChangeOutcome::PersistFailed
+                ) {
+                    // The cascade shares the batch's retained incarnation and
+                    // exact-demotes it on `NotOwner`; never demote by room JID.
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                }
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                } else {
+                    room_fanout_authorized = true;
+                }
             }
             OutboundEvent::PersistRoomSubject {
                 room,
                 texts,
                 setter,
                 setter_nick,
+                sender_full,
+                message,
                 set_at,
             } => {
-                persist_room_subject_event(deps, room, texts, setter, setter_nick, set_at).await;
+                let persist_outcome = persist_room_subject_event(
+                    deps,
+                    room.clone(),
+                    texts,
+                    setter,
+                    setter_nick,
+                    set_at,
+                )
+                .await;
+                if persist_outcome != PersistRoomSubjectOutcome::Applied {
+                    // Subject persistence is bound to the retained actor and
+                    // exact-demotes E1 itself. A JID-only demotion can race
+                    // with recreation and destroy E2.
+                    let stanza_error = match persist_outcome {
+                        PersistRoomSubjectOutcome::PersistFailed => StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "The subject could not be persisted; please retry.",
+                        ),
+                        PersistRoomSubjectOutcome::NotOwner
+                        | PersistRoomSubjectOutcome::OwnershipUncertain => {
+                            resource_constraint_error(
+                                "This room's ownership cannot currently be verified; please retry.",
+                            )
+                        }
+                        PersistRoomSubjectOutcome::Applied => unreachable!(),
+                    };
+                    let bounce =
+                        build_message_error_reply(&message, &room, &sender_full, stanza_error);
+                    match Stanza::Message(bounce).to_element_string() {
+                        Ok(xml) => outcome.frames.push(xml),
+                        Err(error) => {
+                            warn!(%error, "PersistRoomSubject: failed to serialize retryable error")
+                        }
+                    }
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                }
             }
             OutboundEvent::ProjectGroupchatInbox {
                 owner,
@@ -643,10 +807,15 @@ async fn interpret_with_depth(
                 thread,
                 dispatch_timestamp,
             } => {
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                    continue;
+                }
                 project_groupchat_inbox_event(ProjectGroupchatInboxEvent {
                     deps,
                     owner,
-                    room,
+                    room: room.clone(),
                     message,
                     is_recipient,
                     is_durable_recipient,
@@ -657,6 +826,12 @@ async fn interpret_with_depth(
                     dispatch_timestamp,
                 })
                 .await;
+                if !exact_room_effect_authorized(deps, &room).await {
+                    ownership_uncertain = true;
+                    outcome.room_ownership_uncertain = true;
+                } else {
+                    room_fanout_authorized = true;
+                }
             }
             OutboundEvent::ArchiveDirect {
                 archive_jid,
@@ -737,6 +912,7 @@ async fn interpret_with_depth(
     }
 
     outcome.archive_id_rewrites = archive_id_rewrites;
+    outcome.room_ownership_uncertain |= ownership_uncertain;
     outcome
 }
 

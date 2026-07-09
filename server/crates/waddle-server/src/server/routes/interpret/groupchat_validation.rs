@@ -83,6 +83,13 @@ pub(super) async fn validate_groupchat_rich_targets(
                 "Only the original sender may retract a message.",
             ));
         }
+        verify_groupchat_occupancy_generation(
+            sender_archive_view,
+            &original,
+            room_actor,
+            sender_nickname_generation,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -126,9 +133,9 @@ pub(super) fn sender_matches_groupchat_from(sender: &Jid, original_from: &Jid) -
     sender == original_from
 }
 
-/// XEP-0308 §3 occupancy continuity check: a full-JID that left the
-/// room and rejoined under the same nickname MUST NOT be allowed to
-/// correct messages from the previous occupancy. Compares the
+/// Occupancy continuity check for rich-target mutations: a full-JID that
+/// left the room and rejoined under the same nickname MUST NOT be allowed
+/// to correct or retract messages from the previous occupancy. Compares the
 /// per-nickname generation captured on the archive row at write time
 /// against the room actor's current generation for the sender's
 /// nickname.
@@ -140,12 +147,12 @@ pub(super) async fn verify_groupchat_occupancy_generation(
 ) -> Result<(), StanzaError> {
     let Some(nick) = sender.resource().map(|r| r.to_string()) else {
         return Err(forbidden_error(
-            "Correction sender has no MUC nickname for occupancy check.",
+            "Rich-target sender has no MUC nickname for occupancy check.",
         ));
     };
     let Some(archived_generation) = original.nickname_generation else {
         return Err(forbidden_error(
-            "Original message predates occupancy tracking; correction window has closed.",
+            "Original message predates occupancy tracking; rich-target mutation window has closed.",
         ));
     };
     // Prefer the generation snapshot already captured by `dispatch_to_room`
@@ -165,7 +172,7 @@ pub(super) async fn verify_groupchat_occupancy_generation(
     };
     if current_generation != archived_generation {
         return Err(forbidden_error(
-            "Occupancy generation has advanced; correction is no longer permitted across the leave/rejoin boundary.",
+            "Occupancy generation has advanced; this rich-target mutation is no longer permitted across the leave/rejoin boundary.",
         ));
     }
     Ok(())

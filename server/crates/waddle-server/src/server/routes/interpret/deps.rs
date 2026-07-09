@@ -63,6 +63,11 @@ pub struct InterpretOutcome {
     /// wire stanza it extracts BEFORE interpreting, so live/MAM id
     /// parity holds under origin-id retries.
     pub(super) archive_id_rewrites: Vec<ArchiveIdRewrite>,
+    /// A clustered MUC effect could not prove the exact current room
+    /// ownership fence. Nested interpreters propagate this bit so callers
+    /// can suppress post-dispatch observers and later enclosing effects
+    /// while retaining the retryable bounce frame.
+    pub(crate) room_ownership_uncertain: bool,
 }
 
 /// Typed timer instruction relayed from the state machine to the
@@ -121,6 +126,27 @@ pub struct Deps<'a> {
     /// actor and ask it for a frozen
     /// [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`].
     pub room_registry: Option<&'a ActorRef<RoomRegistryActor>>,
+    /// Exact `RoomActor` incarnation whose frozen snapshot authorized the
+    /// current nested room-event batch. Room mutations after async work must
+    /// compare the registry's current actor with this ref immediately before
+    /// applying the effect, so retained E1 authority never transfers to E2.
+    pub room_actor_incarnation: Option<ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
+    /// Explicit clustered MUC ownership boundary. Keeping this separate
+    /// from `web_socket_state` prevents a missing transport context from
+    /// being mistaken for single-node operation. `None` means clustered
+    /// durable MUC ownership is genuinely not configured.
+    #[cfg(feature = "clustering")]
+    pub muc_durable_store: Option<&'a Arc<dyn waddle_xmpp::muc::MucDurableStore>>,
+    /// True when the clustering claim plane is active. The pair
+    /// `(true, None)` is an unavailable ownership proof and fails closed;
+    /// only `(false, None)` selects portable single-node behavior.
+    #[cfg(feature = "clustering")]
+    pub clustered_muc_ownership_required: bool,
+    /// Exact immutable claim carried by the `RoomActor` whose snapshot is
+    /// being interpreted. Nested room effects must use this rather than a
+    /// newer room-scoped cache entry.
+    #[cfg(feature = "clustering")]
+    pub room_claim_fence: Option<waddle_xmpp::muc::RoomClaimFenceContext>,
     /// WebSocket route state. Used by the
     /// [`OutboundEvent::DispatchToRoom`] arm for the managed-room
     /// owner check (announcements room) and by
@@ -188,6 +214,13 @@ impl<'a> Deps<'a> {
             inbox_storage: None,
             extension_manager: None,
             room_registry: None,
+            room_actor_incarnation: None,
+            #[cfg(feature = "clustering")]
+            muc_durable_store: None,
+            #[cfg(feature = "clustering")]
+            clustered_muc_ownership_required: false,
+            #[cfg(feature = "clustering")]
+            room_claim_fence: None,
             web_socket_state: None,
             authenticated_session: None,
             local_domain: "example.com",
@@ -217,6 +250,13 @@ impl<'a> Deps<'a> {
             inbox_storage: None,
             extension_manager: None,
             room_registry: None,
+            room_actor_incarnation: None,
+            #[cfg(feature = "clustering")]
+            muc_durable_store: None,
+            #[cfg(feature = "clustering")]
+            clustered_muc_ownership_required: false,
+            #[cfg(feature = "clustering")]
+            room_claim_fence: None,
             web_socket_state: None,
             authenticated_session: None,
             local_domain: "example.com",
@@ -244,6 +284,13 @@ impl<'a> Deps<'a> {
             inbox_storage: Some(inbox_storage),
             extension_manager: None,
             room_registry: None,
+            room_actor_incarnation: None,
+            #[cfg(feature = "clustering")]
+            muc_durable_store: None,
+            #[cfg(feature = "clustering")]
+            clustered_muc_ownership_required: false,
+            #[cfg(feature = "clustering")]
+            room_claim_fence: None,
             web_socket_state: None,
             authenticated_session: None,
             local_domain: "example.com",
@@ -269,6 +316,13 @@ impl<'a> Deps<'a> {
             inbox_storage: None,
             extension_manager: Some(extension_manager),
             room_registry: None,
+            room_actor_incarnation: None,
+            #[cfg(feature = "clustering")]
+            muc_durable_store: None,
+            #[cfg(feature = "clustering")]
+            clustered_muc_ownership_required: false,
+            #[cfg(feature = "clustering")]
+            room_claim_fence: None,
             web_socket_state: None,
             authenticated_session: None,
             local_domain: "example.com",

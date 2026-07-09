@@ -36,13 +36,14 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom,
-    IsMucJid, ListRooms, ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor,
-    RoomRegistryError, WireClusteringClaims,
+    CreateInstantRoom, CreateRoom, DemoteAllRooms, DemoteRoomIfSuperseded, DestroyRoom,
+    DestroyRoomExact, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
+    ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
-use crate::ownership::{ClaimStore, SharedNodeIdentity};
+use crate::ownership::{ClaimEpoch, ClaimStore, NodeIdentity, SharedNodeIdentity};
 use crate::xep::xep0421::OccupantIdSecret;
 
 /// Explicit bounded mailbox capacity for the `RoomRegistryActor`.
@@ -314,10 +315,23 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Destroy a room, returning whether it existed.
+        /// Destroy the current room for a logical JID, returning whether it
+        /// existed. This unconditional form is for explicit administrator
+        /// intent; delayed rollback paths must use [`Self::destroy_room_exact`].
         destroy_room(room_jid: BareJid) -> bool,
         "destroy_room",
         DestroyRoom { room_jid }
+    );
+
+    registry_method!(
+        /// Destroy only the exact actor incarnation previously observed by
+        /// the caller, refusing a retained-E1/new-E2 ABA.
+        destroy_room_exact(
+            room_jid: BareJid,
+            expected_actor: ActorRef<RoomActor>
+        ) -> bool,
+        "destroy_room_exact",
+        DestroyRoomExact { room_jid, expected_actor }
     );
 
     registry_method!(
@@ -360,6 +374,26 @@ impl RoomRegistry {
         list_rooms() -> Vec<BareJid>,
         "list_rooms",
         ListRooms
+    );
+
+    registry_method!(
+        /// Atomically forget and hard-kill every room after node self-fence.
+        /// Claims are not released under the fenced identity.
+        demote_all_rooms() -> usize,
+        "demote_all_rooms",
+        DemoteAllRooms
+    );
+
+    registry_method!(
+        /// Hard-kill a room only when a delayed cluster Demote still names
+        /// this exact node incarnation and a strictly newer claim epoch.
+        demote_room_if_superseded(
+            room_jid: BareJid,
+            expected_owner: NodeIdentity,
+            new_epoch: ClaimEpoch
+        ) -> bool,
+        "demote_room_if_superseded",
+        DemoteRoomIfSuperseded { room_jid, expected_owner, new_epoch }
     );
 
     registry_method!(

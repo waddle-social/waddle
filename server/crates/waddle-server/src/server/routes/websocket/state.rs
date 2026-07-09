@@ -639,6 +639,20 @@ pub(super) struct WsConnState {
     pub(super) pending_resume_h: Option<u32>,
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Exact clustering admission generation captured when this physical
+    /// WebSocket task started. Registration fails closed if the node fences
+    /// and recovers while this connection is suspended before publication.
+    pub(super) clustering_admission: Option<crate::clustering::ClusteringAdmissionToken>,
+    /// Exact cluster-wide physical full-JID admission. Unlike the node-level
+    /// admission above, this orders same-resource binds across every socket
+    /// node and remains attached to the connection through final SM setup and
+    /// owner-gated cleanup.
+    #[cfg(feature = "clustering")]
+    pub(super) physical_resource_admission:
+        Option<crate::clustering::route_bridge::PhysicalResourceAdmissionToken>,
+    /// Hard-retirement backstop for whole-node fencing. Installed onto the
+    /// local ConnectionEntry at bind; never used for owner-side remote mirrors.
+    pub(super) retirement_handle: Option<waddle_xmpp::registry::ConnectionRetirementHandle>,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -718,6 +732,10 @@ impl WsConnState {
             pending_resume_stream_id: None,
             pending_resume_h: None,
             registry_owner: None,
+            clustering_admission: None,
+            #[cfg(feature = "clustering")]
+            physical_resource_admission: None,
+            retirement_handle: None,
             suppress_sm_record_next_batch: false,
             deferred_inbound: std::collections::VecDeque::new(),
             send_window_pause_deadline: None,

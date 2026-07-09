@@ -127,28 +127,83 @@ impl OutboundStanza {
 /// element 8's "live, owned elsewhere" branch) and also used by clustered
 /// `UserActor` owner demotion/retirement before a stale user claim is reused.
 /// Delivered through [`ConnectionEntry::force_detach_tx`] into the owning
-/// connection's own select loop, so the destructive detach-flush +
-/// `<conflict/>` close runs on the connection's own task (never from an
-/// external task reaching into its state directly).
+/// connection's own select loop, so the destructive detach-flush and typed
+/// stream close run on the connection's own task (never from an external task
+/// reaching into its state directly).
 #[derive(Debug)]
 pub struct ForceDetachRequest {
-    /// The bare JID the cross-node resume requester authenticated as.
-    /// Compared against this connection's own bound JID (defense in depth:
-    /// the caller — `ResumeStealBridge` — already checked this against the
-    /// registry's reverse index before sending, but the identity check must
-    /// gate the destructive close itself, not just an earlier lookup).
+    /// The bare JID authorized to retire this connection. Compared against
+    /// this connection's own bound JID as a final defense in depth; callers
+    /// already locate the resource through an identity-scoped registry or
+    /// relay route, but the destructive close itself must still be gated.
     pub requester_bare_jid: jid::BareJid,
+    /// Why the connection is being retired. The transport adapter uses this
+    /// typed reason to distinguish XEP-0198/same-resource replacement
+    /// (`<conflict/>`) from recoverable cluster infrastructure errors.
+    pub reason: ForceDetachReason,
     /// Answered exactly once, after the connection either force-detaches
     /// (identity matched) or declines (identity mismatch).
     pub ack: tokio::sync::oneshot::Sender<ForceDetachOutcome>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ForceDetachReason {
+    /// XEP-0198 resumed this still-open former stream elsewhere.
+    SessionResumed,
+    /// A newer registration displaced this same full JID.
+    ResourceReplaced,
+    /// This node lost the authoritative claim that allowed it to serve the
+    /// resource. The client should reconnect through the surviving cluster.
+    OwnershipLost,
+    /// This entire node self-fenced after losing its cluster lease.
+    NodeSelfFenced,
+    /// The owner-side mirror rejected or lost this remote resource state.
+    RemoteStateInvalidated,
+}
+
+/// Where a registry entry executes. A local socket can be hard-aborted by
+/// this process; a remote mirror is only proxy state and must never pin this
+/// node's readiness while another node owns the physical transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPlacement {
+    LocalSocket,
+    RemoteMirror,
+}
+
+/// Non-cooperative retirement backstop installed by a local WebSocket task.
+/// Cooperative force-detach remains the normal path so clients receive a
+/// native stream error and SM cleanup runs; terminal fencing uses this handle
+/// only after that bounded grace window expires.
+#[derive(Debug, Clone)]
+pub struct ConnectionRetirementHandle {
+    abort: futures::future::AbortHandle,
+    terminated: tokio_util::sync::CancellationToken,
+}
+
+impl ConnectionRetirementHandle {
+    pub fn new(
+        abort: futures::future::AbortHandle,
+        terminated: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self { abort, terminated }
+    }
+
+    pub fn abort(&self) {
+        self.abort.abort();
+    }
+
+    pub async fn terminated(&self) {
+        self.terminated.cancelled().await;
+    }
+}
+
 /// Outcome of a [`ForceDetachRequest`], reported back to the asker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForceDetachOutcome {
-    /// Identity matched, the connection sent `<conflict/>` and closed, AND
-    /// its subsequent XEP-0198 detach-for-resume cleanup actually persisted
-    /// a resumable snapshot (council-adjudicated fix: this is the ONLY
+    /// Identity matched, the connection sent the stream error appropriate to
+    /// [`ForceDetachRequest::reason`] and closed, AND its subsequent XEP-0198
+    /// detach-for-resume cleanup actually persisted a resumable snapshot
+    /// (council-adjudicated fix: this is the ONLY
     /// variant that authorizes the asker to proceed with
     /// `steal_for_resume` — see [`Self::NotPersisted`] for every other
     /// outcome of that same cleanup pass).
@@ -228,8 +283,9 @@ pub struct ConnectionEntry {
     /// **Council-adjudicated fix (updating this comment to match reality,
     /// not the original design intent)**: the capacity here is
     /// belt-and-suspenders, not the load-bearing bound it once was.
-    /// `ResumeStealBridge::request_forced_detach` (the sole production
-    /// sender) uses `try_send`, not a blocking `send().await` — a full or
+    /// Every production sender (resume, ownership reconciliation, and
+    /// remote-resource retirement) uses `try_send`, not a blocking
+    /// `send().await` — a full or
     /// closed channel answers `NotLiveLocally` immediately rather than
     /// waiting for capacity that may never free up. This is belt-and
     /// -suspenders alongside (not a replacement for) the
@@ -244,6 +300,8 @@ pub struct ConnectionEntry {
     /// own asker-side ack timeout instead (a bounded, not indefinite, wait).
     force_detach_tx: mpsc::Sender<ForceDetachRequest>,
     force_detach_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<ForceDetachRequest>>>>,
+    placement: ConnectionPlacement,
+    retirement: Arc<std::sync::OnceLock<ConnectionRetirementHandle>>,
 }
 
 /// See [`ConnectionEntry::force_detach_tx`]'s doc comment for why this is
@@ -253,6 +311,18 @@ const FORCE_DETACH_CHANNEL_CAPACITY: usize = 8;
 impl ConnectionEntry {
     /// Create a new connection entry with carbons disabled by default.
     pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        Self::with_placement(sender, ConnectionPlacement::LocalSocket)
+    }
+
+    /// Create owner-side proxy state for a socket hosted by another node.
+    pub fn new_remote_mirror(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        Self::with_placement(sender, ConnectionPlacement::RemoteMirror)
+    }
+
+    fn with_placement(
+        sender: mpsc::Sender<OutboundStanza>,
+        placement: ConnectionPlacement,
+    ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             sender,
@@ -266,7 +336,21 @@ impl ConnectionEntry {
             sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
+            placement,
+            retirement: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    pub fn placement(&self) -> ConnectionPlacement {
+        self.placement
+    }
+
+    pub fn install_retirement_handle(&self, handle: ConnectionRetirementHandle) -> bool {
+        self.retirement.set(handle).is_ok()
+    }
+
+    pub fn retirement_handle(&self) -> Option<ConnectionRetirementHandle> {
+        self.retirement.get().cloned()
     }
 
     /// Clone of this entry's force-detach sender, for a caller (the

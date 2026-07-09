@@ -4,7 +4,7 @@ use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::presence::Presence;
 
-use super::{AdminApplyError, AdminContext, RoomActor};
+use super::{AdminApplyError, AdminContext, RoomActor, RoomMutationError};
 use crate::muc::admin::{is_role_change_query, AdminItem};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
@@ -138,6 +138,7 @@ fn apply_affiliation_change(
         return Ok(AdminItemsApplied {
             presence_updates: updates,
             removed_by_moderation,
+            persist_failure: None,
         });
     }
 
@@ -161,6 +162,7 @@ fn apply_affiliation_change(
         return Ok(AdminItemsApplied {
             presence_updates: updates,
             removed_by_moderation: Vec::new(),
+            persist_failure: None,
         });
     }
 
@@ -193,6 +195,7 @@ fn apply_affiliation_change(
     Ok(AdminItemsApplied {
         presence_updates: updates,
         removed_by_moderation: Vec::new(),
+        persist_failure: None,
     })
 }
 
@@ -295,6 +298,11 @@ pub struct ApplyAdminItems {
 pub struct AdminItemsApplied {
     pub presence_updates: Vec<(FullJid, Presence)>,
     pub removed_by_moderation: Vec<FullJid>,
+    /// A durable convergence failure discovered after one or more effects
+    /// had already mutated room state. Callers must deliver those effects
+    /// before returning a retryable error; dropping this outcome would leave
+    /// clients and SFU state inconsistent with the actor.
+    pub persist_failure: Option<super::DurablePersistError>,
 }
 
 impl kameo::message::Message<ApplyAdminItems> for RoomActor {
@@ -549,6 +557,15 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     self.admission_revision = self.admission_revision.saturating_add(1);
                     if let Err(error) = self.persist_affiliation(&target_jid, new_affiliation).await
                     {
+                        match &error {
+                            super::DurablePersistError::NotOwner => {
+                                return Err(AdminApplyError::NotOwner);
+                            }
+                            super::DurablePersistError::OwnershipUncertain => {
+                                return Err(AdminApplyError::OwnershipUncertain);
+                            }
+                            super::DurablePersistError::Failed(_) => {}
+                        }
                         persist_failure.get_or_insert(error);
                     }
                 }
@@ -566,12 +583,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             // `RoomActor::refresh_durable_recipients_from_source`).
             self.refresh_durable_recipients_from_source().await;
         }
-        if let Some(error) = persist_failure {
-            return Err(error.into());
-        }
         Ok(AdminItemsApplied {
             presence_updates,
             removed_by_moderation,
+            persist_failure,
         })
     }
 }
@@ -602,9 +617,24 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
             None,
         )?;
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
+        let mut updates = updates;
         if previous_affiliation != msg.affiliation {
             self.admission_revision = self.admission_revision.saturating_add(1);
-            self.persist_affiliation(&msg.jid, msg.affiliation).await?;
+            if let Err(error) = self.persist_affiliation(&msg.jid, msg.affiliation).await {
+                match &error {
+                    super::DurablePersistError::NotOwner => {
+                        return Err(AdminApplyError::NotOwner);
+                    }
+                    super::DurablePersistError::OwnershipUncertain => {
+                        return Err(AdminApplyError::OwnershipUncertain);
+                    }
+                    super::DurablePersistError::Failed(_) => {}
+                }
+                // The affiliation/removal effects have already committed in
+                // memory. Return them with the convergence error so callers
+                // notify occupants and evict calls before reporting failure.
+                updates.persist_failure = Some(error);
+            }
         }
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
@@ -616,14 +646,34 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
 pub struct EnforceMembersOnly;
 
 impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
-    type Reply = Vec<(FullJid, Presence)>;
+    type Reply = Result<Vec<(FullJid, Presence)>, RoomMutationError>;
 
     async fn handle(
         &mut self,
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        enforce_members_only(&mut self.room, &self.occupant_id_secret)
+        self.gate_mutation().await?;
+        Ok(enforce_members_only(
+            &mut self.room,
+            &self.occupant_id_secret,
+        ))
+    }
+}
+
+/// Admit a server-side managed-channel mutation against this exact actor
+/// incarnation before touching external channel/bookmark state.
+pub struct CheckMutationOwnership;
+
+impl kameo::message::Message<CheckMutationOwnership> for RoomActor {
+    type Reply = Result<(), RoomMutationError>;
+
+    async fn handle(
+        &mut self,
+        _msg: CheckMutationOwnership,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.gate_mutation().await
     }
 }
 
@@ -665,6 +715,15 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             {
                 self.admission_revision = self.admission_revision.saturating_add(1);
                 if let Err(error) = self.persist_affiliation(&jid, affiliation).await {
+                    match &error {
+                        super::DurablePersistError::NotOwner => {
+                            return Err(super::RoomMutationError::NotOwner);
+                        }
+                        super::DurablePersistError::OwnershipUncertain => {
+                            return Err(super::RoomMutationError::OwnershipUncertain);
+                        }
+                        super::DurablePersistError::Failed(_) => {}
+                    }
                     persist_failure.get_or_insert(error);
                 }
             }

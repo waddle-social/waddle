@@ -46,6 +46,39 @@ pub use resume::{verify_resume_identity, ResumeIdentityProof};
 use async_trait::async_trait;
 use std::time::Duration;
 
+/// Hard wall-clock budget for a Postgres transaction that holds an exact
+/// claim or node-incarnation fence.
+///
+/// Fenced transactions deliberately keep row locks until commit so an
+/// ownership transfer cannot pass a durable write. Without a database-side
+/// bound, however, one stalled transaction can retain both the entity claim
+/// and the shared node row forever, preventing heartbeat renewal and cluster
+/// recovery past the nominal lease TTL. Both `waddle-server`'s database
+/// adapter and this crate's direct SQLx MAM path consume this one typed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FencedTransactionBudget(Duration);
+
+impl FencedTransactionBudget {
+    pub const fn from_millis(milliseconds: u64) -> Self {
+        Self(Duration::from_millis(milliseconds))
+    }
+
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    pub fn postgres_timeout(self) -> String {
+        format!("{}ms", self.0.as_millis())
+    }
+}
+
+/// Five seconds is comfortably below the shipped 30-second node lease while
+/// leaving ordinary fenced SM/MUC/MAM writes ample time to finish. Cluster
+/// configuration rejects any node lease that is not strictly longer than
+/// this budget.
+pub const FENCED_TRANSACTION_BUDGET: FencedTransactionBudget =
+    FencedTransactionBudget::from_millis(5_000);
+
 /// Closed set of claimable entity kinds (element 4). Serialized to `TEXT`
 /// only at the SQL boundary (`entity_type` column) — never compared or
 /// branched on as a bare string at call sites. Also `Serialize`/
@@ -177,11 +210,13 @@ impl std::fmt::Display for Entity {
 /// typed-payloads hard rule.
 ///
 /// `owner_lease_fresh` (council-adjudicated fix, Slice 6): whether `owner`'s
-/// own node-liveness row is currently fresh (not committed-`expired`, and its
-/// `node_epoch` still matches) — the exact same owner-stale predicate
-/// [`StalePredicate::OwnerStale`] realizes for `steal_stale`, read here
-/// advisory-only (no write attached, same "never itself an authority"
-/// caveat as the rest of this snapshot). This is what lets a cross-node
+/// own node-liveness row is currently serving-eligible (exact `node_epoch`,
+/// not committed-`expired`, and heartbeat still within that incarnation's
+/// registered lease TTL), read advisory-only (no write attached, same
+/// "never itself an authority" caveat as the rest of this snapshot). This
+/// freshness read never authorizes stealing: [`StalePredicate::OwnerStale`]
+/// continues to require the serialized committed-expiry transition. This is
+/// what lets a cross-node
 /// resume attempt distinguish, once its held-response window closes,
 /// between "the owner is still alive, just unreachable over the swarm right
 /// now" (XEP-0198's `resource-constraint`) and "the owner's own lease has
@@ -207,13 +242,37 @@ pub struct ClaimSnapshot {
 )]
 pub struct ClaimEpoch(pub i64);
 
+/// Exact authority returned by a successful claim grant. Carrying the
+/// entity, owner incarnation, and globally unique claim generation together
+/// prevents callers from accidentally pairing an epoch with a different
+/// entity or a later node incarnation across an `.await` boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimGrant {
+    pub entity: Entity,
+    pub owner: NodeIdentity,
+    pub epoch: ClaimEpoch,
+}
+
+impl ClaimGrant {
+    pub fn new(entity: Entity, owner: NodeIdentity, epoch: ClaimEpoch) -> Self {
+        Self {
+            entity,
+            owner,
+            epoch,
+        }
+    }
+}
+
 /// A node's cluster identity, as seen by the claims CAS. Distinct from
 /// `waddle-server::clustering::NodeId` (which is `clustering`-feature gated
 /// and libp2p-flavored): this type is unconditionally compiled, so it is
-/// plain data with no dependency on the swarm subsystem. `node_epoch` is
-/// freshly generated on every process start and never reused, mirroring the
-/// keypair-slot lease's `LeaseIdentity` (ADR-0017 element 3/4).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// plain data with no dependency on the swarm subsystem. `node_id` is the
+/// process-stable relay address; `node_epoch` is freshly generated on every
+/// process start and after every self-fence recovery, and is never reused.
+/// Both fields are serialized together on cluster relay messages whose
+/// correctness depends on the exact owner incarnation, rather than only its
+/// routable process address.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NodeIdentity {
     pub node_id: String,
     pub node_epoch: String,
@@ -238,9 +297,10 @@ impl NodeIdentity {
 /// A live, shared view of this process's current [`NodeIdentity`].
 ///
 /// Node identity is not fixed for the life of a process: ADR-0017 Phase 3
-/// Slice 2's `self_fence::run_node_lease` mints a fresh `node_id`/
-/// `node_epoch` pair every time this node re-registers after a self-fence,
-/// reassigning its loop-local identity in place. Any call site that binds
+/// Slice 2's `self_fence::run_node_lease` retains the process-stable
+/// `node_id` relay address while minting a fresh `node_epoch` every time this
+/// node re-registers after a self-fence, reassigning its loop-local identity
+/// in place. Any call site that binds
 /// an identity into a claim acquire/fence CAS on this node's behalf must
 /// observe whatever identity is *currently* in force, not a snapshot
 /// captured once at startup — a caller holding a stale, pre-fence identity
@@ -346,6 +406,12 @@ pub enum ClaimError {
     #[error("claim store internal lock poisoned")]
     Poisoned,
 
+    /// The monotonic claim-generation allocator reached `i64::MAX`.
+    /// Reusing an epoch would make delayed fences/releases valid again, so
+    /// exhaustion is a hard typed failure rather than wrapping.
+    #[error("claim epoch allocator exhausted")]
+    EpochExhausted,
+
     /// A steal-intent operation (`report_steal_intent`/`owner_steal_intents`/
     /// `clear_steal_intent`, ADR-0017 Phase 3 Slice 3) was asked to operate
     /// on an `EntityType::SmSession` claim. Per the three-rule steal-variant
@@ -362,16 +428,17 @@ pub enum ClaimError {
     SmSessionExcludedFromStealIntent,
 
     /// `acquire`/`ensure_claimed`/`steal_stale` refused to grant a NEW
-    /// claim because the calling node has marked itself draining
-    /// (ADR-0017 Phase 3 Slice 10: `NodeLeaseStore::mark_draining` — "stop
-    /// acquiring new claims, keep serving already-owned ones"). Distinct
+    /// claim because the calling node's exact lease incarnation is missing,
+    /// expired, or marked draining (ADR-0017 Phase 3 Slice 10:
+    /// `NodeLeaseStore::mark_draining` — "stop acquiring new claims, keep
+    /// serving already-owned ones"). Distinct
     /// from [`ClaimError::AlreadyClaimed`]: the entity may well be
     /// unclaimed — this node simply refuses to be the one to claim it while
     /// on its way out. A caller already holding this exact claim is
     /// unaffected (`ensure_claimed`'s self-reacquire fallback still
     /// succeeds while draining); only a genuinely NEW acquisition is
     /// refused.
-    #[error("this node is draining and refuses to acquire a new claim")]
+    #[error("this node lease is unavailable or draining and refuses to acquire a new claim")]
     Draining,
 }
 
@@ -459,6 +526,24 @@ pub trait ClaimStore: Send + Sync {
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError>;
 
+    /// Self-fence recovery-only reclaim from `expected_owner` into a
+    /// registered-but-draining replacement incarnation. Unlike ordinary
+    /// acquisition, the destination may be draining because readiness and
+    /// all general admissions remain closed until hydration completes and
+    /// the node is activated. The exact source identity prevents this
+    /// narrow exception from becoming a generic stale-claim steal.
+    async fn reclaim_after_self_fence(
+        &self,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        expected_owner: &NodeIdentity,
+        me: &NodeIdentity,
+        lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        let _ = (entity, observed, expected_owner, me, lease_ttl);
+        Err(ClaimError::Conflict)
+    }
+
     /// Steal `entity` via the consent/epoch-only CAS (element 4's third CAS
     /// variant), authorized exclusively by an identity-checked resume
     /// (element 8). Requires a [`ResumeIdentityProof`], which only
@@ -485,6 +570,30 @@ pub trait ClaimStore: Send + Sync {
     /// call.
     async fn current_claim(&self, entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError>;
 
+    /// Bulk snapshot the exact grants among `entities` currently held by
+    /// `me`. Graceful drain uses this once before sealing, then carries each
+    /// exact grant through the final write into [`Self::release_many`]
+    /// without issuing one point read per entity.
+    async fn owned_claims(
+        &self,
+        entities: &[Entity],
+        me: &NodeIdentity,
+    ) -> Result<Vec<ClaimGrant>, ClaimError> {
+        let mut grants = Vec::new();
+        for entity in entities {
+            if let Some(snapshot) = self.current_claim(entity).await? {
+                if snapshot.owner == *me && snapshot.owner_lease_fresh {
+                    grants.push(ClaimGrant::new(
+                        entity.clone(),
+                        snapshot.owner,
+                        snapshot.claim_epoch,
+                    ));
+                }
+            }
+        }
+        Ok(grants)
+    }
+
     /// Advisory, own-transaction check: does `me` still hold `entity` under
     /// epoch `mine` right now? See the trait-level doc for why this is
     /// never the write-path fencing mechanism.
@@ -506,27 +615,12 @@ pub trait ClaimStore: Send + Sync {
 
     /// Batched release for graceful drain (~18k modeled claims, ADR-0017
     /// Phase 3 Slice 10) — one round-trip, not one-at-a-time. Releases every
-    /// entity in `entities` currently held by `me`, regardless of each
-    /// entity's individual epoch (drain does not need per-entity epoch
-    /// pinning — only "still owned by me, whatever the epoch").
-    ///
-    /// **Plan-sanctioned ABA window**: this release is blind to `entity`'s
-    /// individual `claim_epoch`, matching only on `(node_id, node_epoch)` —
-    /// so if an entity queued into `entities` (because its final write
-    /// already committed) is *re-claimed by this same node* at a higher
-    /// epoch before the batched DELETE actually runs (e.g. a resumed
-    /// XEP-0198 session legitimately steals back onto this node via
-    /// `steal_for_resume` — no staleness required — while this node is
-    /// still draining but not yet gone), the stale batch entry deletes that
-    /// brand-new, genuinely-live claim too. Slice 2's draining-node marker
-    /// (`NodeLeaseStore::mark_draining` stops this node from *acquiring*
-    /// new claims once draining, narrowing but not eliminating the window)
-    /// and Slice 10's batch-construction ordering (an entity enters the
-    /// batch only after its final fenced write's transaction has committed,
-    /// keeping the window as short as possible) are the mitigations — not a
-    /// full closure of the race. See Slice 10's Tests paragraph for the
-    /// interleaving this implies for the drain test suite.
-    async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError>;
+    /// grant in `grants` only while its exact `(entity, owner node/epoch,
+    /// claim_epoch)` tuple remains current. The epoch is mandatory: an
+    /// owner-only batch can delete a claim that was stolen away and then
+    /// legitimately granted back to the same node before the delayed batch
+    /// executes.
+    async fn release_many(&self, grants: &[ClaimGrant]) -> Result<(), ClaimError>;
 }
 
 /// Rollout-aware claim-acquisition placement (ADR-0017 Phase 3 Slice 10,
@@ -606,6 +700,16 @@ mod tests {
     #[test]
     fn node_identity_local_is_stable() {
         assert_eq!(NodeIdentity::local(), NodeIdentity::local());
+    }
+
+    #[test]
+    fn node_identity_serde_round_trips_both_incarnation_fields() {
+        let identity = NodeIdentity::new("relay-address", "post-fence-epoch");
+        let encoded = serde_json::to_string(&identity).expect("serialize node identity");
+        let decoded: NodeIdentity =
+            serde_json::from_str(&encoded).expect("deserialize node identity");
+
+        assert_eq!(decoded, identity);
     }
 
     #[test]

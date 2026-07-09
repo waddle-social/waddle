@@ -24,8 +24,8 @@ mod snapshot_handlers;
 mod tests;
 
 pub use admin_handlers::{
-    ApplyAdminItems, ApplyAffiliationChange, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
-    GetAdminContext, IsOwner,
+    ApplyAdminItems, ApplyAffiliationChange, CheckMutationOwnership, EnforceMembersOnly,
+    EnforceMembersOnlyAffiliations, GetAdminContext, IsOwner,
 };
 pub use occupancy_handlers::{
     ClearMujiPresence, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
@@ -162,6 +162,11 @@ pub enum AdminApplyError {
     /// `<resource-constraint/>` bounce).
     #[error("this room's ownership has moved to another node")]
     NotOwner,
+    /// The ownership store could not prove or disprove the exact claim.
+    /// The mutation was never applied. Unlike `NotOwner`, callers must not
+    /// demote the actor solely from this transient uncertainty.
+    #[error("this room's ownership cannot currently be verified")]
+    OwnershipUncertain,
     /// FIX 2: the fenced gate passed (or was skipped, single-node), the
     /// in-memory mutation was applied, but the best-effort durable
     /// persist afterwards failed for a reason OTHER than ownership loss
@@ -177,6 +182,7 @@ impl From<RoomMutationError> for AdminApplyError {
     fn from(error: RoomMutationError) -> Self {
         match error {
             RoomMutationError::NotOwner => AdminApplyError::NotOwner,
+            RoomMutationError::OwnershipUncertain => AdminApplyError::OwnershipUncertain,
             RoomMutationError::PersistFailed(detail) => AdminApplyError::PersistFailed(detail),
         }
     }
@@ -185,6 +191,8 @@ impl From<RoomMutationError> for AdminApplyError {
 impl From<DurablePersistError> for AdminApplyError {
     fn from(error: DurablePersistError) -> Self {
         match error {
+            DurablePersistError::NotOwner => AdminApplyError::NotOwner,
+            DurablePersistError::OwnershipUncertain => AdminApplyError::OwnershipUncertain,
             DurablePersistError::Failed(detail) => AdminApplyError::PersistFailed(detail),
         }
     }
@@ -219,6 +227,8 @@ impl From<DurablePersistError> for AdminApplyError {
 pub enum RoomMutationError {
     #[error("this room's ownership has moved to another node")]
     NotOwner,
+    #[error("this room's ownership cannot currently be verified")]
+    OwnershipUncertain,
     #[error("durable persist failed after the in-memory mutation committed: {0}")]
     PersistFailed(String),
 }
@@ -232,6 +242,10 @@ pub enum RoomMutationError {
 /// named variant (`PendingStorageError::Other`, `MamStorageError::Database`).
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DurablePersistError {
+    #[error("this room's ownership moved before the durable write committed")]
+    NotOwner,
+    #[error("this room's exact-incarnation ownership cannot currently be verified")]
+    OwnershipUncertain,
     #[error("durable persist failed: {0}")]
     Failed(String),
 }
@@ -239,6 +253,8 @@ pub enum DurablePersistError {
 impl From<DurablePersistError> for RoomMutationError {
     fn from(error: DurablePersistError) -> Self {
         match error {
+            DurablePersistError::NotOwner => RoomMutationError::NotOwner,
+            DurablePersistError::OwnershipUncertain => RoomMutationError::OwnershipUncertain,
             DurablePersistError::Failed(detail) => RoomMutationError::PersistFailed(detail),
         }
     }
@@ -276,6 +292,9 @@ pub struct RoomActor {
     /// makes the probe's revision stale, closing the probe→destroy
     /// TOCTOU that orphaned freshly-admitted occupants.
     occupancy_revision: u64,
+    /// Monotonic token for pin-list mutations. Failed system-message
+    /// broadcasts use it for ABA-safe conditional rollback.
+    pin_revision: u64,
     /// Set by [`SealIfInactive`] immediately before the registry
     /// removes this actor from its map (#1108). A sealed actor refuses
     /// further admissions with [`RoomActorError::RoomSealed`] so a
@@ -309,6 +328,10 @@ pub struct RoomActor {
     /// Every config/subject/affiliation-mutating handler best-effort
     /// persists through this handle when it is `Some`.
     durable_store: Option<std::sync::Arc<dyn super::durable::MucDurableStore>>,
+    /// Exact claim won for this actor incarnation. This never follows a
+    /// later room-scoped cache update, preventing an E1 actor from borrowing
+    /// a same-node E2 reacquisition after destroy/recreate.
+    claim_fence: Option<super::durable::RoomClaimFenceContext>,
     /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): whether this
     /// actor incarnation's durable restore genuinely completed. See
     /// [`DurableRestoreState`]'s own doc comment.
@@ -389,6 +412,25 @@ pub enum RoomActorError {
     /// ownership-gap bounce.
     #[error("durable room-state restore has not yet completed; retry")]
     RestorePending,
+    /// The exact room claim no longer belongs to this actor's node/epoch.
+    /// No join mutation was applied.
+    #[error("this room's ownership has moved to another node")]
+    NotOwner,
+    /// The ownership store could not verify the exact room claim. No join
+    /// mutation was applied.
+    #[error("this room's ownership cannot currently be verified")]
+    OwnershipUncertain,
+}
+
+impl From<RoomMutationError> for RoomActorError {
+    fn from(error: RoomMutationError) -> Self {
+        match error {
+            RoomMutationError::NotOwner => Self::NotOwner,
+            RoomMutationError::OwnershipUncertain | RoomMutationError::PersistFailed(_) => {
+                Self::OwnershipUncertain
+            }
+        }
+    }
 }
 
 impl RoomActor {
@@ -399,11 +441,13 @@ impl RoomActor {
             config_revision: 0,
             admission_revision: 0,
             occupancy_revision: 0,
+            pin_revision: 0,
             sealed: false,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
             membership_source: None,
             durable_store: None,
+            claim_fence: None,
             restore_state: DurableRestoreState::Ready,
         }
     }
@@ -416,17 +460,25 @@ impl RoomActor {
     /// still holds the claim. `Err(RoomMutationError::NotOwner)` when the
     /// fenced check observes 0 rows — the caller MUST NOT mutate.
     ///
-    /// A transient backend failure fails OPEN for the gate itself
-    /// (mirroring `dispatch_to_room`'s identical "a transient fencing
-    /// -check failure never demotes, only a definitive 0-rows result
-    /// does" rule) — only a definitive fencing failure blocks the
-    /// mutation; an unreachable Postgres must not itself wedge every
-    /// mutating admin action.
+    /// A backend failure returns `OwnershipUncertain` and fails this
+    /// mutation closed. It does not demote the actor (only a definitive
+    /// zero-row result does), but an unreachable ownership store cannot
+    /// authorize an in-memory state change.
     async fn gate_mutation(&self) -> Result<(), RoomMutationError> {
         let Some(store) = self.durable_store.clone() else {
             return Ok(());
         };
-        match store.check_fenced_fanout(&self.room.room_jid).await {
+        let Some(fence) = self.claim_fence.as_ref() else {
+            tracing::warn!(
+                room = %self.room.room_jid,
+                "durable room actor has no exact-incarnation claim fence; failing mutation closed"
+            );
+            return Err(RoomMutationError::OwnershipUncertain);
+        };
+        let checked = store
+            .check_fenced_fanout_exact(&self.room.room_jid, fence)
+            .await;
+        match checked {
             Ok(true) => Ok(()),
             Ok(false) => {
                 tracing::warn!(
@@ -435,14 +487,20 @@ impl RoomActor {
                 );
                 Err(RoomMutationError::NotOwner)
             }
+            Err(crate::XmppError::RoomOwnershipLost(_)) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    "mutation gate has no live cached room claim; refusing as not-owner"
+                );
+                Err(RoomMutationError::NotOwner)
+            }
             Err(error) => {
                 tracing::warn!(
                     room = %self.room.room_jid,
                     %error,
-                    "mutation gate fencing check failed transiently; failing open \
-                     (not blocking the mutation)"
+                    "mutation gate fencing check failed; failing closed without demoting"
                 );
-                Ok(())
+                Err(RoomMutationError::OwnershipUncertain)
             }
         }
     }
@@ -509,23 +567,30 @@ impl RoomActor {
         let Some(store) = self.durable_store.clone() else {
             return Ok(());
         };
-        store
-            .save_config(
+        let Some(fence) = self.claim_fence.as_ref() else {
+            return Err(DurablePersistError::OwnershipUncertain);
+        };
+        let saved = store
+            .save_config_exact(
                 &self.room.room_jid,
                 &self.room.waddle_id,
                 &self.room.channel_id,
                 &self.room.config,
+                fence,
             )
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    room = %self.room.room_jid,
-                    %error,
-                    "durable room-config persist failed (in-memory config remains \
-                     authoritative for this actor incarnation; surfaced typed to caller)"
-                );
-                DurablePersistError::Failed(error.to_string())
-            })
+            .await;
+        saved.map_err(|error| {
+            tracing::warn!(
+                room = %self.room.room_jid,
+                %error,
+                "durable room-config persist failed (in-memory config remains \
+                 authoritative for this actor incarnation; surfaced typed to caller)"
+            );
+            match error {
+                crate::XmppError::RoomOwnershipLost(_) => DurablePersistError::NotOwner,
+                other => DurablePersistError::Failed(other.to_string()),
+            }
+        })
     }
 
     /// Best-effort durable persist of the current subject. See
@@ -534,17 +599,23 @@ impl RoomActor {
         let Some(store) = self.durable_store.clone() else {
             return Ok(());
         };
-        store
-            .save_subject(&self.room.room_jid, self.room.subject.as_ref())
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    room = %self.room.room_jid,
-                    %error,
-                    "durable room-subject persist failed (surfaced typed to caller)"
-                );
-                DurablePersistError::Failed(error.to_string())
-            })
+        let Some(fence) = self.claim_fence.as_ref() else {
+            return Err(DurablePersistError::OwnershipUncertain);
+        };
+        let saved = store
+            .save_subject_exact(&self.room.room_jid, self.room.subject.as_ref(), fence)
+            .await;
+        saved.map_err(|error| {
+            tracing::warn!(
+                room = %self.room.room_jid,
+                %error,
+                "durable room-subject persist failed (surfaced typed to caller)"
+            );
+            match error {
+                crate::XmppError::RoomOwnershipLost(_) => DurablePersistError::NotOwner,
+                other => DurablePersistError::Failed(other.to_string()),
+            }
+        })
     }
 
     /// Best-effort durable persist of one affiliation-list entry. See
@@ -558,18 +629,24 @@ impl RoomActor {
             return Ok(());
         };
         let entry = super::affiliation::AffiliationEntry::new(jid.clone(), affiliation);
-        store
-            .save_affiliation(&self.room.room_jid, &entry)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    room = %self.room.room_jid,
-                    jid = %jid,
-                    %error,
-                    "durable room-affiliation persist failed (surfaced typed to caller)"
-                );
-                DurablePersistError::Failed(error.to_string())
-            })
+        let Some(fence) = self.claim_fence.as_ref() else {
+            return Err(DurablePersistError::OwnershipUncertain);
+        };
+        let saved = store
+            .save_affiliation_exact(&self.room.room_jid, &entry, fence)
+            .await;
+        saved.map_err(|error| {
+            tracing::warn!(
+                room = %self.room.room_jid,
+                jid = %jid,
+                %error,
+                "durable room-affiliation persist failed (surfaced typed to caller)"
+            );
+            match error {
+                crate::XmppError::RoomOwnershipLost(_) => DurablePersistError::NotOwner,
+                other => DurablePersistError::Failed(other.to_string()),
+            }
+        })
     }
 
     /// Drop a JID from the spawn-time hydrated durable-recipient
@@ -735,6 +812,69 @@ pub struct RestoreDurableRoomState {
     pub store: std::sync::Arc<dyn super::durable::MucDurableStore>,
 }
 
+/// Bind the immutable claim proof won for this exact actor incarnation.
+/// The registry enqueues this before restore and before exposing the actor.
+pub struct BindRoomClaimFence {
+    pub fence: super::durable::RoomClaimFenceContext,
+}
+
+/// An actor incarnation may carry exactly one claim proof. Re-sending the
+/// identical proof is idempotent, but attempting to transplant a newer (or
+/// otherwise different) proof into the retained actor is an ABA violation.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BindRoomClaimFenceError {
+    #[error("room actor already carries a different exact-incarnation claim fence")]
+    ConflictingFence {
+        bound: super::durable::RoomClaimFenceContext,
+        attempted: super::durable::RoomClaimFenceContext,
+    },
+}
+
+impl kameo::message::Message<BindRoomClaimFence> for RoomActor {
+    type Reply = Result<(), BindRoomClaimFenceError>;
+
+    async fn handle(
+        &mut self,
+        msg: BindRoomClaimFence,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match self.claim_fence.as_ref() {
+            None => {
+                self.claim_fence = Some(msg.fence);
+                Ok(())
+            }
+            Some(bound) if bound == &msg.fence => Ok(()),
+            Some(bound) => {
+                let error = BindRoomClaimFenceError::ConflictingFence {
+                    bound: bound.clone(),
+                    attempted: msg.fence,
+                };
+                tracing::error!(
+                    room = %self.room.room_jid,
+                    "room actor claim fence rebind rejected; stopping retained actor"
+                );
+                ctx.stop();
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Return the immutable exact-incarnation claim carried by this actor.
+pub struct GetRoomClaimFence;
+
+impl kameo::message::Message<GetRoomClaimFence> for RoomActor {
+    type Reply = Option<super::durable::RoomClaimFenceContext>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetRoomClaimFence,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.claim_fence.clone()
+    }
+}
+
 impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
     type Reply = ();
 
@@ -801,6 +941,7 @@ impl kameo::message::Message<Join> for RoomActor {
         if self.sealed {
             return Err(RoomActorError::RoomSealed);
         }
+        self.gate_mutation().await?;
         if self.room.is_full() && !affiliation_overflows_full_room(msg.affiliation) {
             return Err(RoomActorError::RoomFull);
         }
@@ -829,6 +970,7 @@ impl kameo::message::Message<Leave> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.gate_mutation().await?;
         self.room
             .remove_occupant(&msg.nick)
             .map(|_| ())
@@ -977,6 +1119,8 @@ pub enum UpdateGroupDmConfigByMemberError {
     /// doc comment — identical contract, one message type over.
     #[error("this room's ownership has moved to another node")]
     NotOwner,
+    #[error("this room's ownership cannot currently be verified")]
+    OwnershipUncertain,
     /// FIX 2: see [`AdminApplyError::PersistFailed`]'s doc comment.
     #[error("durable persist failed after the in-memory mutation committed: {0}")]
     PersistFailed(String),
@@ -986,6 +1130,9 @@ impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
     fn from(error: RoomMutationError) -> Self {
         match error {
             RoomMutationError::NotOwner => UpdateGroupDmConfigByMemberError::NotOwner,
+            RoomMutationError::OwnershipUncertain => {
+                UpdateGroupDmConfigByMemberError::OwnershipUncertain
+            }
             RoomMutationError::PersistFailed(detail) => {
                 UpdateGroupDmConfigByMemberError::PersistFailed(detail)
             }
@@ -996,6 +1143,10 @@ impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
 impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
     fn from(error: DurablePersistError) -> Self {
         match error {
+            DurablePersistError::NotOwner => UpdateGroupDmConfigByMemberError::NotOwner,
+            DurablePersistError::OwnershipUncertain => {
+                UpdateGroupDmConfigByMemberError::OwnershipUncertain
+            }
             DurablePersistError::Failed(detail) => {
                 UpdateGroupDmConfigByMemberError::PersistFailed(detail)
             }
@@ -1064,9 +1215,13 @@ impl kameo::message::Message<SetSubject> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.gate_mutation().await?;
+        let previous_subject = self.room.subject.clone();
         self.room
             .set_subject(msg.texts, msg.setter, msg.setter_nick, msg.set_at);
-        self.persist_subject().await?;
+        if let Err(error) = self.persist_subject().await {
+            self.room.subject = previous_subject;
+            return Err(error.into());
+        }
         Ok(())
     }
 }
@@ -1081,13 +1236,14 @@ pub struct ApplyPin {
 }
 
 impl kameo::message::Message<ApplyPin> for RoomActor {
-    type Reply = ();
+    type Reply = Result<u64, RoomMutationError>;
 
     async fn handle(
         &mut self,
         msg: ApplyPin,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_mutation().await?;
         match msg.change {
             PinStateChange::Pin(entry) => {
                 self.room.upsert_pin(entry);
@@ -1096,6 +1252,40 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
                 self.room.remove_pin_by_target(&target_stanza_id);
             }
         }
+        self.pin_revision = self.pin_revision.saturating_add(1);
+        Ok(self.pin_revision)
+    }
+}
+
+/// Restore a pin target after a failed system-message broadcast, but only
+/// when no later pin mutation was processed while that broadcast awaited.
+pub struct RollbackPinIfRevision {
+    pub expected_revision: u64,
+    pub change: PinStateChange,
+}
+
+impl kameo::message::Message<RollbackPinIfRevision> for RoomActor {
+    type Reply = Result<bool, RoomMutationError>;
+
+    async fn handle(
+        &mut self,
+        msg: RollbackPinIfRevision,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.pin_revision != msg.expected_revision {
+            return Ok(false);
+        }
+        self.gate_mutation().await?;
+        match msg.change {
+            PinStateChange::Pin(entry) => {
+                self.room.upsert_pin(entry);
+            }
+            PinStateChange::Unpin { target_stanza_id } => {
+                self.room.remove_pin_by_target(&target_stanza_id);
+            }
+        }
+        self.pin_revision = self.pin_revision.saturating_add(1);
+        Ok(true)
     }
 }
 
@@ -1315,6 +1505,34 @@ pub enum SealGuard {
     /// eviction of instant rooms (XEP-0045 §10.1.3), which may still
     /// hold a subject or the creator's Owner grant.
     EmptyNonPersistent,
+}
+
+/// Seal this exact actor for an owner-requested XEP-0045 room destruction and
+/// return the final occupant snapshot covered by that seal.
+///
+/// The actor mailbox is the admission barrier: every join queued before this
+/// message commits before the snapshot, while every join processed after it
+/// observes [`RoomActorError::RoomSealed`]. The ownership mutation gate runs
+/// before changing `sealed`, so claim loss or backend uncertainty never
+/// authorizes destruction from a deposed actor.
+pub struct SealForOwnerDestroy;
+
+impl kameo::message::Message<SealForOwnerDestroy> for RoomActor {
+    type Reply = Result<RoomSnapshot, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        _msg: SealForOwnerDestroy,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.gate_mutation().await?;
+        self.sealed = true;
+        Ok(RoomSnapshot {
+            room: self.room.clone(),
+            config_revision: self.config_revision,
+            admission_revision: self.admission_revision,
+        })
+    }
 }
 
 /// Seal this room actor for destruction if it is still inactive at the

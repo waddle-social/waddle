@@ -118,7 +118,8 @@ use jid::BareJid;
 use tokio::time::Instant;
 
 use crate::ownership::{
-    verify_resume_identity, ClaimEpoch, ClaimError, Entity, EntityType, ResumeIdentityProof,
+    verify_resume_identity, ClaimEpoch, ClaimError, Entity, EntityType, NodeIdentity,
+    ResumeIdentityProof,
 };
 use crate::stream_management::persistence::PersistedSession;
 
@@ -172,9 +173,10 @@ const REPAIR_RELEASE_MAX_ATTEMPTS: u32 = 3;
 /// Delay between [`REPAIR_RELEASE_MAX_ATTEMPTS`] repair-release retries.
 const REPAIR_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
-/// Ask a remote node (identified by its `node_id`) to release a live SM
-/// session for cross-node resume (element 8's "live, owned elsewhere"
-/// branch — XEP-0198's "Resumption" section `<conflict/>`-close SHOULD).
+/// Ask the exact remote owner incarnation observed in the claims table to
+/// release a live SM session for cross-node resume (element 8's "live,
+/// owned elsewhere" branch — XEP-0198's "Resumption" section
+/// `<conflict/>`-close SHOULD).
 ///
 /// Implemented in `waddle-server` via `RelayHandle` (the swarm's cross-node
 /// ask); this trait keeps `waddle-xmpp` free of any clustering/swarm/libp2p
@@ -182,14 +184,16 @@ const REPAIR_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(200);
 /// already uses for the Postgres CAS implementation.
 #[async_trait::async_trait]
 pub trait RemoteResumeAsker: Send + Sync {
-    /// Ask node `node_id` to force-detach its live SM session `stream_id`
-    /// on behalf of `requester_bare_jid`. The remote node performs its own
-    /// defense-in-depth identity check before doing anything destructive
-    /// (ADR-0017 Phase 3 plan, Slice 6: "the identity check gates the
-    /// destructive close itself, not just the subsequent CAS").
+    /// Ask `expected_owner` to force-detach its live SM session `stream_id`
+    /// only while the claim is still held under `observed`. The remote node
+    /// performs both exact-owner/claim-epoch validation and the requester's
+    /// JID identity check before doing anything destructive (ADR-0017 Phase
+    /// 3 plan, Slice 6: "the identity check gates the destructive close
+    /// itself, not just the subsequent CAS").
     async fn ask_remote_detach(
         &self,
-        node_id: &str,
+        expected_owner: &NodeIdentity,
+        observed: ClaimEpoch,
         stream_id: &str,
         requester_bare_jid: &BareJid,
     ) -> RemoteResumeAskOutcome;
@@ -359,7 +363,7 @@ impl InMemorySmSessionRegistry {
         // The eventual `steal_for_resume` call binds this exact value,
         // never a freshly re-read one.
         let observed_epoch = snapshot.claim_epoch;
-        let owner_node_id = snapshot.owner.node_id;
+        let expected_owner = snapshot.owner;
 
         let deadline = Instant::now() + handshake_budget;
         let mut backoff = INITIAL_HANDSHAKE_BACKOFF;
@@ -452,7 +456,12 @@ impl InMemorySmSessionRegistry {
             // same bounded backoff-and-retry below.
             let ask_outcome = match tokio::time::timeout(
                 remaining,
-                asker.ask_remote_detach(&owner_node_id, stream_id, requester_bare_jid),
+                asker.ask_remote_detach(
+                    &expected_owner,
+                    observed_epoch,
+                    stream_id,
+                    requester_bare_jid,
+                ),
             )
             .await
             {
@@ -917,7 +926,8 @@ mod tests {
     impl RemoteResumeAsker for SlowAsker {
         async fn ask_remote_detach(
             &self,
-            _node_id: &str,
+            _expected_owner: &NodeIdentity,
+            _observed: ClaimEpoch,
             _stream_id: &str,
             _requester_bare_jid: &BareJid,
         ) -> RemoteResumeAskOutcome {
@@ -1016,7 +1026,8 @@ mod tests {
     impl RemoteResumeAsker for FlakyAsker {
         async fn ask_remote_detach(
             &self,
-            _node_id: &str,
+            _expected_owner: &NodeIdentity,
+            _observed: ClaimEpoch,
             stream_id: &str,
             _requester_bare_jid: &BareJid,
         ) -> RemoteResumeAskOutcome {
@@ -1123,7 +1134,8 @@ mod tests {
         impl RemoteResumeAsker for ReleasingAsker {
             async fn ask_remote_detach(
                 &self,
-                _node_id: &str,
+                _expected_owner: &NodeIdentity,
+                _observed: ClaimEpoch,
                 _stream_id: &str,
                 _requester_bare_jid: &BareJid,
             ) -> RemoteResumeAskOutcome {
@@ -1550,10 +1562,9 @@ mod tests {
         }
         async fn release_many(
             &self,
-            entities: &[Entity],
-            me: &crate::ownership::NodeIdentity,
+            grants: &[crate::ownership::ClaimGrant],
         ) -> Result<(), ClaimError> {
-            self.inner.release_many(entities, me).await
+            self.inner.release_many(grants).await
         }
     }
 

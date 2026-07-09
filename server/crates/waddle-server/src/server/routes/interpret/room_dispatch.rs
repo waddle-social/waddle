@@ -158,6 +158,15 @@ pub(super) async fn dispatch_to_room(
         }
     };
 
+    #[cfg(feature = "clustering")]
+    let exact_fence = match room_actor.ask(GetRoomClaimFence).await {
+        Ok(fence) => fence,
+        Err(error) => {
+            warn!(room = %room_jid, ?error, "DispatchToRoom: exact actor fence lookup failed");
+            None
+        }
+    };
+
     // ADR-0017 Phase 3 Slice 7: the two-part demotion protocol's
     // guaranteed backstop — a fenced `SELECT ... FOR SHARE` against this
     // room's Postgres claim, run before any local fan-out (this is the
@@ -167,22 +176,43 @@ pub(super) async fn dispatch_to_room(
     // `GetRoomSnapshot`-based sans-I/O chain and carries no live
     // production caller). `None` (clustering disabled, non-Postgres, or a
     // build without the `clustering` feature) skips this entirely —
-    // single-node behavior, unchanged. A transient backend error fails
-    // open (logged, not blocking); only a definitive 0-rows result
-    // demotes.
+    // single-node behavior, unchanged. Both a definitive 0-rows result and
+    // an inability to check the database fail closed: neither case may
+    // emit local fan-out or other message effects. Only definitive
+    // ownership loss demotes the actor; a transient check error bounces
+    // this message without destroying still-potentially-owned state.
     #[cfg(feature = "clustering")]
     if let Some(store) = &state.deps.app_state.clustering_claims.muc_durable_store {
-        match store.check_fenced_fanout(&room_jid).await {
+        let Some(exact_fence) = exact_fence.as_ref() else {
+            let reply = build_message_error_reply(
+                &incoming,
+                &room_jid,
+                &sender_full,
+                resource_constraint_error(
+                    "This room's ownership cannot currently be verified; please retry.",
+                ),
+            );
+            if let Ok(xml) = Stanza::Message(reply).to_element_string() {
+                outcome.frames.push(xml);
+            }
+            outcome.room_ownership_uncertain = true;
+            return outcome;
+        };
+        match store
+            .check_fenced_fanout_exact(&room_jid, exact_fence)
+            .await
+        {
             Ok(true) => {}
-            Ok(false) => {
+            Ok(false) | Err(waddle_xmpp::XmppError::RoomOwnershipLost(_)) => {
                 warn!(
                     room = %room_jid,
-                    "DispatchToRoom: fenced ownership check observed 0 rows; this node has \
-                     been deposed — evicting the local room actor and bouncing the sender"
+                    "DispatchToRoom: fenced ownership check proved this node is no longer \
+                     authoritative — evicting the local room actor and bouncing the sender"
                 );
                 let _ = room_registry
-                    .ask(DestroyRoom {
+                    .ask(DestroyRoomExact {
                         room_jid: room_jid.clone(),
+                        expected_actor: room_actor.clone(),
                     })
                     .await;
                 let reply = build_message_error_reply(
@@ -203,6 +233,7 @@ pub(super) async fn dispatch_to_room(
                         );
                     }
                 }
+                outcome.room_ownership_uncertain = true;
                 return outcome;
             }
             Err(error) => {
@@ -210,8 +241,28 @@ pub(super) async fn dispatch_to_room(
                     room = %room_jid,
                     %error,
                     "DispatchToRoom: fenced ownership check failed (transient backend \
-                     error); failing open, not demoting"
+                     error); failing closed for this message without demoting"
                 );
+                let reply = build_message_error_reply(
+                    &incoming,
+                    &room_jid,
+                    &sender_full,
+                    resource_constraint_error(
+                        "This room's ownership cannot currently be verified; please retry.",
+                    ),
+                );
+                match Stanza::Message(reply).to_element_string() {
+                    Ok(xml) => outcome.frames.push(xml),
+                    Err(serialize_error) => {
+                        warn!(
+                            room = %room_jid,
+                            error = %serialize_error,
+                            "DispatchToRoom: failed to serialize ownership-uncertainty bounce reply"
+                        );
+                    }
+                }
+                outcome.room_ownership_uncertain = true;
+                return outcome;
             }
         }
     }
@@ -284,27 +335,12 @@ pub(super) async fn dispatch_to_room(
         // pending callback completions if a future gate handler ever
         // emits them.
         let nested = Box::pin(interpret_with_depth(gate_events, deps, recursion_depth)).await;
+        outcome.room_ownership_uncertain = nested.room_ownership_uncertain;
         outcome.frames.extend(nested.frames);
         outcome.close = outcome.close || nested.close;
         outcome.feedback.extend(nested.feedback);
         return outcome;
     }
-
-    // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
-    // an inbound MUC stanza represents the sender being currently
-    // active in the room. Record `(sender_bare, room)` only AFTER the
-    // occupancy / managed-room gate has admitted the sender — otherwise
-    // a non-occupant or managed-room-forbidden sender whose stanza is
-    // rejected could still bump their activity projection and appear
-    // "recently active" for the XEP-0513 `<active/>` filter (Codex
-    // review on PR #731).
-    super::notification_activity_ingest::record_chat_state_activity(
-        deps,
-        &sender_full.to_bare(),
-        &room_jid,
-        &incoming,
-    )
-    .await;
 
     if message_has_framework_envelope(&prototype) {
         let mut sanitized = incoming.clone();
@@ -428,17 +464,48 @@ pub(super) async fn dispatch_to_room(
     //    promotes to a headless recipient pass (depth bumped there).
     //    Bumping here would break that path for every offline
     //    occupant.
+    let nested_deps = {
+        let mut nested = deps.clone();
+        nested.room_actor_incarnation = Some(room_actor.clone());
+        #[cfg(feature = "clustering")]
+        {
+            nested.room_claim_fence = exact_fence.clone();
+        }
+        nested
+    };
     let nested = Box::pin(interpret_with_depth(
         dispatch_outcome.events,
-        deps,
+        &nested_deps,
         recursion_depth,
     ))
     .await;
+    let nested_ownership_uncertain = nested.room_ownership_uncertain;
     outcome.frames.extend(nested.frames);
     if nested.close {
         outcome.close = true;
     }
     outcome.feedback.extend(nested.feedback);
+
+    if nested_ownership_uncertain {
+        // The nested archive fence has already suppressed the remaining
+        // batch and emitted a retryable bounce. Do not leave activity or
+        // extension-observer side effects behind for a message whose exact
+        // room owner could not be proved.
+        outcome.room_ownership_uncertain = true;
+        return outcome;
+    }
+
+    // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
+    // an admitted inbound MUC stanza represents the sender being currently
+    // active in the room. This runs only after the archive/fan-out batch has
+    // completed without ownership uncertainty.
+    super::notification_activity_ingest::record_chat_state_activity(
+        deps,
+        &sender_full.to_bare(),
+        &room_jid,
+        &incoming,
+    )
+    .await;
 
     let mut observer_message = observer_message;
     let observer_outcome = state

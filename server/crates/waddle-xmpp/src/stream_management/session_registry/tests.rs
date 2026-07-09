@@ -2717,6 +2717,87 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
 }
 
 #[tokio::test]
+async fn strict_hydration_rechecks_the_exact_grant_after_durable_reads() {
+    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new("stream-stolen-mid-load"));
+    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::new("recovery", "candidate");
+    let other = crate::ownership::NodeIdentity::new("other", "winner");
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "stream-stolen-mid-load",
+    );
+    storage
+        .inner
+        .upsert_session(super::super::persistence::PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-stolen-mid-load"),
+            user_id: "race@example.com".to_string(),
+            jid: "race@example.com/recovery".parse().expect("jid"),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            max_resume_time: Some(300),
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: Duration::from_secs(300),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("seed durable row");
+    let epoch = claim_store.acquire(&entity, &me).await.expect("seed claim");
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_persistence(storage.clone())
+            .with_claim_store(
+                claim_store.clone(),
+                crate::ownership::SharedNodeIdentity::new(me.clone()),
+            ),
+    );
+
+    storage
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let hydrate_registry = std::sync::Arc::clone(&registry);
+    let hydrate_entity = entity.clone();
+    let hydrate_owner = me.clone();
+    let hydrate = tokio::spawn(async move {
+        hydrate_registry
+            .hydrate_reclaimed_one_as(&hydrate_entity, epoch, &hydrate_owner)
+            .await
+    });
+    storage.reached.notified().await;
+    claim_store
+        .steal_stale(
+            &entity,
+            epoch,
+            crate::ownership::StalePredicate::OwnerStale,
+            &other,
+        )
+        .await
+        .expect("move claim during durable load");
+    storage
+        .armed
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    storage.proceed.notify_one();
+
+    assert_eq!(
+        hydrate.await.expect("task").expect("hydrate"),
+        ReclaimedSessionHydration::Elsewhere
+    );
+    assert!(registry
+        .peek_session("stream-stolen-mid-load")
+        .await
+        .expect("peek")
+        .is_none());
+}
+
+#[tokio::test]
 async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_same_stream() {
     // FIX 2's mid-flight race: the orphan reaper's `hydrate_reclaimed` must
     // never overlap a live session's own store/claim/take mutation of the

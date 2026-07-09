@@ -281,6 +281,13 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         inbox_storage: None,
         extension_manager: None,
         room_registry: None,
+        room_actor_incarnation: None,
+        #[cfg(feature = "clustering")]
+        muc_durable_store: None,
+        #[cfg(feature = "clustering")]
+        clustered_muc_ownership_required: false,
+        #[cfg(feature = "clustering")]
+        room_claim_fence: None,
         web_socket_state: None,
         authenticated_session: None,
         local_domain: "example.com",
@@ -2062,6 +2069,191 @@ async fn send_stanza_preserves_xep_0201_thread_on_wire() {
 // the chain wiring against the lightweight in-process `Deps` shape.
 // -----------------------------------------------------------------
 
+#[cfg(feature = "clustering")]
+struct ResolvedRoomFenceStore {
+    fence: waddle_xmpp::muc::RoomClaimFenceContext,
+}
+
+#[cfg(feature = "clustering")]
+impl waddle_xmpp::muc::MucDurableStore for ResolvedRoomFenceStore {
+    fn load_room_state<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn save_config<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _waddle_id: &'a str,
+        _channel_id: &'a str,
+        _config: &'a waddle_xmpp::muc::RoomConfig,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save_subject<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save_affiliation<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn current_claim_fence(
+        &self,
+        _room_jid: &BareJid,
+    ) -> Option<waddle_xmpp::muc::RoomClaimFenceContext> {
+        Some(self.fence.clone())
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn archive_groupchat_event_message(room: &BareJid, with_stanza_id: bool) -> Message {
+    use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
+
+    let mut message = Message::new(Some(Jid::from(room.clone())));
+    message.from = Some(
+        format!("{room}/alice")
+            .parse::<Jid>()
+            .expect("valid room occupant JID"),
+    );
+    message.type_ = XmppMessageType::Groupchat;
+    message.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
+    if with_stanza_id {
+        add_stanza_id(
+            &mut message,
+            &StanzaId::new("archive-id", Jid::from(room.clone())),
+        );
+    }
+    message
+}
+
+#[cfg(feature = "clustering")]
+fn clustered_archive_test_deps<'a>(
+    registry: &'a ConnectionRegistry,
+    mam: &'a Arc<dyn MamStorage>,
+    inbox: &'a Arc<dyn InboxStorage>,
+    store: &'a Arc<dyn waddle_xmpp::muc::MucDurableStore>,
+) -> Deps<'a> {
+    let mut deps = Deps::test_with_storage(registry, mam, inbox);
+    deps.muc_durable_store = Some(store);
+    deps.clustered_muc_ownership_required = true;
+    deps
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustered_archive_fence_failure_suppresses_later_batch_effects() {
+    use waddle_xmpp::mam::SqlxMamStorage;
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(
+        SqlxMamStorage::open_in_memory()
+            .await
+            .expect("open in-memory MAM"),
+    );
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+    let room: BareJid = "batch-fence@muc.example.com".parse().expect("room");
+    let store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(ResolvedRoomFenceStore {
+        fence: waddle_xmpp::muc::RoomClaimFenceContext {
+            entity: Entity::new(EntityType::RoomActor, room.to_string()),
+            epoch: ClaimEpoch(3),
+            owner: NodeIdentity::new("node-a", "epoch-a"),
+        },
+    });
+    let deps = clustered_archive_test_deps(&registry, &mam, &inbox, &store);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let outcome = interpret(
+        vec![
+            OutboundEvent::ArchiveGroupchat {
+                room: room.clone(),
+                sender,
+                message: Box::new(archive_groupchat_event_message(&room, true)),
+                sender_nickname_generation: 0,
+                sender_item: None,
+            },
+            OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(result_iq("must-not-run"))))),
+        ],
+        &deps,
+    )
+    .await;
+
+    assert!(outcome.room_ownership_uncertain);
+    assert!(outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("resource-constraint")));
+    assert!(!outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("must-not-run")));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn malformed_fenced_archive_event_suppresses_later_batch_effects() {
+    use waddle_xmpp::mam::SqlxMamStorage;
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(
+        SqlxMamStorage::open_in_memory()
+            .await
+            .expect("open in-memory MAM"),
+    );
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+    let room: BareJid = "batch-skip@muc.example.com".parse().expect("room");
+    let store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(ResolvedRoomFenceStore {
+        fence: waddle_xmpp::muc::RoomClaimFenceContext {
+            entity: Entity::new(EntityType::RoomActor, room.to_string()),
+            epoch: ClaimEpoch(4),
+            owner: NodeIdentity::new("node-a", "epoch-a"),
+        },
+    });
+    let deps = clustered_archive_test_deps(&registry, &mam, &inbox, &store);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let outcome = interpret(
+        vec![
+            OutboundEvent::ArchiveGroupchat {
+                room: room.clone(),
+                sender,
+                message: Box::new(archive_groupchat_event_message(&room, false)),
+                sender_nickname_generation: 0,
+                sender_item: None,
+            },
+            OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(result_iq("must-not-run"))))),
+        ],
+        &deps,
+    )
+    .await;
+
+    assert!(outcome.room_ownership_uncertain);
+    assert!(outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("resource-constraint")));
+    assert!(!outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("must-not-run")));
+}
+
 /// Without `web_socket_state` the arm logs a warn and drops the
 /// event without panicking — production must wire `web_socket_state`
 /// via [`super::super::websocket::build_interpret_deps`].
@@ -2344,6 +2536,13 @@ fn offline_pass_deps<'a>(
         inbox_storage: Some(inbox),
         extension_manager: None,
         room_registry: None,
+        room_actor_incarnation: None,
+        #[cfg(feature = "clustering")]
+        muc_durable_store: None,
+        #[cfg(feature = "clustering")]
+        clustered_muc_ownership_required: false,
+        #[cfg(feature = "clustering")]
+        room_claim_fence: None,
         web_socket_state: None,
         authenticated_session: None,
         local_domain: "example.com",
@@ -2835,7 +3034,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
             .expect("test secret meets length floor"),
     ));
     let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
-    let _room_actor = room_registry
+    let room_actor = room_registry
         .ask(CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "w-1".to_string(),
@@ -2853,6 +3052,13 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         inbox_storage: None,
         extension_manager: None,
         room_registry: Some(&room_registry),
+        room_actor_incarnation: Some(room_actor),
+        #[cfg(feature = "clustering")]
+        muc_durable_store: None,
+        #[cfg(feature = "clustering")]
+        clustered_muc_ownership_required: false,
+        #[cfg(feature = "clustering")]
+        room_claim_fence: None,
         web_socket_state: None,
         authenticated_session: None,
         local_domain: "example.com",
@@ -2874,6 +3080,8 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         texts: texts.clone(),
         setter: setter.clone(),
         setter_nick: "alice-nick".to_string(),
+        sender_full: "alice@example.com/desktop".parse().expect("full jid"),
+        message: Box::new(Message::new(Some(jid::Jid::from(room_jid.clone())))),
         set_at,
     }];
     let _outcome = interpret(events, &deps).await;
@@ -2912,14 +3120,17 @@ async fn xep_0045_persist_room_subject_with_no_registry_is_noop() {
     let texts =
         waddle_xmpp::muc::RoomSubjectTexts::from_iter([(String::new(), "ignored".to_string())]);
     let events = vec![OutboundEvent::PersistRoomSubject {
-        room: room_jid,
+        room: room_jid.clone(),
         texts,
         setter,
         setter_nick: "alice-nick".to_string(),
+        sender_full: "alice@example.com/desktop".parse().expect("full jid"),
+        message: Box::new(Message::new(Some(jid::Jid::from(room_jid)))),
         set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
     }];
     let outcome = interpret(events, &deps).await;
-    assert!(outcome.frames.is_empty());
+    assert_eq!(outcome.frames.len(), 1, "the sender gets a retryable error");
+    assert!(outcome.room_ownership_uncertain);
     assert!(!outcome.close);
 }
 
@@ -3110,15 +3321,31 @@ async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_room_stanza_id()
     retraction.id = Some(xmpp_parsers::message::Id("retract-stanza-1".to_string()));
     retraction.from = Some(format!("{room}/alice").parse().expect("room/nick"));
     retraction.type_ = XmppMessageType::Groupchat;
+    waddle_xmpp_core::xep0359::add_stanza_id(
+        &mut retraction,
+        &waddle_xmpp_core::xep0359::StanzaId::new(
+            "retract-room-stamp-1",
+            jid::Jid::from(room.clone()),
+        ),
+    );
     retraction
         .payloads
         .push(waddle_xmpp::xep::xep0424::build_retract_element(archive_pk));
 
-    let events = vec![OutboundEvent::ApplyGroupchatRetractionTombstone {
-        room: room.clone(),
-        target_message_id: archive_pk.to_string(),
-        retraction_message: Box::new(retraction),
-    }];
+    let events = vec![
+        OutboundEvent::ArchiveGroupchat {
+            room: room.clone(),
+            sender: "alice@example.com/web".parse().expect("full jid"),
+            message: Box::new(retraction.clone()),
+            sender_nickname_generation: 0,
+            sender_item: None,
+        },
+        OutboundEvent::ApplyGroupchatRetractionTombstone {
+            room: room.clone(),
+            target_message_id: archive_pk.to_string(),
+            retraction_message: Box::new(retraction),
+        },
+    ];
     let _outcome = interpret(events, &deps).await;
 
     // The seeded row's body must now be scrubbed and a
@@ -3213,15 +3440,31 @@ async fn xep_0424_groupchat_retraction_scrubs_pending_delivery_rows() {
     retraction.id = Some(xmpp_parsers::message::Id("retract-stanza-2".to_string()));
     retraction.from = Some(format!("{room}/alice").parse().expect("room/nick"));
     retraction.type_ = XmppMessageType::Groupchat;
+    waddle_xmpp_core::xep0359::add_stanza_id(
+        &mut retraction,
+        &waddle_xmpp_core::xep0359::StanzaId::new(
+            "retract-room-stamp-2",
+            jid::Jid::from(room.clone()),
+        ),
+    );
     retraction
         .payloads
         .push(waddle_xmpp::xep::xep0424::build_retract_element(archive_pk));
 
-    let events = vec![OutboundEvent::ApplyGroupchatRetractionTombstone {
-        room: room.clone(),
-        target_message_id: archive_pk.to_string(),
-        retraction_message: Box::new(retraction),
-    }];
+    let events = vec![
+        OutboundEvent::ArchiveGroupchat {
+            room: room.clone(),
+            sender: "alice@example.com/web".parse().expect("full jid"),
+            message: Box::new(retraction.clone()),
+            sender_nickname_generation: 0,
+            sender_item: None,
+        },
+        OutboundEvent::ApplyGroupchatRetractionTombstone {
+            room: room.clone(),
+            target_message_id: archive_pk.to_string(),
+            retraction_message: Box::new(retraction),
+        },
+    ];
     let _outcome = interpret(events, &deps).await;
 
     let rows = pending.list(&recipient).await.expect("list");
@@ -3308,6 +3551,13 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         inbox_storage: None,
         extension_manager: None,
         room_registry: None,
+        room_actor_incarnation: None,
+        #[cfg(feature = "clustering")]
+        muc_durable_store: None,
+        #[cfg(feature = "clustering")]
+        clustered_muc_ownership_required: false,
+        #[cfg(feature = "clustering")]
+        room_claim_fence: None,
         web_socket_state: None,
         authenticated_session: None,
         local_domain: "example.com",

@@ -1,7 +1,10 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
+use kameo::actor::ActorRef;
 use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, info, warn};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::muc::room_actor::GetRoomClaimFence;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -24,8 +27,9 @@ use waddle_xmpp::{
         },
         owner::build_config_form,
         room_actor::{
-            ApplyAdminItems, ChangeAffiliation, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
-            GetAdminContext, GetOccupantByJid, GetSnapshot, PingSelfCheck, UpdateConfig,
+            ApplyAdminItems, ChangeAffiliation, CheckMutationOwnership, EnforceMembersOnly,
+            EnforceMembersOnlyAffiliations, GetAdminContext, GetOccupantByJid, GetSnapshot,
+            PingSelfCheck, RoomActor, UpdateConfig,
         },
         DATA_FORMS_NS,
     },
@@ -171,6 +175,296 @@ pub(super) use errors::{
     service_unavailable_iq_error,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FencedRoomEffectsOutcome {
+    Authorized,
+    NotOwner,
+    OwnershipUncertain,
+}
+
+/// Demote only the actor incarnation that produced the failed exact proof.
+/// If E2 has already replaced retained E1 in the registry, the registry CAS
+/// refuses to touch E2 and the direct kill still terminates the retained E1.
+pub(crate) async fn demote_exact_room_actor(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_actor: &ActorRef<RoomActor>,
+) {
+    let _ = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoomExact {
+            room_jid: room_jid.clone(),
+            expected_actor: room_actor.clone(),
+        })
+        .await;
+    room_actor.kill();
+}
+
+/// Final local-incarnation half of an exact room-effects proof. Run this
+/// after any backend claim check so a retained E1 cannot borrow E2's current
+/// room-scoped authority merely because both use the same logical JID.
+async fn fence_current_room_actor(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_actor: &ActorRef<RoomActor>,
+) -> FencedRoomEffectsOutcome {
+    match state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(current_actor)) if current_actor == *room_actor => {
+            FencedRoomEffectsOutcome::Authorized
+        }
+        Ok(Some(_)) | Ok(None) => {
+            demote_exact_room_actor(state, room_jid, room_actor).await;
+            FencedRoomEffectsOutcome::NotOwner
+        }
+        Err(_) => FencedRoomEffectsOutcome::OwnershipUncertain,
+    }
+}
+
+/// Final exact-incarnation proof for direct room effects that bypass the
+/// sans-I/O room dispatcher (admin/config presence, moderation, destroy).
+pub(super) async fn fence_room_effects(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_actor: &ActorRef<RoomActor>,
+) -> FencedRoomEffectsOutcome {
+    #[cfg(feature = "clustering")]
+    {
+        let clustering = &state.deps.app_state.clustering_claims;
+        if clustering.claim_store.is_none() {
+            return fence_current_room_actor(state, room_jid, room_actor).await;
+        }
+        let Some(store) = clustering.muc_durable_store.as_ref() else {
+            return FencedRoomEffectsOutcome::OwnershipUncertain;
+        };
+        let fence = match room_actor.ask(GetRoomClaimFence).await {
+            Ok(Some(fence)) => fence,
+            Ok(None) | Err(_) => return FencedRoomEffectsOutcome::OwnershipUncertain,
+        };
+        match store.check_fenced_fanout_exact(room_jid, &fence).await {
+            Ok(true) => fence_current_room_actor(state, room_jid, room_actor).await,
+            Ok(false) | Err(waddle_xmpp::XmppError::RoomOwnershipLost(_)) => {
+                demote_exact_room_actor(state, room_jid, room_actor).await;
+                FencedRoomEffectsOutcome::NotOwner
+            }
+            Err(_) => FencedRoomEffectsOutcome::OwnershipUncertain,
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        fence_current_room_actor(state, room_jid, room_actor).await
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod fenced_effect_tests {
+    use super::*;
+    use kameo::actor::Spawn;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use waddle_xmpp::muc::room_actor::{BindRoomClaimFence, GetSnapshot, Join};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::{DurableRoomState, MucDurableFuture, MucDurableStore, RoomConfig};
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+    use waddle_xmpp_core::{Affiliation, Role};
+
+    struct SwitchableFenceStore {
+        owned: AtomicBool,
+    }
+
+    impl MucDurableStore for SwitchableFenceStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a RoomConfig,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn check_fenced_fanout_exact<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let owned = self.owned.load(Ordering::SeqCst);
+            Box::pin(async move { Ok(owned) })
+        }
+    }
+
+    #[tokio::test]
+    async fn ownership_loss_during_snapshot_and_scrub_window_suppresses_live_fanout() {
+        use crate::server::routes::websocket::tests::{
+            create_test_websocket_state_with_clustering, register_test_connection,
+        };
+
+        let store = Arc::new(SwitchableFenceStore {
+            owned: AtomicBool::new(true),
+        });
+        let clustering = crate::clustering::ClusteringHandles {
+            claim_store: Some(Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new())),
+            muc_durable_store: Some(store.clone()),
+            ..Default::default()
+        };
+        let sm_registry =
+            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+        let state = create_test_websocket_state_with_clustering(clustering, sm_registry).await;
+        let room: BareJid = "late-fence@muc.example.com".parse().expect("room");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "waddle".to_string(),
+                channel_id: "channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        actor
+            .ask(BindRoomClaimFence {
+                fence: waddle_xmpp::muc::RoomClaimFenceContext {
+                    entity: Entity::new(EntityType::RoomActor, room.to_string()),
+                    epoch: ClaimEpoch(1),
+                    owner: NodeIdentity::new("node-a", "node-epoch-a"),
+                },
+            })
+            .await
+            .expect("bind E1");
+        let occupant: jid::FullJid = "alice@example.com/web".parse().expect("occupant");
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: occupant.clone(),
+                role: Role::Moderator,
+                affiliation: Affiliation::Owner,
+            })
+            .await
+            .expect("join occupant");
+
+        // The moderation path takes this snapshot and then awaits preview,
+        // SM, and pending-delivery scrubs. Model the claim moving during
+        // that window before the production final-effects helper runs.
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+        tokio::task::yield_now().await;
+        store.owned.store(false, Ordering::SeqCst);
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let _owner = register_test_connection(&state, &occupant, sender).await;
+        if fence_room_effects(&state, &room, &actor).await == FencedRoomEffectsOutcome::Authorized {
+            let presence =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+            let _ = state.deps.protocol.connection_registry.try_send_to(
+                &snapshot.room.occupants["alice"].real_jid,
+                Stanza::Presence(presence),
+            );
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn retained_actor_cannot_borrow_current_registry_incarnation_authority() {
+        use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+
+        let store = Arc::new(SwitchableFenceStore {
+            owned: AtomicBool::new(true),
+        });
+        let clustering = crate::clustering::ClusteringHandles {
+            claim_store: Some(Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new())),
+            muc_durable_store: Some(store),
+            ..Default::default()
+        };
+        let sm_registry =
+            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+        let state = create_test_websocket_state_with_clustering(clustering, sm_registry).await;
+        let room: BareJid = "actor-ref-fence@muc.example.com".parse().expect("room");
+        let current = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "current".to_string(),
+                channel_id: "current".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create current actor");
+        let retained = RoomActor::spawn(RoomActor::new(
+            waddle_xmpp::muc::MucRoom::new(
+                room.clone(),
+                "retained".to_string(),
+                "retained".to_string(),
+                RoomConfig::default(),
+            ),
+            state.deps.occupant_id_secret.clone(),
+        ));
+        retained
+            .ask(BindRoomClaimFence {
+                fence: waddle_xmpp::muc::RoomClaimFenceContext {
+                    entity: Entity::new(EntityType::RoomActor, room.to_string()),
+                    epoch: ClaimEpoch(1),
+                    owner: NodeIdentity::new("node-a", "node-epoch-a"),
+                },
+            })
+            .await
+            .expect("bind retained fence");
+
+        assert_eq!(
+            fence_room_effects(&state, &room, &retained).await,
+            FencedRoomEffectsOutcome::NotOwner
+        );
+        tokio::task::yield_now().await;
+        assert!(!retained.is_alive());
+        let still_current = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom { room_jid: room })
+            .await
+            .expect("get current actor")
+            .expect("current actor remains");
+        assert_eq!(still_current, current);
+        assert!(current.is_alive());
+    }
+}
+
 fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::StanzaError {
     match error {
         XmppError::Stanza {
@@ -201,8 +495,8 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 pub(super) use super::super::build_iq_error_xml_typed;
 
 use super::super::{
-    build_iq_result_xml, destroy_room_actor, element_to_xml, get_room_actor, iq_to_xml,
-    is_muc_room_jid, stanza_to_xml, WebSocketState,
+    build_iq_result_xml, element_to_xml, get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml,
+    WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, resolve_muc_room_archive_access,

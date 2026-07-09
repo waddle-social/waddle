@@ -130,6 +130,8 @@ impl RoomHandler for MucSubjectHandler {
             texts,
             setter: sender.bare_jid(),
             setter_nick: sender.nick.clone(),
+            sender_full: sender.full_jid.clone(),
+            message: Box::new(message.clone()),
             set_at,
         };
         RoomHandlerOutcome::Continue(vec![event])

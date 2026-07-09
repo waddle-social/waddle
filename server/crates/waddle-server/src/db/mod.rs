@@ -264,6 +264,29 @@ impl Database {
         }
     }
 
+    /// Begin a transaction on the dedicated clustering control-plane pool.
+    ///
+    /// Claim grants need more than one ordered locking step: first serialize
+    /// the entity claim, then prove the destination node lease at the actual
+    /// commit boundary. Keeping those steps on this pool preserves the
+    /// control-plane isolation guarantee while making the proof atomic.
+    pub async fn control_plane_begin(&self) -> Result<Transaction<'_>, DatabaseError> {
+        match &self.control_plane_backend {
+            Some(backend) => Transaction::begin(backend).await,
+            None => Err(DatabaseError::ControlPlanePoolUnavailable),
+        }
+    }
+
+    /// Begin a bounded transaction on the clustering control-plane pool.
+    /// Every transaction that can retain an exact claim/node lock must use
+    /// this instead of [`Self::control_plane_begin`].
+    pub async fn control_plane_begin_fenced(&self) -> Result<Transaction<'_>, DatabaseError> {
+        let mut tx = self.control_plane_begin().await?;
+        tx.configure_fenced(waddle_xmpp::ownership::FENCED_TRANSACTION_BUDGET)
+            .await?;
+        Ok(tx)
+    }
+
     /// Begin a database transaction.
     ///
     /// Multiple statements executed against the returned [`Transaction`]
@@ -274,6 +297,16 @@ impl Database {
     /// or not at all.
     pub async fn begin(&self) -> Result<Transaction<'_>, DatabaseError> {
         Transaction::begin(&self.backend).await
+    }
+
+    /// Begin a main-pool transaction with database-enforced lock, statement,
+    /// idle, and total transaction deadlines. This is the only supported
+    /// entrypoint for a transaction that holds an ownership fence.
+    pub async fn begin_fenced(&self) -> Result<Transaction<'_>, DatabaseError> {
+        let mut tx = self.begin().await?;
+        tx.configure_fenced(waddle_xmpp::ownership::FENCED_TRANSACTION_BUDGET)
+            .await?;
+        Ok(tx)
     }
 
     /// Begin a transaction that acquires the database write lock

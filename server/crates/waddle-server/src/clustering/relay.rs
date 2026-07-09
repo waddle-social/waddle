@@ -31,7 +31,6 @@ use super::route_bridge::{
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
-use super::self_fence::LocallyClaimedEntities;
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
@@ -42,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use waddle_xmpp::ownership::{ClaimEpoch, Entity};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, NodeIdentity};
 
 /// Bound on this node's own wait for a local force-detach to complete when
 /// answering a [`RelayResumeSteal`] ask (ADR-0017 Phase 3 Slice 6).
@@ -327,8 +326,16 @@ fn record_ordered_relay_reply(reply: &OrderedRelayReply) {
 pub struct RelayRegisterRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub admission_epoch: super::route_bridge::RemoteResourceAdmissionEpoch,
     pub socket_generation: RemoteResourceSocketGeneration,
-    pub socket_node: NodeId,
+    pub socket_node: NodeIdentity,
+    /// Exact UserActor-owner incarnation the socket node resolved before
+    /// sending this registration. The receiver rejects a delayed request when
+    /// its stable process node id has since rotated to a new lease epoch.
+    pub expected_user_owner: NodeIdentity,
+    /// Exact UserActor claim generation observed alongside
+    /// `expected_user_owner`.
+    pub expected_user_claim_epoch: ClaimEpoch,
     pub state: RemoteResourceStateSnapshot,
 }
 
@@ -363,12 +370,25 @@ impl Message<RelayRegisterRemoteUserResource> for RelayActor {
 pub struct RelayUnregisterRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub admission_epoch: super::route_bridge::RemoteResourceAdmissionEpoch,
     pub socket_generation: RemoteResourceSocketGeneration,
+    pub socket_node: NodeIdentity,
+    pub expected_user_owner: NodeIdentity,
+    pub expected_user_claim_epoch: ClaimEpoch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayRemoteResourceUnregisterReply {
-    pub removed: bool,
+    pub status: RelayRemoteResourceUnregisterStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceUnregisterStatus {
+    /// The exact owner mirror was removed or is proven absent.
+    Terminal,
+    /// Cleanup could not be proven; the socket node must retain and retry its
+    /// exact registration evidence.
+    Retry,
 }
 
 #[kameo::remote_message("waddle.clustering.relay.remote_resource_unregister.v1")]
@@ -389,7 +409,11 @@ impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
 pub struct RelayUpdateRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub admission_epoch: super::route_bridge::RemoteResourceAdmissionEpoch,
     pub socket_generation: RemoteResourceSocketGeneration,
+    pub socket_node: NodeIdentity,
+    pub expected_user_owner: NodeIdentity,
+    pub expected_user_claim_epoch: ClaimEpoch,
     pub update: RemoteResourceStateUpdate,
 }
 
@@ -423,7 +447,11 @@ impl Message<RelayUpdateRemoteUserResource> for RelayActor {
 pub struct RelayRemoteUserSideEffect {
     pub source_jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub admission_epoch: super::route_bridge::RemoteResourceAdmissionEpoch,
     pub socket_generation: RemoteResourceSocketGeneration,
+    pub socket_node: NodeIdentity,
+    pub expected_user_owner: NodeIdentity,
+    pub expected_user_claim_epoch: ClaimEpoch,
     pub effect: RemoteUserSideEffect,
 }
 
@@ -457,7 +485,11 @@ impl Message<RelayRemoteUserSideEffect> for RelayActor {
 pub struct RelayRouteRemoteResourceStanza {
     pub source_jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub admission_epoch: super::route_bridge::RemoteResourceAdmissionEpoch,
     pub socket_generation: RemoteResourceSocketGeneration,
+    pub socket_node: NodeIdentity,
+    pub expected_user_owner: NodeIdentity,
+    pub expected_user_claim_epoch: ClaimEpoch,
     pub target: RemoteResourceRouteTarget,
 }
 
@@ -490,6 +522,7 @@ pub struct RelayDeliverRemoteResourceFrame {
 pub enum RelayRemoteResourceFrameStatus {
     Delivered,
     Backpressure,
+    StaleRegistration,
     Unavailable,
 }
 
@@ -516,12 +549,21 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
 pub struct RelayForceDetachRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub admission_epoch: super::route_bridge::RemoteResourceAdmissionEpoch,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub socket_node: NodeIdentity,
+    pub expected_user_owner: NodeIdentity,
+    pub expected_user_claim_epoch: ClaimEpoch,
     pub requester_bare_jid: jid::BareJid,
+    pub reason: waddle_xmpp::registry::ForceDetachReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayRemoteResourceForceDetachStatus {
     Detached,
+    /// The requested authority was stale, so the socket node terminally
+    /// invalidated its own matching physical registration instead.
+    Invalidated,
     NotLive,
     Refused,
     Unknown,
@@ -563,6 +605,12 @@ impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
 pub struct RelayResumeSteal {
     pub stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     pub requester_bare_jid: jid::BareJid,
+    /// Exact node incarnation observed as owner by the asker. A delayed ask
+    /// must not detach a session hosted by a newer incarnation that reused
+    /// the same stable relay address.
+    pub expected_owner: NodeIdentity,
+    /// Exact claim generation observed alongside `expected_owner`.
+    pub observed: ClaimEpoch,
 }
 
 /// Reply to [`RelayResumeSteal`].
@@ -614,6 +662,8 @@ impl Message<RelayResumeSteal> for RelayActor {
                 .request_forced_detach(
                     &msg.stream_id,
                     &msg.requester_bare_jid,
+                    &msg.expected_owner,
+                    msg.observed,
                     LOCAL_FORCE_DETACH_ACK_TIMEOUT,
                 )
                 .await
@@ -645,6 +695,7 @@ impl Message<RelayResumeSteal> for RelayActor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Demote {
     pub entity: Entity,
+    pub expected_previous_owner: NodeIdentity,
     pub new_epoch: ClaimEpoch,
 }
 
@@ -666,7 +717,9 @@ impl Message<Demote> for RelayActor {
     type Reply = DemoteReply;
 
     async fn handle(&mut self, msg: Demote, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.room_local_claims.demote(&msg.entity).await;
+        self.room_local_claims
+            .demote_if_superseded(&msg.entity, msg.expected_previous_owner, msg.new_epoch)
+            .await;
         DemoteReply::Acked
     }
 }
@@ -1554,12 +1607,14 @@ impl RelayHandle {
         &mut self,
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         requester_bare_jid: jid::BareJid,
+        expected_owner: NodeIdentity,
+        observed: ClaimEpoch,
     ) -> Result<RelayResumeStealReply, RelayAskError> {
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
-            result = self.resume_steal_inner(stream_id, requester_bare_jid) => result,
+            result = self.resume_steal_inner(stream_id, requester_bare_jid, expected_owner, observed) => result,
         }
     }
 
@@ -1567,10 +1622,14 @@ impl RelayHandle {
         &mut self,
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         requester_bare_jid: jid::BareJid,
+        expected_owner: NodeIdentity,
+        observed: ClaimEpoch,
     ) -> Result<RelayResumeStealReply, RelayAskError> {
         let message = RelayResumeSteal {
             stream_id,
             requester_bare_jid,
+            expected_owner,
+            observed,
         };
         let remote_ref = self.resolve().await?;
         match remote_ref
@@ -1605,22 +1664,28 @@ impl RelayHandle {
     pub async fn demote(
         &mut self,
         entity: Entity,
+        expected_previous_owner: NodeIdentity,
         new_epoch: ClaimEpoch,
     ) -> Result<DemoteReply, RelayAskError> {
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
-            result = self.demote_inner(entity, new_epoch) => result,
+            result = self.demote_inner(entity, expected_previous_owner, new_epoch) => result,
         }
     }
 
     async fn demote_inner(
         &mut self,
         entity: Entity,
+        expected_previous_owner: NodeIdentity,
         new_epoch: ClaimEpoch,
     ) -> Result<DemoteReply, RelayAskError> {
-        let message = Demote { entity, new_epoch };
+        let message = Demote {
+            entity,
+            expected_previous_owner,
+            new_epoch,
+        };
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&message)
@@ -1784,8 +1849,7 @@ mod tests {
 
         async fn release_many(
             &self,
-            _entities: &[Entity],
-            _me: &NodeIdentity,
+            _grants: &[waddle_xmpp::ownership::ClaimGrant],
         ) -> Result<(), ClaimError> {
             unreachable!("ordered relay timeout test only calls current_claim")
         }
@@ -1842,6 +1906,8 @@ mod tests {
         async fn report_steal_intent(
             &self,
             _entity: &Entity,
+            _target_owner: &NodeIdentity,
+            _target_epoch: ClaimEpoch,
             _reporter: &NodeIdentity,
         ) -> Result<(), ClaimError> {
             Ok(())
@@ -1908,7 +1974,7 @@ mod tests {
             .insert(Lang::new(), "timeout test".to_string());
 
         RemoteStanzaEnvelope {
-            asserted_origin_node: NodeId::new("origin-node".to_string()),
+            asserted_origin_node: NodeIdentity::new("origin-node", "origin-epoch"),
             channel: OrderedRelayChannel {
                 origin: OrderedRelayOrigin::SmSession(origin_stream.clone()),
                 recipient: OrderedRelayRecipient::FullJid(target.clone()),
@@ -1954,6 +2020,9 @@ mod tests {
             claim_store: Arc::new(HangingClaimStore),
             allowlist_store: Arc::new(NoopAllowlist),
             node_lease: Arc::new(NoopNodeLease),
+            remote_resource_admission_store: Arc::new(
+                crate::clustering::remote_resource_admission::InMemoryRemoteResourceAdmissionStore::default(),
+            ),
             node_identity: SharedNodeIdentity::new(NodeIdentity::new("receiver", "epoch")),
             connection_registry: Arc::new(ConnectionRegistry::new()),
             user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),
@@ -2128,12 +2197,22 @@ mod tests {
     #[tokio::test]
     async fn slow_force_detach_does_not_delay_a_concurrent_relay_ping() {
         use kameo::actor::Spawn;
+        use waddle_xmpp::ownership::{ClaimStore, EntityType, InProcessClaimStore};
         use waddle_xmpp::pending_delivery::SmSessionId;
         use waddle_xmpp::registry::{ConnectionRegistry, ForceDetachOutcome};
 
         let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid full jid");
         let requester: jid::BareJid = "alice@example.com".parse().expect("valid bare jid");
         let stream_id = SmSessionId::new("stream-slow-detach");
+        let expected_owner = NodeIdentity::new("node-under-test", "owner-epoch");
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let claim_epoch = claim_store
+            .acquire(
+                &Entity::new(EntityType::SmSession, stream_id.as_str()),
+                &expected_owner,
+            )
+            .await
+            .expect("seed stream claim");
 
         let registry = Arc::new(ConnectionRegistry::new());
         let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
@@ -2157,6 +2236,11 @@ mod tests {
 
         let resume_bridge = ResumeStealBridge::new();
         resume_bridge.wire(Arc::clone(&registry));
+        let claim_store_handle: Arc<dyn ClaimStore> = claim_store;
+        resume_bridge.wire_claim_fence(
+            claim_store_handle,
+            waddle_xmpp::ownership::SharedNodeIdentity::new(expected_owner.clone()),
+        );
         let actor_ref: kameo::actor::ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
             NodeId::new("node-under-test".to_string()),
             false,
@@ -2179,6 +2263,8 @@ mod tests {
                     .ask(RelayResumeSteal {
                         stream_id,
                         requester_bare_jid: requester,
+                        expected_owner,
+                        observed: claim_epoch,
                     })
                     .await
             }

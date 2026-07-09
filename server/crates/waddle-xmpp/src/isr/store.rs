@@ -21,7 +21,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use subtle::ConstantTimeEq;
 
-use crate::ownership::{ClaimEpoch, NodeIdentity};
+use crate::ownership::{ClaimEpoch, ClaimGrant, NodeIdentity};
 
 /// A freshly issued or rotated ISR token (ADR-0017 Phase 3 Slice 8,
 /// XEP-0397). The token string itself is a secret credential — never
@@ -115,6 +115,7 @@ pub trait IsrTokenStore: Send + Sync {
         &self,
         sm_id: &str,
         mechanism: &str,
+        grant: &ClaimGrant,
     ) -> Result<IssuedIsrToken, IsrTokenStoreError>;
 
     /// Fenced, single-use, constant-time consume. See the trait-level doc
@@ -169,6 +170,7 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
         &self,
         sm_id: &str,
         mechanism: &str,
+        _grant: &ClaimGrant,
     ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
         let issued = IssuedIsrToken {
             token: super::generate_isr_token(),
@@ -236,15 +238,27 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ownership::{Entity, EntityType};
 
     fn identity() -> NodeIdentity {
         NodeIdentity::local()
     }
 
+    fn grant(sm_id: &str) -> ClaimGrant {
+        ClaimGrant::new(
+            Entity::new(EntityType::SmSession, sm_id),
+            identity(),
+            ClaimEpoch(0),
+        )
+    }
+
     #[tokio::test]
     async fn issue_then_consume_with_matching_token_rotates() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let issued = store
+            .issue("sm-1", "PLAIN", &grant("sm-1"))
+            .await
+            .expect("issue");
         let outcome = store
             .consume(
                 "sm-1",
@@ -264,7 +278,10 @@ mod tests {
     #[tokio::test]
     async fn consume_with_wrong_token_is_mismatched_and_destroys_the_row() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let issued = store
+            .issue("sm-1", "PLAIN", &grant("sm-1"))
+            .await
+            .expect("issue");
         let outcome = store
             .consume(
                 "sm-1",
@@ -296,7 +313,10 @@ mod tests {
     #[tokio::test]
     async fn consume_is_single_use() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let issued = store
+            .issue("sm-1", "PLAIN", &grant("sm-1"))
+            .await
+            .expect("issue");
         let first = store
             .consume(
                 "sm-1",
@@ -344,7 +364,10 @@ mod tests {
     #[tokio::test]
     async fn consume_pins_the_mechanism() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let issued = store
+            .issue("sm-1", "PLAIN", &grant("sm-1"))
+            .await
+            .expect("issue");
         let outcome = store
             .consume(
                 "sm-1",

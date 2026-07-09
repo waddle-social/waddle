@@ -246,8 +246,6 @@ async fn handle_sm_enable(
         Some(m) => m,
         None => max_resume_secs,
     };
-    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
-
     // ADR-0017 Phase 3 Slice 6, element 8: ensure this node's `ClaimStore`
     // claim on this SM session at `<enable/>` time — not only at detach
     // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
@@ -259,12 +257,24 @@ async fn handle_sm_enable(
     // with the detach-time call for the same stream id later in this
     // session's lifetime. No-op in practice for single-node deployments
     // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
-    state
+    let claim_grant = match state
         .deps
         .protocol
         .sm_session_registry
         .ensure_session_claim(&stream_id)
-        .await;
+        .await
+    {
+        Ok(grant) => grant,
+        Err(error) => {
+            warn!(
+                stream_id = %stream_id,
+                %error,
+                "SM enable rejected: authoritative session claim admission failed"
+            );
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
+    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
 
     // Publish the stream id onto the registry's ConnectionEntry so
     // the offline-flush path can claim `pending_delivery` rows under
@@ -310,7 +320,10 @@ async fn handle_sm_enable(
             Some(mechanism) if mechanism == waddle_xmpp::isr::ISR_PINNED_MECHANISM => {
                 match state.deps.app_state.clustering_claims.isr_token_store() {
                     Some(isr_token_store) => {
-                        match isr_token_store.issue(&stream_id, mechanism).await {
+                        match isr_token_store
+                            .issue(&stream_id, mechanism, &claim_grant)
+                            .await
+                        {
                             Ok(issued) => Some(issued.token),
                             Err(error) => {
                                 warn!(stream_id = %stream_id, %error, "ISR token issuance failed");

@@ -11,9 +11,9 @@ pub use access::{
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::RoomRegistry;
+pub(super) use xml::build_muc_presence_error_xml;
 use xml::{
-    build_muc_conflict_presence_xml, build_muc_join_presence_stanza, build_muc_presence_error_xml,
-    build_muc_self_unavailable_xml,
+    build_muc_conflict_presence_xml, build_muc_join_presence_stanza, build_muc_self_unavailable_xml,
 };
 pub(super) use xml::{build_muc_join_presence_xml, MucJoinPresence};
 
@@ -96,6 +96,7 @@ pub async fn handle_muc_join_with_ordered_relay(
 /// between, so a delayed sync can never clear a live occupant's fresh
 /// affiliation.
 async fn sync_resolver_affiliation_on_rejection(
+    state: &WebSocketState,
     existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
     room_jid: &BareJid,
     jid: BareJid,
@@ -123,6 +124,14 @@ async fn sync_resolver_affiliation_on_rejection(
                 outcome = ?outcome,
                 "Skipped resolver affiliation sync on rejected join"
             );
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+        )) => {
+            crate::server::routes::websocket::handlers::iq::demote_exact_room_actor(
+                state, room_jid, actor,
+            )
+            .await;
         }
         Err(error) => {
             warn!(
@@ -509,6 +518,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     // until eviction. Explicit bans are untouched by the
                     // provenance-aware sync.
                     sync_resolver_affiliation_on_rejection(
+                        state,
                         existing_room_actor.as_ref(),
                         room_jid,
                         // Room affiliations are keyed by the joiner's
@@ -541,6 +551,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         // actor — clear any stale resolver-derived
                         // affiliation from before the revocation here.
                         sync_resolver_affiliation_on_rejection(
+                            state,
                             existing_room_actor.as_ref(),
                             room_jid,
                             // Same key as `JoinWithAffiliation`:
@@ -940,6 +951,48 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 if matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::NotOwner
+                    )
+                ) {
+                    crate::server::routes::websocket::handlers::iq::demote_exact_room_actor(
+                        state,
+                        room_jid,
+                        &room_actor,
+                    )
+                    .await;
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::ResourceConstraint,
+                            "en",
+                            "This room's ownership recently moved; please retry.",
+                        ),
+                    )];
+                }
+                if matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::OwnershipUncertain
+                    )
+                ) {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::ResourceConstraint,
+                            "en",
+                            "This room's ownership cannot currently be verified; please retry.",
+                        ),
+                    )];
+                }
+                if matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
                         waddle_xmpp::muc::room_actor::RoomActorError::RoomFull
                     )
                 ) {
@@ -1318,10 +1371,54 @@ pub async fn handle_muc_leave(
                 state, room_jid, nick, sender_jid, true,
             )];
         }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+        )) => {
+            crate::server::routes::websocket::handlers::iq::demote_exact_room_actor(
+                state,
+                room_jid,
+                &room_actor,
+            )
+            .await;
+            return vec![build_muc_presence_error_xml(
+                room_jid,
+                nick,
+                sender_jid,
+                StanzaError::new(
+                    ErrorType::Wait,
+                    DefinedCondition::ResourceConstraint,
+                    "en",
+                    "This room's ownership recently moved; please retry.",
+                ),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+        )) => {
+            return vec![build_muc_presence_error_xml(
+                room_jid,
+                nick,
+                sender_jid,
+                StanzaError::new(
+                    ErrorType::Wait,
+                    DefinedCondition::ResourceConstraint,
+                    "en",
+                    "This room's ownership cannot currently be verified; please retry.",
+                ),
+            )];
+        }
         Err(error) => {
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
-            return vec![build_muc_self_unavailable_xml(
-                state, room_jid, nick, sender_jid, true,
+            return vec![build_muc_presence_error_xml(
+                room_jid,
+                nick,
+                sender_jid,
+                StanzaError::new(
+                    ErrorType::Wait,
+                    DefinedCondition::InternalServerError,
+                    "en",
+                    "Failed to leave the room; please retry.",
+                ),
             )];
         }
     };

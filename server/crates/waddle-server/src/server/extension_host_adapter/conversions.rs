@@ -18,6 +18,7 @@ pub(super) fn host_tool_error(error: ExtensionHostAdapterError) -> ext_host::Hos
         ExtensionHostAdapterError::RoomNotFound(_) => ext_host::HostToolErrorCode::NotFound,
         ExtensionHostAdapterError::Unsupported(_) => ext_host::HostToolErrorCode::Unsupported,
         ExtensionHostAdapterError::RoomActor(_)
+        | ExtensionHostAdapterError::RoomOwnershipUncertain(_)
         | ExtensionHostAdapterError::Storage(_)
         | ExtensionHostAdapterError::Protocol(_) => ext_host::HostToolErrorCode::TemporaryFailure,
     };

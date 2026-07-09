@@ -54,11 +54,31 @@ use waddle_xmpp_core::xep0359::{build_origin_id_element, NS_SID};
 use xmpp_parsers::jingle::SessionId;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::presence::Presence;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::super::super::{get_room_actor, stanza_to_xml};
 use crate::server::routes::websocket::{
     interpret_loop::build_interpret_deps, ActiveCallThread, WebSocketState,
 };
+
+fn retryable_room_error(
+    room: &BareJid,
+    nick: &str,
+    sender: &FullJid,
+    text: &'static str,
+) -> Vec<String> {
+    vec![super::muc::build_muc_presence_error_xml(
+        room,
+        nick,
+        sender,
+        StanzaError::new(
+            ErrorType::Wait,
+            DefinedCondition::ResourceConstraint,
+            "en",
+            text,
+        ),
+    )]
+}
 
 /// Pull out the typed [`Muji`] element from an inbound presence's
 /// payloads if it carries one. Returns `None` when the namespace
@@ -177,6 +197,30 @@ pub(crate) async fn try_handle_muc_presence_update(
         {
             Ok(Some(outcome)) => outcome,
             Ok(None) => return None,
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+            )) => {
+                crate::server::routes::websocket::handlers::iq::demote_exact_room_actor(
+                    state, room_jid, &actor,
+                )
+                .await;
+                return Some(retryable_room_error(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "This room's ownership recently moved; please retry.",
+                ));
+            }
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+            )) => {
+                return Some(retryable_room_error(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "This room's ownership cannot currently be verified; please retry.",
+                ));
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -185,7 +229,12 @@ pub(crate) async fn try_handle_muc_presence_update(
                     error = ?error,
                     "Failed to upsert MUC Muji presence; falling back to join path"
                 );
-                return None;
+                return Some(retryable_room_error(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "The room could not apply this presence update; please retry.",
+                ));
             }
         },
         None => match actor
@@ -196,6 +245,30 @@ pub(crate) async fn try_handle_muc_presence_update(
         {
             Ok(Some(outcome)) => outcome,
             Ok(None) => return None,
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+            )) => {
+                crate::server::routes::websocket::handlers::iq::demote_exact_room_actor(
+                    state, room_jid, &actor,
+                )
+                .await;
+                return Some(retryable_room_error(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "This room's ownership recently moved; please retry.",
+                ));
+            }
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+            )) => {
+                return Some(retryable_room_error(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "This room's ownership cannot currently be verified; please retry.",
+                ));
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -204,7 +277,12 @@ pub(crate) async fn try_handle_muc_presence_update(
                     error = ?error,
                     "Failed to clear MUC Muji presence; falling back to join path"
                 );
-                return None;
+                return Some(retryable_room_error(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "The room could not apply this presence update; please retry.",
+                ));
             }
         },
     };
@@ -272,7 +350,40 @@ pub(crate) async fn try_handle_muc_presence_update(
         .await
     {
         Ok(Some(in_call_outcome)) => in_call_outcome.in_call_sessions,
-        Ok(None) | Err(_) => Vec::new(),
+        Ok(None) => Vec::new(),
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+        )) => {
+            crate::server::routes::websocket::handlers::iq::demote_exact_room_actor(
+                state, room_jid, &actor,
+            )
+            .await;
+            return Some(retryable_room_error(
+                room_jid,
+                nick,
+                sender_jid,
+                "This room's ownership recently moved; please retry.",
+            ));
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+        )) => {
+            return Some(retryable_room_error(
+                room_jid,
+                nick,
+                sender_jid,
+                "This room's ownership cannot currently be verified; please retry.",
+            ));
+        }
+        Err(error) => {
+            warn!(room = %room_jid, ?error, "Failed to apply in-call state; suppressing presence fanout");
+            return Some(retryable_room_error(
+                room_jid,
+                nick,
+                sender_jid,
+                "The room could not apply this presence update; please retry.",
+            ));
+        }
     };
 
     let from_room_jid = room_jid

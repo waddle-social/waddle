@@ -83,6 +83,7 @@ pub(super) async fn run_headless_recipient_pass(
         // Headless pass emits no wire copy, so there is nothing to
         // rewrite.
         archive_id_rewrites: _,
+        room_ownership_uncertain: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,
@@ -245,6 +246,7 @@ pub(super) async fn run_fanout_recipient_pass(
         keepalive_probes: _,
         timer_commands: _,
         archive_id_rewrites,
+        room_ownership_uncertain: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,

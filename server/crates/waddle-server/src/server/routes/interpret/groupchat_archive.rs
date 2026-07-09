@@ -1,54 +1,104 @@
 use super::*;
 use waddle_xmpp::mam::MamStorageError;
+#[cfg(any(feature = "clustering", test))]
 use waddle_xmpp::muc::RoomClaimFenceContext;
 
 /// Outcome of a groupchat archive write attempt (ADR-0017 Phase 3 Slice 7
-/// FIX 1, council-adjudicated). `OwnershipLost` is the fenced backstop
-/// firing: the caller MUST neither treat the message as archived NOR fan
-/// it out to occupants — mirroring `dispatch_to_room`'s own
-/// `check_fenced_fanout` `Ok(false)` handling one layer closer to the
-/// actual write.
+/// FIX 1, council-adjudicated). `OwnershipUncertain` means the fenced
+/// backstop either disproved ownership or could not prove it. The caller
+/// MUST neither treat the message as archived NOR fan it out to occupants.
 pub(super) enum ArchiveGroupchatOutcome {
     Stored(ArchiveStoreResult),
     /// Not an error: a chain-bug guard or a non-fencing storage failure
     /// declined the write. The reflection still goes out (today's
     /// pre-existing behavior, unchanged).
     Skipped,
-    /// The fenced write observed that this node no longer holds the
-    /// room's ownership claim. The message was NOT archived; the caller
-    /// must also suppress fan-out and bounce the sender.
-    OwnershipLost,
+    /// Exact ownership could not be proved. This covers a definitive claim
+    /// mismatch, a missing cached claim fence, and a backend failure while
+    /// checking or applying a fenced write. The message was NOT archived;
+    /// the caller must also suppress fan-out and other effects.
+    OwnershipUncertain,
+}
+
+/// Resolution of the room-ownership fence for a groupchat archive write.
+///
+/// `Unfenced` is reserved for deployments where clustered MUC ownership is
+/// not configured at all. Once a clustered durable room store exists, a
+/// missing cached epoch is not equivalent to single-node operation: it is
+/// an inability to prove ownership and must fail closed.
+pub(super) enum RoomClaimFenceResolution {
+    Unfenced,
+    #[cfg(any(feature = "clustering", test))]
+    Fenced(RoomClaimFenceContext),
+    #[cfg(any(feature = "clustering", test))]
+    OwnershipUncertain,
+}
+
+impl RoomClaimFenceResolution {
+    pub(super) fn is_fenced(&self) -> bool {
+        #[cfg(any(feature = "clustering", test))]
+        {
+            matches!(self, Self::Fenced(_))
+        }
+        #[cfg(not(any(feature = "clustering", test)))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn is_ownership_uncertain(&self) -> bool {
+        #[cfg(any(feature = "clustering", test))]
+        {
+            matches!(self, Self::OwnershipUncertain)
+        }
+        #[cfg(not(any(feature = "clustering", test)))]
+        {
+            false
+        }
+    }
 }
 
 /// ADR-0017 Phase 3 Slice 7 FIX 1: resolve the typed `(Entity, ClaimEpoch,
-/// node_id)` fencing context for `room`, the SAME mechanism
+/// NodeIdentity)` fencing context for `room`, the SAME mechanism
 /// `dispatch_to_room`'s own `check_fenced_fanout` pre-fan-out check reads
 /// from — threaded here rather than re-derived from a second, independent
-/// source. `None` whenever clustering is disabled, this binary lacks the
-/// `clustering` Cargo feature, or no durable store is configured for this
-/// room (matches `check_fenced_fanout`'s own `None`-means-unfenced
-/// contract): callers fall back to the portable, unfenced
-/// `MamStorage::store_message` path, byte-identical to pre-Slice-7
-/// behavior.
+/// source. `Unfenced` is returned only when clustering/durable MUC ownership
+/// is not configured. A configured store with no cached exact claim returns
+/// `OwnershipUncertain`; it must never degrade into an unfenced write.
 pub(super) fn resolve_room_claim_fence(
     deps: &Deps<'_>,
     room: &BareJid,
-) -> Option<RoomClaimFenceContext> {
+) -> RoomClaimFenceResolution {
     #[cfg(feature = "clustering")]
     {
-        let state = deps.web_socket_state?;
-        let store = state
-            .deps
-            .app_state
-            .clustering_claims
-            .muc_durable_store
-            .as_ref()?;
-        store.current_claim_fence(room)
+        let Some(_store) = deps.muc_durable_store else {
+            return if deps.clustered_muc_ownership_required {
+                RoomClaimFenceResolution::OwnershipUncertain
+            } else {
+                RoomClaimFenceResolution::Unfenced
+            };
+        };
+        if let Some(fence) = deps.room_claim_fence.as_ref() {
+            let expected = waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room.to_string(),
+            );
+            return if fence.entity == expected {
+                RoomClaimFenceResolution::Fenced(fence.clone())
+            } else {
+                RoomClaimFenceResolution::OwnershipUncertain
+            };
+        }
+        // A configured durable MUC store means this archive belongs to a
+        // claim-bound RoomActor incarnation. Never recover a missing actor
+        // proof from the store's room-scoped "latest epoch" cache: after an
+        // E1 actor is retained and E2 is acquired, that would revive the ABA.
+        RoomClaimFenceResolution::OwnershipUncertain
     }
     #[cfg(not(feature = "clustering"))]
     {
         let _ = (deps, room);
-        None
+        RoomClaimFenceResolution::Unfenced
     }
 }
 
@@ -57,9 +107,17 @@ pub(super) async fn archive_groupchat_message(
     room: &BareJid,
     message: &Message,
     sender_nickname_generation: u64,
-    fence: Option<&RoomClaimFenceContext>,
+    fence: &RoomClaimFenceResolution,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    if fence.is_ownership_uncertain() {
+        warn!(
+            room = %room,
+            "ArchiveGroupchat: clustered room has no provable claim fence; failing closed"
+        );
+        return ArchiveGroupchatOutcome::OwnershipUncertain;
+    }
+
     // XEP-0313 §MUC Archives: for non-anonymous rooms the *archived*
     // copy carries a room-authored `<x xmlns='muc#user'><item
     // jid='real-jid' affiliation role/></x>` disclosing the sender's
@@ -94,7 +152,15 @@ pub(super) async fn archive_groupchat_message(
                  skipping archive write because persisting an archive-only id would \
                  break the wire/archive stanza-id invariant (chain bug)"
             );
-            return ArchiveGroupchatOutcome::Skipped;
+            return if fence.is_fenced() {
+                // In clustered mode an emitted archive effect without its
+                // canonical room stanza-id is not a benign policy skip. The
+                // chain cannot prove a safe archive/fan-out identity, so the
+                // whole batch must fail closed.
+                ArchiveGroupchatOutcome::OwnershipUncertain
+            } else {
+                ArchiveGroupchatOutcome::Skipped
+            };
         }
     };
 
@@ -126,7 +192,7 @@ pub(super) async fn finish_archive_groupchat_message(
     archive_clone: Message,
     archive_id: String,
     sender_nickname_generation: u64,
-    fence: Option<&RoomClaimFenceContext>,
+    fence: &RoomClaimFenceResolution,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
@@ -192,13 +258,26 @@ pub(super) async fn finish_archive_groupchat_message(
     // `pending_delivery::insert_fenced` establishes one table over,
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
-    let store_result = match fence {
-        Some(fence) => {
+    let (store_result, fenced) = match fence {
+        #[cfg(any(feature = "clustering", test))]
+        RoomClaimFenceResolution::Fenced(fence) => (
             mam_storage
                 .store_message_fenced(room, &archived, fence)
-                .await
+                .await,
+            true,
+        ),
+        RoomClaimFenceResolution::Unfenced => {
+            (mam_storage.store_message(room, &archived).await, false)
         }
-        None => mam_storage.store_message(room, &archived).await,
+        #[cfg(any(feature = "clustering", test))]
+        RoomClaimFenceResolution::OwnershipUncertain => {
+            warn!(
+                room = %room,
+                "ArchiveGroupchat: clustered room ownership became uncertain before store; \
+                 failing closed"
+            );
+            return ArchiveGroupchatOutcome::OwnershipUncertain;
+        }
     };
     match store_result {
         Ok(stored_id) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
@@ -216,7 +295,16 @@ pub(super) async fn finish_archive_groupchat_message(
                 "ArchiveGroupchat: fenced store failed — this node has been deposed; \
                  not archiving, caller must also suppress fan-out"
             );
-            ArchiveGroupchatOutcome::OwnershipLost
+            ArchiveGroupchatOutcome::OwnershipUncertain
+        }
+        Err(error) if fenced => {
+            warn!(
+                room = %room,
+                %error,
+                "ArchiveGroupchat: fenced store could not prove and commit under exact room \
+                 ownership; failing closed"
+            );
+            ArchiveGroupchatOutcome::OwnershipUncertain
         }
         Err(error) => {
             warn!(
@@ -234,16 +322,25 @@ pub(super) struct ArchiveStoreResult {
     pub rewrite: Option<ArchiveIdRewrite>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupchatRetractionTombstoneOutcome {
+    Applied,
+    Skipped,
+    NotOwner,
+    OwnershipUncertain,
+    PersistFailed,
+}
+
 pub(super) async fn apply_groupchat_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
-    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    pending_storage: Option<
-        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
-    >,
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
-) -> bool {
+    fence: &RoomClaimFenceResolution,
+) -> GroupchatRetractionTombstoneOutcome {
+    if fence.is_ownership_uncertain() {
+        return GroupchatRetractionTombstoneOutcome::OwnershipUncertain;
+    }
     // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
     // retraction names the target by the room-assigned XEP-0359
     // stanza-id, which is persisted as the archive primary key. Resolve
@@ -251,14 +348,11 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     // room (the archived `to` is the room JID) — never by the wire `id`
     // attribute or the origin-id. Keyed identically to the
     // validation-time `lookup_groupchat_retraction_target` so both sites
-    // agree. The scrub target mirrors this: cached reflections match
-    // ONLY on `<stanza-id by=room id=target/>`, never on the
-    // client-chosen wire id (which any occupant could mint to collide).
-    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-        stanza_id: target_message_id.to_string(),
-        room: room.clone(),
-    };
-    let original = match mam_storage.get_message(target_message_id).await {
+    // agree.
+    let original = match mam_storage
+        .get_message_by_archive_or_stanza_id(room, target_message_id)
+        .await
+    {
         Ok(Some(row)) if row.to.to_bare() == *room => row,
         Ok(_) => {
             debug!(
@@ -266,7 +360,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 target = target_message_id,
                 "ApplyGroupchatRetractionTombstone: target not found in room archive; skipping"
             );
-            return false;
+            return GroupchatRetractionTombstoneOutcome::Skipped;
         }
         Err(error) => {
             warn!(
@@ -275,31 +369,89 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 %error,
                 "ApplyGroupchatRetractionTombstone: archive lookup failed; skipping"
             );
-            return false;
+            return if fence.is_fenced() {
+                GroupchatRetractionTombstoneOutcome::OwnershipUncertain
+            } else {
+                GroupchatRetractionTombstoneOutcome::PersistFailed
+            };
         }
     };
+    let Some(retraction_archive_id) = extract_room_stanza_id(retraction_message, room) else {
+        warn!(
+            archive = %room,
+            target = target_message_id,
+            "ApplyGroupchatRetractionTombstone: retraction stanza missing canonical room stanza-id"
+        );
+        return if fence.is_fenced() {
+            GroupchatRetractionTombstoneOutcome::OwnershipUncertain
+        } else {
+            GroupchatRetractionTombstoneOutcome::Skipped
+        };
+    };
+    // XEP-0424 tombstones cite the retraction message's wire `id`, while
+    // the fenced storage proof above/below uses its room-assigned canonical
+    // stanza-id. Keep those two identities deliberately distinct.
     let Some(retraction_id) = retraction_message
         .id
         .as_ref()
         .map(|id| id.0.clone())
         .and_then(RichMessageId::new)
     else {
-        warn!(
-            archive = %room,
-            target = target_message_id,
-            "ApplyGroupchatRetractionTombstone: retraction stanza missing valid message id; skipping"
-        );
-        return false;
+        return if fence.is_fenced() {
+            GroupchatRetractionTombstoneOutcome::OwnershipUncertain
+        } else {
+            GroupchatRetractionTombstoneOutcome::Skipped
+        };
+    };
+    let Some(retraction_from) = retraction_message.from.as_ref() else {
+        return if fence.is_fenced() {
+            GroupchatRetractionTombstoneOutcome::OwnershipUncertain
+        } else {
+            GroupchatRetractionTombstoneOutcome::Skipped
+        };
     };
     let tombstone = ArchivedTombstone {
         retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
     };
-    match mam_storage
-        .replace_with_tombstone(&original.id, tombstone)
-        .await
-    {
+    let replace_result = match fence {
+        #[cfg(any(feature = "clustering", test))]
+        RoomClaimFenceResolution::Fenced(fence) => {
+            mam_storage
+                .replace_with_tombstone_fenced(
+                    room,
+                    &original.id,
+                    &retraction_archive_id,
+                    retraction_from,
+                    tombstone,
+                    fence,
+                )
+                .await
+        }
+        RoomClaimFenceResolution::Unfenced => {
+            // XEP-0424 requires the retraction message itself to be stored.
+            // Prove it belongs to this room and exact occupant before
+            // replacing the target even in a single-node deployment.
+            let archived_retraction = mam_storage
+                .get_message_by_archive_or_stanza_id(room, &retraction_archive_id)
+                .await;
+            match archived_retraction {
+                Ok(Some(row)) if row.to.to_bare() == *room && row.from == *retraction_from => {
+                    mam_storage
+                        .replace_with_tombstone(&original.id, tombstone)
+                        .await
+                }
+                Ok(_) => Ok(false),
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(any(feature = "clustering", test))]
+        RoomClaimFenceResolution::OwnershipUncertain => {
+            unreachable!("ownership-uncertain fence returned before archive access")
+        }
+    };
+    match replace_result {
         Ok(true) => {
             debug!(
                 archive = %room,
@@ -313,14 +465,10 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 original_id = %original.id,
                 "ApplyGroupchatRetractionTombstone: target row not found at replace time"
             );
-            scrub_unacked_for_tombstone(
-                sm_session_registry,
-                pending_storage,
-                &scrub_target,
-                "ApplyGroupchatRetractionTombstone",
-            )
-            .await;
-            return false;
+            return GroupchatRetractionTombstoneOutcome::PersistFailed;
+        }
+        Err(MamStorageError::NotOwner { .. }) => {
+            return GroupchatRetractionTombstoneOutcome::NotOwner;
         }
         Err(error) => {
             warn!(
@@ -329,32 +477,14 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 %error,
                 "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
             );
-            scrub_unacked_for_tombstone(
-                sm_session_registry,
-                pending_storage,
-                &scrub_target,
-                "ApplyGroupchatRetractionTombstone",
-            )
-            .await;
-            return false;
+            return if fence.is_fenced() {
+                GroupchatRetractionTombstoneOutcome::OwnershipUncertain
+            } else {
+                GroupchatRetractionTombstoneOutcome::PersistFailed
+            };
         }
     }
-    // Drop matching unacked groupchat reflections from detached
-    // XEP-0198 session queues. The reflection is what occupants see;
-    // scrubbing here closes the resume-side replay leak for groupchat
-    // retractions identically to the 1:1 case. Scope by the room JID
-    // so the matcher's stanza-id branch can find groupchat reflections
-    // that key by the room's XEP-0359 stamp, and so a colliding wire
-    // id in another conversation is not accidentally scrubbed
-    // (Codex P1, Copilot review on PR #305).
-    scrub_unacked_for_tombstone(
-        sm_session_registry,
-        pending_storage,
-        &scrub_target,
-        "ApplyGroupchatRetractionTombstone",
-    )
-    .await;
-    true
+    GroupchatRetractionTombstoneOutcome::Applied
 }
 
 /// Walk the SM session registry AND the pending-delivery store and
@@ -731,5 +861,287 @@ pub(super) fn rich_archive_payload(
             occupant_id,
             muc_sender,
         })
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use waddle_xmpp::mam::SqlxMamStorage;
+    #[cfg(feature = "clustering")]
+    use waddle_xmpp::muc::{DurableRoomState, MucDurableFuture, MucDurableStore, RoomConfig};
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+    use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
+
+    fn room() -> BareJid {
+        "archive-fence@muc.example.com"
+            .parse()
+            .expect("valid room JID")
+    }
+
+    fn fence(room: &BareJid) -> RoomClaimFenceResolution {
+        RoomClaimFenceResolution::Fenced(RoomClaimFenceContext {
+            entity: Entity::new(EntityType::RoomActor, room.to_string()),
+            epoch: ClaimEpoch(7),
+            owner: NodeIdentity::new("node-a", "epoch-a"),
+        })
+    }
+
+    fn groupchat_message(room: &BareJid, with_stanza_id: bool) -> Message {
+        let mut message = Message::new(Some(Jid::from(room.clone())));
+        message.from = Some(
+            format!("{room}/alice")
+                .parse::<Jid>()
+                .expect("valid room occupant JID"),
+        );
+        message.type_ = XmppMessageType::Groupchat;
+        message.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
+        if with_stanza_id {
+            add_stanza_id(
+                &mut message,
+                &StanzaId::new("archive-id", Jid::from(room.clone())),
+            );
+        }
+        message
+    }
+
+    #[cfg(feature = "clustering")]
+    struct MissingCachedFenceStore;
+
+    #[cfg(feature = "clustering")]
+    impl MucDurableStore for MissingCachedFenceStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a RoomConfig,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn active_cluster_without_muc_store_is_not_treated_as_unfenced() {
+        let registry = ConnectionRegistry::new();
+        let mut deps = Deps::registry_only(&registry);
+        deps.clustered_muc_ownership_required = true;
+
+        assert!(matches!(
+            resolve_room_claim_fence(&deps, &room()),
+            RoomClaimFenceResolution::OwnershipUncertain
+        ));
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn clustered_store_without_cached_claim_is_ownership_uncertain() {
+        let registry = ConnectionRegistry::new();
+        let store: Arc<dyn MucDurableStore> = Arc::new(MissingCachedFenceStore);
+        let mut deps = Deps::registry_only(&registry);
+        deps.clustered_muc_ownership_required = true;
+        deps.muc_durable_store = Some(&store);
+
+        assert!(matches!(
+            resolve_room_claim_fence(&deps, &room()),
+            RoomClaimFenceResolution::OwnershipUncertain
+        ));
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn durable_archive_without_actor_fence_never_uses_a_room_scoped_latest_claim() {
+        use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+        let registry = ConnectionRegistry::new();
+        let room = room();
+        let latest = RoomClaimFenceContext {
+            entity: Entity::new(EntityType::RoomActor, room.to_string()),
+            epoch: ClaimEpoch(2),
+            owner: NodeIdentity::new("node-a", "node-epoch-a"),
+        };
+        struct LatestClaimStore(RoomClaimFenceContext);
+        impl MucDurableStore for LatestClaimStore {
+            fn load_room_state<'a>(
+                &'a self,
+                _room_jid: &'a BareJid,
+            ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+                Box::pin(async { Ok(None) })
+            }
+
+            fn save_config<'a>(
+                &'a self,
+                _room_jid: &'a BareJid,
+                _waddle_id: &'a str,
+                _channel_id: &'a str,
+                _config: &'a RoomConfig,
+            ) -> MucDurableFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn save_subject<'a>(
+                &'a self,
+                _room_jid: &'a BareJid,
+                _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+            ) -> MucDurableFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn save_affiliation<'a>(
+                &'a self,
+                _room_jid: &'a BareJid,
+                _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+            ) -> MucDurableFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn current_claim_fence(&self, _room_jid: &BareJid) -> Option<RoomClaimFenceContext> {
+                Some(self.0.clone())
+            }
+        }
+
+        let latest_store: Arc<dyn MucDurableStore> = Arc::new(LatestClaimStore(latest));
+        let mut deps = Deps::registry_only(&registry);
+        deps.muc_durable_store = Some(&latest_store);
+
+        assert!(matches!(
+            resolve_room_claim_fence(&deps, &room),
+            RoomClaimFenceResolution::OwnershipUncertain
+        ));
+    }
+
+    #[tokio::test]
+    async fn ownership_uncertainty_overrides_archive_policy_skip() {
+        let room = room();
+        let storage: Arc<dyn MamStorage> = Arc::new(
+            SqlxMamStorage::open_in_memory()
+                .await
+                .expect("open in-memory MAM"),
+        );
+        let outcome = archive_groupchat_message(
+            &storage,
+            &room,
+            &groupchat_message(&room, false),
+            0,
+            &RoomClaimFenceResolution::OwnershipUncertain,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            ArchiveGroupchatOutcome::OwnershipUncertain
+        ));
+    }
+
+    #[tokio::test]
+    async fn fenced_malformed_archive_event_is_ownership_uncertain() {
+        let room = room();
+        let storage: Arc<dyn MamStorage> = Arc::new(
+            SqlxMamStorage::open_in_memory()
+                .await
+                .expect("open in-memory MAM"),
+        );
+        let outcome = archive_groupchat_message(
+            &storage,
+            &room,
+            &groupchat_message(&room, false),
+            0,
+            &fence(&room),
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            ArchiveGroupchatOutcome::OwnershipUncertain
+        ));
+    }
+
+    #[tokio::test]
+    async fn fenced_archive_without_fencing_backend_fails_closed() {
+        let room = room();
+        let storage: Arc<dyn MamStorage> = Arc::new(
+            SqlxMamStorage::open_in_memory()
+                .await
+                .expect("open in-memory MAM"),
+        );
+        let outcome = archive_groupchat_message(
+            &storage,
+            &room,
+            &groupchat_message(&room, true),
+            0,
+            &fence(&room),
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            ArchiveGroupchatOutcome::OwnershipUncertain
+        ));
+        assert!(storage
+            .query_messages(&room, &Default::default())
+            .await
+            .expect("query archive")
+            .messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn unfenced_single_node_archive_uses_portable_store() {
+        let room = room();
+        let storage: Arc<dyn MamStorage> = Arc::new(
+            SqlxMamStorage::open_in_memory()
+                .await
+                .expect("open in-memory MAM"),
+        );
+        let outcome = archive_groupchat_message(
+            &storage,
+            &room,
+            &groupchat_message(&room, true),
+            0,
+            &RoomClaimFenceResolution::Unfenced,
+            None,
+        )
+        .await;
+
+        assert!(matches!(outcome, ArchiveGroupchatOutcome::Stored(_)));
+        assert_eq!(
+            storage
+                .query_messages(&room, &Default::default())
+                .await
+                .expect("query archive")
+                .messages
+                .len(),
+            1
+        );
     }
 }

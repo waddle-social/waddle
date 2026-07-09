@@ -19,7 +19,11 @@ use super::{
 };
 use axum::response::IntoResponse;
 use futures::stream::{SplitSink, SplitStream};
+use waddle_xmpp::registry::ForceDetachReason;
 use waddle_xmpp::stream_management::SmRequest;
+
+const FORCE_DETACH_RECONNECT_TEXT: &str =
+    "This stream can no longer be served here; please reconnect.";
 
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
@@ -108,7 +112,28 @@ async fn handle_xmpp_websocket(
     // drain (issue #1091) only completes once every live session has
     // been closed AND its SM state handed to the session registry for
     // Q6 promotion.
+    connection_guard: waddle_ecdysis::ConnectionGuard,
+) {
+    let (abort, registration) = futures::future::AbortHandle::new_pair();
+    let terminated = tokio_util::sync::CancellationToken::new();
+    let retirement_handle =
+        waddle_xmpp::registry::ConnectionRetirementHandle::new(abort, terminated.clone());
+    let result = futures::future::Abortable::new(
+        handle_xmpp_websocket_inner(socket, state, connection_guard, retirement_handle),
+        registration,
+    )
+    .await;
+    terminated.cancel();
+    if result.is_err() {
+        warn!("XMPP WebSocket connection hard-retired after force-detach timeout");
+    }
+}
+
+async fn handle_xmpp_websocket_inner(
+    socket: WebSocket,
+    state: Arc<WebSocketState>,
     _connection_guard: waddle_ecdysis::ConnectionGuard,
+    retirement_handle: waddle_xmpp::registry::ConnectionRetirementHandle,
 ) {
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let shutdown_token = state.deps.shutdown.stop_token();
@@ -145,6 +170,12 @@ async fn handle_xmpp_websocket(
 
     // Track connection state
     let mut conn = WsConnState::new();
+    conn.clustering_admission = state
+        .deps
+        .app_state
+        .clustering_readiness
+        .capture_admission();
+    conn.retirement_handle = Some(retirement_handle);
     let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<
         crate::server::routes::interpret::OrderedRelayHandoffCompletion,
     >();
@@ -367,14 +398,15 @@ async fn handle_xmpp_websocket(
                 }
             }
 
-            // ADR-0017 Phase 3 Slice 6: a cross-node XEP-0198 resume
-            // live-steal handshake ask for this connection's own stream id.
+            // A typed request to retire this connection on its own task.
+            // Cross-node XEP-0198 resume and same-resource replacement use
+            // <conflict/>; whole-node fencing uses <system-shutdown/>; and
+            // per-resource ownership/remote-state loss uses recoverable
+            // <internal-server-error/> so the client reconnects.
             // The identity check gates the destructive close itself (defense
             // in depth against a wrong-identity `previd` forcing a disconnect
-            // before rejection) — a mismatch answers inline and this
-            // connection keeps serving normally; a match sends `<conflict/>`
-            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
-            // the SAME detach-for-resume cleanup a graceful/keepalive close
+            // before rejection). A matching request closes and falls through
+            // to the same detach-for-resume cleanup a graceful/keepalive close
             // uses (never transitions `phase` to `Closing`).
             request = recv_optional(&mut force_detach_rx) => {
                 match request {
@@ -384,27 +416,32 @@ async fn handle_xmpp_websocket(
                             warn!(
                                 requester = %request.requester_bare_jid,
                                 bound = ?bound_bare,
-                                "Cross-node resume force-detach rejected: identity mismatch"
+                                reason = ?request.reason,
+                                "Force-detach rejected: identity mismatch"
                             );
                             let _ = request
                                 .ack
                                 .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
                         } else {
+                            let (stream_error, condition) =
+                                force_detach_stream_error(request.reason);
                             info!(
                                 jid = ?conn.phase.bound_jid(),
-                                "Cross-node resume: force-detaching this session (<conflict/> close)"
+                                reason = ?request.reason,
+                                condition,
+                                "Force-detaching this session"
                             );
                             if conn.stream_open_sent {
                                 let _ = send_ws_text_frames(
                                     &mut ws_sender,
-                                    [build_conflict_stream_error(), websocket_stream_close_xml()],
-                                    "Failed to send conflict stream error",
+                                    [stream_error, websocket_stream_close_xml()],
+                                    "Failed to send force-detach stream error",
                                 )
                                 .await;
                             }
                             let _ = close_ws_connection(
                                 &mut ws_sender,
-                                "Failed to send WebSocket close frame after conflict",
+                                "Failed to send WebSocket close frame after force-detach",
                             )
                             .await;
                             // Deferred: acked only after this connection's own
@@ -889,6 +926,21 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
         .is_some_and(|frame| frame == &websocket_close)
 }
 
+fn force_detach_stream_error(reason: ForceDetachReason) -> (String, &'static str) {
+    match reason {
+        ForceDetachReason::SessionResumed | ForceDetachReason::ResourceReplaced => {
+            (build_conflict_stream_error(), "conflict")
+        }
+        ForceDetachReason::NodeSelfFenced => {
+            (build_system_shutdown_stream_error(), "system-shutdown")
+        }
+        ForceDetachReason::OwnershipLost | ForceDetachReason::RemoteStateInvalidated => (
+            build_internal_server_error_stream_error(FORCE_DETACH_RECONNECT_TEXT),
+            "internal-server-error",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,5 +971,36 @@ mod tests {
         ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
 
         assert_eq!(responses.len(), 1);
+    }
+
+    #[test]
+    fn force_detach_reason_selects_terminal_or_recoverable_stream_error() {
+        for reason in [
+            ForceDetachReason::SessionResumed,
+            ForceDetachReason::ResourceReplaced,
+        ] {
+            let (xml, condition) = force_detach_stream_error(reason);
+            assert_eq!(condition, "conflict");
+            assert!(xml.contains("<conflict "));
+        }
+
+        let (xml, condition) = force_detach_stream_error(ForceDetachReason::NodeSelfFenced);
+        assert_eq!(condition, "system-shutdown");
+        assert!(xml.contains("<system-shutdown "));
+
+        for reason in [
+            ForceDetachReason::OwnershipLost,
+            ForceDetachReason::RemoteStateInvalidated,
+        ] {
+            let (xml, condition) = force_detach_stream_error(reason);
+            assert_eq!(condition, "internal-server-error");
+            assert_eq!(
+                xml,
+                build_internal_server_error_stream_error(FORCE_DETACH_RECONNECT_TEXT)
+            );
+            assert!(xml.contains(
+                "<internal-server-error xmlns=\"urn:ietf:params:xml:ns:xmpp-streams\"/>"
+            ));
+        }
     }
 }

@@ -2,6 +2,24 @@ use super::permissions::write_tuple_if_absent;
 use super::*;
 use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MucOwnerConfigError {
+    #[error("room ownership moved")]
+    NotOwner,
+    #[error("room ownership cannot currently be verified")]
+    OwnershipUncertain,
+    #[error("room mutation did not converge durably: {0}")]
+    PersistFailed(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<String> for MucOwnerConfigError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
 fn data_form_value(form: &Element, var: &str) -> Option<String> {
     form.children()
         .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
@@ -76,7 +94,7 @@ pub(super) async fn apply_muc_owner_config(
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
     session: Option<&Session>,
-) -> Result<(), String> {
+) -> Result<(), MucOwnerConfigError> {
     let room_actor = get_room_actor(state, room_jid)
         .await
         .ok_or_else(|| "room actor not found".to_string())?;
@@ -145,6 +163,28 @@ pub(super) async fn apply_muc_owner_config(
     if let Some(channel_type) = existing_channel_type {
         project_channel_type_to_config(&mut config, channel_type);
     }
+    if channel_id.is_some() {
+        match room_actor.ask(CheckMutationOwnership).await {
+            Ok(()) => {}
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+            )) => {
+                demote_exact_room_actor(state, room_jid, &room_actor).await;
+                return Err(MucOwnerConfigError::NotOwner);
+            }
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+            )) => return Err(MucOwnerConfigError::OwnershipUncertain),
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::PersistFailed(detail),
+            )) => return Err(MucOwnerConfigError::PersistFailed(detail)),
+            Err(error) => {
+                return Err(MucOwnerConfigError::Other(format!(
+                    "ownership admission failed: {error}"
+                )));
+            }
+        }
+    }
     if let (Some(channel_id), Some(session)) = (channel_id.as_deref(), session) {
         write_tuple_if_absent(
             state,
@@ -174,21 +214,61 @@ pub(super) async fn apply_muc_owner_config(
         None
     };
 
-    let expected_revision = room_actor
+    let expected_revision = match room_actor
         .ask(UpdateConfig {
             config: config.clone(),
         })
         .await
-        .map_err(|error| format!("config update failed: {error:?}"))?;
+    {
+        Ok(revision) => revision,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+        )) => {
+            demote_exact_room_actor(state, room_jid, &room_actor).await;
+            return Err(MucOwnerConfigError::NotOwner);
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+        )) => return Err(MucOwnerConfigError::OwnershipUncertain),
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::PersistFailed(detail),
+        )) => return Err(MucOwnerConfigError::PersistFailed(detail)),
+        Err(error) => {
+            return Err(MucOwnerConfigError::Other(format!(
+                "config update failed: {error:?}"
+            )));
+        }
+    };
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
-            let updates = room_actor
-                .ask(EnforceMembersOnly)
-                .await
-                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
+            let updates =
+                room_actor
+                    .ask(EnforceMembersOnly)
+                    .await
+                    .map_err(|error| match error {
+                        kameo::error::SendError::HandlerError(
+                            waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+                        ) => MucOwnerConfigError::NotOwner,
+                        kameo::error::SendError::HandlerError(
+                            waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+                        ) => MucOwnerConfigError::OwnershipUncertain,
+                        kameo::error::SendError::HandlerError(
+                            waddle_xmpp::muc::room_actor::RoomMutationError::PersistFailed(detail),
+                        ) => MucOwnerConfigError::PersistFailed(detail),
+                        error => MucOwnerConfigError::Other(format!(
+                            "members-only enforcement failed: {error:?}"
+                        )),
+                    })?;
+            match fence_room_effects(state, room_jid, &room_actor).await {
+                FencedRoomEffectsOutcome::Authorized => {}
+                FencedRoomEffectsOutcome::NotOwner => return Err(MucOwnerConfigError::NotOwner),
+                FencedRoomEffectsOutcome::OwnershipUncertain => {
+                    return Err(MucOwnerConfigError::OwnershipUncertain)
+                }
+            }
             for (recipient, presence) in updates {
                 let _ = state
                     .deps
@@ -201,6 +281,13 @@ pub(super) async fn apply_muc_owner_config(
             .ask(GetSnapshot)
             .await
             .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
+        match fence_room_effects(state, room_jid, &room_actor).await {
+            FencedRoomEffectsOutcome::Authorized => {}
+            FencedRoomEffectsOutcome::NotOwner => return Err(MucOwnerConfigError::NotOwner),
+            FencedRoomEffectsOutcome::OwnershipUncertain => {
+                return Err(MucOwnerConfigError::OwnershipUncertain)
+            }
+        }
         broadcast_muc_config_change(
             state,
             room_jid,
@@ -248,7 +335,9 @@ pub(super) async fn apply_muc_owner_config(
                 config: previous_config,
             })
             .await;
-        return Err(format!("channel upsert failed: {error}"));
+        return Err(MucOwnerConfigError::Other(format!(
+            "channel upsert failed: {error}"
+        )));
     }
 
     // The channel#owner tuple was written before the config update/upsert so the
@@ -267,13 +356,46 @@ pub(super) async fn apply_muc_owner_config(
             room_actor
                 .ask(EnforceMembersOnlyAffiliations { affiliations })
                 .await
-                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
+                .map_err(|error| match error {
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+                    ) => MucOwnerConfigError::NotOwner,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+                    ) => MucOwnerConfigError::OwnershipUncertain,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomMutationError::PersistFailed(detail),
+                    ) => MucOwnerConfigError::PersistFailed(detail),
+                    error => MucOwnerConfigError::Other(format!(
+                        "members-only enforcement failed: {error:?}"
+                    )),
+                })?
         } else {
             room_actor
                 .ask(EnforceMembersOnly)
                 .await
-                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
+                .map_err(|error| match error {
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+                    ) => MucOwnerConfigError::NotOwner,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+                    ) => MucOwnerConfigError::OwnershipUncertain,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomMutationError::PersistFailed(detail),
+                    ) => MucOwnerConfigError::PersistFailed(detail),
+                    error => MucOwnerConfigError::Other(format!(
+                        "members-only enforcement failed: {error:?}"
+                    )),
+                })?
         };
+        match fence_room_effects(state, room_jid, &room_actor).await {
+            FencedRoomEffectsOutcome::Authorized => {}
+            FencedRoomEffectsOutcome::NotOwner => return Err(MucOwnerConfigError::NotOwner),
+            FencedRoomEffectsOutcome::OwnershipUncertain => {
+                return Err(MucOwnerConfigError::OwnershipUncertain)
+            }
+        }
         for (recipient, presence) in updates {
             let _ = state
                 .deps
@@ -287,6 +409,13 @@ pub(super) async fn apply_muc_owner_config(
         .ask(GetSnapshot)
         .await
         .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
+    match fence_room_effects(state, room_jid, &room_actor).await {
+        FencedRoomEffectsOutcome::Authorized => {}
+        FencedRoomEffectsOutcome::NotOwner => return Err(MucOwnerConfigError::NotOwner),
+        FencedRoomEffectsOutcome::OwnershipUncertain => {
+            return Err(MucOwnerConfigError::OwnershipUncertain)
+        }
+    }
     broadcast_muc_config_change(
         state,
         room_jid,

@@ -393,12 +393,14 @@ changes slice scope, XEP behavior, or operational requirements.
    only after the connection task acknowledges cleanup. A final correctness
    pass closed three edge cases: UserActor health checks are now
    non-destructive so a failed health probe cannot release the claim before
-   demotion; `owned()` falls back to `ConnectionRegistry` bare-JID enumeration
-   if the user registry cannot answer during terminal self-fence; and a queued
-   force-detach timeout leaves the registry entry in place so the connection
-   task can still consume the request and run non-superseded cleanup. XMPP wire
-   behavior remains unchanged except for the intended native `<conflict/>`
-   close on a deposed live stream. A later XEP/lifecycle review found the
+   demotion; terminal self-fence teardown includes `ConnectionRegistry`
+   bare-JID enumeration even if the user registry cannot answer, without
+   treating those sockets as authoritative claims during ordinary
+   reconciliation; and a queued force-detach timeout leaves the registry entry
+   in place so the connection task can still consume the request and run
+   non-superseded cleanup. At that stage, XMPP wire behavior remained
+   unchanged except for the intended native `<conflict/>` close on a deposed
+   live stream. A later XEP/lifecycle review found the
    registry reuse fast path still needed the same discipline: a stale
    `UserEntry` whose stored owner/epoch no longer matches the current shared
    identity/fence is now retired only after its live resources acknowledge
@@ -808,3 +810,192 @@ changes slice scope, XEP behavior, or operational requirements.
     keypair pool or an external secret source whenever `clustering.enabled=true`,
     and Postgres-backed keypair-slot tests share the cluster test lock to keep
     the real multi-process harness deterministic.
+49. Remote-resource rollout exposed an ownership-enumeration ambiguity in
+    `UserLocalClaims`: the ordinary Postgres reconciliation set unconditionally
+    included every socket in the local `ConnectionRegistry`, including sockets
+    whose authoritative `UserActor` claim belongs to another node. The
+    10-second reconciliation loop therefore classified valid remote resources
+    as deposed local claims and conflict-closed them. Authoritative claim
+    enumeration and terminal whole-node teardown are now separate surfaces:
+    routine reconciliation reads only locally owned actors, while an actual
+    node self-fence still demotes all authoritative actors, every socket
+    physically hosted on that node, and owner-side mirrors for remote sockets.
+    Force-detach now carries a typed reason through the relay: real session
+    resume or resource replacement retains the terminal `<conflict/>`; whole
+    node self-fence uses `<system-shutdown/>`; and per-resource ownership or
+    remote-state loss uses recoverable `<internal-server-error/>`. This
+    preserves the Phase 4 safety boundary without treating cross-node resource
+    placement as ownership loss or suppressing client reconnection during
+    infrastructure failure. Per-user reconciliation also carries the exact
+    `ConnectionEntry` owner tokens recorded by the deposed `UserActor`; it
+    never broad-scans the bare JID and therefore cannot detach a newer
+    same-JID incarnation.
+
+    Whole-node teardown is bulk and fail-closed: UserActor and RoomActor
+    registries atomically drain in one mailbox operation; socket retirements
+    run concurrently; a timed-out local socket is hard-aborted through its
+    per-connection retirement handle; and remote mirrors are classified as
+    proxy state rather than local transports. Readiness is cleared before any
+    await and is not restored until terminal teardown succeeds. Incomplete
+    retries re-mark the fresh node row draining, while successful teardown
+    purges both socket-side and owner-side remote-resource bridge indexes.
+    Bind/resume registration checks readiness before publication, immediately
+    after publication, after actor/remote mirroring, and after SM finalization,
+    with owner-gated rollback of every published view.
+
+    Self-fence recovery preserves the process `node_id`, which is also the
+    supervised relay actor's registered address, and rotates only
+    `node_epoch`. Re-registration therefore updates one bounded node row and
+    does not publish claims or routes for a relay name that was never spawned.
+    The replacement epoch is first registered atomically as `draining`; the
+    old epoch is not superseded until terminal teardown succeeds, and an
+    exact-epoch activation CAS runs only after teardown and hysteresis pass.
+    New-claim, resume, and idempotent-reacquire paths require an eligible exact
+    node incarnation, while every durable write fence now matches
+    `(node_id, node_epoch, claim_epoch)` so a recovered process cannot revive
+    a stale incarnation through the stable relay address.
+
+    Claim epochs now come from one never-reset Postgres sequence, and release,
+    bulk release, and recovery operations match the full claim grant rather
+    than a resource key alone. A cold process start uses the same recovery
+    state machine as a live self-fence: it registers the replacement
+    incarnation as draining, keeps readiness false, reclaims only the exact
+    predecessor lineage, strictly hydrates its typed SM, ISR, pending-delivery,
+    UserActor, and RoomActor state, and re-proves every current claim after the
+    durable reads. Recovery heartbeats while that work is in progress; an
+    initialization latch prevents new traffic from observing half-restored SM
+    state; and cancellation or any failed re-proof leaves the candidate
+    draining instead of activating partial state.
+
+    Each node incarnation persists its configured lease TTL beside its
+    heartbeat. Destination-side claim grants, current-ownership proofs, relay
+    authority, reconciliation vetoes, and all SM, ISR, pending-delivery, MUC,
+    and MAM durable-write fences atomically require that row-local heartbeat to
+    remain within the recorded TTL, even if the watchdog has not yet committed
+    `expired=true`. Takeover of another node remains stricter: source ownership
+    is stealable only after its expiry is durably committed. This prevents a
+    paused process from waking after its lease window and winning a new claim
+    or committing a stale durable write during the watchdog scheduling gap.
+
+    Those deadline checks run after the contested claim or node row has been
+    locked, using Postgres `clock_timestamp()` rather than transaction-stable
+    `now()`. Claim grants mutate inside a control-plane transaction, then lock
+    and validate the destination incarnation immediately before commit; a
+    failed proof rolls the mutation and any consumed steal intent back.
+    Absent-row acquisition and stable-node registration use transaction-scoped
+    advisory locks so a uniqueness wait cannot preserve an early liveness
+    decision. Durable stores materialize the exact claim and node locks before
+    evaluating the wall clock. A task that begins while fresh but waits beyond
+    the TTL therefore cannot renew, acquire, or commit a fenced write.
+
+    Every transaction that can retain one of those exact claim or node locks
+    installs a five-second database-side deadline before taking the lock. On
+    PostgreSQL 17 this sets local lock, statement, idle-in-transaction, and
+    total transaction timeouts from one typed budget; cluster configuration
+    rejects a node lease TTL that is not strictly longer. The same bounded
+    transaction entry point is used by the control plane and the SM, ISR,
+    pending-delivery, MUC, and MAM durable stores, so a stalled task cannot pin
+    heartbeat or takeover locks indefinitely past the nominal lease.
+
+    Before publishing either a local-owner resource or a remote-owner mirror,
+    a socket reserves one durable full-JID admission row under a never-reset
+    Postgres sequence. The row binds a typed admission epoch and registration
+    id to the exact physical socket `NodeIdentity`; a later reservation on any
+    node atomically supersedes it. Both placements pass through the same
+    per-full-JID publication guard and owner-side registration map, so a newer
+    local socket displaces an older remote socket and a newer remote socket
+    displaces an older local socket in one total order. Owner handlers prove
+    that exact row before displacement and again after every await and before
+    publication, while exact cancellation can delete only the matching
+    admission. Inbound stanzas, full-JID delivery, and Carbon fanout also prove
+    the stored token; a cancellation that arrives before its delayed register
+    therefore makes the register terminally stale, and an old node cannot
+    deliver to or detach a newer bind. Normal and whole-node cleanup cancel the
+    exact row; a bounded indexed janitor removes only rows whose socket
+    incarnation is absent or committed expired.
+
+    The socket also publishes its exact pending registration before asking the
+    owner to create a mirror, ensuring concurrent owner teardown can always
+    reach the physical connection even if the registration ACK is still in
+    flight. Process-local socket generations survive epoch rotation and remain
+    an additional same-node ordering proof. Registration, update, route,
+    delivery, force-detach, unregister, and compensation messages carry both
+    generations plus the expected authoritative owner incarnation.
+
+    Both sides retain typed, exact-generation compensation evidence for an
+    owner registration whose reply is uncertain. Cleanup distinguishes a
+    terminal exact unregister from a retryable maybe-committed outcome, never
+    makes cleanup-only evidence routable, and is bounded globally and per JID
+    before the owner ask is admitted. Whole-node fencing transfers active
+    registrations into that same bounded cleanup path, while cooperative
+    detach and the physical socket's abort handle provide a terminal fallback.
+    All registration, forwarding, detach, and compensation messages carry the
+    exact socket `NodeIdentity`, resource generation, and registration id, so
+    a delayed operation cannot retire a newer same-resource incarnation.
+
+    Remote delivery replies also distinguish positively stale registration
+    evidence from temporary unavailability. A missing exact connection,
+    superseded admission, or changed socket incarnation permits cleanup; a
+    claim-store failure, relay discovery miss, or other ambiguous outage keeps
+    the owner mirror and returns a retryable unavailable outcome. Pending
+    socket cleanup becomes globally retryable as soon as either its exact
+    active metadata or exact physical connection is gone, preventing uncertain
+    disconnects from permanently consuming the bounded cleanup budget.
+
+    Each RoomActor now binds the exact claim context won for that actor
+    incarnation before restore; it never resolves a later room-scoped epoch.
+    Binding is one-shot, every registry removal kills the old actor, and
+    destroy is an exact actor-reference CAS, so a retained E1 reference cannot
+    borrow E2 authority or remove the replacement. Room mutations pass that
+    exact gate before touching actor state, durable MUC/MAM writes return typed
+    ownership loss when their in-transaction fence fails, and direct admin,
+    config, destroy, moderation, and system-message effects re-prove the same
+    context immediately after their final await and before fanout. Definitive
+    loss demotes; backend uncertainty fails closed without guessing.
+
+    Owner-driven room destruction uses a registry-serialized exact-effect
+    barrier rather than a check followed by an ordinary destroy CAS. CAS-first
+    alone is insufficient: once E1 is removed and its claim released, the
+    registry can install E2 before the caller emits E1's final unavailable
+    presence and room/full-JID-keyed SFU teardown. The barrier revalidates E1's
+    exact claim and live node inside the registry handler, then asks E1's own
+    mailbox to run its mutation gate, seal admission, and return the final
+    occupant snapshot. Joins committed before the seal are therefore included;
+    later joins receive `RoomSealed`. No fallible authority check follows that
+    seal. The actor-ref CAS removes and kills E1 while retaining its full
+    `ClaimGrant`, then grants the caller one typed reservation carrying that
+    snapshot. The registry mailbox remains blocked until a typed `effects_done`
+    acknowledgement arrives; dropping the acknowledgement sender on
+    cancellation also unblocks cleanup. Only that reservation winner emits
+    XEP-0045 destroy effects, after which the registry exact-releases E1's grant
+    before admitting E2. Definitive claim loss demotes E1 without effects,
+    while claim-backend or actor-gate uncertainty retains E1 unsealed and fails
+    closed.
+
+    Terminal registry removal retains the actor's full typed `ClaimGrant`
+    until its exact release succeeds. A transient release failure therefore
+    blocks replacement instead of allowing `ensure_claimed` to self-reacquire
+    E1's orphaned epoch for E2; the pending evidence survives whole-node
+    demotion and identity rotation and is retried with E1's captured owner.
+    Duplicate release evidence cannot overwrite the first unresolved grant.
+    Nested room effects also carry the authorizing actor reference alongside
+    the claim fence: archive, tombstone, inbox projection, and normal or system
+    fanout re-prove that exact actor around awaited work and at each recipient
+    boundary. A stale E1 result can exact-demote only E1 and can never adopt,
+    remove, mutate, or fan out through the room-key-current E2.
+
+    XEP-0424 retraction validates the canonical target, wire retraction id,
+    sender, room, and non-null occupancy generation in the same transaction.
+    XEP-0425 accepts only the room-assigned stanza/archive id as its target,
+    preserves the moderation message's distinct wire `id` during MAM replay,
+    and uses that wire id for the XEP-0424 tombstone `<retracted id>`, while the
+    canonical event and tombstone remain atomically bound to the exact target
+    and moderator. Subject, affiliation, role, occupant, moderation, destroy,
+    and pin effects therefore fail closed across claim rotation instead of
+    publishing from a deposed room owner.
+
+    The multi-process regression now holds a non-owner resource across
+    multiple observed heartbeat/reconciliation advances, proves exact XEP-0280
+    sent/received carbon shapes, and drives a live remote socket through
+    isolation fencing (`<system-shutdown/>`), re-enrollment, same-resource
+    reconnection, and fresh owner-mirror delivery.

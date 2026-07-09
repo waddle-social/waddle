@@ -18,7 +18,7 @@ mod tombstones;
 mod trait_impl;
 mod traits;
 
-pub use core::InMemorySmSessionRegistry;
+pub use core::{InMemorySmSessionRegistry, ReclaimedSessionHydration};
 pub use cross_node_resume::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,
     StealTicket,

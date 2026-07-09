@@ -3,7 +3,7 @@
 //! unset, mirroring `clustering::claims`'s own test style exactly.
 
 use super::*;
-use crate::clustering::claims::PostgresClaimStore;
+use crate::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
 use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
@@ -65,15 +65,23 @@ fn node_identity() -> NodeIdentity {
     )
 }
 
-/// Mirrors `clustering::claims::tests::seed_node` exactly (duplicated
-/// rather than exposed cross-module for a test-only helper — see that
-/// function's own doc comment for why `expired` is spliced as a literal).
+/// Mirrors `clustering::claims::tests::seed_node`'s direct-SQL purpose
+/// (duplicated rather than exposed cross-module for a test-only helper).
+/// This variant upserts because [`fixture`] now registers its exact live
+/// identity before each test; see the original helper's doc comment for why
+/// `expired` is spliced as a literal.
 async fn seed_node(db: &Database, identity: &NodeIdentity, expired: bool) {
     let conn = db.guard().await.expect("guard");
     let expired_literal = if expired { "true" } else { "false" };
     conn.execute(
         &format!(
-            "INSERT INTO clustering_nodes (node_id, node_epoch, expired) VALUES (?, ?, {expired_literal})"
+            "INSERT INTO clustering_nodes (node_id, node_epoch, heartbeat, expired, draining) \
+             VALUES (?, ?, now(), {expired_literal}, false) \
+             ON CONFLICT (node_id) DO UPDATE SET \
+                 node_epoch = EXCLUDED.node_epoch, \
+                 heartbeat = now(), \
+                 expired = EXCLUDED.expired, \
+                 draining = false"
         ),
         crate::db_params![identity.node_id.clone(), identity.node_epoch.clone()],
     )
@@ -85,6 +93,95 @@ async fn live_stealer(db: &Database) -> NodeIdentity {
     let stealer = node_identity();
     seed_node(db, &stealer, false).await;
     stealer
+}
+
+async fn current_claim_epoch(claims: &PostgresClaimStore, entity: &Entity) -> ClaimEpoch {
+    claims
+        .current_claim(entity)
+        .await
+        .expect("read current claim")
+        .expect("fixture claim exists")
+        .claim_epoch
+}
+
+const FENCED_WRITE_RACE_LEASE_TTL_MS: i64 = 1_000;
+
+/// Give the owner a short but comfortably-live lease. The writer is started
+/// immediately and must reach the test barrier while this lease is fresh;
+/// once fenced, the test can let database time make the same owner stale
+/// without updating the node row that the writer has locked `FOR SHARE`.
+async fn arm_short_live_owner_lease(db: &Database, owner: &NodeIdentity) {
+    let conn = db.guard().await.expect("guard");
+    let updated = conn
+        .execute(
+            "UPDATE clustering_nodes \
+             SET heartbeat = clock_timestamp(), lease_ttl_ms = ?, expired = false, draining = false \
+             WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![
+                FENCED_WRITE_RACE_LEASE_TTL_MS,
+                owner.node_id.clone(),
+                owner.node_epoch.clone(),
+            ],
+        )
+        .await
+        .expect("arm short live owner lease");
+    assert_eq!(updated, 1, "fixture owner row must exist");
+}
+
+/// Wait until a real public persistence method has passed `assert_fenced`
+/// and is holding the claim/node rows, let the short owner lease lapse, then
+/// launch the exact `expire` CAS on another connection. The early timeout
+/// proves expiry is blocked by the writer's node-row lock. Once the writer
+/// commits, expiry must commit first; only that committed `expired = true`
+/// transition makes the following `OwnerStale` steal eligible.
+async fn expire_then_steal_behind_fenced_write(
+    db: Database,
+    barrier: FencedWriteTestBarrier,
+    entity: Entity,
+    observed: ClaimEpoch,
+    owner: NodeIdentity,
+    stealer: NodeIdentity,
+) -> ClaimEpoch {
+    tokio::time::timeout(StdDuration::from_secs(5), barrier.wait_until_fenced())
+        .await
+        .expect("writer must acquire its fencing lock while the owner lease is fresh");
+
+    tokio::time::sleep(StdDuration::from_millis(
+        u64::try_from(FENCED_WRITE_RACE_LEASE_TTL_MS).expect("positive fixture TTL") + 200,
+    ))
+    .await;
+
+    let expire_db = db.clone();
+    let mut expire_task = tokio::spawn(async move {
+        PostgresClaimStore::new(expire_db)
+            .expire(
+                &owner,
+                StdDuration::from_millis(
+                    u64::try_from(FENCED_WRITE_RACE_LEASE_TTL_MS).expect("positive fixture TTL"),
+                ),
+            )
+            .await
+    });
+    if let Ok(early) = tokio::time::timeout(StdDuration::from_millis(200), &mut expire_task).await {
+        barrier.resume_writer().await;
+        panic!("expiry completed before the fenced writer released its node-row lock: {early:?}");
+    }
+
+    barrier.resume_writer().await;
+    let expired = tokio::time::timeout(StdDuration::from_secs(5), expire_task)
+        .await
+        .expect("expiry must unblock after the fenced writer commits")
+        .expect("expiry task must not panic")
+        .expect("expiry CAS must execute cleanly");
+    assert!(
+        expired,
+        "the lapsed exact owner must commit expired=true after the writer releases its lock"
+    );
+
+    PostgresClaimStore::new(db)
+        .steal_stale(&entity, observed, StalePredicate::OwnerStale, &stealer)
+        .await
+        .expect("steal must succeed after the exact owner commits expired=true")
 }
 
 struct Fixture {
@@ -156,6 +253,11 @@ async fn fixture() -> Option<Fixture> {
     ] {
         conn.execute(stmt, ()).await.expect("clean table");
     }
+    drop(conn);
+    claims
+        .register(&identity, None)
+        .await
+        .expect("register live fixture node");
 
     Some(Fixture {
         fenced,
@@ -206,6 +308,51 @@ async fn upsert_and_get_session_round_trip_except_divergent_detached_at() {
     assert!(
         loaded.detached_at >= before,
         "detached_at must be stamped from Postgres now() at write time"
+    );
+}
+
+#[tokio::test]
+async fn upsert_stamps_detached_at_after_session_row_lock_wait() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = "stream-detached-post-lock";
+    f.fenced
+        .upsert_session(fixture_session(stream_id))
+        .await
+        .unwrap();
+
+    let db = f.claims_db.clone();
+    let mut blocker = db.begin().await.unwrap();
+    let mut rows = blocker
+        .query(
+            "SELECT 1 FROM sm_sessions WHERE stream_id = ? FOR UPDATE",
+            crate::db_params![stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+    assert!(rows.next().await.unwrap().is_some());
+    drop(rows);
+
+    let fenced = Arc::new(f.fenced);
+    let task_fenced = fenced.clone();
+    let task =
+        tokio::spawn(async move { task_fenced.upsert_session(fixture_session(stream_id)).await });
+    tokio::time::sleep(StdDuration::from_millis(40)).await;
+    assert!(!task.is_finished(), "upsert must wait on the session row");
+    tokio::time::sleep(StdDuration::from_millis(360)).await;
+    let release_started_at = Utc::now() - chrono::Duration::milliseconds(5);
+    blocker.commit().await.unwrap();
+    task.await.unwrap().unwrap();
+
+    let loaded = fenced
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        loaded.detached_at >= release_started_at,
+        "detached_at must be computed after the 400ms session-row wait: {} < {}",
+        loaded.detached_at,
+        release_started_at,
     );
 }
 
@@ -434,15 +581,18 @@ async fn delete_session_aborts_before_any_write_once_the_claim_is_stolen() {
     f.fenced
         .upsert_session(fixture_session("stream-stolen"))
         .await
-        .expect("upsert_session establishes the claim at epoch 0");
+        .expect("upsert_session establishes the claim");
 
     // Make the current owner's node row stale, then steal the entity to a
-    // different node — the fenced impl's cached epoch (0) is now invalid.
-    seed_node(&f.claims_db, &f.identity, true).await;
+    // different node — the fenced impl's cached epoch is now invalid. Claim
+    // epochs come from a global monotonic sequence, so read the exact grant
+    // rather than assuming a freshly-cleaned table resets it to zero.
     let entity = Entity::new(EntityType::SmSession, "stream-stolen".to_string());
+    let observed = current_claim_epoch(&f.claims, &entity).await;
+    seed_node(&f.claims_db, &f.identity, true).await;
     let stealer = live_stealer(&f.claims_db).await;
     f.claims
-        .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
+        .steal_stale(&entity, observed, StalePredicate::OwnerStale, &stealer)
         .await
         .expect("steal succeeds against a stale owner");
 
@@ -470,13 +620,14 @@ async fn record_promotion_failure_aborts_before_any_write_once_the_claim_is_stol
     f.fenced
         .upsert_session(fixture_session("stream-promo-stolen"))
         .await
-        .expect("upsert_session establishes the claim at epoch 0");
+        .expect("upsert_session establishes the claim");
 
-    seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-promo-stolen".to_string());
+    let observed = current_claim_epoch(&f.claims, &entity).await;
+    seed_node(&f.claims_db, &f.identity, true).await;
     let stealer = live_stealer(&f.claims_db).await;
     f.claims
-        .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
+        .steal_stale(&entity, observed, StalePredicate::OwnerStale, &stealer)
         .await
         .expect("steal succeeds against a stale owner");
 
@@ -501,12 +652,151 @@ async fn record_promotion_failure_aborts_before_any_write_once_the_claim_is_stol
 }
 
 #[tokio::test]
+async fn durable_write_rejects_a_lapsed_owner_before_expiry_is_committed() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-lapsed-owner");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("live owner establishes session and claim");
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE clustering_nodes SET heartbeat = now() - interval '1 hour' \
+         WHERE node_id = ? AND node_epoch = ?",
+        crate::db_params![f.identity.node_id.clone(), f.identity.node_epoch.clone()],
+    )
+    .await
+    .expect("lapse heartbeat without committing expiry");
+    let mut rows = conn
+        .query(
+            "SELECT expired FROM clustering_nodes WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![f.identity.node_id.clone(), f.identity.node_epoch.clone()],
+        )
+        .await
+        .expect("read expiry bit");
+    assert!(!rows
+        .next()
+        .await
+        .expect("row read")
+        .expect("node row")
+        .get::<bool>(0)
+        .expect("expired"));
+    drop(rows);
+    drop(conn);
+
+    let result = f.fenced.record_promotion_failure(&stream_id).await;
+    assert!(
+        matches!(result, Err(SmPersistenceError::NotOwner { .. })),
+        "a lapsed-but-not-expired owner must fail the in-transaction fence: {result:?}"
+    );
+    let conn = f.claims_db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT promotion_attempts FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_owned()],
+        )
+        .await
+        .expect("query untouched session");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row read")
+            .expect("session row")
+            .get::<i64>(0)
+            .expect("promotion_attempts"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn fence_uses_wall_clock_after_transaction_begin() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-transaction-clock");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("establish claim");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    let epoch = f
+        .claims
+        .current_claim(&entity)
+        .await
+        .unwrap()
+        .unwrap()
+        .claim_epoch;
+    f.claims_db
+        .guard()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE clustering_nodes SET heartbeat = clock_timestamp(), lease_ttl_ms = 50 WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![f.identity.node_id.clone(), f.identity.node_epoch.clone()],
+        )
+        .await
+        .unwrap();
+
+    let mut tx = f.claims_db.begin().await.unwrap();
+    tokio::time::sleep(StdDuration::from_millis(150)).await;
+    let result = f.fenced.assert_fenced(&mut tx, &stream_id, epoch).await;
+    assert!(matches!(result, Err(SmPersistenceError::NotOwner { .. })));
+}
+
+#[tokio::test]
+async fn fenced_write_rejects_the_old_epoch_after_same_node_id_recovery() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-same-node-new-epoch");
+    seed_node(&f.claims_db, &f.identity, false).await;
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("old incarnation establishes the session and claim");
+
+    let recovered = NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE clustering_nodes SET node_epoch = ? WHERE node_id = ?",
+        crate::db_params![recovered.node_epoch.clone(), recovered.node_id.clone()],
+    )
+    .await
+    .expect("rotate process node epoch");
+    drop(conn);
+
+    let result = f.fenced.record_promotion_failure(&stream_id).await;
+    assert!(
+        matches!(result, Err(SmPersistenceError::NotOwner { .. })),
+        "the old node epoch must not pass a same-node-id write fence: {result:?}"
+    );
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT promotion_attempts FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("query promotion attempts");
+    let attempts: i64 = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("session remains")
+        .get(0)
+        .expect("promotion_attempts column");
+    assert_eq!(attempts, 0, "the stale incarnation must not mutate the row");
+}
+
+#[tokio::test]
 async fn upsert_session_fails_closed_when_entity_already_claimed_by_another_node() {
     let Some(f) = fixture().await else { return };
     // A different node claims the entity first (simulating this SM-ID
     // already being owned elsewhere before this node ever saw it).
     let entity = Entity::new(EntityType::SmSession, "stream-preclaimed".to_string());
     let other = node_identity();
+    f.claims
+        .register(&other, None)
+        .await
+        .expect("register foreign claimant");
     f.claims.acquire(&entity, &other).await.expect("acquire");
 
     let result = f
@@ -528,36 +818,50 @@ async fn upsert_session_fails_closed_when_entity_already_claimed_by_another_node
 }
 
 /// Proves `delete_session`'s fencing check and its subsequent DELETEs are
-/// genuinely atomic — not merely "usually fine": a concurrent steal can
-/// never land in the window between the `FOR SHARE` SELECT succeeding and
-/// the DELETEs committing, because both contend for the same
-/// `clustering_claims` row. Modeled on
+/// genuinely atomic — not merely "usually fine": this deterministically
+/// pauses after the `FOR SHARE` SELECT succeeds, launches the exact expiry
+/// CAS, proves it is blocked, then lets both DELETEs commit before expiry
+/// makes the later steal eligible. Modeled on
 /// `clustering::claims::tests::steal_commit_interleaved_inside_a_fenced_transaction`.
 #[tokio::test]
-async fn concurrent_steal_vs_delete_session_never_produces_torn_state() {
-    let Some(f) = fixture().await else { return };
+async fn fenced_delete_serializes_concurrent_owner_expiry_before_steal() {
+    let Some(mut f) = fixture().await else {
+        return;
+    };
     let stream_id = SmSessionId::new("stream-race");
     f.fenced
         .upsert_session(fixture_session("stream-race"))
         .await
         .expect("upsert_session");
-    seed_node(&f.claims_db, &f.identity, true).await;
+    f.fenced
+        .append_unacked(fixture_unacked("stream-race", 1))
+        .await
+        .expect("append_unacked establishes a row for the first DELETE");
 
     let entity = Entity::new(EntityType::SmSession, "stream-race".to_string());
+    let observed = current_claim_epoch(&f.claims, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
+    arm_short_live_owner_lease(&f.claims_db, &f.identity).await;
+    let barrier = f.fenced.install_fenced_write_test_barrier();
 
     let delete_result = f.fenced.delete_session(&stream_id);
-    let steal_result =
-        f.claims
-            .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer);
-    let (delete_outcome, _steal_outcome) = tokio::join!(delete_result, steal_result);
+    let steal_result = expire_then_steal_behind_fenced_write(
+        f.claims_db.clone(),
+        barrier,
+        entity,
+        observed,
+        f.identity.clone(),
+        stealer,
+    );
+    let (delete_outcome, stolen_epoch) = tokio::join!(delete_result, steal_result);
+    delete_outcome.expect("fenced delete must commit before the blocked expiry CAS");
+    assert!(
+        stolen_epoch > observed,
+        "the steal must advance the claim after the delete commits"
+    );
 
-    // Whichever statement's transaction actually committed first, the
-    // session row must be in a *consistent* state: either fully deleted
-    // (delete_session won the race before the steal changed the epoch) or
-    // fully intact (the steal's epoch bump landed first, so
-    // delete_session's FOR SHARE SELECT saw zero rows and rolled back
-    // before deleting anything) — never partially deleted.
+    // Both rows must be gone: the writer committed its complete transaction
+    // before the blocked expiry CAS made the later steal eligible.
     let session_present = f
         .fenced
         .get_session(&stream_id)
@@ -570,23 +874,8 @@ async fn concurrent_steal_vs_delete_session_never_produces_torn_state() {
         .await
         .expect("list_unacked")
         .is_empty();
-
-    match delete_outcome {
-        Ok(()) => {
-            assert!(
-                !session_present,
-                "delete_session Ok(()) must mean the row is gone"
-            );
-            assert!(!unacked_present);
-        }
-        Err(SmPersistenceError::NotOwner { .. }) => {
-            assert!(
-                session_present,
-                "delete_session NotOwner must mean the row was never touched"
-            );
-        }
-        Err(other) => panic!("unexpected delete_session error: {other:?}"),
-    }
+    assert!(!session_present, "the session row must be deleted");
+    assert!(!unacked_present, "the unacked row must be deleted");
 }
 
 /// FIX 6: `store_session_atomic`'s own fencing check must abort the
@@ -600,17 +889,18 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
     f.fenced
         .upsert_session(fixture_session("stream-atomic-stolen"))
         .await
-        .expect("upsert_session establishes the claim at epoch 0");
+        .expect("upsert_session establishes the claim");
     f.fenced
         .append_unacked(fixture_unacked("stream-atomic-stolen", 1))
         .await
         .expect("append_unacked establishes an original unacked row");
 
-    seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-stolen".to_string());
+    let observed = current_claim_epoch(&f.claims, &entity).await;
+    seed_node(&f.claims_db, &f.identity, true).await;
     let stealer = live_stealer(&f.claims_db).await;
     f.claims
-        .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
+        .steal_stale(&entity, observed, StalePredicate::OwnerStale, &stealer)
         .await
         .expect("steal succeeds against a stale owner");
 
@@ -648,13 +938,15 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
 }
 
 /// FIX 6: the same steal-vs-write race as
-/// `concurrent_steal_vs_delete_session_never_produces_torn_state`, exercised
+/// `fenced_delete_serializes_concurrent_owner_expiry_before_steal`, exercised
 /// against `store_session_atomic`'s own DELETE-then-INSERT-then-append
-/// sequence: whichever side commits first, the durable state must never end
-/// up torn between the old and new session/unacked rows.
+/// sequence. Expiry must wait for the complete durable replacement before it
+/// can commit and make the subsequent steal eligible.
 #[tokio::test]
-async fn concurrent_steal_vs_store_session_atomic_never_produces_torn_state() {
-    let Some(f) = fixture().await else { return };
+async fn fenced_atomic_store_serializes_concurrent_owner_expiry_before_steal() {
+    let Some(mut f) = fixture().await else {
+        return;
+    };
     let stream_id = SmSessionId::new("stream-atomic-race");
     f.fenced
         .upsert_session(fixture_session("stream-atomic-race"))
@@ -664,20 +956,32 @@ async fn concurrent_steal_vs_store_session_atomic_never_produces_torn_state() {
         .append_unacked(fixture_unacked("stream-atomic-race", 1))
         .await
         .expect("append_unacked establishes an original unacked row");
-    seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-race".to_string());
+    let observed = current_claim_epoch(&f.claims, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
+    arm_short_live_owner_lease(&f.claims_db, &f.identity).await;
+    let barrier = f.fenced.install_fenced_write_test_barrier();
 
     let mut new_session = fixture_session("stream-atomic-race");
     new_session.inbound_count = 999;
     let new_unacked = vec![fixture_unacked("stream-atomic-race", 2)];
 
     let store_result = f.fenced.store_session_atomic(new_session, new_unacked);
-    let steal_result =
-        f.claims
-            .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer);
-    let (store_outcome, _steal_outcome) = tokio::join!(store_result, steal_result);
+    let steal_result = expire_then_steal_behind_fenced_write(
+        f.claims_db.clone(),
+        barrier,
+        entity,
+        observed,
+        f.identity.clone(),
+        stealer,
+    );
+    let (store_outcome, stolen_epoch) = tokio::join!(store_result, steal_result);
+    store_outcome.expect("fenced atomic store must commit before the blocked expiry CAS");
+    assert!(
+        stolen_epoch > observed,
+        "the steal must advance the claim after the atomic store commits"
+    );
 
     let loaded = f
         .fenced
@@ -691,50 +995,51 @@ async fn concurrent_steal_vs_store_session_atomic_never_produces_torn_state() {
         .await
         .expect("list_unacked");
 
-    match store_outcome {
-        Ok(()) => {
-            assert_eq!(
-                loaded.inbound_count, 999,
-                "store_session_atomic Ok(()) must mean the new session landed"
-            );
-            assert_eq!(queue.len(), 1);
-            assert_eq!(queue[0].sequence, 2);
-        }
-        Err(SmPersistenceError::NotOwner { .. }) => {
-            assert_eq!(
-                loaded.inbound_count, 7,
-                "store_session_atomic NotOwner must mean the original row survived untouched"
-            );
-            assert_eq!(queue.len(), 1);
-            assert_eq!(
-                queue[0].sequence, 1,
-                "the original unacked row must survive untouched"
-            );
-        }
-        Err(other) => panic!("unexpected store_session_atomic error: {other:?}"),
-    }
+    assert_eq!(
+        loaded.inbound_count, 999,
+        "the complete replacement session must land before the steal"
+    );
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].sequence, 2);
 }
 
-/// FIX 6: the same steal-vs-write race, exercised against
+/// FIX 6: the same expiry-then-steal ordering, exercised against
 /// `record_promotion_failure`'s fenced `UPDATE ... RETURNING`.
 #[tokio::test]
-async fn concurrent_steal_vs_record_promotion_failure_never_produces_torn_state() {
-    let Some(f) = fixture().await else { return };
+async fn fenced_promotion_update_serializes_concurrent_owner_expiry_before_steal() {
+    let Some(mut f) = fixture().await else {
+        return;
+    };
     let stream_id = SmSessionId::new("stream-promo-race");
     f.fenced
         .upsert_session(fixture_session("stream-promo-race"))
         .await
         .expect("upsert_session");
-    seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-promo-race".to_string());
+    let observed = current_claim_epoch(&f.claims, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
+    arm_short_live_owner_lease(&f.claims_db, &f.identity).await;
+    let barrier = f.fenced.install_fenced_write_test_barrier();
 
     let promo_result = f.fenced.record_promotion_failure(&stream_id);
-    let steal_result =
-        f.claims
-            .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer);
-    let (promo_outcome, _steal_outcome) = tokio::join!(promo_result, steal_result);
+    let steal_result = expire_then_steal_behind_fenced_write(
+        f.claims_db.clone(),
+        barrier,
+        entity,
+        observed,
+        f.identity.clone(),
+        stealer,
+    );
+    let (promo_outcome, stolen_epoch) = tokio::join!(promo_result, steal_result);
+    assert_eq!(
+        promo_outcome.expect("fenced promotion update must commit before the blocked expiry CAS"),
+        1
+    );
+    assert!(
+        stolen_epoch > observed,
+        "the steal must advance the claim after the promotion update commits"
+    );
 
     let conn = f.claims_db.guard().await.expect("guard");
     let mut rows = conn
@@ -747,22 +1052,7 @@ async fn concurrent_steal_vs_record_promotion_failure_never_produces_torn_state(
     let row = rows.next().await.expect("row").expect("row present");
     let attempts: i64 = row.get(0).expect("promotion_attempts column");
 
-    match promo_outcome {
-        Ok(count) => {
-            assert_eq!(
-                count, 1,
-                "record_promotion_failure Ok(1) must mean the UPDATE committed"
-            );
-            assert_eq!(attempts, 1);
-        }
-        Err(SmPersistenceError::NotOwner { .. }) => {
-            assert_eq!(
-                attempts, 0,
-                "record_promotion_failure NotOwner must mean the UPDATE never ran"
-            );
-        }
-        Err(other) => panic!("unexpected record_promotion_failure error: {other:?}"),
-    }
+    assert_eq!(attempts, 1, "the fenced UPDATE must commit exactly once");
 }
 
 /// FIX 6: `list_all_sessions` round-trips every persisted session under the
@@ -859,6 +1149,10 @@ struct SecondNode {
 
 async fn second_node(f: &Fixture) -> SecondNode {
     let identity = node_identity();
+    PostgresClaimStore::new(f.claims_db.clone())
+        .register(&identity, None)
+        .await
+        .expect("register second node incarnation");
     let shared_identity = SharedNodeIdentity::new(identity.clone());
     let claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(f.claims_db.clone()));
     let fenced = PostgresFencedSmPersistence::open(

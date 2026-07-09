@@ -36,7 +36,7 @@ use jid::BareJid;
 
 use super::affiliation::AffiliationEntry;
 use super::{RoomConfig, SubjectState};
-use crate::ownership::{ClaimEpoch, Entity};
+use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
 use crate::XmppError;
 
 /// Boxed future returned by every [`MucDurableStore`] method, mirroring
@@ -46,18 +46,18 @@ pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppErr
 
 /// Typed fencing context for a room's currently-recorded Postgres claim
 /// (ADR-0017 Phase 3 Slice 7 FIX 1, council-adjudicated): the same
-/// `(Entity, ClaimEpoch, node_id)` triple [`MucDurableStore::check_fenced_fanout`]
+/// `(Entity, ClaimEpoch, NodeIdentity)` triple [`MucDurableStore::check_fenced_fanout`]
 /// resolves internally via [`MucDurableStore::record_claim_epoch`]'s cache,
 /// exposed here so a caller that needs to run its OWN fenced write against a
 /// DIFFERENT store (MAM's `store_message_fenced`, which cannot share a SQL
 /// transaction with this store's own `assert_fenced`) can bind the identical
 /// typed values into its own `SELECT ... FOR SHARE` check, rather than
 /// re-deriving them from a second, independent source of truth.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomClaimFenceContext {
     pub entity: Entity,
     pub epoch: ClaimEpoch,
-    pub node_id: String,
+    pub owner: NodeIdentity,
 }
 
 /// Full durable snapshot of a room's long-lived state: configuration,
@@ -79,8 +79,8 @@ pub struct DurableRoomState {
 /// on the room's `RoomActor` entity (see [`Self::record_claim_epoch`]) —
 /// "epoch-fenced like all claimed-entity writes" per element 7.
 ///
-/// **Fail-open contract, revised (ADR-0017 Phase 3 Slice 7 FIX 2,
-/// council-adjudicated).** This trait's `save_*` methods themselves are
+/// **Fail-closed ownership contract (ADR-0017 Phase 3 Slice 7 FIX 2).**
+/// This trait's `save_*` methods themselves are
 /// still fire-and-forget from a Rust-signature perspective (`Result<(),
 /// XmppError>`, not surfaced up through every intermediate layer) — a
 /// fenced write that fails still just returns `Err` to its immediate
@@ -94,9 +94,10 @@ pub struct DurableRoomState {
 /// 1. **Before mutating**: the handler runs
 ///    [`super::room_actor::RoomActor::gate_mutation`] — a `SELECT ... FOR
 ///    SHARE`-fenced [`Self::check_fenced_fanout`] pre-check — and refuses
-///    to mutate at all on a definitive ownership-loss result. This is new:
-///    previously every mutation applied in-memory unconditionally,
-///    regardless of whether this node's claim was still current.
+///    to mutate on either definitive ownership loss or a backend error that
+///    prevents proving exact ownership. The uncertain case does not demote
+///    the actor; neither case applies the requested in-memory or durable
+///    effect.
 /// 2. **After mutating**: a `save_*` failure that is NOT ownership loss
 ///    (a transient backend outage) is no longer silently logged and
 ///    swallowed — it now surfaces as a typed error
@@ -130,6 +131,21 @@ pub trait MucDurableStore: Send + Sync {
         config: &'a RoomConfig,
     ) -> MucDurableFuture<'a, ()>;
 
+    /// Persist configuration under the exact claim captured by one
+    /// `RoomActor` incarnation. Clustered implementations override this;
+    /// portable stores retain their existing room-scoped behavior.
+    fn save_config_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        waddle_id: &'a str,
+        channel_id: &'a str,
+        config: &'a RoomConfig,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        let _ = fence;
+        self.save_config(room_jid, waddle_id, channel_id, config)
+    }
+
     /// Durably upsert (or, when `subject` is `None`, clear) the room's
     /// current subject.
     fn save_subject<'a>(
@@ -137,6 +153,17 @@ pub trait MucDurableStore: Send + Sync {
         room_jid: &'a BareJid,
         subject: Option<&'a SubjectState>,
     ) -> MucDurableFuture<'a, ()>;
+
+    /// Exact-incarnation variant of [`Self::save_subject`].
+    fn save_subject_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        subject: Option<&'a SubjectState>,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        let _ = fence;
+        self.save_subject(room_jid, subject)
+    }
 
     /// Durably upsert one affiliation-list entry. `Affiliation::None`
     /// removes the row, mirroring `AffiliationList::set`'s in-memory
@@ -146,6 +173,17 @@ pub trait MucDurableStore: Send + Sync {
         room_jid: &'a BareJid,
         entry: &'a AffiliationEntry,
     ) -> MucDurableFuture<'a, ()>;
+
+    /// Exact-incarnation variant of [`Self::save_affiliation`].
+    fn save_affiliation_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        entry: &'a AffiliationEntry,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        let _ = fence;
+        self.save_affiliation(room_jid, entry)
+    }
 
     /// Record the claim epoch this node most recently won for `room_jid`
     /// (called by the room registry immediately after a successful
@@ -170,7 +208,9 @@ pub trait MucDurableStore: Send + Sync {
     /// epoch [`Self::record_claim_epoch`] last recorded), run before every
     /// local fan-out. `Ok(true)` iff this node still holds the claim;
     /// `Ok(false)` means a steal has committed and the caller must demote
-    /// locally and not deliver. Default `Ok(true)` (never demotes):
+    /// locally and not deliver. `Err` means exact ownership could not be
+    /// proved; callers must suppress the current fan-out/mutation without
+    /// demoting solely from that uncertainty. Default `Ok(true)` (never demotes):
     /// single-node/non-clustering deployments never configure a
     /// `MucDurableStore` at all, so this default only matters for tests
     /// exercising the trait directly.
@@ -179,7 +219,19 @@ pub trait MucDurableStore: Send + Sync {
         Box::pin(async { Ok(true) })
     }
 
-    /// The typed `(Entity, ClaimEpoch, node_id)` context this room is
+    /// Prove the exact claim captured by a particular room-actor
+    /// incarnation. Unlike [`Self::check_fenced_fanout`], this must never
+    /// substitute a newer epoch cached for the same room.
+    fn check_fenced_fanout_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, bool> {
+        let _ = fence;
+        self.check_fenced_fanout(room_jid)
+    }
+
+    /// The typed `(Entity, ClaimEpoch, NodeIdentity)` context this room is
     /// currently cached under (ADR-0017 Phase 3 Slice 7 FIX 1) — the exact
     /// same values [`Self::check_fenced_fanout`] resolves internally, handed
     /// out here so a caller needing its OWN fenced write (MAM's

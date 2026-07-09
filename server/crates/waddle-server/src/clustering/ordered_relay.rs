@@ -6,11 +6,10 @@
 //! ConnectionRegistry, pending delivery, or XEP-0198 state.
 
 use super::codec::RemoteStanza;
-use super::NodeId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 
 const RECENT_ACK_CACHE_PER_CHANNEL: usize = 64;
@@ -288,7 +287,7 @@ pub struct RemoteStanzaEnvelope {
     /// against the authenticated relay transport/registry origin before any
     /// delivery effect; this field is not proof by itself and is deliberately
     /// not part of the ordering key.
-    pub asserted_origin_node: NodeId,
+    pub asserted_origin_node: NodeIdentity,
     pub channel: OrderedRelayChannel,
     /// Per-channel sender sequence for the origin-stream/recipient pair.
     pub sequence: OrderedRelaySequence,
@@ -325,7 +324,7 @@ impl RemoteStanzaEnvelope {
 
 #[derive(Serialize)]
 struct RemoteStanzaEnvelopeSigningView<'a> {
-    asserted_origin_node: &'a NodeId,
+    asserted_origin_node: &'a NodeIdentity,
     channel: &'a OrderedRelayChannel,
     sequence: OrderedRelaySequence,
     origin_inbound_sequence: OriginInboundSequence,
@@ -512,7 +511,7 @@ pub struct OrderedRelaySenderState {
 impl OrderedRelaySenderState {
     pub fn next_envelope(
         &mut self,
-        asserted_origin_node: NodeId,
+        asserted_origin_node: NodeIdentity,
         channel: OrderedRelayChannel,
         origin_inbound_sequence: OriginInboundSequence,
         claims: OrderedRelayEnvelopeClaims,
@@ -1027,8 +1026,8 @@ mod invariant_tests {
         }
     }
 
-    fn origin_node() -> NodeId {
-        NodeId::new("origin-node".to_string())
+    fn origin_node() -> NodeIdentity {
+        NodeIdentity::new("origin-node", "origin-epoch")
     }
 
     fn inbound(sequence: u32) -> OriginInboundSequence {
@@ -1163,8 +1162,8 @@ mod tests {
         }
     }
 
-    fn origin_node() -> NodeId {
-        NodeId::new("origin-node".to_string())
+    fn origin_node() -> NodeIdentity {
+        NodeIdentity::new("origin-node", "origin-epoch")
     }
 
     fn room_jid() -> jid::BareJid {
@@ -1299,7 +1298,7 @@ mod tests {
 
         let first = state
             .next_envelope(
-                NodeId::new("old-node".to_string()),
+                NodeIdentity::new("old-node", "old-epoch"),
                 channel.clone(),
                 inbound(1),
                 claims(),
@@ -1308,7 +1307,7 @@ mod tests {
             .expect("first");
         let second = state
             .next_envelope(
-                NodeId::new("new-node".to_string()),
+                NodeIdentity::new("new-node", "new-epoch"),
                 channel,
                 inbound(2),
                 claims(),
@@ -1482,7 +1481,7 @@ mod tests {
     fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
         let mut receiver = OrderedRelayReceiverState::default();
         let envelope = RemoteStanzaEnvelope {
-            asserted_origin_node: NodeId::new("old-node".to_string()),
+            asserted_origin_node: NodeIdentity::new("old-node", "old-epoch"),
             channel: channel(),
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
@@ -1501,7 +1500,7 @@ mod tests {
         ));
 
         let retry_after_move = RemoteStanzaEnvelope {
-            asserted_origin_node: NodeId::new("new-node".to_string()),
+            asserted_origin_node: NodeIdentity::new("new-node", "new-epoch"),
             origin_claim: OrderedRelayClaim {
                 epoch: ClaimEpoch(99),
                 ..origin_claim()

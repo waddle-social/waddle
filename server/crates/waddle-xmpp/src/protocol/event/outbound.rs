@@ -211,6 +211,11 @@ pub enum OutboundEvent {
         /// emissions stay stable across nick changes and after the
         /// setter has left the room.
         setter_nick: String,
+        /// Exact sending session, retained so an interpreter-side ownership
+        /// failure can return a retryable message error to the requester.
+        sender_full: FullJid,
+        /// Canonicalized subject-change message used to correlate that error.
+        message: Box<Message>,
         /// Wall-clock time of the change (UTC). Becomes the XEP-0203
         /// `<delay/>` `stamp` attribute on the next join's emission.
         set_at: DateTime<Utc>,

@@ -7,14 +7,16 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Row, Sqlite};
 use tracing::{debug, warn};
 use uuid::Uuid;
-use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
+use waddle_xmpp_core::mam::{
+    ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+};
 use xmpp_parsers::message::MessageType;
 
 use crate::mam::storage::MamStorageError;
 use crate::muc::RoomClaimFenceContext;
 
-use super::decode::{encode_nickname_generation, encode_rich_payload};
-use super::MamDatabaseBackend;
+use super::decode::{decode_rich_payload, encode_nickname_generation, encode_rich_payload};
+use super::{begin_fenced, MamDatabaseBackend};
 
 pub(super) async fn store_message(
     backend: &MamDatabaseBackend,
@@ -164,23 +166,31 @@ pub(super) async fn store_message(
 /// standalone pre-fan-out check and this write can never land a phantom
 /// archived row under a claim this node no longer holds.
 ///
-/// The origin-id dedup pre-check (idempotency for retried sends) runs
-/// against the plain pool, exactly as [`store_message`] already does it —
-/// it only ever reads already-committed rows, so it needs no transactional
-/// isolation from this write; only the fencing-check-then-insert pair needs
-/// one-transaction atomicity, which this function provides. Postgres-only:
-/// fencing is never enabled for a SQLite backend (clustering is
-/// Postgres-only per ADR-0017 element 1 — see
-/// `SqlxMamStorage::with_cluster_fencing`), so the non-Postgres arm here is
-/// defensive only.
+/// Origin-id deduplication runs only after the fence is locked, inside that
+/// same transaction. A dedup hit is still a message effect: returning it
+/// before proving current ownership would let a stale room actor fan out a
+/// retry without ever touching the fenced insert. Postgres-only: fencing is
+/// never enabled for a SQLite backend (clustering is Postgres-only per
+/// ADR-0017 element 1 — see `SqlxMamStorage::with_cluster_fencing`).
 pub(super) async fn store_message_fenced(
     backend: &MamDatabaseBackend,
     archive_jid: &BareJid,
     message: &ArchivedMessage,
     fence: &RoomClaimFenceContext,
 ) -> Result<String, MamStorageError> {
+    let expected_entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::RoomActor,
+        archive_jid.to_string(),
+    );
+    if fence.entity != expected_entity {
+        return Err(MamStorageError::NotOwner {
+            entity: expected_entity,
+        });
+    }
     let MamDatabaseBackend::Postgres(pool) = backend else {
-        return store_message(backend, archive_jid, message).await;
+        return Err(MamStorageError::FencingUnavailable {
+            entity: fence.entity.clone(),
+        });
     };
 
     let rich_payload = encode_rich_payload(message)?;
@@ -188,18 +198,6 @@ pub(super) async fn store_message_fenced(
         .origin_id
         .as_ref()
         .map(|_| origin_dedup_fingerprint(message));
-
-    if let Some(existing_archive_id) = find_existing_origin_id_match(
-        backend,
-        archive_jid,
-        message,
-        rich_payload.as_deref(),
-        origin_dedup_fingerprint.as_deref(),
-    )
-    .await?
-    {
-        return Ok(existing_archive_id);
-    }
 
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
@@ -218,36 +216,23 @@ pub(super) async fn store_message_fenced(
         .and_then(|r| r.to.as_ref())
         .map(|jid| jid.to_string());
 
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_fenced(pool).await?;
 
-    // Fencing check: the exact `SELECT ... FOR SHARE` shape
-    // `muc_durable::PostgresMucRoomStore::assert_fenced`/
-    // `sm_persistence_fenced::assert_fenced`/`pending_delivery`'s
-    // `insert_fenced` already establish — the first statement inside this
-    // transaction, on the SAME connection as the write it guards. A failed
-    // check rolls back BEFORE any write.
-    let entity_key = format!(
-        "{}:{}",
-        fence.entity.entity_type.as_db_str(),
-        fence.entity.id
-    );
-    let held = sqlx::query(
-        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND claim_epoch = $3 FOR SHARE",
-    )
-    .bind(&entity_key)
-    .bind(&fence.node_id)
-    .bind(fence.epoch.0)
-    .fetch_optional(&mut *tx)
-    .await?
-    .is_some();
-    if !held {
-        // Roll back explicitly rather than relying on drop — the fencing
-        // failure is the expected, correctness-critical path here, not an
-        // error worth masking behind an implicit rollback-on-drop.
+    if let Err(error) = assert_room_fence(&mut tx, fence).await {
         let _ = tx.rollback().await;
-        return Err(MamStorageError::NotOwner {
-            entity: fence.entity.clone(),
-        });
+        return Err(error);
+    }
+    if let Some(existing_archive_id) = find_existing_origin_id_match_postgres_in_tx(
+        &mut tx,
+        archive_jid,
+        message,
+        rich_payload.as_deref(),
+        origin_dedup_fingerprint.as_deref(),
+    )
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(existing_archive_id);
     }
 
     let mut query = QueryBuilder::<Postgres>::new(
@@ -281,10 +266,12 @@ pub(super) async fn store_message_fenced(
     });
     if let Err(error) = query.build().execute(&mut *tx).await {
         let _ = tx.rollback().await;
-        if let Some(existing_archive_id) = find_existing_origin_id_match(
-            backend,
+        let insert_error = MamStorageError::from(error);
+        if let Some(existing_archive_id) = find_existing_origin_id_match_fenced(
+            pool,
             archive_jid,
             message,
+            fence,
             rich_payload.as_deref(),
             origin_dedup_fingerprint.as_deref(),
         )
@@ -292,12 +279,122 @@ pub(super) async fn store_message_fenced(
         {
             return Ok(existing_archive_id);
         }
-        return Err(error.into());
+        return Err(insert_error);
     }
     tx.commit().await?;
 
     debug!(archive_id = %archive_id, "Message stored in MAM archive (fenced)");
     Ok(archive_id)
+}
+
+/// Lock both halves of the ownership proof in the archive transaction.
+/// Locking only `clustering_claims` is insufficient: a self-fence can rotate
+/// or expire the matching `clustering_nodes` incarnation while leaving the
+/// old claim row intact. Existing owners remain allowed to finish work while
+/// draining only while their registered heartbeat deadline remains fresh;
+/// deadline lapse fails closed before the watchdog commits terminal expiry.
+async fn assert_room_fence(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    fence: &RoomClaimFenceContext,
+) -> Result<(), MamStorageError> {
+    let entity_key = format!(
+        "{}:{}",
+        fence.entity.entity_type.as_db_str(),
+        fence.entity.id
+    );
+    let held = sqlx::query(
+        r#"
+        WITH locked AS MATERIALIZED (
+            SELECT n.heartbeat, n.expired, n.lease_ttl_ms
+            FROM clustering_claims AS c
+            JOIN clustering_nodes AS n
+              ON n.node_id = c.node_id
+             AND n.node_epoch = c.node_epoch
+            WHERE c.entity = $1
+              AND c.node_id = $2
+              AND c.node_epoch = $3
+              AND c.claim_epoch = $4
+            FOR SHARE OF c, n
+        )
+        SELECT 1 FROM locked
+        WHERE NOT expired
+          AND heartbeat >= clock_timestamp()
+              - (lease_ttl_ms::text || ' milliseconds')::interval
+        "#,
+    )
+    .bind(&entity_key)
+    .bind(&fence.owner.node_id)
+    .bind(&fence.owner.node_epoch)
+    .bind(fence.epoch.0)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    if held {
+        Ok(())
+    } else {
+        Err(MamStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        })
+    }
+}
+
+async fn find_existing_origin_id_match_fenced(
+    pool: &sqlx::PgPool,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+    fence: &RoomClaimFenceContext,
+    incoming_rich_payload: Option<&str>,
+    origin_dedup_fingerprint: Option<&str>,
+) -> Result<Option<String>, MamStorageError> {
+    let mut tx = begin_fenced(pool).await?;
+    if let Err(error) = assert_room_fence(&mut tx, fence).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    let result = find_existing_origin_id_match_postgres_in_tx(
+        &mut tx,
+        archive_jid,
+        message,
+        incoming_rich_payload,
+        origin_dedup_fingerprint,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn find_existing_origin_id_match_postgres_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+    incoming_rich_payload: Option<&str>,
+    origin_dedup_fingerprint: Option<&str>,
+) -> Result<Option<String>, MamStorageError> {
+    let Some(origin_id) = message.origin_id.as_ref() else {
+        return Ok(None);
+    };
+    let archive_jid_str = archive_jid.to_string();
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT id, from_jid, to_jid, body, thread_id, parent_thread_id, \
+         reply_to_id, reply_to_jid, message_type, rich_payload, nickname_generation \
+         FROM mam_messages WHERE room_jid = ",
+    );
+    push_origin_dedup_filter(
+        &mut builder,
+        archive_jid_str.as_str(),
+        origin_id.as_str(),
+        origin_dedup_fingerprint,
+    );
+    let rows: Vec<PgRow> = builder.build().fetch_all(&mut **tx).await?;
+    for row in rows {
+        let Some(existing) = OriginDedupRow::from_postgres(&row) else {
+            continue;
+        };
+        if existing.matches(message, incoming_rich_payload) {
+            return Ok(Some(existing.id));
+        }
+    }
+    Ok(None)
 }
 
 async fn find_existing_origin_id_match(
@@ -672,19 +769,7 @@ pub(super) async fn replace_with_tombstone(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let payload = ArchivedRichMessage {
-        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
-        reply: None,
-        references: Vec::new(),
-        mentions: Vec::new(),
-        // XEP-0424 §Tombstones: the occupant-id and real-JID item
-        // identify the original sender and MUST NOT survive the
-        // tombstone replacement.
-        occupant_id: None,
-        muc_sender: None,
-    };
-    let encoded = serde_json::to_string(&payload)
-        .map_err(|error| MamStorageError::Serialization(error.to_string()))?;
+    let encoded = encode_tombstone(tombstone)?;
 
     // XEP-0424 §Tombstones / XEP-0425 §Tombstones: drop the body
     // entirely on tombstone. With wire-fidelity body semantics, SQL NULL
@@ -718,4 +803,279 @@ pub(super) async fn replace_with_tombstone(
         "Replaced archived message with tombstone"
     );
     Ok(rows > 0)
+}
+
+fn encode_tombstone(tombstone: ArchivedTombstone) -> Result<String, MamStorageError> {
+    let payload = ArchivedRichMessage {
+        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+        reply: None,
+        references: Vec::new(),
+        mentions: Vec::new(),
+        // XEP-0424 §Tombstones: the occupant-id and real-JID item
+        // identify the original sender and MUST NOT survive the
+        // tombstone replacement.
+        occupant_id: None,
+        muc_sender: None,
+    };
+    serde_json::to_string(&payload)
+        .map_err(|error| MamStorageError::Serialization(error.to_string()))
+}
+
+fn validate_room_fence(
+    archive_jid: &BareJid,
+    fence: &RoomClaimFenceContext,
+) -> Result<(), MamStorageError> {
+    let expected_entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::RoomActor,
+        archive_jid.to_string(),
+    );
+    if fence.entity == expected_entity {
+        Ok(())
+    } else {
+        Err(MamStorageError::NotOwner {
+            entity: expected_entity,
+        })
+    }
+}
+
+async fn insert_postgres_message(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+) -> Result<(), MamStorageError> {
+    let rich_payload = encode_rich_payload(message)?;
+    let origin_dedup_fingerprint = message
+        .origin_id
+        .as_ref()
+        .map(|_| origin_dedup_fingerprint(message));
+    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
+    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
+    let archive_jid_str = archive_jid.to_string();
+    let from_jid_str = message.from.to_string();
+    let to_jid_str = message.to.to_string();
+    let reply_to_jid = message
+        .reply
+        .as_ref()
+        .and_then(|reply| reply.to.as_ref())
+        .map(ToString::to_string);
+
+    let mut query = QueryBuilder::<Postgres>::new(
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_fingerprint) ",
+    );
+    query.push_values(std::iter::once(()), |mut builder, _| {
+        builder
+            .push_bind(&message.id)
+            .push_bind(archive_jid_str.as_str())
+            .push_bind(message.timestamp)
+            .push_bind(from_jid_str.as_str())
+            .push_bind(to_jid_str.as_str())
+            .push_bind(message.body.as_deref())
+            .push_bind(message.stanza_id.as_ref().map(|id| id.id.as_str()))
+            .push_bind(message.thread.as_ref().map(|thread| thread.id.as_str()))
+            .push_bind(message.reply.as_ref().map(|reply| reply.id.as_str()))
+            .push_bind(reply_to_jid.as_deref())
+            .push_bind(message.origin_id.as_ref().map(|id| id.id.as_str()))
+            .push_bind(message_type)
+            .push_bind(message.stanza_xml.as_deref())
+            .push_bind(rich_payload.as_deref())
+            .push_bind(nickname_generation)
+            .push_bind(
+                message
+                    .thread
+                    .as_ref()
+                    .and_then(|thread| thread.parent.as_ref())
+                    .map(|parent| parent.as_str()),
+            )
+            .push_bind(origin_dedup_fingerprint.as_deref());
+    });
+    query.build().execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// XEP-0425 moderation is one room effect: the canonical moderation event
+/// and target tombstone either both commit beneath the exact claim lock or
+/// neither exists.
+pub(super) async fn moderate_message_fenced(
+    backend: &MamDatabaseBackend,
+    archive_jid: &BareJid,
+    moderation: &ArchivedMessage,
+    target_archive_id: &str,
+    tombstone: ArchivedTombstone,
+    fence: &RoomClaimFenceContext,
+) -> Result<bool, MamStorageError> {
+    validate_room_fence(archive_jid, fence)?;
+    let MamDatabaseBackend::Postgres(pool) = backend else {
+        return Err(MamStorageError::FencingUnavailable {
+            entity: fence.entity.clone(),
+        });
+    };
+    let canonical_by = Jid::from(archive_jid.clone());
+    let moderation_payload = moderation
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.payload.as_ref())
+        .and_then(|payload| match payload {
+            ArchivedRichPayload::Moderation(moderation) => Some(moderation),
+            _ => None,
+        });
+    let moderation_wire_id = moderation.stanza_id.as_ref().and_then(|stanza_id| {
+        (stanza_id.by == canonical_by && !stanza_id.id.trim().is_empty())
+            .then_some(stanza_id.id.as_str())
+    });
+    let canonical = !moderation.id.trim().is_empty()
+        && moderation.id != target_archive_id
+        && moderation_wire_id.is_some()
+        && moderation.to == canonical_by
+        && moderation.from == canonical_by
+        && moderation.message_type == MessageType::Groupchat
+        && moderation_payload.is_some_and(|payload| {
+            payload.target_id.as_str() == target_archive_id
+                && payload.stamp == Some(moderation.timestamp)
+                && tombstone
+                    .retraction_id
+                    .as_ref()
+                    .is_some_and(|retraction_id| Some(retraction_id.as_str()) == moderation_wire_id)
+                && tombstone.moderation.as_ref() == Some(payload)
+                && tombstone.stamp == moderation.timestamp
+        });
+    if !canonical {
+        return Err(MamStorageError::Serialization(
+            "moderation archive row and tombstone are not canonically bound to the target"
+                .to_owned(),
+        ));
+    }
+    let encoded_tombstone = encode_tombstone(tombstone.clone())?;
+    let room = archive_jid.to_string();
+    let mut tx = begin_fenced(pool).await?;
+    if let Err(error) = assert_room_fence(&mut tx, fence).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    let target_exists = sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM mam_messages WHERE id = $1 AND room_jid = $2 AND to_jid = $2 AND message_type = 'groupchat' FOR UPDATE",
+    )
+    .bind(target_archive_id)
+    .bind(room.as_str())
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !target_exists {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    }
+    if let Err(error) = insert_postgres_message(&mut tx, archive_jid, moderation).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    let updated = sqlx::query(
+        "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_fingerprint = NULL, rich_payload = $1 WHERE id = $2 AND room_jid = $3",
+    )
+    .bind(encoded_tombstone)
+    .bind(target_archive_id)
+    .bind(room.as_str())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// XEP-0424 tombstoning is fenced and can only follow the exact retraction
+/// event archived by the authenticated room occupant in the same archive.
+pub(super) async fn replace_with_tombstone_fenced(
+    backend: &MamDatabaseBackend,
+    archive_jid: &BareJid,
+    target_archive_id: &str,
+    retraction_archive_id: &str,
+    retraction_from: &Jid,
+    tombstone: ArchivedTombstone,
+    fence: &RoomClaimFenceContext,
+) -> Result<bool, MamStorageError> {
+    validate_room_fence(archive_jid, fence)?;
+    let MamDatabaseBackend::Postgres(pool) = backend else {
+        return Err(MamStorageError::FencingUnavailable {
+            entity: fence.entity.clone(),
+        });
+    };
+    if target_archive_id == retraction_archive_id {
+        return Ok(false);
+    }
+    let encoded_tombstone = encode_tombstone(tombstone.clone())?;
+    let room = archive_jid.to_string();
+    let retraction_from = retraction_from.to_string();
+    let mut tx = begin_fenced(pool).await?;
+    if let Err(error) = assert_room_fence(&mut tx, fence).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    let target = sqlx::query(
+        "SELECT from_jid, nickname_generation FROM mam_messages WHERE id = $1 AND room_jid = $2 AND to_jid = $2 AND message_type = 'groupchat' FOR UPDATE",
+    )
+    .bind(target_archive_id)
+    .bind(room.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(target) = target else {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    };
+    let target_from: String = target.try_get("from_jid")?;
+    let target_generation: Option<i64> = target.try_get("nickname_generation")?;
+
+    let retraction = sqlx::query(
+        "SELECT from_jid, stanza_id, rich_payload, nickname_generation FROM mam_messages WHERE id = $1 AND room_jid = $2 AND to_jid = $2 AND from_jid = $3 AND message_type = 'groupchat' FOR SHARE",
+    )
+    .bind(retraction_archive_id)
+    .bind(room.as_str())
+    .bind(retraction_from.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(retraction) = retraction else {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    };
+    let retraction_row_from: String = retraction.try_get("from_jid")?;
+    let retraction_wire_id: Option<String> = retraction.try_get("stanza_id")?;
+    let retraction_rich: Option<String> = retraction.try_get("rich_payload")?;
+    let retraction_generation: Option<i64> = retraction.try_get("nickname_generation")?;
+    let typed_retraction = decode_rich_payload(retraction_rich.as_deref())?
+        .and_then(|rich| rich.payload)
+        .and_then(|payload| match payload {
+            ArchivedRichPayload::Retraction(retraction) => Some(retraction),
+            _ => None,
+        });
+    let proof_matches = target_from == retraction_from
+        && retraction_row_from == retraction_from
+        && target_generation.is_some()
+        && target_generation == retraction_generation
+        && tombstone.moderation.is_none()
+        && typed_retraction.is_some_and(|retraction| {
+            retraction.target_id.as_str() == target_archive_id
+                && retraction.retraction_id == tombstone.retraction_id
+                && retraction_wire_id.as_deref()
+                    == retraction.retraction_id.as_ref().map(|id| id.as_str())
+        });
+    if !proof_matches {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    }
+    let updated = sqlx::query(
+        "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_fingerprint = NULL, rich_payload = $1 WHERE id = $2 AND room_jid = $3",
+    )
+    .bind(encoded_tombstone)
+    .bind(target_archive_id)
+    .bind(room.as_str())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
 }

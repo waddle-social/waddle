@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use sqlx::postgres::PgRow;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
 use tracing::{debug, instrument};
-use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedTombstone, MamQuery, MamResult};
 
 use crate::mam::storage::query_semantics::{finalize_result, uses_backward_pagination};
 use crate::mam::storage::{MamStorage, MamStorageError};
@@ -38,7 +38,9 @@ impl MamStorage for SqlxMamStorage {
         fence: &RoomClaimFenceContext,
     ) -> Result<String, MamStorageError> {
         if !self.fencing_enabled {
-            return self.store_message(archive_jid, message).await;
+            return Err(MamStorageError::FencingUnavailable {
+                entity: fence.entity.clone(),
+            });
         }
         super::write::store_message_fenced(&self.backend, archive_jid, message, fence).await
     }
@@ -413,5 +415,57 @@ impl MamStorage for SqlxMamStorage {
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<bool, MamStorageError> {
         super::write::replace_with_tombstone(&self.backend, archive_id, tombstone).await
+    }
+
+    #[instrument(skip(self, moderation, tombstone, fence), fields(archive = %archive_jid))]
+    async fn moderate_message_fenced(
+        &self,
+        archive_jid: &BareJid,
+        moderation: &ArchivedMessage,
+        target_archive_id: &str,
+        tombstone: ArchivedTombstone,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<bool, MamStorageError> {
+        if !self.fencing_enabled {
+            return Err(MamStorageError::FencingUnavailable {
+                entity: fence.entity.clone(),
+            });
+        }
+        super::write::moderate_message_fenced(
+            &self.backend,
+            archive_jid,
+            moderation,
+            target_archive_id,
+            tombstone,
+            fence,
+        )
+        .await
+    }
+
+    #[instrument(skip(self, retraction_from, tombstone, fence), fields(archive = %archive_jid))]
+    async fn replace_with_tombstone_fenced(
+        &self,
+        archive_jid: &BareJid,
+        target_archive_id: &str,
+        retraction_archive_id: &str,
+        retraction_from: &Jid,
+        tombstone: ArchivedTombstone,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<bool, MamStorageError> {
+        if !self.fencing_enabled {
+            return Err(MamStorageError::FencingUnavailable {
+                entity: fence.entity.clone(),
+            });
+        }
+        super::write::replace_with_tombstone_fenced(
+            &self.backend,
+            archive_jid,
+            target_archive_id,
+            retraction_archive_id,
+            retraction_from,
+            tombstone,
+            fence,
+        )
+        .await
     }
 }

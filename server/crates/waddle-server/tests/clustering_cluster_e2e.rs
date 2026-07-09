@@ -70,11 +70,16 @@ use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, Cluster
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+use waddle_xmpp::protocol::CarbonKind;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::carbons::{CARBONS_NS, FORWARDED_NS};
 
 const POOL_SIZE: usize = 4;
 const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
 const CLUSTER_PEER_PASSWORD: &str = "cluster-peer-password";
+const NODE_LEASE_HEARTBEAT_INTERVAL_MS: u64 = 300;
+const REMOTE_RESOURCE_REQUIRED_HEARTBEAT_ADVANCES: usize = 3;
+const CARBON_DUPLICATE_QUIET_WINDOW: Duration = Duration::from_secs(1);
 
 struct EnrolledPool {
     /// base64-encoded 32-byte ed25519 seeds (the WADDLE_CLUSTERING_KEYPAIR_POOL value).
@@ -140,6 +145,21 @@ async fn open_control_db(url: &str) -> Database {
     )
     .await
     .expect("open harness postgres")
+}
+
+async fn node_heartbeat(db: &Database, node_id: &str) -> Option<String> {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT heartbeat::text FROM clustering_nodes WHERE node_id = ?",
+            waddle_server::db_params![node_id.to_string()],
+        )
+        .await
+        .expect("query node heartbeat");
+    rows.next()
+        .await
+        .expect("node heartbeat row")
+        .map(|row| row.get::<String>(0).expect("heartbeat column"))
 }
 
 /// Reset the clustering control-plane tables and enroll every pool PeerId.
@@ -268,6 +288,283 @@ fn frame_attr_starts_with(frame: &str, name: &str, prefix: &str) -> bool {
     frame.contains(&format!("{name}='{prefix}")) || frame.contains(&format!("{name}=\"{prefix}"))
 }
 
+async fn enable_carbons(client: &mut WsXmppClient, id: &str) {
+    let iq = xmpp_parsers::iq::Iq::Set {
+        from: None,
+        to: None,
+        id: id.to_string(),
+        payload: minidom::Element::builder("enable", CARBONS_NS).build(),
+    };
+    client
+        .send(&stanza_xml(Stanza::Iq(Box::new(iq))))
+        .await
+        .expect("send XEP-0280 enable IQ");
+    let response = client
+        .recv_matching(|frame| frame_has_attr(frame, "id", id))
+        .await
+        .expect("receive XEP-0280 enable result");
+    let response = response
+        .parse::<minidom::Element>()
+        .unwrap_or_else(|error| panic!("carbons enable result must be XML: {error}: {response}"));
+    assert_eq!(response.name(), "iq", "carbons enable response stanza");
+    assert_eq!(
+        response.ns(),
+        waddle_xmpp::ns::JABBER_CLIENT,
+        "carbons enable IQ namespace"
+    );
+    assert_eq!(
+        response.attr("type"),
+        Some("result"),
+        "carbons enable result"
+    );
+}
+
+struct CarbonWireExpectation<'a> {
+    kind: CarbonKind,
+    owner: &'a jid::BareJid,
+    target: &'a jid::FullJid,
+    original_id: &'a str,
+    original_from: &'a jid::FullJid,
+    original_to: &'a jid::FullJid,
+    original_body: &'a str,
+}
+
+fn carbon_element_name(kind: CarbonKind) -> &'static str {
+    match kind {
+        CarbonKind::Sent => "sent",
+        CarbonKind::Received => "received",
+    }
+}
+
+fn assert_carbon_wire_shape(frame: &str, expected: CarbonWireExpectation<'_>) {
+    let envelope = frame
+        .parse::<minidom::Element>()
+        .unwrap_or_else(|error| panic!("carbon envelope must be XML: {error}: {frame}"));
+    assert_eq!(envelope.name(), "message", "carbon envelope stanza");
+    assert_eq!(
+        envelope.ns(),
+        waddle_xmpp::ns::JABBER_CLIENT,
+        "carbon envelope namespace"
+    );
+    assert_eq!(
+        envelope.attr("type"),
+        Some("chat"),
+        "XEP-0280 carbon envelope must preserve the original message type"
+    );
+    assert_eq!(
+        envelope.attr("from"),
+        Some(expected.owner.as_str()),
+        "XEP-0280 carbon envelope must originate from the user's bare JID"
+    );
+    assert_eq!(
+        envelope.attr("to"),
+        Some(expected.target.as_str()),
+        "XEP-0280 carbon envelope must target the opted-in full JID"
+    );
+
+    let kind = carbon_element_name(expected.kind);
+    let carbon_elements = envelope
+        .children()
+        .filter(|child| child.ns() == CARBONS_NS && matches!(child.name(), "sent" | "received"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        carbon_elements.len(),
+        1,
+        "carbon envelope must contain exactly one <sent/> or <received/> child: {frame}"
+    );
+    let carbon = carbon_elements[0];
+    assert_eq!(
+        carbon.name(),
+        kind,
+        "carbon envelope contained the opposite carbon kind: {frame}"
+    );
+    let forwarded = carbon
+        .get_child("forwarded", FORWARDED_NS)
+        .unwrap_or_else(|| panic!("<{}> missing XEP-0297 <forwarded/> child: {frame}", kind));
+    let original = forwarded
+        .get_child("message", waddle_xmpp::ns::JABBER_CLIENT)
+        .unwrap_or_else(|| panic!("<forwarded/> missing original <message/>: {frame}"));
+    assert_eq!(
+        original.attr("id"),
+        Some(expected.original_id),
+        "forwarded message id"
+    );
+    assert_eq!(
+        original.attr("from"),
+        Some(expected.original_from.as_str()),
+        "forwarded original sender"
+    );
+    assert_eq!(
+        original.attr("to"),
+        Some(expected.original_to.as_str()),
+        "forwarded original recipient"
+    );
+    assert_eq!(
+        original.attr("type"),
+        Some("chat"),
+        "forwarded original message type"
+    );
+    assert_eq!(
+        original
+            .get_child("body", waddle_xmpp::ns::JABBER_CLIENT)
+            .map(minidom::Element::text)
+            .as_deref(),
+        Some(expected.original_body),
+        "forwarded original body"
+    );
+}
+
+fn assert_original_message_wire_shape(
+    frame: &str,
+    id: &str,
+    from: &jid::FullJid,
+    to: &jid::FullJid,
+    body: &str,
+) {
+    let message = frame
+        .parse::<minidom::Element>()
+        .unwrap_or_else(|error| panic!("original message must be XML: {error}: {frame}"));
+    assert_eq!(message.name(), "message", "original delivery stanza");
+    assert_eq!(
+        message.ns(),
+        waddle_xmpp::ns::JABBER_CLIENT,
+        "original delivery namespace"
+    );
+    assert_eq!(message.attr("id"), Some(id), "original delivery id");
+    assert_eq!(
+        message.attr("from"),
+        Some(from.as_str()),
+        "original delivery sender"
+    );
+    assert_eq!(
+        message.attr("to"),
+        Some(to.as_str()),
+        "original delivery recipient"
+    );
+    assert_eq!(message.attr("type"), Some("chat"), "original delivery type");
+    assert_eq!(
+        message
+            .get_child("body", waddle_xmpp::ns::JABBER_CLIENT)
+            .map(minidom::Element::text)
+            .as_deref(),
+        Some(body),
+        "original delivery body"
+    );
+    assert!(
+        message.children().all(|child| {
+            child.ns() != CARBONS_NS || !matches!(child.name(), "sent" | "received")
+        }),
+        "the original delivery must not be substituted with a carbon: {frame}"
+    );
+}
+
+fn assert_stream_error_wire_shape(frame: &str, expected_condition: &str, label: &str) {
+    let stream_error = frame
+        .parse::<minidom::Element>()
+        .unwrap_or_else(|error| panic!("{label}: stream error must be XML: {error}: {frame}"));
+    assert_eq!(
+        stream_error.name(),
+        "error",
+        "{label}: terminal frame must be <stream:error>: {frame}"
+    );
+    assert_eq!(
+        stream_error.ns(),
+        waddle_xmpp::ns::STREAM,
+        "{label}: <stream:error> must use the streams namespace: {frame}"
+    );
+
+    let conditions = stream_error
+        .children()
+        .filter(|child| child.ns() == waddle_xmpp::ns::STREAMS && child.name() != "text")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conditions.len(),
+        1,
+        "{label}: <stream:error> must contain exactly one streams-namespaced condition: {frame}"
+    );
+    assert_eq!(
+        conditions[0].name(),
+        expected_condition,
+        "{label}: unexpected stream-error condition: {frame}"
+    );
+}
+
+async fn assert_stream_error_then_framing_close(
+    client: &mut WsXmppClient,
+    expected_condition: &str,
+    label: &str,
+) {
+    let stream_error = client
+        .recv_matching(|frame| frame.contains("<stream:error"))
+        .await
+        .unwrap_or_else(|error| panic!("{label}: did not receive <stream:error>: {error}"));
+    assert_stream_error_wire_shape(&stream_error, expected_condition, label);
+
+    let close = client.recv().await.unwrap_or_else(|error| {
+        panic!("{label}: stream error was not followed by RFC 7395 <close/>: {error}")
+    });
+    let close = close
+        .parse::<minidom::Element>()
+        .unwrap_or_else(|error| panic!("{label}: framing close must be XML: {error}: {close}"));
+    assert_eq!(close.name(), "close", "{label}: framing close element");
+    assert_eq!(
+        close.ns(),
+        "urn:ietf:params:xml:ns:xmpp-framing",
+        "{label}: framing close namespace"
+    );
+}
+
+async fn drain_frames_with_id(
+    client: &mut WsXmppClient,
+    id: &str,
+    window: Duration,
+    label: &str,
+) -> Vec<String> {
+    let deadline = Instant::now() + window;
+    let mut matching = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) => {
+                if frame_has_attr(&frame, "id", id) {
+                    matching.push(frame);
+                }
+            }
+            Err(error) if error == "Timeout waiting for message" => break,
+            Err(error) => panic!("{label}: failed while draining frames for {id}: {error}"),
+        }
+    }
+    matching
+}
+
+async fn recv_exactly_one_frame_with_id(
+    client: &mut WsXmppClient,
+    id: &str,
+    label: &str,
+) -> String {
+    let first = client
+        .recv_matching(|frame| frame_has_attr(frame, "id", id))
+        .await
+        .unwrap_or_else(|error| panic!("{label}: did not receive {id}: {error}"));
+    let duplicates = drain_frames_with_id(client, id, CARBON_DUPLICATE_QUIET_WINDOW, label).await;
+    assert!(
+        duplicates.is_empty(),
+        "{label}: expected exactly one frame for {id}, received duplicates: {duplicates:?}"
+    );
+    first
+}
+
+async fn assert_no_frame_with_id(client: &mut WsXmppClient, id: &str, label: &str) {
+    let unexpected = drain_frames_with_id(client, id, CARBON_DUPLICATE_QUIET_WINDOW, label).await;
+    assert!(
+        unexpected.is_empty(),
+        "{label}: expected no frame for {id}, received: {unexpected:?}"
+    );
+}
+
 async fn send_roster_get(client: &mut WsXmppClient, id: &str) -> String {
     let iq = xmpp_parsers::iq::Iq::Get {
         from: None,
@@ -331,6 +628,7 @@ async fn spawn_cluster_server(
             .map(|port| format!("localhost:{port}"))
             .collect::<Vec<_>>()
             .join(",");
+        let node_lease_heartbeat_interval_ms = NODE_LEASE_HEARTBEAT_INTERVAL_MS.to_string();
 
         let mut envs: Vec<(&str, &str)> = vec![
             ("WADDLE_DB_DRIVER", "postgres"),
@@ -371,7 +669,10 @@ async fn spawn_cluster_server(
             // self-fence loop unconditionally, so these envs simply make that
             // already-running production loop observable on a modest wall
             // clock instead of introducing a second harness-only code path.
-            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "300"),
+            (
+                "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+                &node_lease_heartbeat_interval_ms,
+            ),
             ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "1200"),
             ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "2"),
             ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "200"),
@@ -856,6 +1157,53 @@ async fn cluster_exit_criteria_end_to_end() {
         "same-bare remote bind must not advance the UserActor claim epoch"
     );
 
+    // The node-lease loop renews the heartbeat, performs reconciliation, then
+    // starts the next tick. Observe three heartbeat advances after this bind:
+    // reaching the third proves at least the first two post-bind reconciliation
+    // passes completed. A wall-clock sleep alone would not prove that under a
+    // loaded CI scheduler. The old bug included this remote socket in node B's
+    // authoritative UserActor set and conflict-closed it on the first pass.
+    let initial_heartbeat = node_heartbeat(&db, &node_b)
+        .await
+        .expect("node B heartbeat row after remote bind");
+    let mut last_heartbeat = initial_heartbeat.clone();
+    let mut heartbeat_advances = 0usize;
+    let heartbeat_deadline = Instant::now() + Duration::from_secs(15);
+    while heartbeat_advances < REMOTE_RESOURCE_REQUIRED_HEARTBEAT_ADVANCES {
+        assert!(
+            Instant::now() < heartbeat_deadline,
+            "node B heartbeat did not advance {} times after remote bind; observed \
+             {heartbeat_advances} advances from {initial_heartbeat} to {last_heartbeat}",
+            REMOTE_RESOURCE_REQUIRED_HEARTBEAT_ADVANCES
+        );
+        tokio::time::sleep(Duration::from_millis(NODE_LEASE_HEARTBEAT_INTERVAL_MS / 4)).await;
+        let observed = node_heartbeat(&db, &node_b)
+            .await
+            .expect("node B heartbeat row remains present");
+        if observed != last_heartbeat {
+            heartbeat_advances += 1;
+            last_heartbeat = observed;
+        }
+    }
+
+    let after_reconciliation = claim_store
+        .current_claim(&target_entity)
+        .await
+        .expect("target claim lookup after node-B reconciliation")
+        .expect("target claim remains present after node-B reconciliation");
+    assert_eq!(
+        after_reconciliation.owner.node_id, node_a,
+        "node-B reconciliation must not steal the authoritative UserActor claim"
+    );
+    assert_eq!(
+        after_reconciliation.claim_epoch, target_snapshot.claim_epoch,
+        "node-B reconciliation must not advance the UserActor claim epoch"
+    );
+
+    // This IQ round-trip is the post-reconciliation socket usability proof and
+    // mirrors the remote resource's XEP-0280 state onto its node-A owner.
+    enable_carbons(&mut remote_target_client, "cluster-remote-carbons-enable").await;
+
     let mut same_bare_message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_target_full.clone())));
     same_bare_message.thread = Some(xmpp_parsers::message::Thread {
@@ -913,9 +1261,275 @@ async fn cluster_exit_criteria_end_to_end() {
         "remote-origin frame should remain addressed to the owner-node full JID: \
          {remote_origin_delivered}"
     );
-    let _ = remote_target_client.close().await;
 
-    let ordered_origin_node = NodeId::new(handle.node_id.as_str().to_string());
+    // XEP-0280 sent carbon: the node-A owner resource sends an eligible
+    // message. The carbons-enabled sibling is the remote resource whose
+    // socket lives on node B, so the owner must use the registered remote
+    // resource route for the conformant <sent><forwarded><message/> copy.
+    let ordered_origin_full: jid::FullJid = ordered_origin_client
+        .full_jid
+        .as_ref()
+        .expect("ordered origin bind full JID")
+        .parse()
+        .expect("ordered origin full JID");
+    let sent_carbon_id = "cluster-remote-carbon-sent";
+    let sent_carbon_body = "cross-node remote-resource sent carbon";
+    let mut sent_carbon_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(ordered_origin_full.clone())));
+    sent_carbon_message.id = Some(xmpp_parsers::message::Id(sent_carbon_id.to_string()));
+    sent_carbon_message.type_ = xmpp_parsers::message::MessageType::Chat;
+    sent_carbon_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        sent_carbon_body.to_string(),
+    );
+    let sent_carbon_xml = waddle_xmpp::parser::message_to_string(&sent_carbon_message)
+        .expect("serialize sent-carbon source message");
+    ordered_target_client
+        .send(&sent_carbon_xml)
+        .await
+        .expect("owner-node resource sends sent-carbon source message");
+    let (sent_original, sent_carbon) = tokio::join!(
+        recv_exactly_one_frame_with_id(
+            &mut ordered_origin_client,
+            sent_carbon_id,
+            "sent-carbon original recipient",
+        ),
+        recv_exactly_one_frame_with_id(
+            &mut remote_target_client,
+            sent_carbon_id,
+            "sent-carbon remote sibling",
+        ),
+    );
+    assert_original_message_wire_shape(
+        &sent_original,
+        sent_carbon_id,
+        &ordered_target_full,
+        &ordered_origin_full,
+        sent_carbon_body,
+    );
+    assert_carbon_wire_shape(
+        &sent_carbon,
+        CarbonWireExpectation {
+            kind: CarbonKind::Sent,
+            owner: &ordered_target_full.to_bare(),
+            target: &remote_target_full,
+            original_id: sent_carbon_id,
+            original_from: &ordered_target_full,
+            original_to: &ordered_origin_full,
+            original_body: sent_carbon_body,
+        },
+    );
+    assert_no_frame_with_id(
+        &mut ordered_target_client,
+        sent_carbon_id,
+        "sent-carbon originating resource",
+    )
+    .await;
+
+    // XEP-0280 received carbon: a node-B resource for another account sends
+    // to the node-A owner resource. That resource receives the original; its
+    // carbons-enabled remote sibling on node B receives only the conformant
+    // <received><forwarded><message/> copy.
+    let received_carbon_id = "cluster-remote-carbon-received";
+    let received_carbon_body = "cross-node remote-resource received carbon";
+    let mut received_carbon_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(ordered_target_full.clone())));
+    received_carbon_message.id = Some(xmpp_parsers::message::Id(received_carbon_id.to_string()));
+    received_carbon_message.type_ = xmpp_parsers::message::MessageType::Chat;
+    received_carbon_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        received_carbon_body.to_string(),
+    );
+    let received_carbon_xml = waddle_xmpp::parser::message_to_string(&received_carbon_message)
+        .expect("serialize received-carbon source message");
+    ordered_origin_client
+        .send(&received_carbon_xml)
+        .await
+        .expect("cross-node peer sends received-carbon source message");
+    let (received_original, received_carbon) = tokio::join!(
+        recv_exactly_one_frame_with_id(
+            &mut ordered_target_client,
+            received_carbon_id,
+            "received-carbon original recipient",
+        ),
+        recv_exactly_one_frame_with_id(
+            &mut remote_target_client,
+            received_carbon_id,
+            "received-carbon remote sibling",
+        ),
+    );
+    assert_original_message_wire_shape(
+        &received_original,
+        received_carbon_id,
+        &ordered_origin_full,
+        &ordered_target_full,
+        received_carbon_body,
+    );
+    assert_carbon_wire_shape(
+        &received_carbon,
+        CarbonWireExpectation {
+            kind: CarbonKind::Received,
+            owner: &ordered_target_full.to_bare(),
+            target: &remote_target_full,
+            original_id: received_carbon_id,
+            original_from: &ordered_origin_full,
+            original_to: &ordered_target_full,
+            original_body: received_carbon_body,
+        },
+    );
+    assert_no_frame_with_id(
+        &mut ordered_origin_client,
+        received_carbon_id,
+        "received-carbon originating resource",
+    )
+    .await;
+
+    // A single full JID has one physical-admission lineage across every
+    // cluster placement. Move the exact resource from its node-B socket to a
+    // node-A socket. The newcomer must conflict-close the former socket, and
+    // the owner-side registration must become a LocalSocket without taking a
+    // second UserActor claim.
+    let mut local_replacement = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &remote_resource,
+    )
+    .await
+    .expect("same full JID moves from its remote socket to the owner node");
+    assert_eq!(
+        local_replacement.full_jid.as_deref(),
+        Some(remote_target_full.as_str()),
+        "remote-to-local replacement must preserve the exact full JID"
+    );
+    assert_stream_error_then_framing_close(
+        &mut remote_target_client,
+        "conflict",
+        "remote socket displaced by exact local replacement",
+    )
+    .await;
+
+    let after_local_replacement = claim_store
+        .current_claim(&target_entity)
+        .await
+        .expect("target claim lookup after remote-to-local replacement")
+        .expect("target claim remains present after remote-to-local replacement");
+    assert_eq!(after_local_replacement.owner.node_id, node_a);
+    assert_eq!(
+        after_local_replacement.claim_epoch, target_snapshot.claim_epoch,
+        "physical replacement must not advance the UserActor claim epoch"
+    );
+
+    // The LocalSocket placement must still participate in the ordinary
+    // owner-local XEP-0280 path. This catches an accidental attempt to relay
+    // a local physical socket through the RemoteMirror transport.
+    enable_carbons(
+        &mut local_replacement,
+        "cluster-local-replacement-carbons-enable",
+    )
+    .await;
+    let local_carbon_id = "cluster-local-replacement-carbon-received";
+    let local_carbon_body = "local replacement received carbon";
+    let mut local_carbon_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(ordered_target_full.clone())));
+    local_carbon_message.id = Some(xmpp_parsers::message::Id(local_carbon_id.to_string()));
+    local_carbon_message.type_ = xmpp_parsers::message::MessageType::Chat;
+    local_carbon_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        local_carbon_body.to_string(),
+    );
+    ordered_origin_client
+        .send(
+            &waddle_xmpp::parser::message_to_string(&local_carbon_message)
+                .expect("serialize local-replacement carbon source message"),
+        )
+        .await
+        .expect("cross-node peer sends local-replacement carbon source message");
+    let (local_original, local_carbon) = tokio::join!(
+        recv_exactly_one_frame_with_id(
+            &mut ordered_target_client,
+            local_carbon_id,
+            "local-replacement carbon original recipient",
+        ),
+        recv_exactly_one_frame_with_id(
+            &mut local_replacement,
+            local_carbon_id,
+            "local-replacement carbon sibling",
+        ),
+    );
+    assert_original_message_wire_shape(
+        &local_original,
+        local_carbon_id,
+        &ordered_origin_full,
+        &ordered_target_full,
+        local_carbon_body,
+    );
+    assert_carbon_wire_shape(
+        &local_carbon,
+        CarbonWireExpectation {
+            kind: CarbonKind::Received,
+            owner: &ordered_target_full.to_bare(),
+            target: &remote_target_full,
+            original_id: local_carbon_id,
+            original_from: &ordered_origin_full,
+            original_to: &ordered_target_full,
+            original_body: local_carbon_body,
+        },
+    );
+
+    // Move the same full JID back to node B. The exact local socket must now
+    // be conflict-closed, and the new RemoteMirror must be the only route that
+    // accepts a full-JID delivery.
+    let mut remote_replacement = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &remote_resource,
+    )
+    .await
+    .expect("same full JID moves back from the owner node to a remote socket");
+    assert_eq!(
+        remote_replacement.full_jid.as_deref(),
+        Some(remote_target_full.as_str()),
+        "local-to-remote replacement must preserve the exact full JID"
+    );
+    assert_stream_error_then_framing_close(
+        &mut local_replacement,
+        "conflict",
+        "local socket displaced by exact remote replacement",
+    )
+    .await;
+
+    let replacement_delivery_id = "cluster-remote-replacement-delivery";
+    let replacement_delivery_body = "remote replacement owns the full JID";
+    let mut replacement_delivery =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_target_full.clone())));
+    replacement_delivery.id = Some(xmpp_parsers::message::Id(
+        replacement_delivery_id.to_string(),
+    ));
+    replacement_delivery.type_ = xmpp_parsers::message::MessageType::Chat;
+    replacement_delivery.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        replacement_delivery_body.to_string(),
+    );
+    ordered_origin_client
+        .send(
+            &waddle_xmpp::parser::message_to_string(&replacement_delivery)
+                .expect("serialize remote-replacement delivery"),
+        )
+        .await
+        .expect("origin sends to the remote replacement");
+    remote_replacement
+        .recv_matching(|frame| {
+            frame.contains(replacement_delivery_id) && frame.contains(replacement_delivery_body)
+        })
+        .await
+        .expect("remote replacement receives the exact full-JID delivery");
+    let _ = remote_replacement.close().await;
+
+    let ordered_origin_node = origin_identity.clone();
     let ordered_channel = ordered_channel(
         ordered_stream_id,
         &ordered_target_full,
@@ -1272,6 +1886,24 @@ async fn node_expired_flag(db: &Database, node_id: &str) -> Option<bool> {
         .map(|row| row.get::<bool>(0).expect("expired column"))
 }
 
+async fn node_lease_state(db: &Database, node_id: &str) -> Option<(String, bool, bool)> {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT node_epoch, expired, draining FROM clustering_nodes WHERE node_id = ?",
+            waddle_server::db_params![node_id.to_string()],
+        )
+        .await
+        .expect("query node lease state");
+    rows.next().await.expect("row").map(|row| {
+        (
+            row.get::<String>(0).expect("node_epoch column"),
+            row.get::<bool>(1).expect("expired column"),
+            row.get::<bool>(2).expect("draining column"),
+        )
+    })
+}
+
 async fn seed_detached_sm_session_row(
     db: &Database,
     stream_id: &str,
@@ -1356,6 +1988,8 @@ async fn sm_session_claim_owner(db: &Database, stream_id: &str) -> Option<(Strin
 /// below complete in single-digit seconds of real time.
 #[tokio::test(flavor = "multi_thread")]
 async fn lone_survivor_and_isolation_fencing() {
+    use waddle_xmpp::ownership::ClaimStore as _;
+
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
@@ -1427,16 +2061,103 @@ async fn lone_survivor_and_isolation_fencing() {
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
         let port_d = free_tcp_port();
-        let (server_a, _node_a, _peer_a) =
+        let (server_a, node_a, _peer_a) =
             spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b, port_d]).await;
         let (server_b, _node_b, _peer_b) =
             spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a, port_d]).await;
-        let (server_d, _node_d, peer_d) =
+        let (server_d, node_d, peer_d) =
             spawn_cluster_server(&postgres_url, &pool.pool_env, port_d, &[port_a, port_b]).await;
 
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_d, true, Duration::from_secs(15)).await;
+        let (node_d_epoch_before, node_d_expired_before, node_d_draining_before) =
+            node_lease_state(&db, &node_d)
+                .await
+                .expect("D node lease exists before isolation");
+        assert!(
+            !node_d_expired_before && !node_d_draining_before,
+            "D must begin the remote-resource scenario as an active node"
+        );
+
+        // Give isolated node D a real remote resource to tear down. Node A
+        // owns the authoritative UserActor; the same account's second socket
+        // is physically hosted by D and mirrored back to A.
+        let password = server_d.fixed_account_password().to_string();
+        let owner_resource = format!("isolation-owner-{}", uuid::Uuid::new_v4());
+        let remote_resource = format!("isolation-remote-{}", uuid::Uuid::new_v4());
+        let mut owner_client = WsXmppClient::connect_and_auth(
+            &server_a.ws_url(),
+            "localhost",
+            "admin",
+            &password,
+            &owner_resource,
+        )
+        .await
+        .expect("authoritative owner resource connects to node A");
+        let owner_full: jid::FullJid = owner_client
+            .full_jid
+            .as_ref()
+            .expect("owner full JID")
+            .parse()
+            .expect("valid owner full JID");
+        let mut remote_client = WsXmppClient::connect_and_auth(
+            &server_d.ws_url(),
+            "localhost",
+            "admin",
+            &password,
+            &remote_resource,
+        )
+        .await
+        .expect("same-account remote resource connects to node D");
+        let remote_full: jid::FullJid = remote_client
+            .full_jid
+            .as_ref()
+            .expect("remote full JID")
+            .parse()
+            .expect("valid remote full JID");
+        let claim_store = PostgresClaimStore::new(db.clone());
+        let user_entity = Entity::new(EntityType::UserActor, owner_full.to_bare().to_string());
+        let user_claim = {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(snapshot) = claim_store
+                    .current_claim(&user_entity)
+                    .await
+                    .expect("isolation user claim lookup")
+                {
+                    if snapshot.owner.node_id == node_a {
+                        break snapshot;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "node A did not retain the authoritative UserActor claim"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+
+        let before_id = "isolation-remote-before-fence";
+        let before_body = "remote socket works before isolation";
+        let mut before =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_full.clone())));
+        before.id = Some(xmpp_parsers::message::Id(before_id.to_string()));
+        before.type_ = xmpp_parsers::message::MessageType::Chat;
+        before
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), before_body.to_string());
+        owner_client
+            .send(
+                &waddle_xmpp::parser::message_to_string(&before)
+                    .expect("serialize pre-fence message"),
+            )
+            .await
+            .expect("send pre-fence remote message");
+        remote_client
+            .recv_matching(|frame| frame.contains(before_id) && frame.contains(before_body))
+            .await
+            .expect("remote resource receives pre-fence message through owner mirror");
 
         let conn = db.guard().await.expect("guard");
         conn.execute(
@@ -1448,7 +2169,25 @@ async fn lone_survivor_and_isolation_fencing() {
 
         // D must self-fence: readiness flips not-ready within a modest
         // deadline (a few allowlist-refresh + isolation-interval windows).
+        // This is infrastructure teardown, not XEP-0198 replacement of an
+        // open former stream: it must therefore be recoverable
+        // <system-shutdown/>, never the resumption-only <conflict/> condition,
+        // followed immediately by RFC 7395 framing <close/>.
         wait_for_readiness(&server_d, false, Duration::from_secs(15)).await;
+        assert_stream_error_then_framing_close(
+            &mut remote_client,
+            "system-shutdown",
+            "isolated node remote socket",
+        )
+        .await;
+
+        let claim_after_fence = claim_store
+            .current_claim(&user_entity)
+            .await
+            .expect("claim lookup after D fence")
+            .expect("authoritative claim remains present");
+        assert_eq!(claim_after_fence.owner.node_id, node_a);
+        assert_eq!(claim_after_fence.claim_epoch, user_claim.claim_epoch);
 
         // A and B were never isolated from each other — they must stay
         // ready throughout, proving this is a targeted fence of the
@@ -1463,6 +2202,100 @@ async fn lone_survivor_and_isolation_fencing() {
             Some(true),
             "uninvolved peer B must stay ready"
         );
+
+        // Re-enroll D and reuse the exact resource. Recovery must clear both
+        // D's physical registration and A's old owner-side mirror; otherwise
+        // this same-JID registration or the post-recovery delivery fails.
+        conn.execute(
+            "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?) ON CONFLICT DO NOTHING",
+            waddle_server::db_params![peer_d.clone()],
+        )
+        .await
+        .expect("re-enroll D after isolation fence");
+        wait_for_readiness(&server_d, true, Duration::from_secs(30)).await;
+        let mut recovered_remote = WsXmppClient::connect_and_auth(
+            &server_d.ws_url(),
+            "localhost",
+            "admin",
+            &password,
+            &remote_resource,
+        )
+        .await
+        .expect("same remote resource reconnects after D recovers");
+        assert_eq!(
+            recovered_remote.full_jid.as_deref(),
+            Some(remote_full.as_str()),
+            "recovery must bind the exact same full JID on the re-enrolled node"
+        );
+
+        // Recovery must be a fresh fencing incarnation on the same stable
+        // node_id. Repeated isolation/re-registration must update that row in
+        // place instead of leaking one clustering_nodes row per epoch.
+        let (node_d_epoch_after, node_d_expired_after, node_d_draining_after) =
+            node_lease_state(&db, &node_d)
+                .await
+                .expect("D node lease exists after recovery");
+        assert_ne!(
+            node_d_epoch_after, node_d_epoch_before,
+            "D must rotate its fencing epoch before accepting the recovered resource"
+        );
+        assert!(
+            !node_d_expired_after && !node_d_draining_after,
+            "D's recovered stable node row must be active"
+        );
+        let mut node_rows = conn
+            .query(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT expired AND NOT draining) \
+                 FROM clustering_nodes",
+                (),
+            )
+            .await
+            .expect("count clustering node rows after D recovery");
+        let node_counts = node_rows
+            .next()
+            .await
+            .expect("node count row")
+            .expect("node count row present");
+        let total_node_count: i64 = node_counts.get(0).expect("total node count");
+        let active_node_count: i64 = node_counts.get(1).expect("active node count");
+        assert_eq!(
+            total_node_count, 3,
+            "D recovery must keep clustering_nodes bounded to stable A, B, and D rows"
+        );
+        assert_eq!(
+            active_node_count, 3,
+            "A, B, and recovered D must be the only active node rows"
+        );
+
+        let claim_after_reconnect = claim_store
+            .current_claim(&user_entity)
+            .await
+            .expect("claim lookup after D reconnect")
+            .expect("authoritative claim remains present after D reconnect");
+        assert_eq!(claim_after_reconnect.owner.node_id, node_a);
+        assert_eq!(claim_after_reconnect.claim_epoch, user_claim.claim_epoch);
+
+        let after_id = "isolation-remote-after-recovery";
+        let after_body = "remote socket works after isolation recovery";
+        let mut after = xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_full)));
+        after.id = Some(xmpp_parsers::message::Id(after_id.to_string()));
+        after.type_ = xmpp_parsers::message::MessageType::Chat;
+        after
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), after_body.to_string());
+        owner_client
+            .send(
+                &waddle_xmpp::parser::message_to_string(&after)
+                    .expect("serialize post-recovery message"),
+            )
+            .await
+            .expect("send post-recovery remote message");
+        recovered_remote
+            .recv_matching(|frame| frame.contains(after_id) && frame.contains(after_body))
+            .await
+            .expect("recovered remote resource receives through fresh owner mirror");
+        let _ = owner_client.close().await;
+        let _ = recovered_remote.close().await;
 
         drop(server_a);
         drop(server_b);
@@ -1575,14 +2408,12 @@ async fn cross_node_resume_live_steal_handshake() {
 
     // Client A's live socket must have been force-detached: XEP-0198
     // "Resumption"'s `<conflict/>` stream error, then the transport close.
-    let conflict_or_close = client_a
-        .recv_matching(|frame| frame.contains("conflict") || frame.contains("<close"))
-        .await
-        .expect("client A observes the force-detach close");
-    assert!(
-        conflict_or_close.contains("conflict") || conflict_or_close.contains("<close"),
-        "client A must see the <conflict/> stream error (or the framing close that follows): {conflict_or_close}"
-    );
+    assert_stream_error_then_framing_close(
+        &mut client_a,
+        "conflict",
+        "cross-node resumed former stream",
+    )
+    .await;
 
     drop(server_a);
     drop(server_b);
@@ -1986,7 +2817,16 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         uuid::Uuid::new_v4().to_string(),
     );
     node_lease_store
-        .report_steal_intent(&entity, &reporter)
+        .register(&reporter, None)
+        .await
+        .expect("register reporter lease");
+    let snapshot = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("read room claim")
+        .expect("room claim exists");
+    node_lease_store
+        .report_steal_intent(&entity, &snapshot.owner, snapshot.claim_epoch, &reporter)
         .await
         .expect("report steal intent");
 
@@ -2015,6 +2855,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             peer_id: None,
             claim_store,
             claim_release_budget: Duration::from_secs(5),
+            startup_recovery_source: None,
         },
     ));
 
@@ -2456,7 +3297,7 @@ async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
 /// symmetric isolation of ONE of three nodes (the same primitive
 /// `lone_survivor_and_isolation_fencing`'s Part 2 uses), extended with an
 /// assertion Part 2 does NOT make — genuine, unattended SELF-RECOVERY
-/// (re-registration under a fresh identity, `self_fence.rs`'s
+/// (re-registration under a fresh fencing epoch, `self_fence.rs`'s
 /// `readiness.set_ready(true)` re-arm path) once connectivity returns, with
 /// no process restart. This is the most faithful available proof that a
 /// connectivity degradation "degrades... without [permanently] fencing"
@@ -2521,6 +3362,11 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_c, true, Duration::from_secs(15)).await;
+    let (node_c_epoch_before, node_c_expired_before, node_c_draining_before) =
+        node_lease_state(&db, &node_c)
+            .await
+            .expect("C node lease exists before isolation");
+    assert!(!node_c_expired_before && !node_c_draining_before);
 
     // --- Induce (closest available primitive, see deviation 107): revoke
     // C's peer_id cluster-wide.
@@ -2559,7 +3405,7 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
 
     // --- Degrades WITHOUT [permanently] fencing: re-enroll C and assert
     // genuine, unattended SELF-RECOVERY — no process restart, a fresh
-    // internal identity re-registers and readiness re-arms once swarm
+    // fencing epoch re-registers and readiness re-arms once swarm
     // connectivity actually returns (`self_fence.rs`'s
     // `can_reacquire_claims`/`readiness.set_ready(true)` path).
     conn.execute(
@@ -2571,36 +3417,39 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
 
     wait_for_readiness(&server_c, true, Duration::from_secs(30)).await;
 
-    // Prove the recovery is REAL re-registration (a fresh `NodeIdentity`),
-    // not a stale readiness flag: C's ORIGINAL `clustering_nodes` row must
-    // now be committed-expired (`self_fence.rs`'s successful-recovery path
-    // explicitly calls `expire_bounded` on the just-superseded identity),
-    // and exactly three live (not expired, not draining) rows must exist
-    // cluster-wide — A, B, and C's fresh post-recovery identity.
-    assert_eq!(
-        node_expired_flag(&db, &node_c).await,
-        Some(true),
-        "C's ORIGINAL clustering_nodes row must be committed-expired after self-healing \
-         re-registration under a fresh identity"
+    // Prove recovery is a real fencing-incarnation change, not a stale
+    // readiness flag. The process-stable node_id is also C's relay address,
+    // so recovery updates that one row in place with a fresh node_epoch.
+    let (node_c_epoch_after, node_c_expired_after, node_c_draining_after) =
+        node_lease_state(&db, &node_c)
+            .await
+            .expect("C node lease exists after recovery");
+    assert_ne!(
+        node_c_epoch_after, node_c_epoch_before,
+        "C must rotate its fencing epoch during unattended recovery"
+    );
+    assert!(
+        !node_c_expired_after && !node_c_draining_after,
+        "C's recovered stable node row must be active"
     );
     let mut rows = conn
         .query(
-            "SELECT COUNT(*) FROM clustering_nodes WHERE NOT expired AND NOT draining",
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT expired AND NOT draining) \
+             FROM clustering_nodes",
             (),
         )
         .await
         .expect("count live nodes");
-    let live_count: i64 = rows
-        .next()
-        .await
-        .expect("row")
-        .expect("row present")
-        .get(0)
-        .expect("count column");
+    let row = rows.next().await.expect("row").expect("row present");
+    let total_count: i64 = row.get(0).expect("total count column");
+    let live_count: i64 = row.get(1).expect("live count column");
+    assert_eq!(
+        total_count, 3,
+        "stable node ids must keep clustering_nodes bounded to A, B, and C"
+    );
     assert_eq!(
         live_count, 3,
-        "exactly three live node rows must exist post-recovery: A, B, and C's fresh \
-         re-registered identity (C's original row is expired, not deleted)"
+        "exactly three active node rows must exist post-recovery: A, B, and C"
     );
 
     // A and B must still be ready too — full-mesh recovery, not just C's

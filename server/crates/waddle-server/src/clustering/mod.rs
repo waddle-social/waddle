@@ -77,6 +77,8 @@ pub mod ordered_relay;
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+#[cfg(feature = "clustering")]
+pub mod remote_resource_admission;
 /// The `RemoteResumeAsker` implementation over `RelayHandle` (ADR-0017
 /// Phase 3 Slice 6) — the resuming node's side of the cross-node XEP-0198
 /// resume live-steal handshake. Public so `server/http.rs` can construct it.
@@ -158,31 +160,99 @@ pub(crate) fn keypair_slot_table_lock() -> &'static tokio::sync::Mutex<()> {
 /// plane (ADR-0017 element 4, Phase 3 Slice 2): flipped to not-ready the
 /// instant a node self-fences (node-lease heartbeat CAS returns zero rows,
 /// or Postgres is unreachable past the lease deadline) and back to ready
-/// only once the node has re-registered under a fresh `node_id`/
-/// `node_epoch` and satisfied the re-acquisition hysteresis gate. Cloning
-/// shares the same underlying flag (cheap `Arc` clone).
+/// only once the node has re-registered under a fresh `node_epoch` and
+/// satisfied the re-acquisition hysteresis gate. Cloning shares the same
+/// underlying state (cheap `Arc` clone).
 ///
 /// Unconditionally compiled (no `clustering` feature gate) so `AppState`
 /// and the `/ready`/`/readyz` handlers can hold one field regardless of
 /// build: a non-clustering deployment (or a `clustering`-feature build with
 /// `clustering.enabled = false`) never flips it, so it stays ready forever
 /// — today's behavior, unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClusteringAdmissionToken(u64);
+
+/// Readiness and its admission generation are packed into one atomic word:
+/// bit 0 is the ready flag and the remaining bits are the generation. This
+/// makes a ready -> fenced -> ready transition observably different from the
+/// original ready state, even when a connection is suspended across the
+/// complete transition.
 #[derive(Clone)]
-pub struct ClusteringReadiness(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub struct ClusteringReadiness(std::sync::Arc<std::sync::atomic::AtomicU64>);
 
 impl ClusteringReadiness {
+    const TERMINAL_FENCED_STATE: u64 = u64::MAX - 1;
+
     pub fn new() -> Self {
-        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            true,
-        )))
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)))
     }
 
     pub fn is_ready(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Acquire)
+        self.0.load(std::sync::atomic::Ordering::Acquire) & 1 == 1
     }
 
     pub fn set_ready(&self, ready: bool) {
-        self.0.store(ready, std::sync::atomic::Ordering::Release);
+        if ready {
+            let _ = self.0.fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |state| {
+                    (state != Self::TERMINAL_FENCED_STATE && state & 1 == 0).then_some(state | 1)
+                },
+            );
+            return;
+        }
+
+        let _ = self.0.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |state| {
+                if state & 1 == 0 {
+                    return None;
+                }
+                Some(state.checked_add(1).unwrap_or(Self::TERMINAL_FENCED_STATE))
+            },
+        );
+    }
+
+    /// Capture the exact ready generation a physical connection started in.
+    /// `None` fails closed when the node is already fenced.
+    pub fn capture_admission(&self) -> Option<ClusteringAdmissionToken> {
+        let state = self.0.load(std::sync::atomic::Ordering::Acquire);
+        (state & 1 == 1).then_some(ClusteringAdmissionToken(state >> 1))
+    }
+
+    /// True only while `token` still names the currently-ready generation.
+    /// A complete false -> true ABA transition increments the generation and
+    /// therefore cannot re-admit a pre-fence connection.
+    pub fn admits(&self, token: ClusteringAdmissionToken) -> bool {
+        let state = self.0.load(std::sync::atomic::Ordering::Acquire);
+        state & 1 == 1 && state >> 1 == token.0
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn admission_generation_exhaustion_is_terminally_fail_closed() {
+        let readiness = ClusteringReadiness(std::sync::Arc::new(
+            std::sync::atomic::AtomicU64::new(u64::MAX),
+        ));
+        let token = readiness
+            .capture_admission()
+            .expect("the boundary state starts ready");
+
+        readiness.set_ready(false);
+        assert!(!readiness.is_ready());
+        assert!(!readiness.admits(token));
+
+        readiness.set_ready(true);
+        assert!(
+            !readiness.is_ready(),
+            "the terminal exhausted state must never be re-opened"
+        );
     }
 }
 
@@ -256,6 +326,10 @@ pub enum ClusteringError {
     #[cfg(feature = "clustering")]
     #[error("clustering ISR token store initialization failed: {0}")]
     IsrTokenStoreInit(waddle_xmpp::isr::IsrTokenStoreError),
+
+    #[cfg(feature = "clustering")]
+    #[error("clustered remote-resource admission store initialization failed: {0}")]
+    RemoteResourceAdmissionStoreInit(remote_resource_admission::RemoteResourceAdmissionError),
 }
 
 /// Derive the clustering subsystem's own cancellation scope from the
@@ -372,6 +446,9 @@ pub struct ClusteringHandles {
     /// as `local_claims`: `NodeLeaseStore` only exists behind `clustering`.
     #[cfg(feature = "clustering")]
     pub node_lease: Option<Arc<dyn claims::NodeLeaseStore>>,
+    #[cfg(feature = "clustering")]
+    pub remote_resource_admission_store:
+        Option<Arc<dyn remote_resource_admission::RemoteResourceAdmissionStore>>,
     /// The configured node-lease TTL (ADR-0017 element 4/Q6) — the orphan
     /// reaper janitor needs this same value to bind into its `expire` calls
     /// and has no other route to `ClusteringNodeLeaseConfig` (it runs off
@@ -473,41 +550,6 @@ impl ClusteringHandles {
         #[cfg(not(feature = "clustering"))]
         {
             None
-        }
-    }
-
-    /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): hard-kill the
-    /// locally-claimed `RoomActor` for `room_jid`, mirroring the Demote
-    /// relay ask's exact receiving-side call
-    /// (`RelayActor`'s `Demote` handler calling
-    /// `room_local_claims.demote(&entity)`). Every mutation-handler call
-    /// site that observes `RoomMutationError::NotOwner`/an equivalent
-    /// per-message `NotOwner` variant calls this so the deposed actor
-    /// genuinely stops serving (hard `ActorRef::kill()`), instead of only
-    /// bouncing the one request that discovered the ownership loss and
-    /// leaving the actor to keep answering (and re-discovering the same
-    /// staleness) for every subsequent ask.
-    ///
-    /// A no-op when clustering is disabled, this binary lacks the
-    /// `clustering` Cargo feature, or `room_local_claims` was never wired
-    /// (defensive — `NotOwner` can only ever be produced when a durable
-    /// store, and therefore `room_local_claims`, is configured).
-    pub async fn demote_room_actor(&self, room_jid: &jid::BareJid) {
-        #[cfg(feature = "clustering")]
-        {
-            use self_fence::LocallyClaimedEntities as _;
-            let Some(room_local_claims) = &self.room_local_claims else {
-                return;
-            };
-            let entity = waddle_xmpp::ownership::Entity::new(
-                waddle_xmpp::ownership::EntityType::RoomActor,
-                room_jid.to_string(),
-            );
-            room_local_claims.demote(&entity).await;
-        }
-        #[cfg(not(feature = "clustering"))]
-        {
-            let _ = room_jid;
         }
     }
 }
@@ -638,7 +680,8 @@ pub async fn start_if_enabled(
         // coupling" precedent). Register once, up front (fail startup on a
         // genuine registration failure, exactly like the keypair-slot
         // acquire above), then hand the loop off to the background task.
-        let node_lease = claims::PostgresClaimStore::new(db.clone());
+        let node_lease =
+            claims::PostgresClaimStore::with_lease_ttl(db.clone(), config.node_lease.lease_ttl);
         let node_identity = waddle_xmpp::ownership::NodeIdentity::new(
             handle.node_id.as_str().to_string(),
             uuid::Uuid::new_v4().to_string(),
@@ -648,13 +691,17 @@ pub async fn start_if_enabled(
         // sibling var) rather than a raw `std::env::var` at this call site.
         let pod_template_hash = config.pod_template_hash.clone();
         let local_peer_id = handle.local_peer_id.to_string();
-        prepare_node_lease(
+        let startup_recovery_source = prepare_node_lease(
             &node_lease,
             &node_identity,
             pod_template_hash.clone(),
             Some(local_peer_id.clone()),
+            config.node_lease.lease_ttl,
         )
         .await?;
+        if startup_recovery_source.is_some() {
+            readiness.set_ready(false);
+        }
 
         // ADR-0017 Phase 3 Slice 4 follow-up plumbing: hand back a
         // `ClaimStore` view onto the same `clustering_claims` rows the
@@ -665,9 +712,27 @@ pub async fn start_if_enabled(
         // acquire/fence calls instead of capturing a stale one at
         // construction time. `claim_store_handle` wraps the same `db`
         // clone as `node_lease` — not a second, independent store.
-        let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
-            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> = Arc::new(
+            claims::PostgresClaimStore::with_lease_ttl(db.clone(), config.node_lease.lease_ttl),
+        );
         let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(node_identity.clone());
+        let remote_resource_admission_store: Arc<
+            dyn remote_resource_admission::RemoteResourceAdmissionStore,
+        > = {
+            use remote_resource_admission::RemoteResourceAdmissionStore as _;
+            let store =
+                remote_resource_admission::PostgresRemoteResourceAdmissionStore::new(db.clone());
+            store
+                .ensure_schema()
+                .await
+                .map_err(ClusteringError::RemoteResourceAdmissionStoreInit)?;
+            Arc::new(store)
+        };
+        // The relay actor was spawned before the claims layer existed, so
+        // complete its destructive resume-steal gate now. A delayed ask is
+        // authorized only when both this exact live incarnation and the
+        // request's observed claim generation still match Postgres.
+        resume_bridge.wire_claim_fence(Arc::clone(&claim_store_handle), live_identity.clone());
         // ADR-0017 Phase 3 Slice 5 (carried debt (b)): construct the real
         // `LocallyClaimedEntities` empty now, hand the same `Arc` to both
         // `run_node_lease` (below) and the returned handles — the SM
@@ -686,8 +751,9 @@ pub async fn start_if_enabled(
             Arc::clone(&room_local_claims),
             Arc::clone(&user_local_claims),
         );
-        let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
-            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        let node_lease_handle: Arc<dyn claims::NodeLeaseStore> = Arc::new(
+            claims::PostgresClaimStore::with_lease_ttl(db.clone(), config.node_lease.lease_ttl),
+        );
         // ADR-0017 Phase 3 Slice 7: the durable MUC room store. Built here
         // (not deferred to `server/mod.rs`) because it only needs `db`/
         // `live_identity`/`clustering_stop` — all already in scope — unlike
@@ -734,6 +800,7 @@ pub async fn start_if_enabled(
             muc_durable_store: Some(muc_durable_store),
             isr_token_store: Some(isr_token_store),
             node_lease: Some(node_lease_handle),
+            remote_resource_admission_store: Some(remote_resource_admission_store),
             lease_ttl: Some(config.node_lease.lease_ttl),
             pod_template_hash: pod_template_hash.clone(),
             resume_bridge: Some(resume_bridge),
@@ -763,8 +830,12 @@ pub async fn start_if_enabled(
                 // `clustering_claims` as `claim_store_handle` above —
                 // wraps the same `db` clone, never a second, independent
                 // store.
-                claim_store: Arc::new(claims::PostgresClaimStore::new(db.clone())),
+                claim_store: Arc::new(claims::PostgresClaimStore::with_lease_ttl(
+                    db.clone(),
+                    config.node_lease.lease_ttl,
+                )),
                 claim_release_budget: config.node_lease.claim_release_budget,
+                startup_recovery_source,
             },
         ));
         Ok((handles, ClusteringShutdown(Some(node_lease_task))))
@@ -778,13 +849,14 @@ pub async fn start_if_enabled(
 #[cfg(feature = "clustering")]
 async fn register_node_lease(
     node_lease: &claims::PostgresClaimStore,
+    expected_previous: Option<&waddle_xmpp::ownership::NodeIdentity>,
     identity: &waddle_xmpp::ownership::NodeIdentity,
     pod_template_hash: Option<String>,
     peer_id: Option<String>,
 ) -> Result<(), ClusteringError> {
     use claims::NodeLeaseStore as _;
     node_lease
-        .register_with_peer_id(identity, pod_template_hash, peer_id)
+        .register_initial_with_peer_id(expected_previous, identity, pod_template_hash, peer_id)
         .await
         .map_err(ClusteringError::NodeLease)
 }
@@ -799,14 +871,54 @@ async fn prepare_node_lease(
     identity: &waddle_xmpp::ownership::NodeIdentity,
     pod_template_hash: Option<String>,
     peer_id: Option<String>,
-) -> Result<(), ClusteringError> {
+    lease_ttl: Duration,
+) -> Result<Option<waddle_xmpp::ownership::NodeIdentity>, ClusteringError> {
+    use claims::NodeLeaseStore as _;
     use waddle_xmpp::ownership::ClaimStore as _;
 
     node_lease
         .ensure_schema()
         .await
         .map_err(ClusteringError::ClaimStoreSchema)?;
-    register_node_lease(node_lease, identity, pod_template_hash, peer_id).await
+    let previous = node_lease
+        .registered_identity(&identity.node_id)
+        .await
+        .map_err(ClusteringError::NodeLease)?;
+    let replaced = previous
+        .as_ref()
+        .filter(|previous| *previous != identity)
+        .cloned();
+    if let Some(previous) = replaced.as_ref() {
+        let expired = node_lease
+            .expire(previous, lease_ttl)
+            .await
+            .map_err(ClusteringError::NodeLease)?;
+        if !expired {
+            return Err(ClusteringError::NodeLease(
+                waddle_xmpp::ownership::ClaimError::Conflict,
+            ));
+        }
+        node_lease
+            .register_draining_with_peer_id(
+                previous,
+                identity,
+                pod_template_hash,
+                peer_id,
+                lease_ttl,
+            )
+            .await
+            .map_err(ClusteringError::NodeLease)?;
+        return Ok(replaced);
+    }
+    register_node_lease(
+        node_lease,
+        previous.as_ref(),
+        identity,
+        pod_template_hash,
+        peer_id,
+    )
+    .await?;
+    Ok(None)
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -895,6 +1007,7 @@ mod tests {
                 &identity,
                 Some("test-template".to_string()),
                 Some("test-peer".to_string()),
+                Duration::from_secs(30),
             )
             .await
             .map_err(|error| anyhow::anyhow!("prepare node lease: {error}"))?;
@@ -937,6 +1050,56 @@ mod tests {
                 .map_err(|error| anyhow::anyhow!("decode expired: {error}"))?;
             if expired {
                 anyhow::bail!("fresh node lease row must start non-expired");
+            }
+            drop(rows);
+            conn.execute(
+                "UPDATE clustering_nodes SET heartbeat = now() - interval '2 minutes' WHERE node_id = ?",
+                crate::db_params![identity.node_id.clone()],
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("backdate prior incarnation: {error}"))?;
+            drop(conn);
+
+            // A later process may lease the same stable swarm node id. It
+            // must first expire the exact prior incarnation and then replace
+            // it through an expected-old CAS.
+            let restarted = NodeIdentity::new(
+                identity.node_id.clone(),
+                uuid::Uuid::new_v4().to_string(),
+            );
+            prepare_node_lease(
+                &store,
+                &restarted,
+                Some("test-template-2".to_string()),
+                Some("test-peer".to_string()),
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("prepare restarted node lease: {error}"))?;
+            if store
+                .registered_identity(&identity.node_id)
+                .await
+                .map_err(|error| anyhow::anyhow!("read restarted identity: {error}"))?
+                != Some(restarted.clone())
+            {
+                anyhow::bail!("restart did not install the expected fresh incarnation");
+            }
+
+            use claims::NodeLeaseStore as _;
+            let delayed_old = store
+                .register_with_peer_id(
+                    &identity,
+                    Some("stale-template".to_string()),
+                    Some("test-peer".to_string()),
+                )
+                .await;
+            if !matches!(
+                delayed_old,
+                Err(waddle_xmpp::ownership::ClaimError::Conflict)
+            ) {
+                anyhow::bail!(
+                    "a delayed old bootstrap registration rolled back the newer epoch: {delayed_old:?}"
+                );
             }
             Ok(())
         }

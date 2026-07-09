@@ -60,14 +60,20 @@ pub(crate) async fn clear_muji_presence_for_departure(
             note_participant_left_from_webhook(state, room_jid, full_jid);
             return;
         }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+        )) => {
+            super::websocket::handlers::iq::demote_exact_room_actor(state, room_jid, &actor).await;
+            warn!(room = %room_jid, identity = %full_jid, "Room ownership moved; suppressing Muji clear side effects");
+            return;
+        }
         Err(error) => {
             warn!(
                 room = %room_jid,
                 identity = %full_jid,
                 error = ?error,
-                "Room actor rejected Muji clear; falling through to SFU unregister"
+                "Room actor rejected Muji clear; suppressing SFU and fanout side effects"
             );
-            note_participant_left_from_webhook(state, room_jid, full_jid);
             return;
         }
     };

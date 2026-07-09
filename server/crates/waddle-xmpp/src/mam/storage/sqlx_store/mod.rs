@@ -11,6 +11,7 @@ use std::str::FromStr;
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+use sqlx::{Postgres, Transaction};
 use tracing::info;
 
 use super::MamStorageError;
@@ -33,12 +34,35 @@ pub struct SqlxMamStorage {
     /// the caller has verified (via [`Self::with_cluster_fencing`]) that
     /// clustering is enabled AND this storage's own database is co-located
     /// with the clustering global database. [`super::MamStorage::store_message_fenced`]
-    /// uses this to decide whether to run the fenced groupchat-archive
-    /// insert or fall back to the portable, unfenced [`super::MamStorage::store_message`]
-    /// path. `false` for every non-clustered deployment (and, defensively,
-    /// for a SQLite backend even if requested — see that method's doc
-    /// comment).
+    /// uses this to decide whether it can run the fenced groupchat-archive
+    /// insert. A fenced call while this is false returns
+    /// [`super::MamStorageError::FencingUnavailable`]; non-clustered callers
+    /// use the ordinary [`super::MamStorage::store_message`] method instead.
     pub(super) fencing_enabled: bool,
+}
+
+/// Begin a Postgres transaction that cannot retain an exact room/node fence
+/// past the cluster-wide fenced-transaction budget. PostgreSQL 17's total
+/// `transaction_timeout` is the hard outer bound; the other local settings
+/// cover an individual lock/statement wait and an idle task between awaits.
+pub(super) async fn begin_fenced(
+    pool: &PgPool,
+) -> Result<Transaction<'_, Postgres>, MamStorageError> {
+    let mut tx = pool.begin().await?;
+    let timeout = crate::ownership::FENCED_TRANSACTION_BUDGET.postgres_timeout();
+    sqlx::query(
+        r#"
+        SELECT
+            set_config('lock_timeout', $1, true),
+            set_config('statement_timeout', $1, true),
+            set_config('idle_in_transaction_session_timeout', $1, true),
+            set_config('transaction_timeout', $1, true)
+        "#,
+    )
+    .bind(timeout)
+    .execute(&mut *tx)
+    .await?;
+    Ok(tx)
 }
 
 impl SqlxMamStorage {

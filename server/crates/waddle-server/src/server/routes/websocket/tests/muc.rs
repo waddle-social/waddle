@@ -2866,6 +2866,122 @@ async fn standard_muc_owner_config_rejects_non_owner() {
     assert!(responses[0].contains("forbidden"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_owner_destroy_emits_unavailable_and_sfu_effects_once() {
+    let gate = std::sync::Arc::new(FirstUnregisterGate::default());
+    let recorder = std::sync::Arc::new(RecordingSfu::blocking_first_unregister(gate.clone()));
+    let state = state_with_recording_sfu(recorder.clone()).await;
+    let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-once@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(session.clone()),
+    )
+    .await;
+
+    let destroy_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "destroy-once")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                    .append(Element::builder("destroy", waddle_xmpp::muc::NS_MUC_OWNER).build())
+                    .build(),
+            )
+            .build(),
+    );
+
+    let first_state = state.clone();
+    let first_iq = destroy_iq.clone();
+    let first_session = session.clone();
+    let first_jid = alice_jid.clone();
+    let first = tokio::spawn(async move {
+        handle_iq(
+            &first_iq,
+            "example.com",
+            "muc.example.com",
+            first_state.as_ref(),
+            &Some(first_session),
+            &ready_phase(&first_jid),
+        )
+        .await
+    });
+
+    let wait_gate = gate.clone();
+    let first_effect_started = tokio::task::spawn_blocking(move || wait_gate.wait_until_entered())
+        .await
+        .expect("first destroy reaches SFU effect");
+    if !first_effect_started {
+        gate.release();
+        panic!("first destroy never reached SFU effect");
+    }
+
+    let second_state = state.clone();
+    let second_session = session;
+    let second_jid = alice_jid;
+    let second = tokio::spawn(async move {
+        handle_iq(
+            &destroy_iq,
+            "example.com",
+            "muc.example.com",
+            second_state.as_ref(),
+            &Some(second_session),
+            &ready_phase(&second_jid),
+        )
+        .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let pre_release_count = recorder.snapshot().len();
+    gate.release();
+    assert_eq!(
+        pre_release_count, 1,
+        "the losing destroy must not enter the irreversible SFU batch"
+    );
+
+    let first_responses = first.await.expect("first destroy task");
+    let second_responses = second.await.expect("second destroy task");
+    assert_eq!(
+        recorder.snapshot().len(),
+        1,
+        "the exact room incarnation emits SFU teardown exactly once"
+    );
+    let successes = [&first_responses, &second_responses]
+        .into_iter()
+        .filter(|responses| {
+            responses
+                .iter()
+                .any(|frame| frame.contains("type='result'"))
+        })
+        .count();
+    let failures = [&first_responses, &second_responses]
+        .into_iter()
+        .filter(|responses| responses.iter().any(|frame| frame.contains("type='error'")))
+        .count();
+    assert_eq!(successes, 1, "only the reservation winner succeeds");
+    assert_eq!(failures, 1, "the stale destroy fails without effects");
+    let destroy_unavailable = [&first_responses, &second_responses]
+        .into_iter()
+        .flat_map(|responses| responses.iter())
+        .filter(|frame| frame.contains("type='unavailable'") && frame.contains("<destroy"))
+        .count();
+    assert_eq!(
+        destroy_unavailable, 1,
+        "XEP-0045 §10.9 destroy-unavailable presence is emitted exactly once"
+    );
+}
+
 #[tokio::test]
 async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
     let state = create_test_websocket_state().await;
@@ -3767,11 +3883,57 @@ fn empty_muji() -> waddle_xmpp::xep::xep0272::Muji {
 struct RecordingSfu {
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    first_unregister_gate: Option<std::sync::Arc<FirstUnregisterGate>>,
 }
 
 impl RecordingSfu {
     fn snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
         self.calls.lock().expect("recording lock").clone()
+    }
+
+    fn blocking_first_unregister(gate: std::sync::Arc<FirstUnregisterGate>) -> Self {
+        Self {
+            first_unregister_gate: Some(gate),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Default)]
+struct FirstUnregisterGate {
+    entered: std::sync::Mutex<bool>,
+    entered_signal: std::sync::Condvar,
+    released: std::sync::Mutex<bool>,
+    release_signal: std::sync::Condvar,
+}
+
+impl FirstUnregisterGate {
+    fn enter_and_wait(&self) {
+        *self.entered.lock().expect("entered lock") = true;
+        self.entered_signal.notify_all();
+        let mut released = self.released.lock().expect("release lock");
+        while !*released {
+            released = self
+                .release_signal
+                .wait(released)
+                .expect("release wait lock");
+        }
+    }
+
+    fn wait_until_entered(&self) -> bool {
+        let entered = self.entered.lock().expect("entered lock");
+        let (entered, _) = self
+            .entered_signal
+            .wait_timeout_while(entered, std::time::Duration::from_secs(2), |entered| {
+                !*entered
+            })
+            .expect("entered wait lock");
+        *entered
+    }
+
+    fn release(&self) {
+        *self.released.lock().expect("release lock") = true;
+        self.release_signal.notify_all();
     }
 }
 
@@ -3803,10 +3965,16 @@ impl waddle_sfu::SfuService for RecordingSfu {
         call_id: &waddle_sfu::CallId,
         identity: &waddle_sfu::Identity,
     ) -> waddle_sfu::CallState {
-        self.calls
-            .lock()
-            .expect("recording lock")
-            .push((call_id.clone(), identity.clone()));
+        let call_number = {
+            let mut calls = self.calls.lock().expect("recording lock");
+            calls.push((call_id.clone(), identity.clone()));
+            calls.len()
+        };
+        if call_number == 1 {
+            if let Some(gate) = &self.first_unregister_gate {
+                gate.enter_and_wait();
+            }
+        }
         waddle_sfu::CallState::Ended
     }
 

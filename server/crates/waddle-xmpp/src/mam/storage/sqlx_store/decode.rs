@@ -209,7 +209,7 @@ pub(super) fn encode_rich_payload(
         .map_err(|error| MamStorageError::Serialization(error.to_string()))
 }
 
-fn decode_rich_payload(
+pub(super) fn decode_rich_payload(
     value: Option<&str>,
 ) -> Result<Option<waddle_xmpp_core::mam::ArchivedRichMessage>, MamStorageError> {
     value

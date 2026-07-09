@@ -10,8 +10,7 @@ use waddle_server::clustering::ordered_relay::{
     OrderedRelayRecipient, OrderedRelayReply, OrderedRelayReservation, OrderedRelaySenderState,
     OrderedRelaySequence, OriginInboundSequence, RemoteStanzaEnvelope,
 };
-use waddle_server::clustering::NodeId;
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use xmpp_parsers::message::{Lang, Message};
 
@@ -30,8 +29,8 @@ fn channel_for_bare(bare: &str) -> OrderedRelayChannel {
     }
 }
 
-fn origin_node() -> NodeId {
-    NodeId::new("origin-node".to_string())
+fn origin_node() -> NodeIdentity {
+    NodeIdentity::new("origin-node", "origin-epoch")
 }
 
 fn room_jid() -> jid::BareJid {
@@ -177,7 +176,7 @@ fn sender_sequence_is_stable_across_asserted_origin_node_changes() {
 
     let first = state
         .next_envelope(
-            NodeId::new("old-node".to_string()),
+            NodeIdentity::new("old-node", "old-epoch"),
             channel.clone(),
             inbound(1),
             claims(),
@@ -186,7 +185,7 @@ fn sender_sequence_is_stable_across_asserted_origin_node_changes() {
         .expect("first");
     let second = state
         .next_envelope(
-            NodeId::new("new-node".to_string()),
+            NodeIdentity::new("new-node", "new-epoch"),
             channel,
             inbound(2),
             claims(),
@@ -363,7 +362,7 @@ fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
     let mut receiver =
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
-        asserted_origin_node: NodeId::new("old-node".to_string()),
+        asserted_origin_node: NodeIdentity::new("old-node", "old-epoch"),
         channel: channel(),
         sequence: OrderedRelaySequence(1),
         origin_inbound_sequence: inbound(1),
@@ -382,7 +381,7 @@ fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
     ));
 
     let retry_after_move = RemoteStanzaEnvelope {
-        asserted_origin_node: NodeId::new("new-node".to_string()),
+        asserted_origin_node: NodeIdentity::new("new-node", "new-epoch"),
         origin_claim: OrderedRelayClaim {
             epoch: ClaimEpoch(99),
             ..origin_claim()

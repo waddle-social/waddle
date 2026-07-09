@@ -19,6 +19,7 @@
 //! does not tear down the swarm — it works to re-register under a fresh
 //! node identity and resume serving.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,14 +28,27 @@ use async_trait::async_trait;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, StalePredicate,
-};
+use waddle_xmpp::ownership::{ClaimEpoch, ClaimStore, Entity, NodeIdentity};
+#[cfg(test)]
+use waddle_xmpp::ownership::{ClaimError, EntityType};
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
 use super::ClusteringReadiness;
 use crate::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
+
+/// Strict per-entity result used by post-fence recovery's readiness gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimedEntityHydration {
+    /// The exact candidate grant is represented in local state.
+    Local,
+    /// A current-claim read proved a different node now owns the entity.
+    Elsewhere,
+    /// The exact recovery grant was released or was already absent.
+    TerminallyReleased,
+    /// Ownership/storage/local initialization is uncertain; stay not-ready.
+    Retry,
+}
 
 /// Readable snapshot of the swarm's current connected-peer count (Phase 2
 /// Slice 1's connected-peer gauge, reused here rather than inventing a
@@ -92,9 +106,9 @@ impl ConnectedPeerCount {
     }
 }
 
-/// Supplies the local owned-entity set the demotion-reconciliation diff
-/// runs against, and demotes entities Postgres no longer attributes to
-/// this node.
+/// Supplies the authoritative local owned-entity set the
+/// demotion-reconciliation diff runs against, and demotes entities Postgres
+/// no longer attributes to this node.
 ///
 /// **No production implementor lands in Slice 2** — the mechanism and its
 /// tests land here, but no code acquires a Postgres-backed `sm_session`
@@ -104,13 +118,35 @@ impl ConnectedPeerCount {
 /// [`NoLocallyClaimedEntities`].
 #[async_trait]
 pub trait LocallyClaimedEntities: Send + Sync {
-    /// Every entity this process currently believes it owns, from local
-    /// bookkeeping only — never a Postgres read. `async` (ADR-0017 Phase 3
-    /// Slice 7 widening) because an actor-backed implementor (`RoomActor`'s
-    /// registry) can only be queried through its own mailbox — the
-    /// enumeration itself is still pure in-memory bookkeeping, never a
-    /// Postgres round-trip.
+    /// Every entity whose durable claim this process currently believes it
+    /// owns, from local authoritative bookkeeping only — never a Postgres
+    /// read. A socket or proxy physically hosted by this process but owned by
+    /// another node MUST NOT appear here: this list is compared directly with
+    /// Postgres and every absent entry is demoted.
+    ///
+    /// `async` (ADR-0017 Phase 3 Slice 7 widening) because an actor-backed
+    /// implementor (`RoomActor`'s registry) can only be queried through its
+    /// own mailbox — the enumeration itself is still pure in-memory
+    /// bookkeeping, never a Postgres round-trip.
     async fn owned(&self) -> Vec<Entity>;
+
+    /// Demote everything that must stop when this entire node loses its lease.
+    ///
+    /// Unlike [`Self::owned`], this terminal hook may include resources that
+    /// are only physically hosted here, such as clustered remote-user sockets
+    /// whose authoritative `UserActor` belongs to another node. The default is
+    /// correct for claim types whose hosted and authoritative ownership sets
+    /// are identical; implementations with proxy/remote resources override it.
+    /// Returns `true` only when terminal teardown completed. A `false` result
+    /// keeps the node not-ready and is retried before claim service resumes;
+    /// timing out a cooperative socket close must never let an old-generation
+    /// connection survive into a newly ready identity.
+    async fn demote_all_on_self_fence(&self) -> bool {
+        for entity in self.owned().await {
+            self.demote(&entity).await;
+        }
+        true
+    }
 
     /// Demote local state for an entity Postgres no longer attributes to
     /// this node (claim stolen, or this node's own claim row is gone).
@@ -156,7 +192,7 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// timed out (wedged — the caller proactively demotes rather than
     /// waiting to be stolen from at `intent_ttl`, per element 4's "an owner
     /// whose internal health ask fails ... kills the wedged actor and
-    /// conflict-closes its sockets" text).
+    /// retires its sockets" text).
     ///
     /// Never called against an entity absent from [`Self::owned`] — the
     /// veto-scan loop only health-asks entities `owner_steal_intents`
@@ -177,8 +213,16 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// by the time it runs. Default no-op, mirroring [`Self::demote`]'s
     /// own no-op default: correct for [`NoLocallyClaimedEntities`], which
     /// owns nothing to hydrate.
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
-        let _ = entities;
+    async fn hydrate_reclaimed(
+        &self,
+        owner: &NodeIdentity,
+        entity: &Entity,
+        epoch: ClaimEpoch,
+    ) -> ReclaimedEntityHydration {
+        let _ = owner;
+        let _ = entity;
+        let _ = epoch;
+        ReclaimedEntityHydration::Retry
     }
 
     /// ADR-0017 Phase 3 Slice 10: complete `entity`'s final fenced write —
@@ -350,18 +394,17 @@ pub struct NodeLeaseRunConfig {
     pub claim_store: Arc<dyn ClaimStore>,
     /// Live, shared view of this node's current identity (ADR-0017 Phase 3
     /// Slice 4 follow-up plumbing note): [`run_node_lease`] calls
-    /// [`waddle_xmpp::ownership::SharedNodeIdentity::set`] on it every
-    /// time it mints a fresh identity (initial value and every post-fence
-    /// re-registration), so any other holder of a clone — e.g. the
+    /// [`waddle_xmpp::ownership::SharedNodeIdentity::set`] on it after every
+    /// post-fence epoch rotation, so any other holder of a clone — e.g. the
     /// Postgres-fenced `SmPersistenceStorage`'s claim-acquire calls —
     /// always binds the identity currently in force, never a stale
     /// pre-fence snapshot.
     pub live_identity: waddle_xmpp::ownership::SharedNodeIdentity,
     /// The libp2p PeerId currently held by this process's leased swarm
     /// keypair, bound into every node-lease registration for the current
-    /// process. Re-registrations mint a fresh node identity, but they do not
-    /// mint a fresh swarm keypair, so the PeerId binding intentionally stays
-    /// stable across a self-fence.
+    /// process. Re-registrations rotate the node epoch, but they do not change
+    /// the process `node_id` or mint a fresh swarm keypair, so both the relay
+    /// address and PeerId binding stay stable across a self-fence.
     pub peer_id: Option<String>,
     /// ADR-0017 Phase 3 Slice 10: the graceful per-entity claim-release
     /// drain's time budget (`ClusteringNodeLeaseConfig::claim_release_budget`,
@@ -369,6 +412,10 @@ pub struct NodeLeaseRunConfig {
     /// [`crate::clustering::drain::run_shutdown_drain`], called from every
     /// ordinary-shutdown branch in [`run_node_lease`]'s `'tick` loop below.
     pub claim_release_budget: Duration,
+    /// Exact predecessor replaced during cold start. When present, the
+    /// current identity was registered draining and this task must run the
+    /// same strict reclaim/hydrate/activate state machine before serving.
+    pub startup_recovery_source: Option<NodeIdentity>,
 }
 
 /// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
@@ -448,70 +495,264 @@ where
 /// preserving the "backstop for other nodes" carried-risk boundary FIX 4's
 /// own doc note names honestly).
 ///
-/// Caller bounds this whole call against `config.lease_ttl` (mirroring
-/// every other control-plane call in [`run_node_lease`]); this function
-/// itself does not re-bound the individual `steal_stale`/hydrate calls —
-/// a slow-but-not-hung candidate set is expected to be small (this one
-/// node's own dropped claims only, not the cluster-wide set), so the
-/// outer deadline is sufficient.
+/// This sequence is deliberately not cancellation-raced or timeout-wrapped:
+/// once any `steal_stale` commits, dropping the future before targeted
+/// hydration would strand a fresh-owned durable session outside the local
+/// registry. The control-plane calls retain their database/pool bounds, but
+/// the mutation-plus-hydration sequence itself runs to a definite outcome.
+struct RecoveryState {
+    sources: HashSet<NodeIdentity>,
+    registration_source: NodeIdentity,
+    candidate: NodeIdentity,
+    candidate_registered: bool,
+    candidate_grants: HashMap<Entity, ClaimEpoch>,
+}
+
+impl RecoveryState {
+    fn new(identity: &NodeIdentity) -> Self {
+        let mut sources = HashSet::new();
+        sources.insert(identity.clone());
+        Self {
+            sources,
+            registration_source: identity.clone(),
+            candidate: NodeIdentity::new(
+                identity.node_id.clone(),
+                uuid::Uuid::new_v4().to_string(),
+            ),
+            candidate_registered: false,
+            candidate_grants: HashMap::new(),
+        }
+    }
+
+    fn from_registered_candidate(source: NodeIdentity, candidate: NodeIdentity) -> Self {
+        let mut sources = HashSet::new();
+        sources.insert(source.clone());
+        Self {
+            sources,
+            registration_source: source,
+            candidate,
+            candidate_registered: true,
+            candidate_grants: HashMap::new(),
+        }
+    }
+
+    fn rotate_candidate(&mut self) {
+        self.sources.insert(self.candidate.clone());
+        self.registration_source = self.candidate.clone();
+        self.candidate = NodeIdentity::new(
+            self.registration_source.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        self.candidate_registered = false;
+        // Every grant in this map belongs to the candidate that just became
+        // a source. Once the replacement row is registered, the exact source
+        // scan will rediscover it and mint a new grant for the new candidate.
+        self.candidate_grants.clear();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryPass {
+    Complete,
+    Retry,
+    RotateCandidate,
+}
+
+async fn hydrate_pending_recovery_grants(
+    state: &mut RecoveryState,
+    local_claims: &dyn LocallyClaimedEntities,
+) -> bool {
+    let pending = state
+        .candidate_grants
+        .iter()
+        .map(|(entity, epoch)| (entity.clone(), *epoch))
+        .collect::<Vec<_>>();
+    let mut complete = true;
+    for (entity, epoch) in pending {
+        let outcome = local_claims
+            .hydrate_reclaimed(&state.candidate, &entity, epoch)
+            .await;
+        match outcome {
+            // Keep locally hydrated grants as recovery provenance. Every
+            // outer retry terminally demotes local state before entering the
+            // next pass, so the exact candidate-owned grant must be hydrated
+            // again on that later pass before readiness can be restored.
+            ReclaimedEntityHydration::Local => {}
+            ReclaimedEntityHydration::Elsewhere | ReclaimedEntityHydration::TerminallyReleased => {
+                state.candidate_grants.remove(&entity);
+            }
+            ReclaimedEntityHydration::Retry => complete = false,
+        }
+    }
+    complete
+}
+
 async fn reclaim_own_expired_claims<L>(
     lease: &L,
     claim_store: &dyn ClaimStore,
-    old_identity: &NodeIdentity,
-    fresh: &NodeIdentity,
+    state: &mut RecoveryState,
     local_claims: &dyn LocallyClaimedEntities,
-) where
+    lease_ttl: Duration,
+) -> RecoveryPass
+where
     L: NodeLeaseStore + Send + Sync,
 {
+    // Hydrate every candidate-owned grant at most once per recovery pass.
+    // A retry stays sticky for this pass and is attempted again only after
+    // the outer backoff/terminal-demotion boundary.
+    let mut complete = hydrate_pending_recovery_grants(state, local_claims).await;
     let candidates = match lease.list_orphaned_sm_session_claims().await {
         Ok(candidates) => candidates,
         Err(error) => {
             tracing::warn!(
                 %error,
-                node_id = %old_identity.node_id,
+                node_id = %state.candidate.node_id,
                 "clustering: inline post-fence reclaim: list_orphaned_sm_session_claims failed"
             );
-            return;
+            return RecoveryPass::Retry;
         }
     };
 
-    let mut reclaimed: Vec<(Entity, ClaimEpoch)> = Vec::new();
     for candidate in candidates {
-        if candidate.owner != *old_identity {
-            // Another node's genuinely dead claim — not this node's own
-            // just-superseded identity. Left for the general orphan
-            // reaper, exactly as element 9 describes; naming that
-            // boundary honestly (rather than silently widening this
-            // node's own inline reclaim to cover it) is the point of FIX
-            // 4's "residual window" carried-risk note.
+        if !state.sources.contains(&candidate.owner) {
             continue;
         }
-        match claim_store
-            .steal_stale(
+        let reclaimed = claim_store
+            .reclaim_after_self_fence(
                 &candidate.entity,
                 candidate.epoch,
-                StalePredicate::OwnerStale,
-                fresh,
+                &candidate.owner,
+                &state.candidate,
+                lease_ttl,
             )
-            .await
-        {
-            Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
-            Err(ClaimError::Conflict) => {
-                // The general orphan reaper (or another node) already
-                // reclaimed it first — safe, no-op.
-            }
+            .await;
+        let grant = match reclaimed {
+            Ok(new_epoch) => Some(new_epoch),
             Err(error) => {
                 tracing::warn!(
                     entity_id = %candidate.entity.id,
                     %error,
-                    "clustering: inline post-fence reclaim: steal_stale(OwnerStale) failed"
+                    "clustering: inline post-fence exact reclaim did not return a grant"
                 );
+                // Conflict is not inherently benign: the source may still
+                // own the grant because the destination expired. Resolve
+                // every losing/ambiguous result against the current claim.
+                match claim_store.current_claim(&candidate.entity).await {
+                    Ok(Some(snapshot)) if snapshot.owner == state.candidate => {
+                        Some(snapshot.claim_epoch)
+                    }
+                    Ok(Some(snapshot)) if state.sources.contains(&snapshot.owner) => {
+                        complete = false;
+                        None
+                    }
+                    Ok(Some(snapshot)) if snapshot.owner.node_id != state.candidate.node_id => {
+                        // A different process won; this node must not hydrate
+                        // a second copy.
+                        None
+                    }
+                    Ok(None) => None,
+                    Ok(Some(_)) | Err(_) => return RecoveryPass::RotateCandidate,
+                }
+            }
+        };
+
+        if let Some(epoch) = grant {
+            state
+                .candidate_grants
+                .insert(candidate.entity.clone(), epoch);
+            let outcome = local_claims
+                .hydrate_reclaimed(&state.candidate, &candidate.entity, epoch)
+                .await;
+            match outcome {
+                // Retain the exact grant for any later recovery pass. If a
+                // subsequent completion check fails, the outer loop demotes
+                // this local state and the next pass must rehydrate it.
+                ReclaimedEntityHydration::Local => {}
+                ReclaimedEntityHydration::Elsewhere
+                | ReclaimedEntityHydration::TerminallyReleased => {
+                    state.candidate_grants.remove(&candidate.entity);
+                }
+                ReclaimedEntityHydration::Retry => complete = false,
             }
         }
     }
 
-    if !reclaimed.is_empty() {
-        local_claims.hydrate_reclaimed(&reclaimed).await;
+    // A second exact scan is the completion barrier. The first scan can race
+    // a final pre-teardown detach; readiness is forbidden while any durable
+    // SM claim still names any epoch superseded during this recovery.
+    let remaining_sources = match lease.list_orphaned_sm_session_claims().await {
+        Ok(candidates) => candidates
+            .into_iter()
+            .any(|candidate| state.sources.contains(&candidate.owner)),
+        Err(error) => {
+            tracing::warn!(%error, "clustering: recovery completion scan failed");
+            return RecoveryPass::Retry;
+        }
+    };
+    if complete && !remaining_sources {
+        // Every retained grant was hydrated exactly once in this pass, and
+        // no source claim remains. Consume recovery bookkeeping only at the
+        // completion barrier so an incomplete pass can survive the outer
+        // loop's terminal demotion and rehydrate on its next attempt.
+        state.candidate_grants.clear();
+        RecoveryPass::Complete
+    } else {
+        RecoveryPass::Retry
+    }
+}
+
+/// Poll a potentially long multi-session recovery pass while keeping the
+/// exact draining candidate's lease alive. A false heartbeat is remembered,
+/// but does not cancel the in-flight pass: a reclaim CAS may already have
+/// committed and must reach a definite hydration outcome before the
+/// candidate becomes a lineage source.
+async fn reclaim_with_candidate_heartbeat<L>(
+    lease: &L,
+    claim_store: &dyn ClaimStore,
+    state: &mut RecoveryState,
+    local_claims: &dyn LocallyClaimedEntities,
+    heartbeat_interval: Duration,
+    lease_ttl: Duration,
+) -> RecoveryPass
+where
+    L: NodeLeaseStore + Send + Sync,
+{
+    let candidate = state.candidate.clone();
+    let recovery = std::pin::pin!(reclaim_own_expired_claims(
+        lease,
+        claim_store,
+        state,
+        local_claims,
+        lease_ttl,
+    ));
+    let mut recovery = recovery;
+    let mut ticker = tokio::time::interval(heartbeat_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticker.tick().await;
+    let mut candidate_lost = false;
+
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut recovery => {
+                return if candidate_lost {
+                    RecoveryPass::RotateCandidate
+                } else {
+                    result
+                };
+            }
+            _ = ticker.tick(), if !candidate_lost => {
+                match lease.heartbeat(&candidate, lease_ttl).await {
+                    Ok(true) => {}
+                    Ok(false) => candidate_lost = true,
+                    Err(error) => tracing::warn!(
+                        %error,
+                        node_epoch = %candidate.node_epoch,
+                        "recovery candidate heartbeat failed during hydration"
+                    ),
+                }
+            }
+        }
     }
 }
 
@@ -651,36 +892,25 @@ pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
 /// dropped per fence (never per-tick) — the deadline fires at most once
 /// before the loop exits to the self-fenced block below.
 ///
-/// On either trigger: locally demote every entity `local_claims.owned()`
-/// currently lists (a purely local action that must succeed even while
-/// Postgres is unreachable), flip `readiness` to not-ready, **mark the
-/// just-fenced identity's row draining (FIX 1(b), bounded best-effort)**,
-/// then loop re-registration attempts (exponential backoff) until one
-/// succeeds *and* the hysteresis gate ([`can_reacquire_claims`]) is
-/// satisfied — at which point readiness flips back to ready and normal
-/// heartbeat/reconciliation resumes under the freshly minted identity.
+/// On either trigger: flip `readiness` to not-ready, then concurrently run
+/// `local_claims.demote_all_on_self_fence()` (a purely local action that must
+/// stop every authoritative claim and hosted proxy even while Postgres is
+/// unreachable) and **mark the just-fenced identity's row draining (FIX 1(b),
+/// bounded best-effort)**, then
+/// loop re-registration attempts (exponential backoff) until one succeeds
+/// *and* the hysteresis gate ([`can_reacquire_claims`]) is satisfied — at which
+/// point readiness flips back to ready and normal heartbeat/reconciliation
+/// resumes under the process's stable `node_id` and freshly minted epoch.
 ///
-/// **FIX 1(a)**: the fresh `node_id`/`node_epoch` identity for
-/// re-registration is minted **once per fence**, before the retry loop —
-/// every retry within that fence's re-registration loop reuses the same
-/// identity. Minting a fresh random identity on every retry (including
-/// hysteresis-rejected ones, which do not indicate a registration
-/// failure) was a row-leak wedge: `register`'s `INSERT ... ON CONFLICT
-/// (node_id) DO UPDATE` only refreshes an existing row when called
-/// repeatedly with the *same* `node_id` — called with a fresh `node_id`
-/// every time, it INSERTs a new phantom row per retry instead, and — at the
-/// time this fix landed (Slice 2) — nothing in production ever expired node
-/// rows (`NodeLeaseStore::expire` had no production caller yet), so
-/// `clustering_nodes` would grow without bound across a single sustained
-/// fence and permanently inflate every node's `count_other_live_nodes` —
-/// eventually making [`can_reacquire_claims`] impossible to satisfy again (a
-/// permanent not-ready wedge) and polluting the cluster-wide isolation
-/// heuristic. (ADR-0017 Phase 3 Slice 5: `expire` now has its first two
-/// production callers — this function's own `expire_bounded` call below,
-/// and the orphan reaper — but this FIX 1(a) reasoning is unaffected: both
-/// callers only ever expire an identity this loop or the reaper has
-/// independently proven dead, never the identity a phantom-row retry would
-/// have minted.)
+/// **FIX 1(a)**: `node_id` is the process-stable clustering address used by
+/// both the node lease and the relay actor. A fresh `node_epoch` is minted
+/// **once per fence**, before the retry loop, and every retry within that
+/// fence reuses it. Rotating `node_id` would strand the relay actor under its
+/// original name and leak a new `clustering_nodes` row per fence; minting a
+/// new epoch on every retry would make each successful registration supersede
+/// the identity used by the previous retry. Keeping the address stable and
+/// rotating one epoch per fence gives Postgres a single bounded node row while
+/// still fencing all claims from the prior incarnation.
 pub async fn run_node_lease<L>(
     lease: L,
     mut identity: NodeIdentity,
@@ -700,6 +930,7 @@ pub async fn run_node_lease<L>(
         peer_id,
         claim_store,
         claim_release_budget,
+        startup_recovery_source,
     } = run_config;
     // Seed the shared handle with the identity this loop starts under —
     // see `live_identity`'s doc comment and the `identity = fresh;`
@@ -712,187 +943,178 @@ pub async fn run_node_lease<L>(
         self_fence_cfg.reregister_backoff_max,
     );
 
+    let mut startup_recovery_source = startup_recovery_source;
     'registered: loop {
-        let mut timer = tokio::time::interval_at(
-            tokio::time::Instant::now() + config.heartbeat_interval,
-            config.heartbeat_interval,
-        );
-        timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut last_success = tokio::time::Instant::now();
-
-        // Runs until this identity self-fences (either trigger). Both
-        // trigger paths converge on identical handling below, so this
-        // block's exit is unconditional (never a plain `break`).
-        //
-        // FIX 2: labeled so the per-entity veto-scan loop below (which
-        // nests its own `for` loop over `owner_steal_intents`'s result) can
-        // `break 'tick` straight out to the self-fenced handling from
-        // inside that nested loop, exactly as if the heartbeat/count/
-        // reconcile calls above had blown the same deadline.
-        'tick: loop {
-            tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                    return;
-                }
-                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                    break;
-                }
-                _ = timer.tick() => {}
-            }
-
-            metrics::record_node_heartbeat_age_ms(last_success.elapsed().as_secs_f64() * 1000.0);
-
-            let write_started = tokio::time::Instant::now();
-            let renewal = std::pin::pin!(lease.heartbeat(&identity, config.lease_ttl));
-            let renewed = tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                    return;
-                }
-                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                    break;
-                }
-                result = renewal => result,
-            };
-            metrics::record_node_heartbeat_write_latency_ms(
-                write_started.elapsed().as_secs_f64() * 1000.0,
+        let startup_source = startup_recovery_source.take();
+        if startup_source.is_none() {
+            let mut timer = tokio::time::interval_at(
+                tokio::time::Instant::now() + config.heartbeat_interval,
+                config.heartbeat_interval,
             );
+            timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut last_success = tokio::time::Instant::now();
 
-            match renewed {
-                Ok(true) => {
-                    last_success = tokio::time::Instant::now();
+            // Runs until this identity self-fences (either trigger). Both
+            // trigger paths converge on identical handling below, so this
+            // block's exit is unconditional (never a plain `break`).
+            //
+            // FIX 2: labeled so the per-entity veto-scan loop below (which
+            // nests its own `for` loop over `owner_steal_intents`'s result) can
+            // `break 'tick` straight out to the self-fenced handling from
+            // inside that nested loop, exactly as if the heartbeat/count/
+            // reconcile calls above had blown the same deadline.
+            'tick: loop {
+                tokio::select! {
+                    biased;
+                    _ = stop_token.cancelled() => {
+                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                        break;
+                    }
+                    _ = timer.tick() => {}
                 }
-                Ok(false) => {
-                    tracing::error!(
-                        node_id = %identity.node_id,
-                        "clustering node-lease heartbeat lost (fencing): stopping local claims"
-                    );
-                    break;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        node_id = %identity.node_id,
-                        "clustering node-lease heartbeat error; will retry next tick"
-                    );
-                    continue;
-                }
-            }
 
-            // Isolation check + demotion reconciliation, once per
-            // successful renewal — "each heartbeat interval, alongside the
-            // renewal CAS" (element 4). FIX 2: both control-plane calls
-            // below are deadline-armed identically to the heartbeat above
-            // — see this function's doc comment.
-            let count_future =
-                std::pin::pin!(lease.count_other_live_nodes(&identity, config.lease_ttl));
-            let other_live_result = tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                    return;
-                }
-                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                    break;
-                }
-                result = count_future => result,
-            };
-            let other_live = match other_live_result {
-                Ok(count) => count,
-                Err(error) => {
-                    tracing::warn!(%error, "clustering: failed to count other live nodes this interval");
-                    continue;
-                }
-            };
-            let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
-            if isolation.observe(other_live, reachable, self_fence_cfg.isolation_intervals) {
-                tracing::error!(
-                    node_id = %identity.node_id,
-                    other_live,
-                    "clustering node self-fencing: swarm-isolated from >= 2 live nodes for the \
-                     configured interval count"
+                metrics::record_node_heartbeat_age_ms(
+                    last_success.elapsed().as_secs_f64() * 1000.0,
                 );
-                break;
-            }
 
-            let owned = local_claims.owned().await;
-            let reconcile_future = std::pin::pin!(lease.reconcile(&identity, &owned));
-            let reconcile_result = tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                    return;
-                }
-                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                    break;
-                }
-                result = reconcile_future => result,
-            };
-            match reconcile_result {
-                Ok(lost) => {
-                    for entity in &lost {
-                        local_claims.demote(entity).await;
+                let write_started = tokio::time::Instant::now();
+                let renewal = std::pin::pin!(lease.heartbeat(&identity, config.lease_ttl));
+                let renewed = tokio::select! {
+                    biased;
+                    _ = stop_token.cancelled() => {
+                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                        break;
+                    }
+                    result = renewal => result,
+                };
+                metrics::record_node_heartbeat_write_latency_ms(
+                    write_started.elapsed().as_secs_f64() * 1000.0,
+                );
+
+                match renewed {
+                    Ok(true) => {
+                        last_success = tokio::time::Instant::now();
+                    }
+                    Ok(false) => {
+                        tracing::error!(
+                            node_id = %identity.node_id,
+                            "clustering node-lease heartbeat lost (fencing): stopping local claims"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            node_id = %identity.node_id,
+                            "clustering node-lease heartbeat error; will retry next tick"
+                        );
+                        continue;
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "clustering demotion-reconciliation query failed; will retry next interval");
-                }
-            }
 
-            // ADR-0017 Phase 3 Slice 3: owner-side steal-intent veto scan,
-            // riding the same per-interval cadence and deadline-arm as the
-            // other control-plane calls above — "every owner's heartbeat
-            // loop reads intents against its own claims" (element 4).
-            // Vacuous in production this slice: `local_claims.owned()` is
-            // always empty (`NoLocallyClaimedEntities`, per Slice 2's own
-            // wiring — no code acquires a `UserActor`/`RoomActor` claim
-            // until Slices 5-7), so `owner_steal_intents` always returns an
-            // empty set and this block is a no-op every interval. It is
-            // exercised directly against `PostgresClaimStore` and a
-            // configurable `LocallyClaimedEntities` fake in this module's
-            // own tests.
-            let intents_future = std::pin::pin!(lease.owner_steal_intents(&identity));
-            let intents_result = tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                    return;
-                }
-                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                // Isolation check + demotion reconciliation, once per
+                // successful renewal — "each heartbeat interval, alongside the
+                // renewal CAS" (element 4). FIX 2: both control-plane calls
+                // below are deadline-armed identically to the heartbeat above
+                // — see this function's doc comment.
+                let count_future =
+                    std::pin::pin!(lease.count_other_live_nodes(&identity, config.lease_ttl));
+                let other_live_result = tokio::select! {
+                    biased;
+                    _ = stop_token.cancelled() => {
+                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                        break;
+                    }
+                    result = count_future => result,
+                };
+                let other_live = match other_live_result {
+                    Ok(count) => count,
+                    Err(error) => {
+                        tracing::warn!(%error, "clustering: failed to count other live nodes this interval");
+                        continue;
+                    }
+                };
+                let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
+                if isolation.observe(other_live, reachable, self_fence_cfg.isolation_intervals) {
+                    tracing::error!(
+                        node_id = %identity.node_id,
+                        other_live,
+                        "clustering node self-fencing: swarm-isolated from >= 2 live nodes for the \
+                         configured interval count"
+                    );
                     break;
                 }
-                result = intents_future => result,
-            };
-            match intents_result {
-                Ok(intents) => {
-                    // FIX 2: each per-entity await below (`health_check`,
-                    // `clear_steal_intent`, `demote`) is deadline/
-                    // cancellation-armed exactly like every other
-                    // control-plane call above — a slow-but-not-hung
-                    // `health_check` across N owned entities must not blow
-                    // this node's own heartbeat deadline unobserved, and
-                    // shutdown must not block behind a hung ask.
-                    for (entity, epoch) in intents {
-                        let health_check_future =
-                            std::pin::pin!(local_claims.health_check(&entity));
-                        let healthy = tokio::select! {
-                            biased;
-                            _ = stop_token.cancelled() => {
-                                run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                                return;
-                            }
-                            _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                                break 'tick;
-                            }
-                            result = health_check_future => result,
-                        };
-                        if healthy {
-                            let clear_future =
-                                std::pin::pin!(lease.clear_steal_intent(&entity, &identity, epoch));
-                            let cleared = tokio::select! {
+
+                let owned = local_claims.owned().await;
+                let reconcile_future = std::pin::pin!(lease.reconcile(&identity, &owned));
+                let reconcile_result = tokio::select! {
+                    biased;
+                    _ = stop_token.cancelled() => {
+                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                        break;
+                    }
+                    result = reconcile_future => result,
+                };
+                match reconcile_result {
+                    Ok(lost) => {
+                        for entity in &lost {
+                            local_claims.demote(entity).await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "clustering demotion-reconciliation query failed; will retry next interval");
+                    }
+                }
+
+                // ADR-0017 Phase 3 Slice 3: owner-side steal-intent veto scan,
+                // riding the same per-interval cadence and deadline-arm as the
+                // other control-plane calls above — "every owner's heartbeat
+                // loop reads intents against its own claims" (element 4).
+                // Vacuous in production this slice: `local_claims.owned()` is
+                // always empty (`NoLocallyClaimedEntities`, per Slice 2's own
+                // wiring — no code acquires a `UserActor`/`RoomActor` claim
+                // until Slices 5-7), so `owner_steal_intents` always returns an
+                // empty set and this block is a no-op every interval. It is
+                // exercised directly against `PostgresClaimStore` and a
+                // configurable `LocallyClaimedEntities` fake in this module's
+                // own tests.
+                let intents_future = std::pin::pin!(lease.owner_steal_intents(&identity));
+                let intents_result = tokio::select! {
+                    biased;
+                    _ = stop_token.cancelled() => {
+                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                        break;
+                    }
+                    result = intents_future => result,
+                };
+                match intents_result {
+                    Ok(intents) => {
+                        // FIX 2: each per-entity await below (`health_check`,
+                        // `clear_steal_intent`, `demote`) is deadline/
+                        // cancellation-armed exactly like every other
+                        // control-plane call above — a slow-but-not-hung
+                        // `health_check` across N owned entities must not blow
+                        // this node's own heartbeat deadline unobserved, and
+                        // shutdown must not block behind a hung ask.
+                        for (entity, epoch) in intents {
+                            let health_check_future =
+                                std::pin::pin!(local_claims.health_check(&entity));
+                            let healthy = tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
                                     run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
@@ -901,110 +1123,135 @@ pub async fn run_node_lease<L>(
                                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                                     break 'tick;
                                 }
-                                result = clear_future => result,
+                                result = health_check_future => result,
                             };
-                            match cleared {
-                                Ok(rows) if rows > 0 => {}
-                                Ok(_) => {
-                                    // FIX 1(b): `owner_steal_intents` just
-                                    // reported this entity as ours with an
-                                    // outstanding intent, so zero rows
-                                    // affected by the epoch-fenced DELETE
-                                    // means the DELETE's own
-                                    // claims-ownership check failed — a
-                                    // steal already won the race (FIX 1(a)'s
-                                    // consume-CTE design) between our health
-                                    // check and this clear call. Treat this
-                                    // as "possibly deposed" and demote
-                                    // immediately rather than believing the
-                                    // veto succeeded.
-                                    tracing::warn!(
-                                        entity_id = %entity.id,
-                                        "clustering: clear_steal_intent affected zero rows; \
-                                         this node may already have been deposed for this \
-                                         entity — demoting locally"
-                                    );
-                                    let demote_future =
-                                        std::pin::pin!(local_claims.demote(&entity));
-                                    tokio::select! {
-                                        biased;
-                                        _ = stop_token.cancelled() => {
-                                            run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                                            return;
+                            if healthy {
+                                let clear_future = std::pin::pin!(
+                                    lease.clear_steal_intent(&entity, &identity, epoch)
+                                );
+                                let cleared = tokio::select! {
+                                    biased;
+                                    _ = stop_token.cancelled() => {
+                                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                        return;
+                                    }
+                                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                        break 'tick;
+                                    }
+                                    result = clear_future => result,
+                                };
+                                match cleared {
+                                    Ok(rows) if rows > 0 => {}
+                                    Ok(_) => {
+                                        // FIX 1(b): `owner_steal_intents` just
+                                        // reported this entity as ours with an
+                                        // outstanding intent, so zero rows
+                                        // affected by the epoch-fenced DELETE
+                                        // means the DELETE's own
+                                        // claims-ownership check failed — a
+                                        // steal already won the race (FIX 1(a)'s
+                                        // consume-CTE design) between our health
+                                        // check and this clear call. Treat this
+                                        // as "possibly deposed" and demote
+                                        // immediately rather than believing the
+                                        // veto succeeded.
+                                        tracing::warn!(
+                                            entity_id = %entity.id,
+                                            "clustering: clear_steal_intent affected zero rows; \
+                                             this node may already have been deposed for this \
+                                             entity — demoting locally"
+                                        );
+                                        let demote_future =
+                                            std::pin::pin!(local_claims.demote(&entity));
+                                        tokio::select! {
+                                            biased;
+                                            _ = stop_token.cancelled() => {
+                                                run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                                return;
+                                            }
+                                            _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                                break 'tick;
+                                            }
+                                            _ = demote_future => {}
                                         }
-                                        _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                                            break 'tick;
-                                        }
-                                        _ = demote_future => {}
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error,
+                                            entity_id = %entity.id,
+                                            "clustering: failed to clear a vetoed steal intent; the \
+                                             reporter's next scan will re-observe it"
+                                        );
                                     }
                                 }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        %error,
-                                        entity_id = %entity.id,
-                                        "clustering: failed to clear a vetoed steal intent; the \
-                                         reporter's next scan will re-observe it"
-                                    );
+                            } else {
+                                // Proactive wedge-kill (element 4): the health
+                                // ask failed, so this owner already knows the
+                                // steal will proceed at `intent_ttl` — demote
+                                // now rather than keep serving (or squatting on)
+                                // a wedged actor until then.
+                                tracing::error!(
+                                    entity_id = %entity.id,
+                                    "clustering: local actor failed its internal health ask during \
+                                     steal-intent processing; proactively demoting ahead of the \
+                                     pending steal"
+                                );
+                                let demote_future = std::pin::pin!(local_claims.demote(&entity));
+                                tokio::select! {
+                                    biased;
+                                    _ = stop_token.cancelled() => {
+                                        run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                        return;
+                                    }
+                                    _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                                        break 'tick;
+                                    }
+                                    _ = demote_future => {}
                                 }
-                            }
-                        } else {
-                            // Proactive wedge-kill (element 4): the health
-                            // ask failed, so this owner already knows the
-                            // steal will proceed at `intent_ttl` — demote
-                            // now rather than keep serving (or squatting on)
-                            // a wedged actor until then.
-                            tracing::error!(
-                                entity_id = %entity.id,
-                                "clustering: local actor failed its internal health ask during \
-                                 steal-intent processing; proactively demoting ahead of the \
-                                 pending steal"
-                            );
-                            let demote_future = std::pin::pin!(local_claims.demote(&entity));
-                            tokio::select! {
-                                biased;
-                                _ = stop_token.cancelled() => {
-                                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
-                                    return;
-                                }
-                                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
-                                    break 'tick;
-                                }
-                                _ = demote_future => {}
                             }
                         }
                     }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "clustering owner steal-intent scan failed; will retry next interval");
+                    Err(error) => {
+                        tracing::warn!(%error, "clustering owner steal-intent scan failed; will retry next interval");
+                    }
                 }
             }
         }
 
-        // Self-fenced (either trigger): stop serving before the lease
-        // becomes stealable, then flip client-facing readiness.
-        for entity in local_claims.owned().await {
-            local_claims.demote(&entity).await;
-        }
+        // Self-fenced (either trigger): refuse new sessions immediately,
+        // then stop every local claim/proxy while marking this identity
+        // draining. Both operations are independently bounded/best-effort;
+        // neither should serialize the other during a partition.
         readiness.set_ready(false);
+        let (teardown_complete, ()) = tokio::join!(
+            local_claims.demote_all_on_self_fence(),
+            mark_draining_bounded(&lease, &identity, config.heartbeat_interval),
+        );
+        if !teardown_complete {
+            tracing::error!(
+                node_id = %identity.node_id,
+                "clustering node self-fenced with incomplete local teardown; readiness will remain false until a pre-recovery retry succeeds"
+            );
+        }
         isolation.reset();
 
-        // FIX 1(b): best-effort mark the just-fenced identity's row
-        // draining, bounded — narrows how long other nodes keep counting
-        // it as live (FIX 1(c) already excludes draining rows regardless
-        // of heartbeat freshness).
-        mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
-
-        // FIX 1(a): mint the fresh re-registration identity ONCE per
-        // fence — every retry below (including hysteresis-rejected ones)
-        // reuses it. See this function's doc comment for the row-leak
-        // wedge this closes.
-        let fresh = NodeIdentity::new(
-            uuid::Uuid::new_v4().to_string(),
-            uuid::Uuid::new_v4().to_string(),
-        );
+        // FIX 1(a): preserve the process-stable node_id/relay address and
+        // mint one fresh fencing epoch per fence. Every retry below
+        // (including hysteresis-rejected ones) reuses this incarnation.
+        let mut recovery = match startup_source {
+            Some(source) => RecoveryState::from_registered_candidate(source, identity.clone()),
+            None => RecoveryState::new(&identity),
+        };
 
         // Re-registration with hysteresis + exponential backoff.
         loop {
+            let mut delay = backoff.next_delay();
+            if recovery.candidate_registered {
+                // Once a draining candidate exists, keep its exact lease
+                // alive at the ordinary heartbeat cadence instead of letting
+                // exponential backoff exceed the node TTL.
+                delay = delay.min(config.heartbeat_interval);
+            }
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
@@ -1014,25 +1261,72 @@ pub async fn run_node_lease<L>(
                     // all, in which case this is a harmless no-op) — mark
                     // it draining too before returning on ordinary
                     // shutdown.
-                    mark_draining_bounded(&lease, &fresh, config.heartbeat_interval).await;
+                    mark_draining_bounded(
+                        &lease,
+                        &recovery.candidate,
+                        config.heartbeat_interval,
+                    )
+                    .await;
                     return;
                 }
-                _ = tokio::time::sleep(backoff.next_delay()) => {}
+                _ = tokio::time::sleep(delay) => {}
             }
+
+            if recovery.candidate_registered {
+                match lease.heartbeat(&recovery.candidate, config.lease_ttl).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            node_epoch = %recovery.candidate.node_epoch,
+                            "clustering recovery candidate lease elapsed; rotating epoch"
+                        );
+                        recovery.rotate_candidate();
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            node_epoch = %recovery.candidate.node_epoch,
+                            "clustering recovery candidate heartbeat failed"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // Never supersede the old fencing epoch while a resource from
+            // that incarnation may still be alive. A failed terminal sweep
+            // means exactly that, so retry teardown before publishing the
+            // candidate epoch to Postgres.
+            if !local_claims.demote_all_on_self_fence().await {
+                tracing::error!(
+                    node_id = %identity.node_id,
+                    "clustering node terminal teardown remains incomplete; refusing to rotate the node epoch"
+                );
+                continue;
+            }
+
             match lease
-                .register_with_peer_id(&fresh, pod_template_hash.clone(), peer_id.clone())
+                .register_draining_with_peer_id(
+                    &recovery.registration_source,
+                    &recovery.candidate,
+                    pod_template_hash.clone(),
+                    peer_id.clone(),
+                    config.lease_ttl,
+                )
                 .await
             {
                 Ok(()) => {
+                    recovery.candidate_registered = true;
                     let other_live = lease
-                        .count_other_live_nodes(&fresh, config.lease_ttl)
+                        .count_other_live_nodes(&recovery.candidate, config.lease_ttl)
                         .await
                         .unwrap_or(usize::MAX);
                     let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
                     if can_reacquire_claims(other_live, reachable) {
                         // ADR-0017 Phase 3 Slice 5 (plan deviation #19,
                         // closed by FIX 4): the ADR's readiness gate is
-                        // "re-registration under a fresh node_id/node_epoch
+                        // "re-registration under a fresh node epoch
                         // **plus claim re-acquisition**." `local_claims` is
                         // no longer vacuous (Slice 5's
                         // `local_claims::SmSessionLocalClaims`), so the
@@ -1042,8 +1336,8 @@ pub async fn run_node_lease<L>(
                         // FIX 4(a): re-run the demote sweep ONE more time,
                         // right before flipping readiness. The self-fenced
                         // block's own sweep (above, at fence-entry) is a
-                        // one-shot snapshot of `local_claims.owned()` taken
-                        // BEFORE this retry loop even started — a session
+                        // one-shot terminal teardown taken BEFORE this retry
+                        // loop even started — a session
                         // that detached (and self-claimed, via
                         // `acquire_claim_store_entry_for_detach`) during
                         // the retry window did so under `live_identity`'s
@@ -1053,8 +1347,15 @@ pub async fn run_node_lease<L>(
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
-                        for entity in local_claims.owned().await {
-                            local_claims.demote(&entity).await;
+                        if !local_claims.demote_all_on_self_fence().await {
+                            tracing::error!(
+                                node_id = %recovery.candidate.node_id,
+                                "clustering node re-registered but terminal local teardown is still incomplete; refusing to restore readiness"
+                            );
+                            // The candidate was atomically registered as
+                            // draining and stays that way across this retry;
+                            // it has never been advertised as serving.
+                            continue;
                         }
 
                         // What "claim re-acquisition" can mean AT THIS
@@ -1063,8 +1364,9 @@ pub async fn run_node_lease<L>(
                         // just above) is now demoted (forgotten locally,
                         // never released in Postgres — FIX 3's "must
                         // succeed even when Postgres is unreachable"
-                        // contract for `demote`), so `local_claims.owned()`
-                        // is empty and there is nothing left in THIS
+                        // contract for `demote`), so the authoritative
+                        // `local_claims.owned()` set is empty and there is
+                        // nothing left in THIS
                         // process's bookkeeping to "re-acquire" by name.
                         // What this node uniquely knows, that no other node
                         // can assert as confidently, is that its OWN
@@ -1072,47 +1374,152 @@ pub async fn run_node_lease<L>(
                         // reassignment below) is genuinely dead — so it
                         // commits that knowledge to Postgres immediately
                         // via `NodeLeaseStore::expire`.
-                        expire_bounded(&lease, &identity, config.lease_ttl).await;
+                        let sources = recovery.sources.iter().cloned().collect::<Vec<_>>();
+                        for source in sources {
+                            expire_bounded(&lease, &source, config.lease_ttl).await;
+                        }
 
                         // FIX 4(b), council-adjudicated: rather than
                         // leaving every one of this node's own dropped
                         // claims to wait out the general orphan reaper's
                         // independent 120s cadence, reclaim them inline,
                         // right here, under the freshly re-registered
-                        // identity — bounded/deadline-armed like every
-                        // sibling control-plane call in this function. The
+                        // identity. Once a claim-steal commits this sequence
+                        // is intentionally uncancellable through targeted
+                        // hydration; abandoning it midway would strand a
+                        // fresh-owned claim outside local state. The
                         // general reaper remains the backstop for every
                         // OTHER node's genuinely dead claims (never
                         // touched by this inline step — see
                         // `reclaim_own_expired_claims`'s owner filter).
-                        // Scoped in its own block: `std::pin::pin!` binds a
-                        // local that lives to the end of its enclosing
-                        // block, not just this statement, and that local
-                        // borrows `identity`/`fresh` — the block ensures
-                        // those borrows end before `identity = fresh` below
-                        // reassigns `identity` (and moves `fresh`).
-                        let reclaim_timed_out = {
-                            let reclaim_future = std::pin::pin!(reclaim_own_expired_claims(
+                        let recovery_pass = reclaim_with_candidate_heartbeat(
+                            &lease,
+                            claim_store.as_ref(),
+                            &mut recovery,
+                            local_claims.as_ref(),
+                            config.heartbeat_interval,
+                            config.lease_ttl,
+                        )
+                        .await;
+                        if stop_token.is_cancelled() {
+                            let _ = local_claims.demote_all_on_self_fence().await;
+                            mark_draining_bounded(
                                 &lease,
-                                claim_store.as_ref(),
-                                &identity,
-                                &fresh,
-                                local_claims.as_ref(),
-                            ));
-                            tokio::time::timeout(config.lease_ttl, reclaim_future)
-                                .await
-                                .is_err()
-                        };
-                        if reclaim_timed_out {
-                            tracing::warn!(
-                                node_id = %identity.node_id,
-                                "clustering: inline post-fence reclaim of this node's own \
-                                 just-expired identity's SM-session claims timed out; the \
-                                 general orphan reaper remains the backstop for these entities"
-                            );
+                                &recovery.candidate,
+                                config.heartbeat_interval,
+                            )
+                            .await;
+                            return;
+                        }
+                        match recovery_pass {
+                            RecoveryPass::Complete => {}
+                            RecoveryPass::Retry => continue,
+                            RecoveryPass::RotateCandidate => {
+                                mark_draining_bounded(
+                                    &lease,
+                                    &recovery.candidate,
+                                    config.heartbeat_interval,
+                                )
+                                .await;
+                                recovery.rotate_candidate();
+                                continue;
+                            }
                         }
 
-                        identity = fresh;
+                        // Recovery steals above are the sole acquisition
+                        // exception allowed while this exact candidate is
+                        // draining. Only after every moved session has been
+                        // hydrated do we activate the row. Thus ordinary
+                        // local admissions remain bound to the old (now
+                        // ineligible) SharedNodeIdentity, readiness stays
+                        // false, and the database never advertises this
+                        // candidate as generally acquisition-eligible during
+                        // reclaim.
+                        let activated = match lease
+                            .activate(&recovery.candidate, config.lease_ttl)
+                            .await
+                        {
+                            Ok(activated) => activated,
+                            Err(error) => {
+                                tracing::warn!(
+                                    node_id = %recovery.candidate.node_id,
+                                    %error,
+                                    "clustering node recovery activation failed after reclaim; rotating candidate"
+                                );
+                                false
+                            }
+                        };
+                        if stop_token.is_cancelled() {
+                            let _ = local_claims.demote_all_on_self_fence().await;
+                            mark_draining_bounded(
+                                &lease,
+                                &recovery.candidate,
+                                config.heartbeat_interval,
+                            )
+                            .await;
+                            return;
+                        }
+                        if !activated {
+                            mark_draining_bounded(
+                                &lease,
+                                &recovery.candidate,
+                                config.heartbeat_interval,
+                            )
+                            .await;
+                            recovery.rotate_candidate();
+                            continue;
+                        }
+
+                        // Reclaim may legitimately consume most of a lease
+                        // TTL. Renew and then prove the exact candidate row is
+                        // still active (non-draining), non-expired, and fresh
+                        // immediately before publishing its identity and
+                        // readiness. This also closes the window where a
+                        // watchdog expires the candidate while recovery is
+                        // hydrating durable SM state.
+                        let active_and_fresh = match lease
+                            .renew_active(&recovery.candidate, config.lease_ttl)
+                            .await
+                        {
+                            Ok(renewed) => renewed,
+                            Err(error) => {
+                                tracing::warn!(
+                                    node_id = %recovery.candidate.node_id,
+                                    %error,
+                                    "clustering node recovery lease revalidation failed after reclaim; retrying"
+                                );
+                                false
+                            }
+                        };
+                        if stop_token.is_cancelled() {
+                            let _ = local_claims.demote_all_on_self_fence().await;
+                            mark_draining_bounded(
+                                &lease,
+                                &recovery.candidate,
+                                config.heartbeat_interval,
+                            )
+                            .await;
+                            return;
+                        }
+                        if !active_and_fresh {
+                            mark_draining_bounded(
+                                &lease,
+                                &recovery.candidate,
+                                config.heartbeat_interval,
+                            )
+                            .await;
+                            // Claims may already have moved to `fresh` and
+                            // been hydrated before the final liveness proof
+                            // failed. Reusing the same candidate would make
+                            // the next terminal sweep forget them while the
+                            // old-owner filter found nothing to reclaim.
+                            // Rotate the recovery epoch and make this failed
+                            // candidate the next reclaim source instead.
+                            recovery.rotate_candidate();
+                            continue;
+                        }
+
+                        identity = recovery.candidate.clone();
                         live_identity.set(identity.clone());
                         backoff.reset();
                         readiness.set_ready(true);
@@ -1129,6 +1536,37 @@ pub async fn run_node_lease<L>(
                 }
                 Err(error) => {
                     tracing::warn!(%error, "clustering node re-registration failed; retrying with backoff");
+                    // A registration reply may be ambiguous. If the exact
+                    // candidate occupies the stable row, heartbeat is the
+                    // liveness proof; a false heartbeat means it is expired
+                    // or stale and must become a lineage source before a new
+                    // epoch is minted. If the row still contains an older
+                    // known source, retry the same candidate against that
+                    // exact predecessor.
+                    match lease.registered_identity(&recovery.candidate.node_id).await {
+                        Ok(Some(current)) if current == recovery.candidate => {
+                            match lease.heartbeat(&recovery.candidate, config.lease_ttl).await {
+                                Ok(true) => recovery.candidate_registered = true,
+                                Ok(false) => recovery.rotate_candidate(),
+                                Err(heartbeat_error) => tracing::warn!(
+                                    %heartbeat_error,
+                                    "failed to reconcile ambiguous recovery registration"
+                                ),
+                            }
+                        }
+                        Ok(Some(current)) if recovery.sources.contains(&current) => {
+                            recovery.registration_source = current;
+                        }
+                        Ok(Some(current)) => tracing::error!(
+                            node_epoch = %current.node_epoch,
+                            "stable node row contains an unknown recovery epoch; staying fenced"
+                        ),
+                        Ok(None) => {}
+                        Err(read_error) => tracing::warn!(
+                            %read_error,
+                            "failed to read exact node identity after registration error"
+                        ),
+                    }
                 }
             }
         }
@@ -1249,16 +1687,19 @@ mod tests {
     // `swarm.rs`'s own `PartitionedLease`-based heartbeat tests exactly,
     // one level up (node lease instead of keypair-slot lease).
 
-    use std::sync::atomic::{AtomicBool, AtomicU32};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
 
     struct FakeLease {
         heartbeat_result: std::sync::Mutex<Box<dyn FnMut() -> Result<bool, ClaimError> + Send>>,
         registrations: Arc<AtomicU32>,
         /// Every distinct `node_id` ever passed to `register` — lets tests
-        /// assert FIX 1(a)'s invariant directly: a single fence's
-        /// re-registration retries must all reuse the same identity, never
-        /// mint a fresh one per retry.
+        /// assert FIX 1(a)'s invariant directly: the process relay address
+        /// stays stable across every re-registration retry.
         registered_node_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        /// Every distinct epoch passed to `register`; retries within one
+        /// fence must reuse the same incarnation rather than superseding one
+        /// another before readiness is restored.
+        registered_node_epochs: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
         /// Count of `mark_draining` calls — lets tests assert FIX 1(b)/FIX 3
         /// actually fire (bounded best-effort call issued, not skipped).
         draining_calls: Arc<AtomicU32>,
@@ -1278,6 +1719,15 @@ mod tests {
         /// consume-CTE design between this node's health check and its
         /// clear call.
         clear_reports_zero_rows: Arc<AtomicBool>,
+        /// Scripted post-reclaim liveness proofs. Empty means success;
+        /// tests push `false` to force a recovery-candidate rotation after
+        /// claims have already moved and been hydrated.
+        renew_active_results: Arc<std::sync::Mutex<std::collections::VecDeque<bool>>>,
+        /// Optional dynamic orphan source for recovery-loop tests. The fake
+        /// reads the claim store on every scan so a claim moved from one
+        /// failed recovery epoch is surfaced under that exact new owner on
+        /// the next retry.
+        orphan_claim: Option<(Arc<dyn ClaimStore>, Entity)>,
     }
 
     impl FakeLease {
@@ -1288,12 +1738,24 @@ mod tests {
                 registered_node_ids: Arc::new(std::sync::Mutex::new(
                     std::collections::HashSet::new(),
                 )),
+                registered_node_epochs: Arc::new(std::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                )),
                 draining_calls: Arc::new(AtomicU32::new(0)),
                 other_live_nodes: Arc::new(AtomicU32::new(0)),
                 steal_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 clear_reports_zero_rows: Arc::new(AtomicBool::new(false)),
+                renew_active_results: Arc::new(std::sync::Mutex::new(
+                    std::collections::VecDeque::new(),
+                )),
+                orphan_claim: None,
             }
+        }
+
+        fn with_orphan_claim(mut self, store: Arc<dyn ClaimStore>, entity: Entity) -> Self {
+            self.orphan_claim = Some((store, entity));
+            self
         }
     }
 
@@ -1309,6 +1771,10 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .insert(me.node_id.clone());
+            self.registered_node_epochs
+                .lock()
+                .expect("lock")
+                .insert(me.node_epoch.clone());
             Ok(())
         }
         async fn heartbeat(
@@ -1329,6 +1795,18 @@ mod tests {
             self.draining_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+        async fn renew_active(
+            &self,
+            _me: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<bool, ClaimError> {
+            Ok(self
+                .renew_active_results
+                .lock()
+                .expect("lock")
+                .pop_front()
+                .unwrap_or(true))
+        }
         async fn count_other_live_nodes(
             &self,
             _me: &NodeIdentity,
@@ -1346,6 +1824,8 @@ mod tests {
         async fn report_steal_intent(
             &self,
             entity: &Entity,
+            _target_owner: &NodeIdentity,
+            _target_epoch: ClaimEpoch,
             _reporter: &NodeIdentity,
         ) -> Result<(), ClaimError> {
             self.steal_intents
@@ -1382,11 +1862,20 @@ mod tests {
         async fn list_orphaned_sm_session_claims(
             &self,
         ) -> Result<Vec<crate::clustering::claims::OrphanedSmSessionClaim>, ClaimError> {
-            // Not exercised by this module's tests (the orphan reaper is
-            // tested against `PostgresClaimStore` directly, in
-            // `session_janitors.rs`/`claims.rs`); this fake never has
-            // orphaned candidates.
-            Ok(Vec::new())
+            let Some((store, entity)) = &self.orphan_claim else {
+                return Ok(Vec::new());
+            };
+            Ok(store
+                .current_claim(entity)
+                .await?
+                .map(|snapshot| {
+                    vec![crate::clustering::claims::OrphanedSmSessionClaim {
+                        entity: entity.clone(),
+                        epoch: snapshot.claim_epoch,
+                        owner: snapshot.owner,
+                    }]
+                })
+                .unwrap_or_default())
         }
         async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
             // Not exercised by this module's tests (the rollout-aware
@@ -1455,6 +1944,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -1502,6 +1992,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -1553,6 +2044,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -1576,20 +2068,447 @@ mod tests {
         stop_token.cancel();
     }
 
-    // FIX 1(a): the row-leak wedge regression test. With `other_live_nodes`
+    #[tokio::test(start_paused = true)]
+    async fn cold_start_reclaims_the_exact_replaced_predecessor_before_readiness() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(150);
+        let predecessor = identity();
+        let current = NodeIdentity::new(
+            predecessor.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let entity = Entity::new(EntityType::SmSession, "cold-start-predecessor");
+        let concrete_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        concrete_store
+            .acquire(&entity, &predecessor)
+            .await
+            .expect("seed predecessor claim");
+        let claim_store: Arc<dyn ClaimStore> = concrete_store.clone();
+        let lease = FakeLease::new(Box::new(|| Ok(true)))
+            .with_orphan_claim(Arc::clone(&claim_store), entity.clone());
+        let local_state = Arc::new(RecoveryLocalState::default());
+        let readiness = ClusteringReadiness::new();
+        readiness.set_ready(false);
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(current.clone());
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            current.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(RecoveryLocalClaims {
+                    state: Arc::clone(&local_state),
+                }),
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::clone(&claim_store),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: Some(predecessor),
+            },
+        ));
+
+        advance_until(Duration::from_millis(10), 30, || readiness.is_ready()).await;
+        assert!(readiness.is_ready());
+        assert_eq!(live_identity.current(), current);
+        let snapshot = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim read")
+            .expect("claim present");
+        assert_eq!(snapshot.owner, current);
+        assert_eq!(
+            local_state.owned.lock().expect("lock").get(&entity),
+            Some(&current)
+        );
+
+        stop_token.cancel();
+        task.await.expect("node lease exits");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn post_reclaim_renewal_failure_rotates_and_rehydrates_before_readiness() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(150);
+        let initial = identity();
+        let entity = Entity::new(EntityType::SmSession, "recovery-renew-retry");
+        let concrete_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        concrete_store
+            .acquire(&entity, &initial)
+            .await
+            .expect("seed pre-fence claim");
+        let claim_store: Arc<dyn ClaimStore> = concrete_store.clone();
+
+        let fenced_once = Arc::new(AtomicBool::new(false));
+        let fenced_once_writer = Arc::clone(&fenced_once);
+        let lease = FakeLease::new(Box::new(move || {
+            if fenced_once_writer.swap(true, Ordering::SeqCst) {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }))
+        .with_orphan_claim(Arc::clone(&claim_store), entity.clone());
+        lease
+            .renew_active_results
+            .lock()
+            .expect("lock")
+            .push_back(false);
+        let registered_epochs = Arc::clone(&lease.registered_node_epochs);
+
+        let local_state = Arc::new(RecoveryLocalState::default());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(RecoveryLocalClaims {
+            state: Arc::clone(&local_state),
+        });
+        let readiness = ClusteringReadiness::new();
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(initial.clone());
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial,
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::clone(&claim_store),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
+            },
+        ));
+
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        assert!(
+            !readiness.is_ready(),
+            "the initial heartbeat miss self-fences"
+        );
+        advance_until(Duration::from_millis(10), 50, || readiness.is_ready()).await;
+        assert!(
+            readiness.is_ready(),
+            "a second recovery incarnation should eventually pass the final liveness proof"
+        );
+
+        let hydration_owners = local_state.hydration_owners.lock().expect("lock").clone();
+        let distinct_hydration_epochs = hydration_owners
+            .iter()
+            .map(|owner| owner.node_epoch.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            distinct_hydration_epochs.len(),
+            2,
+            "the claim must be verified under the failed candidate and again under its replacement"
+        );
+        assert_eq!(
+            registered_epochs.lock().expect("lock").len(),
+            2,
+            "the retry must publish two distinct candidate incarnations"
+        );
+        let live = live_identity.current();
+        let snapshot = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read final claim")
+            .expect("claim remains present");
+        assert_eq!(snapshot.owner, live);
+        assert_eq!(
+            local_state.owned.lock().expect("lock").get(&entity),
+            Some(&live),
+            "readiness requires the final claim owner to be hydrated locally under the same epoch"
+        );
+
+        stop_token.cancel();
+        task.await.expect("node lease exits cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_stays_not_ready_until_a_committed_grant_is_hydrated() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(150);
+        let initial = identity();
+        let entity = Entity::new(EntityType::SmSession, "recovery-hydration-retry");
+        let concrete_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        concrete_store
+            .acquire(&entity, &initial)
+            .await
+            .expect("seed pre-fence claim");
+        let claim_store: Arc<dyn ClaimStore> = concrete_store.clone();
+
+        let fenced_once = Arc::new(AtomicBool::new(false));
+        let fenced_once_writer = Arc::clone(&fenced_once);
+        let lease = FakeLease::new(Box::new(move || {
+            if fenced_once_writer.swap(true, Ordering::SeqCst) {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }))
+        .with_orphan_claim(Arc::clone(&claim_store), entity.clone());
+        let local_state = Arc::new(RecoveryLocalState::default());
+        local_state.hydration_failures.store(1, Ordering::SeqCst);
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial,
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(RecoveryLocalClaims {
+                    state: Arc::clone(&local_state),
+                }),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store,
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
+            },
+        ));
+
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        advance_until(Duration::from_millis(5), 20, || {
+            !local_state
+                .hydration_owners
+                .lock()
+                .expect("lock")
+                .is_empty()
+        })
+        .await;
+        assert!(
+            !readiness.is_ready(),
+            "a fresh-owned claim with failed local hydration must keep recovery fenced"
+        );
+
+        advance_until(Duration::from_millis(10), 30, || readiness.is_ready()).await;
+        assert!(
+            readiness.is_ready(),
+            "recovery may publish only after the pending exact grant hydrates"
+        );
+        assert!(local_state
+            .owned
+            .lock()
+            .expect("lock")
+            .contains_key(&entity));
+
+        stop_token.cancel();
+        task.await.expect("node lease exits cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_recovery_keeps_the_draining_candidate_heartbeat_fresh() {
+        let interval = Duration::from_millis(40);
+        let lease_ttl = Duration::from_millis(120);
+        let initial = identity();
+        let entity = Entity::new(EntityType::SmSession, "slow-recovery-hydration");
+        let concrete_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        concrete_store
+            .acquire(&entity, &initial)
+            .await
+            .expect("seed pre-fence claim");
+        let claim_store: Arc<dyn ClaimStore> = concrete_store.clone();
+        let heartbeat_calls = Arc::new(AtomicUsize::new(0));
+        let heartbeat_calls_writer = Arc::clone(&heartbeat_calls);
+        let lease = FakeLease::new(Box::new(move || {
+            let call = heartbeat_calls_writer.fetch_add(1, Ordering::SeqCst);
+            Ok(call != 0)
+        }))
+        .with_orphan_claim(Arc::clone(&claim_store), entity.clone());
+        let local_state = Arc::new(RecoveryLocalState {
+            // One hydration must itself span the lease TTL. Before locally
+            // successful grants were consumed, the duplicate second
+            // hydration accidentally made two 80ms calls satisfy this test.
+            hydration_delay: Duration::from_millis(160),
+            ..RecoveryLocalState::default()
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial,
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(RecoveryLocalClaims {
+                    state: Arc::clone(&local_state),
+                }),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store,
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
+            },
+        ));
+
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        advance_until(Duration::from_millis(20), 40, || readiness.is_ready()).await;
+        assert!(readiness.is_ready());
+        assert!(
+            heartbeat_calls.load(Ordering::SeqCst) >= 3,
+            "a hydration pass longer than the TTL must renew the draining candidate"
+        );
+        assert!(local_state
+            .owned
+            .lock()
+            .expect("lock")
+            .contains_key(&entity));
+
+        stop_token.cancel();
+        task.await.expect("node lease exits cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_hydration_never_activates_or_restores_readiness() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_millis(150);
+        let initial = identity();
+        let entity = Entity::new(EntityType::SmSession, "cancelled-recovery-hydration");
+        let concrete_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        concrete_store
+            .acquire(&entity, &initial)
+            .await
+            .expect("seed pre-fence claim");
+        let claim_store: Arc<dyn ClaimStore> = concrete_store.clone();
+        let fenced_once = Arc::new(AtomicBool::new(false));
+        let fenced_once_writer = Arc::clone(&fenced_once);
+        let lease = FakeLease::new(Box::new(move || {
+            if fenced_once_writer.swap(true, Ordering::SeqCst) {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }))
+        .with_orphan_claim(Arc::clone(&claim_store), entity.clone());
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let local_state = Arc::new(RecoveryLocalState::default());
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial,
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(BlockingHydrationClaims {
+                    state: Arc::clone(&local_state),
+                    started: Arc::clone(&started),
+                    release: Arc::clone(&release),
+                }),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store,
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
+            },
+        ));
+
+        advance_until(interval, 20, || !readiness.is_ready()).await;
+        advance_until(Duration::from_millis(5), 30, || {
+            started.load(Ordering::SeqCst)
+        })
+        .await;
+        assert!(
+            started.load(Ordering::SeqCst),
+            "strict hydration must start"
+        );
+        stop_token.cancel();
+        release.notify_one();
+        task.await
+            .expect("recovery exits after finishing hydration");
+
+        assert!(
+            !readiness.is_ready(),
+            "shutdown cancellation must not publish the recovered candidate"
+        );
+        assert!(
+            local_state.owned.lock().expect("lock").is_empty(),
+            "the post-hydration cancellation path must terminally clear local state"
+        );
+    }
+
+    // FIX 1(a): the stable-address/row-leak regression test. With `other_live_nodes`
     // fixed at 1 and `connected_peers` at 0, `can_reacquire_claims(1, 0)` is
     // always false, so every re-registration attempt succeeds at
     // `register()` but is then rejected by the hysteresis gate — forcing
-    // several retries within a single fence. Before the fix, each retry
-    // minted a brand-new random identity (a phantom row per retry); after
-    // the fix, every retry within the same fence reuses one identity.
+    // several retries within a single fence. The process `node_id` must remain
+    // the relay actor's stable address while every retry reuses the one epoch
+    // minted for this fence.
     #[tokio::test(start_paused = true)]
     async fn re_registration_retries_within_one_fence_reuse_the_same_identity() {
         let interval = Duration::from_millis(50);
         let lease_ttl = Duration::from_millis(150);
-        let lease = FakeLease::new(Box::new(|| Ok(false)));
+        let fenced_once = Arc::new(AtomicBool::new(false));
+        let fenced_once_writer = Arc::clone(&fenced_once);
+        let lease = FakeLease::new(Box::new(move || {
+            if fenced_once_writer.swap(true, Ordering::SeqCst) {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }));
         lease.other_live_nodes.store(1, Ordering::SeqCst);
         let registered_node_ids = Arc::clone(&lease.registered_node_ids);
+        let registered_node_epochs = Arc::clone(&lease.registered_node_epochs);
         let registrations = Arc::clone(&lease.registrations);
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -1616,6 +2535,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -1640,8 +2560,12 @@ mod tests {
         assert_eq!(
             registered_node_ids.lock().expect("lock").len(),
             1,
-            "every retry within a single fence must reuse the same freshly-minted \
-             identity, never mint a new one per retry (the row-leak wedge)"
+            "every retry must preserve the process-stable node_id used by the relay actor"
+        );
+        assert_eq!(
+            registered_node_epochs.lock().expect("lock").len(),
+            1,
+            "every retry within one fence must reuse its single freshly minted epoch"
         );
         stop_token.cancel();
     }
@@ -1750,9 +2674,9 @@ mod tests {
         // A second, permanently-live node row: gives `count_other_live_nodes`
         // a nonzero count so the re-acquisition hysteresis gate genuinely
         // rejects re-registration attempts until `connected_peers` reports
-        // reachability — forcing several retries against the SAME
-        // freshly-minted identity within each fence, exactly the shape the
-        // row-leak bug manifested in.
+        // reachability — forcing several retries against the same freshly
+        // minted epoch within each fence while the process node_id remains
+        // stable.
         let other = NodeIdentity::new(
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
@@ -1803,6 +2727,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -1827,15 +2752,15 @@ mod tests {
         // (the hysteresis gate never clears: `other` keeps
         // `count_other_live_nodes` at 1, and `connected_peers` is still 0)
         // — sample the row count several times across that retry storm and
-        // assert it never exceeds "other + fenced-old + fresh-new", proving
-        // retries do not leak rows.
+        // assert the process row is updated in place rather than leaking a
+        // fresh row or relay address.
         for _ in 0..6 {
             tokio::time::sleep(Duration::from_millis(60)).await;
             let count = count_clustering_nodes_rows(&db).await;
-            assert!(
-                count <= 3,
-                "clustering_nodes must stay bounded across re-registration retries \
-                 within one fence, got {count} rows"
+            assert_eq!(
+                count, 2,
+                "clustering_nodes must remain other + the process-stable node row \
+                 across re-registration retries"
             );
         }
 
@@ -1850,31 +2775,14 @@ mod tests {
         .await;
         assert_eq!(
             count_clustering_nodes_rows(&db).await,
-            3,
-            "other + fenced-old (draining) + the one fresh identity from this fence"
+            2,
+            "other + the process-stable node row after its epoch rotates"
         );
 
-        // Identify cycle 1's fresh identity for the second fence below.
-        let cycle1_node_id = {
-            let conn = db.guard().await.expect("guard");
-            let mut rows = conn
-                .query(
-                    "SELECT node_id FROM clustering_nodes WHERE node_id != ? AND node_id != ?",
-                    crate::db_params![other.node_id.clone(), initial_identity.node_id.clone()],
-                )
-                .await
-                .expect("query cycle1 identity");
-            rows.next()
-                .await
-                .expect("row present")
-                .expect("exactly one row: cycle1's fresh identity")
-                .get::<String>(0)
-                .expect("column present")
-        };
-
-        // --- Fence cycle 2: repeat, forcing cycle 1's identity to expire.
+        // --- Fence cycle 2: repeat against the same process node row. Its
+        // epoch changed during cycle 1, but its relay-address node_id did not.
         connected_peers.set(0);
-        force_expire_row(&db, &cycle1_node_id).await;
+        force_expire_row(&db, &initial_identity.node_id).await;
         wait_until(
             || !readiness.is_ready(),
             Duration::from_millis(20),
@@ -1885,10 +2793,9 @@ mod tests {
         for _ in 0..6 {
             tokio::time::sleep(Duration::from_millis(60)).await;
             let count = count_clustering_nodes_rows(&db).await;
-            assert!(
-                count <= 4,
-                "clustering_nodes must stay bounded across the SECOND fence's \
-                 re-registration retries too, got {count} rows"
+            assert_eq!(
+                count, 2,
+                "the second fence must still update the process-stable node row in place"
             );
         }
 
@@ -1901,14 +2808,13 @@ mod tests {
         .await;
         assert_eq!(
             count_clustering_nodes_rows(&db).await,
-            4,
-            "other + 2 fenced-and-draining old identities + the current fresh identity"
+            2,
+            "repeated fences must retain exactly other + the process-stable node row"
         );
 
         // FIX 1(c): `count_other_live_nodes` must have recovered to the
         // truthful value from `other`'s perspective — exactly the current
-        // (cycle 2) identity, not an accumulation of every identity ever
-        // minted across both fences.
+        // process incarnation, not an accumulation of rows from old epochs.
         let truthful_count = store
             .count_other_live_nodes(&other, lease_ttl)
             .await
@@ -1971,11 +2877,251 @@ mod tests {
             self.healthy.load(Ordering::SeqCst)
         }
 
-        async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
-            self.hydrated
+        async fn hydrate_reclaimed(
+            &self,
+            _owner: &NodeIdentity,
+            entity: &Entity,
+            _epoch: ClaimEpoch,
+        ) -> ReclaimedEntityHydration {
+            self.hydrated.lock().expect("lock").push(entity.clone());
+            ReclaimedEntityHydration::Local
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_recovery_hydration_retains_grant_for_a_later_pass() {
+        let source = identity();
+        let entity = Entity::new(EntityType::SmSession, "pending-hydration-once");
+        let mut recovery = RecoveryState::new(&source);
+        recovery
+            .candidate_grants
+            .insert(entity.clone(), ClaimEpoch(41));
+        let hydrated = FakeLocalClaims::unhydrated();
+        let local_claims = FakeLocalClaims {
+            owned: Vec::new(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            hydrated: Arc::clone(&hydrated),
+        };
+
+        assert!(hydrate_pending_recovery_grants(&mut recovery, &local_claims).await);
+        assert_eq!(
+            recovery.candidate_grants.get(&entity),
+            Some(&ClaimEpoch(41)),
+            "a successful hydration must retain the exact grant as recovery provenance"
+        );
+        assert!(hydrate_pending_recovery_grants(&mut recovery, &local_claims).await);
+        assert_eq!(
+            hydrated.lock().expect("lock").as_slice(),
+            &[entity.clone(), entity],
+            "a later recovery pass must rehydrate after the outer loop's terminal demotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_recovery_pass_hydrates_grant_once_and_consumes_bookkeeping() {
+        let source = identity();
+        let entity = Entity::new(EntityType::SmSession, "completed-hydration-once");
+        let mut recovery = RecoveryState::new(&source);
+        recovery
+            .candidate_grants
+            .insert(entity.clone(), ClaimEpoch(42));
+        let hydrated = FakeLocalClaims::unhydrated();
+        let local_claims = FakeLocalClaims {
+            owned: Vec::new(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            hydrated: Arc::clone(&hydrated),
+        };
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let claim_store = waddle_xmpp::ownership::InProcessClaimStore::new();
+
+        assert_eq!(
+            reclaim_own_expired_claims(
+                &lease,
+                &claim_store,
+                &mut recovery,
+                &local_claims,
+                Duration::from_secs(1),
+            )
+            .await,
+            RecoveryPass::Complete
+        );
+        assert!(recovery.candidate_grants.is_empty());
+
+        assert_eq!(
+            reclaim_own_expired_claims(
+                &lease,
+                &claim_store,
+                &mut recovery,
+                &local_claims,
+                Duration::from_secs(1),
+            )
+            .await,
+            RecoveryPass::Complete
+        );
+        assert_eq!(
+            hydrated.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&entity),
+            "a completed pass must consume its grant instead of hydrating it twice"
+        );
+    }
+
+    #[derive(Default)]
+    struct RecoveryLocalState {
+        owned: std::sync::Mutex<std::collections::HashMap<Entity, NodeIdentity>>,
+        hydration_owners: std::sync::Mutex<Vec<NodeIdentity>>,
+        hydration_failures: AtomicUsize,
+        hydration_delay: Duration,
+    }
+
+    struct RecoveryLocalClaims {
+        state: Arc<RecoveryLocalState>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for RecoveryLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            self.state
+                .owned
                 .lock()
                 .expect("lock")
-                .extend(entities.iter().map(|(entity, _epoch)| entity.clone()));
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        async fn demote(&self, entity: &Entity) {
+            self.state.owned.lock().expect("lock").remove(entity);
+        }
+
+        async fn health_check(&self, entity: &Entity) -> bool {
+            self.state.owned.lock().expect("lock").contains_key(entity)
+        }
+
+        async fn hydrate_reclaimed(
+            &self,
+            owner: &NodeIdentity,
+            entity: &Entity,
+            _epoch: ClaimEpoch,
+        ) -> ReclaimedEntityHydration {
+            if !self.state.hydration_delay.is_zero() {
+                tokio::time::sleep(self.state.hydration_delay).await;
+            }
+            self.state
+                .hydration_owners
+                .lock()
+                .expect("lock")
+                .push(owner.clone());
+            if self
+                .state
+                .hydration_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return ReclaimedEntityHydration::Retry;
+            }
+            self.state
+                .owned
+                .lock()
+                .expect("lock")
+                .insert(entity.clone(), owner.clone());
+            ReclaimedEntityHydration::Local
+        }
+    }
+
+    struct BlockingTerminalClaims {
+        started: Arc<AtomicBool>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    struct BlockingHydrationClaims {
+        state: Arc<RecoveryLocalState>,
+        started: Arc<AtomicBool>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for BlockingHydrationClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            self.state
+                .owned
+                .lock()
+                .expect("lock")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        async fn demote(&self, entity: &Entity) {
+            self.state.owned.lock().expect("lock").remove(entity);
+        }
+
+        async fn health_check(&self, entity: &Entity) -> bool {
+            self.state.owned.lock().expect("lock").contains_key(entity)
+        }
+
+        async fn hydrate_reclaimed(
+            &self,
+            owner: &NodeIdentity,
+            entity: &Entity,
+            _epoch: ClaimEpoch,
+        ) -> ReclaimedEntityHydration {
+            if !self.started.swap(true, Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+            self.state
+                .owned
+                .lock()
+                .expect("lock")
+                .insert(entity.clone(), owner.clone());
+            ReclaimedEntityHydration::Local
+        }
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for BlockingTerminalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+
+        async fn demote_all_on_self_fence(&self) -> bool {
+            self.started.store(true, Ordering::SeqCst);
+            self.release.notified().await;
+            true
+        }
+
+        async fn demote(&self, _entity: &Entity) {
+            panic!("the terminal override, not per-entity demotion, must be used");
+        }
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+    }
+
+    struct RetriableTerminalClaims {
+        calls: Arc<AtomicUsize>,
+        allow_completion: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for RetriableTerminalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+
+        async fn demote_all_on_self_fence(&self) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.allow_completion.load(Ordering::SeqCst)
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
         }
     }
 
@@ -2023,6 +3169,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -2089,6 +3236,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -2156,6 +3304,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -2175,9 +3324,8 @@ mod tests {
 
     // FIX A (ADR-0017 Phase 3 Slice 11 corrigenda, council-adjudicated,
     // deviation 109): the terminal "self-fenced (either trigger): demote
-    // ALL local claims" loop just above (`for entity in
-    // local_claims.owned().await { local_claims.demote(&entity).await }`,
-    // reached once the `'tick` loop breaks on either fencing trigger) was
+    // everything hosted here" hook just above (reached once the `'tick` loop
+    // breaks on either fencing trigger) was
     // previously exercised only with an EMPTY `owned()` set (the real-fence
     // tests above use `NoLocallyClaimedEntities`) or with a `FakeLease` that
     // never actually loses fencing (`Ok(true)` on every heartbeat, in every
@@ -2226,6 +3374,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -2245,6 +3394,135 @@ mod tests {
             "readiness must flip not-ready before the lease becomes stealable"
         );
         stop_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_drops_readiness_before_terminal_teardown_with_no_owned_claims() {
+        let interval = Duration::from_millis(50);
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let local_claims = Arc::new(BlockingTerminalClaims {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            FakeLease::new(Box::new(|| Ok(false))),
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
+            },
+        ));
+
+        advance_until(interval, 20, || started.load(Ordering::SeqCst)).await;
+        assert!(
+            started.load(Ordering::SeqCst),
+            "whole-node fencing must invoke the terminal hook even when owned() is empty"
+        );
+        assert!(
+            !readiness.is_ready(),
+            "readiness must be false while terminal teardown is still blocked"
+        );
+
+        stop_token.cancel();
+        release.notify_waiters();
+        task.await
+            .expect("node-lease task exits after cancellation");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_retries_terminal_teardown_before_restoring_readiness() {
+        let interval = Duration::from_millis(50);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let allow_completion = Arc::new(AtomicBool::new(false));
+        let local_claims = Arc::new(RetriableTerminalClaims {
+            calls: Arc::clone(&calls),
+            allow_completion: Arc::clone(&allow_completion),
+        });
+        let lease = FakeLease::new(Box::new(|| Ok(false)));
+        let draining_calls = Arc::clone(&lease.draining_calls);
+        let registrations = Arc::clone(&lease.registrations);
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
+            },
+        ));
+
+        advance_until(Duration::from_millis(10), 20, || {
+            calls.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "fencing must run an initial teardown and retry it before epoch rotation"
+        );
+        assert!(
+            !readiness.is_ready(),
+            "an incomplete teardown retry must keep the candidate identity not-ready"
+        );
+        assert_eq!(
+            registrations.load(Ordering::SeqCst),
+            0,
+            "an incomplete teardown must prevent the old epoch from being superseded"
+        );
+        assert!(
+            draining_calls.load(Ordering::SeqCst) >= 1,
+            "the fenced old identity must remain marked draining"
+        );
+
+        allow_completion.store(true, Ordering::SeqCst);
+        advance_until(Duration::from_millis(5), 20, || readiness.is_ready()).await;
+        assert!(
+            readiness.is_ready(),
+            "readiness may recover only after a later terminal teardown succeeds"
+        );
+
+        stop_token.cancel();
+        task.await
+            .expect("node-lease task exits after cancellation");
     }
 
     // --- FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-
@@ -2351,6 +3629,7 @@ mod tests {
                 peer_id: None,
                 claim_store: task_claim_store,
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                startup_recovery_source: None,
             },
         ));
 
@@ -2389,13 +3668,14 @@ mod tests {
              identity's sm_session claim, not leave it for the general reaper's slower cadence"
         );
 
-        // The claims row must now show the FRESH re-registered identity as
-        // owner — `steal_stale(OwnerStale)` actually won against the real
-        // CAS, not just a fake double.
+        // The claims row must now show the process's FRESH re-registered epoch
+        // as owner — `steal_stale(OwnerStale)` actually won against the real
+        // CAS, not just a fake double. The node_id remains stable because it
+        // is also the relay actor's address.
         let conn = db.guard().await.expect("guard");
         let mut rows = conn
             .query(
-                "SELECT node_id FROM clustering_claims WHERE entity = ?",
+                "SELECT node_id, node_epoch FROM clustering_claims WHERE entity = ?",
                 crate::db_params![format!(
                     "{}:{}",
                     EntityType::SmSession.as_db_str(),
@@ -2404,16 +3684,20 @@ mod tests {
             )
             .await
             .expect("query claims row");
-        let owner_node_id: String = rows
+        let row = rows
             .next()
             .await
             .expect("row present")
-            .expect("row present")
-            .get(0)
-            .expect("column present");
-        assert_ne!(
+            .expect("row present");
+        let owner_node_id: String = row.get(0).expect("column present");
+        let owner_node_epoch: String = row.get(1).expect("column present");
+        assert_eq!(
             owner_node_id, initial_identity.node_id,
-            "the claim must be owned by the FRESH re-registered identity, not the expired one"
+            "the process-stable node_id must remain the relay address"
+        );
+        assert_ne!(
+            owner_node_epoch, initial_identity.node_epoch,
+            "the claim must be owned by the fresh re-registered epoch, not the expired one"
         );
 
         stop_token.cancel();

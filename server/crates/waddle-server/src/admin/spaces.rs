@@ -1299,6 +1299,9 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     let mut destroyed_rooms: std::collections::BTreeSet<BareJid> =
         std::collections::BTreeSet::new();
     for room_jid in &destroy_targets {
+        // Space deletion is an explicit administrator operation over each
+        // logical child-room JID, not rollback of a previously captured actor
+        // incarnation. Destroying the current room is the intended policy.
         if let Err(error) = state
             .room_registry
             .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {

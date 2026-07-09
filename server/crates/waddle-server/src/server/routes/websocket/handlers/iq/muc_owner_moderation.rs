@@ -1,4 +1,8 @@
+use super::errors::resource_constraint_iq_error;
 use super::*;
+use waddle_xmpp::muc::room_registry_actor::{
+    DestroyRoomExactAfterEffects, RoomDestroyEffectsDone, RoomDestroyEffectsReserved,
+};
 use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, NS_MUC_OWNER};
 
 /// Extract the optional alternate venue, reason, and password from a
@@ -127,70 +131,166 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // others are routed via the connection registry.
             let destroy_request = parse_destroy_request(iq).unwrap_or_default();
             let mut frames = Vec::new();
-            if let Some(room_actor) = get_room_actor(state, &room_jid).await {
-                if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
-                    for occupant in snapshot.room.occupants.values() {
-                        let is_self_occupant = occupant.real_jid == *sender_jid;
-                        // XEP-0421: the destroy notification is the
-                        // occupant's final unavailable presence from
-                        // the room and MUST carry their occupant-id
-                        // (#1268).
-                        let occupant_bare = occupant.real_jid.to_bare();
-                        let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                            bare_jid: &occupant_bare,
-                            real_jid: Some(&occupant.real_jid),
-                            secret: &state.deps.occupant_id_secret,
-                        };
-                        let presence = build_destroy_notification(
-                            &room_jid,
-                            &occupant.nick,
-                            &occupant.real_jid,
-                            &destroy_request,
-                            is_self_occupant,
-                            &identity,
-                        );
-                        if is_self_occupant {
-                            frames.push(stanza_to_xml(&Stanza::Presence(presence)));
-                        } else {
-                            let _ = state
-                                .deps
-                                .protocol
-                                .connection_registry
-                                .try_send_to(&occupant.real_jid, Stanza::Presence(presence));
-                        }
-                        // XEP-0045 §10.9 destroy ends every occupant's
-                        // session in the room — their LiveKit
-                        // participant must end with it. Without this
-                        // the SFU keeps the room populated until its
-                        // own timeout even though the XMPP room is
-                        // gone. Idempotent for non-call participants.
-                        super::super::super::muc_call_sfu::unregister_participant_from_room(
-                            state,
-                            &room_jid,
-                            &occupant.real_jid,
-                        );
-                    }
+            let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error(
+                        "Room ownership cannot currently be verified; please retry.",
+                    ),
+                )];
+            };
+            // Prove this exact actor incarnation before asking the registry
+            // to seal its admission mailbox and return the final snapshot.
+            match fence_room_effects(state, &room_jid, &room_actor).await {
+                FencedRoomEffectsOutcome::Authorized => {}
+                FencedRoomEffectsOutcome::NotOwner => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "Room ownership recently moved; please retry.",
+                        ),
+                    )];
+                }
+                FencedRoomEffectsOutcome::OwnershipUncertain => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "Room ownership cannot currently be verified; please retry.",
+                        ),
+                    )];
                 }
             }
 
-            if destroy_room_actor(state, &room_jid).await {
-                debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-                let room_jid_string = room_jid.to_string();
-                frames.push(build_iq_result_xml(
-                    id,
-                    Some(room_jid_string.as_str()),
-                    response_to,
-                    None,
-                ));
-                return frames;
+            // The registry performs the final exact claim + actor-ref proof,
+            // removes E1, and then holds its serialized mailbox (and E1's
+            // exact claim grant) until this caller completes the irreversible
+            // presence/SFU batch. A queued E2 create cannot run in the gap.
+            let (effects_reserved_sender, mut effects_reserved_receiver) =
+                tokio::sync::oneshot::channel();
+            let (effects_done_sender, effects_done_receiver) = tokio::sync::oneshot::channel();
+            let room_registry = state.deps.protocol.room_registry.clone();
+            let destroy_room_jid = room_jid.clone();
+            let destroy_expected_actor = room_actor.clone();
+            let destroy_barrier = async move {
+                room_registry
+                    .ask(DestroyRoomExactAfterEffects {
+                        room_jid: destroy_room_jid,
+                        expected_actor: destroy_expected_actor,
+                        effects_reserved: effects_reserved_sender,
+                        effects_done: effects_done_receiver,
+                    })
+                    .await
+            };
+            tokio::pin!(destroy_barrier);
+
+            let reservation = tokio::select! {
+                reservation = &mut effects_reserved_receiver => reservation,
+                result = &mut destroy_barrier => {
+                    warn!(
+                        room = %room_jid,
+                        result = ?result,
+                        "Exact room destroy ended before reserving its external effects"
+                    );
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "Room ownership changed before destruction committed; please retry.",
+                        ),
+                    )];
+                }
+            };
+            let snapshot = match reservation {
+                Ok(RoomDestroyEffectsReserved { snapshot }) => snapshot,
+                Err(_) => {
+                    let result = destroy_barrier.await;
+                    warn!(
+                        room = %room_jid,
+                        result = ?result,
+                        "Exact room destroy refused its external-effect reservation"
+                    );
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "Room ownership changed before destruction committed; please retry.",
+                        ),
+                    )];
+                }
+            };
+
+            for occupant in snapshot.room.occupants.values() {
+                let is_self_occupant = occupant.real_jid == *sender_jid;
+                // XEP-0421: the destroy notification is the
+                // occupant's final unavailable presence from
+                // the room and MUST carry their occupant-id
+                // (#1268).
+                let occupant_bare = occupant.real_jid.to_bare();
+                let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                    bare_jid: &occupant_bare,
+                    real_jid: Some(&occupant.real_jid),
+                    secret: &state.deps.occupant_id_secret,
+                };
+                let presence = build_destroy_notification(
+                    &room_jid,
+                    &occupant.nick,
+                    &occupant.real_jid,
+                    &destroy_request,
+                    is_self_occupant,
+                    &identity,
+                );
+                if is_self_occupant {
+                    frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+                } else {
+                    let _ = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .try_send_to(&occupant.real_jid, Stanza::Presence(presence));
+                }
+                // XEP-0045 §10.9 destroy ends every occupant's
+                // session in the room — their LiveKit
+                // participant must end with it. Without this
+                // the SFU keeps the room populated until its
+                // own timeout even though the XMPP room is
+                // gone. Idempotent for non-call participants.
+                super::super::super::muc_call_sfu::unregister_participant_from_room(
+                    state,
+                    &room_jid,
+                    &occupant.real_jid,
+                );
             }
 
-            return vec![build_iq_error_xml_typed(
+            let _ = effects_done_sender.send(RoomDestroyEffectsDone);
+            let destroy_result = destroy_barrier.await;
+            if !matches!(destroy_result, Ok(true)) {
+                // The exact actor was already removed and its effects were
+                // committed once the reservation was granted. A lost cleanup
+                // reply cannot roll them back and must not turn success into a
+                // contradictory IQ error.
+                warn!(
+                    room = %room_jid,
+                    result = ?destroy_result,
+                    "Exact room destroy committed effects but cleanup acknowledgement was unavailable"
+                );
+            }
+            debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
+            let room_jid_string = room_jid.to_string();
+            frames.push(build_iq_result_xml(
                 id,
-                response_from,
+                Some(room_jid_string.as_str()),
                 response_to,
-                item_not_found_iq_error("Requested item not found."),
-            )];
+                None,
+            ));
+            return frames;
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
@@ -212,20 +312,46 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
         }
 
-        if let Err(error) =
-            apply_muc_owner_config(state, &room_jid, iq, authenticated_session.as_ref()).await
-        {
-            warn!(
-                room = %room_jid,
-                error = %error,
-                "Failed to apply MUC owner config"
-            );
-            return vec![build_iq_error_xml_typed(
-                id,
-                response_from,
-                response_to,
-                internal_server_error_iq_error("Internal server error."),
-            )];
+        match apply_muc_owner_config(state, &room_jid, iq, authenticated_session.as_ref()).await {
+            Ok(()) => {}
+            Err(super::muc_owner_config::MucOwnerConfigError::NotOwner) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error("Room ownership recently moved; please retry."),
+                )];
+            }
+            Err(super::muc_owner_config::MucOwnerConfigError::OwnershipUncertain) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error(
+                        "Room ownership cannot currently be verified; please retry.",
+                    ),
+                )];
+            }
+            Err(super::muc_owner_config::MucOwnerConfigError::PersistFailed(error)) => {
+                warn!(room = %room_jid, %error, "MUC owner config durable persist failed");
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error(
+                        "The room change could not converge durably; please retry.",
+                    ),
+                )];
+            }
+            Err(error) => {
+                warn!(room = %room_jid, %error, "Failed to apply MUC owner config");
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
         }
 
         // Treat all other owner IQ sets as successful config submit for instant rooms.
@@ -293,14 +419,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 forbidden_iq_error("Operation not permitted."),
             )];
         }
-        match state
+        let original = match state
             .deps
             .protocol
             .mam_storage
             .get_message(&request.target_id)
             .await
         {
-            Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => {}
+            Ok(Some(message)) if message.to.to_bare() == room_jid => message,
             Ok(Some(_)) => {
                 return vec![build_iq_error_xml_typed(
                     id,
@@ -326,7 +452,55 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     internal_server_error_iq_error("Internal server error."),
                 )];
             }
-        }
+        };
+
+        #[cfg(feature = "clustering")]
+        let room_fence = {
+            let clustering = &state.deps.app_state.clustering_claims;
+            if clustering.claim_store.is_some() {
+                if clustering.muc_durable_store.is_none() {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "Room ownership cannot currently be verified; please retry.",
+                        ),
+                    )];
+                }
+                let fence = match room_actor.ask(GetRoomClaimFence).await {
+                    Ok(Some(fence)) => fence,
+                    Ok(None) | Err(_) => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            resource_constraint_iq_error(
+                                "Room ownership cannot currently be verified; please retry.",
+                            ),
+                        )];
+                    }
+                };
+                if fence.entity
+                    != waddle_xmpp::ownership::Entity::new(
+                        waddle_xmpp::ownership::EntityType::RoomActor,
+                        room_jid.to_string(),
+                    )
+                {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "Room ownership cannot currently be verified; please retry.",
+                        ),
+                    )];
+                }
+                Some(fence)
+            } else {
+                None
+            }
+        };
 
         let moderator_nick = context
             .nick
@@ -349,6 +523,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             Some(moderator_occupant_id.as_str()),
             request.reason.as_deref(),
         );
+        let Some(moderation_wire_id) = moderation.id.as_ref().map(|id| id.0.clone()) else {
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        };
         let archive_id = uuid::Uuid::now_v7().to_string();
         let room_jid_full = jid::Jid::from(room_jid.clone());
         add_stanza_id_xep0359(
@@ -356,205 +538,222 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             &Xep0359StanzaId::new(archive_id.as_str(), room_jid_full.clone()),
         );
 
-        if let (Some(target_id), Ok(moderator_jid)) = (
-            RichMessageId::new(request.target_id.clone()),
-            moderated_by.parse::<Jid>(),
-        ) {
-            let archived = ArchivedMessage {
-                id: archive_id.clone(),
-                timestamp: chrono::Utc::now(),
-                from: jid::Jid::from(room_jid.clone()),
-                to: jid::Jid::from(room_jid.clone()),
-                // XEP-0425 moderation tombstone has no `<body>` — `None`
-                // is the wire-faithful "no body element" form.
-                body: None,
-                stanza_id: moderation
-                    .id
-                    .as_ref()
-                    .map(|id| Xep0359StanzaId::new(id.0.clone(), room_jid_full.clone())),
-                // XEP-0425 moderation tombstone: leak-prone fields are
-                // already cleared by construction (this row is a fresh
-                // tombstone, not a scrub of an existing message).
-                thread: None,
+        let Some(target_id) = RichMessageId::new(original.id.clone()) else {
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                bad_request_iq_error("Malformed moderation target."),
+            )];
+        };
+        let Ok(moderator_jid) = moderated_by.parse::<Jid>() else {
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        };
+        let archived = ArchivedMessage {
+            id: archive_id.clone(),
+            timestamp: stamp_time,
+            from: room_jid_full.clone(),
+            to: room_jid_full.clone(),
+            body: None,
+            // `ArchivedMessage.id` is the room-assigned archive/stanza ID;
+            // `stanza_id` carries the live moderation message's wire `id` so
+            // MAM replay preserves it and the tombstone can cite it exactly.
+            stanza_id: Some(Xep0359StanzaId::new(
+                moderation_wire_id.clone(),
+                room_jid_full.clone(),
+            )),
+            thread: None,
+            reply: None,
+            origin_id: None,
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            stanza_xml: None,
+            rich: Some(ArchivedRichMessage {
+                payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {
+                    target_id: target_id.clone(),
+                    moderated_by: moderator_jid.clone(),
+                    stamp: Some(stamp_time),
+                    reason: request.reason.as_deref().and_then(RichText::new),
+                })),
                 reply: None,
-                origin_id: None,
-                message_type: xmpp_parsers::message::MessageType::Groupchat,
-                stanza_xml: None,
-                rich: Some(ArchivedRichMessage {
-                    payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {
-                        target_id,
-                        moderated_by: moderator_jid,
-                        stamp: Some(stamp_time),
-                        reason: request.reason.as_deref().and_then(RichText::new),
-                    })),
-                    reply: None,
-                    references: Vec::new(),
-                    mentions: Vec::new(),
-                    // Room-authored moderation event row: no occupant
-                    // sender to identify.
-                    occupant_id: None,
-                    muc_sender: None,
-                }),
-                nickname_generation: None,
-            };
-            if let Err(error) = state
+                references: Vec::new(),
+                mentions: Vec::new(),
+                // Room-authored moderation event row: no occupant
+                // sender to identify.
+                occupant_id: None,
+                muc_sender: None,
+            }),
+            nickname_generation: None,
+        };
+        let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+            retraction_id: RichMessageId::new(moderation_wire_id),
+            stamp: stamp_time,
+            moderation: Some(ArchivedModeration {
+                target_id,
+                moderated_by: moderator_jid,
+                stamp: Some(stamp_time),
+                reason: request.reason.as_deref().and_then(RichText::new),
+            }),
+        };
+
+        #[cfg(feature = "clustering")]
+        let persistence_result = if let Some(fence) = room_fence.as_ref() {
+            state
+                .deps
+                .protocol
+                .mam_storage
+                .moderate_message_fenced(
+                    &room_jid,
+                    &archived,
+                    &original.id,
+                    tombstone.clone(),
+                    fence,
+                )
+                .await
+        } else {
+            match state
                 .deps
                 .protocol
                 .mam_storage
                 .store_message(&room_jid, &archived)
                 .await
             {
-                warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
-            }
-
-            // XEP-0425 §"the archiving service MAY replace the
-            // retracted message with a tombstone": replace the
-            // original room archive row with a moderation tombstone
-            // whose `<retracted/>` carries `<moderated by/>` and the
-            // optional reason.
-            let original_lookup = state
-                .deps
-                .protocol
-                .mam_storage
-                .get_message(&request.target_id)
-                .await;
-            match original_lookup {
-                Ok(Some(original)) if original.to.to_string() == room_jid.to_string() => {
-                    // Use the moderation message's server-assigned
-                    // archive id (XEP-0359 stanza-id stamped via
-                    // `add_stanza_id_xep0359` above). That's the id
-                    // clients see on the live moderation broadcast
-                    // and need to correlate against the tombstone —
-                    // `moderation.id` is the client message-id
-                    // attribute, which would not match the archive
-                    // entry clients can resolve.
-                    let tombstone = waddle_xmpp::mam::ArchivedTombstone {
-                        retraction_id: waddle_xmpp::mam::RichMessageId::new(archive_id.clone()),
-                        stamp: stamp_time,
-                        moderation: Some(ArchivedModeration {
-                            target_id: waddle_xmpp::mam::RichMessageId::new(
-                                request.target_id.clone(),
-                            )
-                            .expect("target id is non-empty here"),
-                            moderated_by: moderated_by
-                                .parse::<Jid>()
-                                .expect("moderated_by parsed earlier"),
-                            stamp: Some(stamp_time),
-                            reason: request.reason.as_deref().and_then(RichText::new),
-                        }),
-                    };
-                    match state
+                Ok(_) => {
+                    state
                         .deps
                         .protocol
                         .mam_storage
-                        .replace_with_tombstone(&original.id, tombstone)
+                        .replace_with_tombstone(&original.id, tombstone.clone())
                         .await
-                    {
-                        Ok(true) => {
-                            if let Some(stanza_id) = original.stanza_id.as_ref() {
-                                crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
-                                    state.deps.app_state.db_pool.global_actor(),
-                                    &room_jid,
-                                    &stanza_id.id,
-                                )
-                                .await;
-                            }
-                        }
-                        Ok(false) => warn!(
-                            room = %room_jid,
-                            target = %request.target_id,
-                            "Moderation tombstone target disappeared before replacement"
-                        ),
-                        Err(error) => {
-                            warn!(
-                                room = %room_jid,
-                                target = %request.target_id,
-                                error = %error,
-                                "Failed to replace original with moderation tombstone"
-                            );
-                        }
-                    }
-                    // XEP-0425 §Tombstones / XEP-0198: scrub the
-                    // pre-tombstone groupchat reflection from any
-                    // detached resume queues so a recipient mid-resume
-                    // does not replay the moderated content. Best
-                    // effort — tombstone is already applied to the
-                    // archive. Scope by the room JID so the matcher's
-                    // stanza-id branch finds groupchat reflections
-                    // that key by the room's XEP-0359 stamp, and so a
-                    // colliding wire id in another conversation is not
-                    // accidentally scrubbed (Codex P1, Copilot review
-                    // on PR #305).
-                    use waddle_xmpp::stream_management::SmSessionRegistry as _;
-                    let target_id = request.target_id.as_str();
-                    // XEP-0425 moderation targets the room-assigned
-                    // XEP-0359 stanza-id: cached reflections are
-                    // matched ONLY on `<stanza-id by=room/>`, never on
-                    // the client-chosen wire id (which any occupant
-                    // could mint to collide with another reflection).
-                    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-                        stanza_id: request.target_id.clone(),
-                        room: room_jid.clone(),
-                    };
-                    match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .scrub_unacked_for_tombstone(&scrub_target)
-                        .await
-                    {
-                        Ok(removed) if removed > 0 => debug!(
-                            room = %room_jid,
-                            target = target_id,
-                            removed,
-                            "XEP-0425 moderation: scrubbed unacked SM queue entries"
-                        ),
-                        Ok(_) => {}
-                        Err(error) => warn!(
-                            room = %room_jid,
-                            target = target_id,
-                            %error,
-                            "XEP-0425 moderation: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
-                        ),
-                    }
-                    // F2: promotion (#1097/#1098) parks unacked copies
-                    // in pending_delivery — scrub that layer with the
-                    // same keys or the moderated content delivers
-                    // verbatim at the recipient's next login.
-                    match state
-                        .deps
-                        .protocol
-                        .pending_delivery_storage
-                        .scrub_for_tombstone(&scrub_target)
-                        .await
-                    {
-                        Ok(removed) if removed > 0 => debug!(
-                            room = %room_jid,
-                            target = target_id,
-                            removed,
-                            "XEP-0425 moderation: scrubbed pending_delivery rows"
-                        ),
-                        Ok(_) => {}
-                        Err(error) => warn!(
-                            room = %room_jid,
-                            target = target_id,
-                            %error,
-                            "XEP-0425 moderation: pending_delivery scrub_for_tombstone failed; moderated content may still deliver at next login"
-                        ),
-                    }
                 }
-                Ok(_) => {}
-                Err(error) => warn!(
-                    room = %room_jid,
-                    target = %request.target_id,
-                    error = %error,
-                    "Failed to look up moderation target for tombstone"
-                ),
+                Err(error) => Err(error),
+            }
+        };
+        #[cfg(not(feature = "clustering"))]
+        let persistence_result = match state
+            .deps
+            .protocol
+            .mam_storage
+            .store_message(&room_jid, &archived)
+            .await
+        {
+            Ok(_) => {
+                state
+                    .deps
+                    .protocol
+                    .mam_storage
+                    .replace_with_tombstone(&original.id, tombstone)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+
+        match persistence_result {
+            Ok(true) => {}
+            Ok(false) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                )];
+            }
+            Err(waddle_xmpp::mam::MamStorageError::NotOwner { .. }) => {
+                demote_exact_room_actor(state, &room_jid, &room_actor).await;
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error("Room ownership recently moved; please retry."),
+                )];
+            }
+            Err(waddle_xmpp::mam::MamStorageError::FencingUnavailable { .. }) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error(
+                        "Room ownership cannot currently be verified; please retry.",
+                    ),
+                )];
+            }
+            Err(error) => {
+                warn!(room = %room_jid, target = %request.target_id, %error, "Failed to commit moderation event and tombstone");
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        }
+
+        if let Some(stanza_id) = original.stanza_id.as_ref() {
+            crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                state.deps.app_state.db_pool.global_actor(),
+                &room_jid,
+                &stanza_id.id,
+            )
+            .await;
+        }
+
+        use waddle_xmpp::stream_management::SmSessionRegistry as _;
+        let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+            stanza_id: request.target_id.clone(),
+            room: room_jid.clone(),
+        };
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .scrub_unacked_for_tombstone(&scrub_target)
+            .await
+        {
+            warn!(room = %room_jid, target = %request.target_id, %error, "XEP-0425 moderation: SM scrub failed after commit");
+        }
+        if let Err(error) = state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .scrub_for_tombstone(&scrub_target)
+            .await
+        {
+            warn!(room = %room_jid, target = %request.target_id, %error, "XEP-0425 moderation: pending-delivery scrub failed after commit");
+        }
+
+        let snapshot = room_actor.ask(GetSnapshot).await.ok();
+        // The archive commit and every scrub above can yield long enough for
+        // E1 to be replaced. Re-prove the actor's immutable fence only after
+        // all of them and after the final snapshot await, immediately before
+        // live fanout.
+        match fence_room_effects(state, &room_jid, &room_actor).await {
+            FencedRoomEffectsOutcome::Authorized => {}
+            FencedRoomEffectsOutcome::NotOwner => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error("Room ownership recently moved; please retry."),
+                )];
+            }
+            FencedRoomEffectsOutcome::OwnershipUncertain => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error(
+                        "Room ownership cannot currently be verified; please retry.",
+                    ),
+                )];
             }
         }
 
         let mut frames = Vec::new();
-        if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
+        if let Some(snapshot) = snapshot {
             for occupant in snapshot.room.occupants.values() {
                 for occupant_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
                     let mut outbound = moderation.clone();

@@ -10,33 +10,6 @@ use super::super::{
     cleanup::cleanup_invalidated_detached_session, state::WsConnState, WebSocketState,
 };
 
-#[cfg(feature = "clustering")]
-async fn unregister_remote_user_resource_if_owner(
-    state: &WebSocketState,
-    jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
-) {
-    if let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    {
-        bridge
-            .unregister_remote_user_resource_if_owner(jid, owner)
-            .await;
-    }
-}
-
-#[cfg(not(feature = "clustering"))]
-async fn unregister_remote_user_resource_if_owner(
-    _state: &WebSocketState,
-    _jid: &FullJid,
-    _owner: &Arc<std::sync::atomic::AtomicBool>,
-) {
-}
-
 /// Finish the XEP-0198 side effects that become safe only after the resumed
 /// or freshly-bound resource has been published to the connection registry.
 ///
@@ -275,7 +248,10 @@ async fn reset_registered_resume_attempt(
             Some(Arc::clone(owner)),
         )
         .await;
-        unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        // Clustered physical-admission cleanup is deliberately left to
+        // `register_bound_connection_after_frame`: it still holds the per-JID
+        // publication guard across this final SM step and must drop that guard
+        // before performing the exact bridge unregister.
     }
     conn.registry_owner = None;
     conn.phase = ConnectionPhase::authenticated(jid);
@@ -321,7 +297,9 @@ async fn close_registered_resume_attempt(
             Some(Arc::clone(owner)),
         )
         .await;
-        unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        // See `reset_registered_resume_attempt`: the outer registration
+        // boundary owns exact clustered physical-admission rollback after it
+        // releases the publication guard.
     }
     conn.registry_owner = None;
     conn.phase = ConnectionPhase::closing(Some(jid.clone()));

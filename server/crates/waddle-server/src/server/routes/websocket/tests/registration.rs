@@ -2,10 +2,11 @@ use super::super::{
     frame::handle_xmpp_frame,
     registration::{
         publish_stream_id_and_presence, register_bound_connection_after_frame,
+        rollback_authoritative_registration, rollback_registration_if_self_fenced,
         RegistrationAfterFrame,
     },
     session_init::load_blocklist_for_bind,
-    state::WsConnState,
+    state::{WebSocketState, WsConnState},
     stream_management::SmRegistrationFinalization,
     transport_xml::element_to_xml,
 };
@@ -21,6 +22,15 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
+
+fn capture_clustering_admission(state: &WebSocketState, conn: &mut WsConnState) {
+    conn.clustering_admission = state
+        .deps
+        .app_state
+        .clustering_readiness
+        .capture_admission();
+    assert!(conn.clustering_admission.is_some());
+}
 
 #[tokio::test]
 async fn ensure_state_machine_initializes_sm_in_ready_phase() {
@@ -50,6 +60,7 @@ async fn ensure_state_machine_initializes_sm_in_ready_phase() {
 async fn register_bound_connection_after_frame_registers_ready_connection_once() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
     let mut pending_tx = Some(tx);
@@ -128,6 +139,150 @@ async fn register_bound_connection_after_frame_registers_ready_connection_once()
 }
 
 #[tokio::test]
+async fn register_bound_connection_after_frame_rejects_self_fenced_node() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
+    state.deps.app_state.clustering_readiness.set_ready(false);
+    let jid: FullJid = "alice@example.com/fenced".parse().expect("jid");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+
+    let result = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        RegistrationAfterFrame::SessionInitializationFailed
+    ));
+    assert!(
+        pending_tx.is_some(),
+        "the readiness gate must reject before consuming registration state"
+    );
+    assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+}
+
+#[tokio::test]
+async fn registration_rejects_pre_fence_connection_after_false_true_readiness_aba() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
+    let jid: FullJid = "alice@example.com/readiness-aba".parse().expect("jid");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+
+    state.deps.app_state.clustering_readiness.set_ready(false);
+    state.deps.app_state.clustering_readiness.set_ready(true);
+    assert!(state.deps.app_state.clustering_readiness.is_ready());
+
+    let result = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        RegistrationAfterFrame::SessionInitializationFailed
+    ));
+    assert!(pending_tx.is_some());
+    assert!(
+        !state.deps.protocol.connection_registry.is_connected(&jid),
+        "a socket from the pre-fence generation must not publish after recovery"
+    );
+}
+
+#[tokio::test]
+async fn post_publication_readiness_check_rolls_back_racing_registration() {
+    let state = create_test_websocket_state().await;
+    let admission = state
+        .deps
+        .app_state
+        .clustering_readiness
+        .capture_admission();
+    let jid: FullJid = "alice@example.com/racing-fence".parse().expect("jid");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    assert!(state.deps.protocol.connection_registry.is_connected(&jid));
+
+    state.deps.app_state.clustering_readiness.set_ready(false);
+
+    assert!(rollback_registration_if_self_fenced(
+        state.as_ref(),
+        &jid,
+        &owner,
+        admission,
+    ));
+    assert!(
+        !state.deps.protocol.connection_registry.is_connected(&jid),
+        "a fence racing after publication must remove the just-registered owner"
+    );
+}
+
+#[tokio::test]
+async fn authoritative_rollback_removes_connection_and_actor_views() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/authoritative-race".parse().expect("jid");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &owner)
+        .expect("registered entry");
+    assert!(
+        crate::server::dual_registration::mirror_register(
+            &state.deps.protocol.user_registry,
+            jid.clone(),
+            entry,
+        )
+        .await
+    );
+
+    rollback_authoritative_registration(state.as_ref(), &jid, &owner).await;
+    tokio::task::yield_now().await;
+
+    assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+    let actor = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("user lookup after rollback");
+    if let Some(actor) = actor {
+        assert!(
+            actor
+                .ask(waddle_xmpp::registry::GetConnectionEntry { jid })
+                .await
+                .expect("resource lookup after rollback")
+                .is_none(),
+            "owner-gated rollback must remove the actor mirror too"
+        );
+    }
+}
+
+#[tokio::test]
 async fn register_bound_connection_after_frame_completes_pending_resume_claim() {
     use waddle_xmpp::stream_management::{
         DetachedSession, DetachedUnackedStanza, SmSessionRegistry,
@@ -135,6 +290,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
 
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "registration-resume-stream".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
@@ -283,6 +439,7 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
 
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "registration-resume-gap-stream".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
@@ -599,6 +756,7 @@ async fn stale_owner_publication_does_not_stamp_replacement_entry() {
 async fn cleanup_connection_shutdown_mirrors_unregister_into_actor_tree() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
+    capture_clustering_admission(state.as_ref(), &mut conn);
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
     let mut pending_tx = Some(tx);

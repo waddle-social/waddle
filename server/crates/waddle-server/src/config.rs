@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::{fmt, str::FromStr};
 use tracing::info;
 use waddle_extensions::ExtensionConfig;
+use waddle_xmpp::ownership::FENCED_TRANSACTION_BUDGET;
 use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -824,6 +825,15 @@ impl ClusteringConfig {
                  WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS ({})",
                 node_lease_ttl.as_millis(),
                 node_lease_heartbeat_interval.as_millis()
+            ));
+        }
+        if node_lease_ttl <= FENCED_TRANSACTION_BUDGET.duration() {
+            return Err(format!(
+                "WADDLE_CLUSTERING_NODE_LEASE_TTL_MS ({}) must be strictly greater than the \
+                 fenced Postgres transaction budget ({}): no exact claim/node lock may survive \
+                 through the authority lease deadline",
+                node_lease_ttl.as_millis(),
+                FENCED_TRANSACTION_BUDGET.duration().as_millis(),
             ));
         }
         // ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain
@@ -1888,6 +1898,22 @@ mod tests {
         .unwrap();
         assert_eq!(config.node_lease.heartbeat_interval.as_millis(), 5000);
         assert_eq!(config.node_lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_rejects_node_lease_not_longer_than_fenced_transaction_budget() {
+        let budget_ms = FENCED_TRANSACTION_BUDGET.duration().as_millis().to_string();
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", budget_ms.as_str()),
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "1000"),
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "1000"),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("strictly greater") && err.contains("fenced Postgres transaction budget"),
+            "unexpected validation error: {err}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jid::BareJid;
-use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use jid::{BareJid, Jid};
+use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedTombstone, MamQuery, MamResult};
 
 use crate::muc::RoomClaimFenceContext;
 
@@ -44,18 +44,20 @@ pub trait MamStorage: Send + Sync {
     /// otherwise still commit a phantom archived row under a claim this
     /// node no longer holds.
     ///
-    /// `fence` carries the SAME typed `(Entity, ClaimEpoch, node_id)`
+    /// `fence` carries the SAME typed `(Entity, ClaimEpoch, NodeIdentity)`
     /// context [`crate::muc::MucDurableStore::current_claim_fence`]
     /// resolves from `dispatch_to_room`'s own fencing mechanism — threaded
     /// through rather than re-derived, so both fencing checks (the
     /// standalone pre-fan-out one and this write-adjacent one) agree by
     /// construction.
     ///
-    /// Default impl ignores `fence` and falls back to [`Self::store_message`]
-    /// — correct for every implementation with no clustering/fencing
-    /// concept (the portable, single-node backend, and the in-memory test
-    /// double). A cluster-aware implementation overrides this to run the
-    /// fencing check and the insert in one transaction, mirroring
+    /// The default implementation fails with
+    /// [`MamStorageError::FencingUnavailable`]. Single-node callers use
+    /// [`Self::store_message`] directly and never enter this method; once a
+    /// clustered caller supplies a fence, silently falling back to an
+    /// unfenced insert would violate the ownership boundary. A
+    /// cluster-aware implementation overrides this to run the fencing
+    /// check and the insert in one transaction, mirroring
     /// `pending_delivery::storage::PendingDeliveryStorage::insert_fenced`'s
     /// identical pattern one table over. On a failed fence, returns
     /// [`MamStorageError::NotOwner`] and the write never touches
@@ -66,8 +68,10 @@ pub trait MamStorage: Send + Sync {
         message: &ArchivedMessage,
         fence: &RoomClaimFenceContext,
     ) -> Result<String, MamStorageError> {
-        let _ = fence;
-        self.store_message(archive_jid, message).await
+        let _ = (archive_jid, message);
+        Err(MamStorageError::FencingUnavailable {
+            entity: fence.entity.clone(),
+        })
     }
 
     /// Query messages from the archive.
@@ -103,8 +107,50 @@ pub trait MamStorage: Send + Sync {
     async fn replace_with_tombstone(
         &self,
         archive_id: &str,
-        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+        tombstone: ArchivedTombstone,
     ) -> Result<bool, MamStorageError>;
+
+    /// Atomically archive a canonical XEP-0425 moderation event and replace
+    /// its exact room-scoped target with a tombstone under the same room
+    /// ownership fence. `Ok(false)` means the target did not exist in this
+    /// room; neither write is committed.
+    async fn moderate_message_fenced(
+        &self,
+        archive_jid: &BareJid,
+        moderation: &ArchivedMessage,
+        target_archive_id: &str,
+        tombstone: ArchivedTombstone,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<bool, MamStorageError> {
+        let _ = (archive_jid, moderation, target_archive_id, tombstone);
+        Err(MamStorageError::FencingUnavailable {
+            entity: fence.entity.clone(),
+        })
+    }
+
+    /// Replace an exact room-scoped XEP-0424 target only while the exact
+    /// room claim is still held and the matching retraction event has already
+    /// been archived in that room by the authenticated occupant sender.
+    async fn replace_with_tombstone_fenced(
+        &self,
+        archive_jid: &BareJid,
+        target_archive_id: &str,
+        retraction_archive_id: &str,
+        retraction_from: &Jid,
+        tombstone: ArchivedTombstone,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<bool, MamStorageError> {
+        let _ = (
+            archive_jid,
+            target_archive_id,
+            retraction_archive_id,
+            retraction_from,
+            tombstone,
+        );
+        Err(MamStorageError::FencingUnavailable {
+            entity: fence.entity.clone(),
+        })
+    }
 
     /// Get a single message by its original message/stanza id inside an archive.
     async fn get_message_by_stanza_id(

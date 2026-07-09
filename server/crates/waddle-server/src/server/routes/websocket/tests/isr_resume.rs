@@ -20,7 +20,9 @@
 use super::super::isr_resume::handle_isr_resume_authenticate;
 use super::super::stream_management::SmCtx;
 use super::*;
-use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+use crate::clustering::claims::{
+    clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+};
 use crate::clustering::isr::PostgresIsrTokenStore;
 use crate::clustering::ClusteringHandles;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
@@ -64,6 +66,10 @@ async fn isr_fixture() -> Option<IsrFixture> {
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
     ));
+    PostgresClaimStore::new(db.clone())
+        .register(&node_identity.current(), None)
+        .await
+        .expect("register ISR fixture node incarnation");
 
     let sm_session_registry = Arc::new(
         InMemorySmSessionRegistry::new()
@@ -79,6 +85,7 @@ async fn isr_fixture() -> Option<IsrFixture> {
         muc_durable_store: None,
         isr_token_store: Some(isr_token_store.clone()),
         node_lease: None,
+        remote_resource_admission_store: None,
         lease_ttl: None,
         pod_template_hash: None,
         resume_bridge: None,
@@ -273,9 +280,17 @@ async fn isr_resume_succeeds_matches_token_rotates_and_replays() {
         .store_session(seeded_detached_session(&stream_id, &jid))
         .await
         .expect("seed detached session");
+    let grant = fixture
+        .state
+        .deps
+        .protocol
+        .sm_session_registry
+        .ensure_session_claim(&stream_id)
+        .await
+        .expect("read exact session grant");
     let issued = fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&stream_id, ISR_PINNED_MECHANISM, &grant)
         .await
         .expect("issue token");
 
@@ -356,9 +371,17 @@ async fn isr_resume_rejects_wrong_token_with_bare_failure_and_destroys_session()
         .store_session(seeded_detached_session(&stream_id, &jid))
         .await
         .expect("seed detached session");
+    let grant = fixture
+        .state
+        .deps
+        .protocol
+        .sm_session_registry
+        .ensure_session_claim(&stream_id)
+        .await
+        .expect("read exact session grant");
     fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&stream_id, ISR_PINNED_MECHANISM, &grant)
         .await
         .expect("issue token");
 
@@ -473,9 +496,17 @@ async fn isr_resume_rejects_identity_mismatch_without_destroying_session() {
         .store_session(seeded_detached_session(&stream_id, &jid))
         .await
         .expect("seed detached session");
+    let grant = fixture
+        .state
+        .deps
+        .protocol
+        .sm_session_registry
+        .ensure_session_claim(&stream_id)
+        .await
+        .expect("read exact session grant");
     let issued = fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&stream_id, ISR_PINNED_MECHANISM, &grant)
         .await
         .expect("issue token");
 
@@ -523,9 +554,17 @@ async fn isr_resume_authenticated_but_impossible_wraps_failed_in_success() {
         .store_session(seeded_detached_session(&stream_id, &jid))
         .await
         .expect("seed detached session");
+    let grant = fixture
+        .state
+        .deps
+        .protocol
+        .sm_session_registry
+        .ensure_session_claim(&stream_id)
+        .await
+        .expect("read exact session grant");
     let issued = fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&stream_id, ISR_PINNED_MECHANISM, &grant)
         .await
         .expect("issue token");
 
@@ -627,6 +666,10 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
     ));
+    PostgresClaimStore::new(db.clone())
+        .register(&identity_a.current(), None)
+        .await
+        .expect("register ISR owner incarnation");
     let persistence_a = crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
         db.clone(),
         std::sync::Arc::clone(&claim_store_a),
@@ -646,13 +689,17 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
         .store_session(seeded_detached_session_for_persistence(&stream_id, &jid))
         .await
         .expect("node A stores + claims + persists the detached session");
+    let grant = registry_a
+        .ensure_session_claim(&stream_id)
+        .await
+        .expect("read node A exact session grant");
 
     // ---- The ISR token: issued against the shared Postgres, before node
     // ---- B ever sees this stream, exactly as <isr-enable/> would mint it.
     let isr_store = PostgresIsrTokenStore::new(db.clone());
     isr_store.ensure_schema().await.expect("ensure isr schema");
     let issued = isr_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&stream_id, ISR_PINNED_MECHANISM, &grant)
         .await
         .expect("issue token");
 
@@ -665,6 +712,10 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
     ));
+    PostgresClaimStore::new(db.clone())
+        .register(&identity_b.current(), None)
+        .await
+        .expect("register ISR resume destination incarnation");
     let persistence_b = crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
         db.clone(),
         std::sync::Arc::clone(&claim_store_b),
@@ -687,6 +738,7 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
         muc_durable_store: None,
         isr_token_store: Some(std::sync::Arc::new(isr_store) as std::sync::Arc<dyn IsrTokenStore>),
         node_lease: None,
+        remote_resource_admission_store: None,
         lease_ttl: None,
         pod_template_hash: None,
         ordered_relay_delivery_bridge: None,

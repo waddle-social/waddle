@@ -37,21 +37,13 @@
 //! successful claim acquire/steal — never re-derived here, mirroring
 //! `PostgresFencedSmPersistence`'s own "epoch side channel" design note.
 //!
-//! **Corrected code-research finding (this slice's own, not a plan
-//! misattribution)**: element 7's "the MAM archive insert doubles as the
-//! backstop when archiving is on" is not achievable within this slice's
-//! Files list. MAM storage (`waddle_xmpp::mam::storage::sqlx_store`) issues
-//! a plain `sqlx::QueryBuilder` insert directly against its own raw
-//! `sqlx::PgPool`/`SqlitePool`, in `waddle-xmpp` — it has no access to
-//! `waddle-server`'s `Database`/`Transaction` types (the crate-dependency
-//! direction only runs `waddle-server -> waddle-xmpp`) and making the MAM
-//! insert itself fenced would require restructuring the MAM storage
-//! boundary, out of scope here. [`Self::check_fenced_fanout`] is therefore
-//! the **sole** backstop, run unconditionally (both archiving-on and
-//! archiving-off), as a standalone autocommit statement — the ADR's own
-//! "otherwise the standalone autocommit fencing SELECT itself is the one
-//! write-adjacent statement" text for the non-archiving case, generalized
-//! to always apply. See the phase plan's deviation log for the full note.
+//! **Fan-out and archive fencing**: [`Self::check_fenced_fanout`] provides
+//! the standalone pre-effect proof used even when archiving is disabled.
+//! When a groupchat message is archived, `MamStorage::store_message_fenced`
+//! repeats the exact claim plus serving-eligible node-incarnation locks inside
+//! the same Postgres transaction as the MAM insert. Origin-id dedup hits are
+//! resolved inside that transaction too; a retry can never bypass the
+//! ownership proof merely because its archive row already exists.
 
 use dashmap::DashMap;
 use jid::BareJid;
@@ -61,7 +53,7 @@ use waddle_xmpp::muc::{
     DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomConfig,
     SubjectState,
 };
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, SharedNodeIdentity};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::{Affiliation, XmppError};
 
 use crate::clustering::relay::RelayHandle;
@@ -189,30 +181,69 @@ impl PostgresMucRoomStore {
         self.claim_epochs
             .get(room_jid)
             .map(|entry| *entry)
-            .ok_or_else(|| {
-                XmppError::internal(format!(
-                    "no claim epoch recorded for room {room_jid}; durable write skipped \
-                 (the room registry must call record_claim_epoch before any write)"
-                ))
-            })
+            .ok_or_else(|| XmppError::RoomOwnershipLost(room_jid.clone()))
     }
 
-    /// Take the fencing lock inside `tx` — the exact `SELECT ... FOR SHARE`
-    /// shape `sm_persistence_fenced::assert_fenced` already established —
-    /// for `room_jid` at `epoch`. See that function's doc comment for the
-    /// full contract this mirrors.
+    fn current_fence_for(&self, room_jid: &BareJid) -> Result<RoomClaimFenceContext, XmppError> {
+        Ok(RoomClaimFenceContext {
+            entity: Entity::new(EntityType::RoomActor, room_jid.to_string()),
+            epoch: self.epoch_for(room_jid)?,
+            owner: self.node_identity.current(),
+        })
+    }
+
+    fn validate_exact_fence(
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), XmppError> {
+        let expected = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        if fence.entity == expected {
+            Ok(())
+        } else {
+            Err(XmppError::RoomOwnershipLost(room_jid.clone()))
+        }
+    }
+
+    /// Take the fencing locks inside `tx` for both the exact claim and its
+    /// exact, non-expired, heartbeat-fresh node incarnation. A matching stale
+    /// claim row alone is not authority after the node lease has lapsed,
+    /// expired, or rotated. Draining
+    /// remains valid here: a draining owner serves its existing claims until
+    /// terminal teardown; only new acquisition is barred while draining.
     async fn assert_fenced(
         &self,
         tx: &mut Transaction<'_>,
         room_jid: &BareJid,
-        epoch: ClaimEpoch,
+        fence: &RoomClaimFenceContext,
     ) -> Result<(), XmppError> {
-        let identity = self.node_identity.current();
+        Self::validate_exact_fence(room_jid, fence)?;
         let key = room_entity_key(room_jid);
         let mut rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![key, identity.node_id.clone(), epoch.0],
+                r#"
+                WITH locked AS MATERIALIZED (
+                    SELECT n.heartbeat, n.expired, n.lease_ttl_ms
+                    FROM clustering_claims AS c
+                    JOIN clustering_nodes AS n
+                      ON n.node_id = c.node_id
+                     AND n.node_epoch = c.node_epoch
+                    WHERE c.entity = ?
+                      AND c.node_id = ?
+                      AND c.node_epoch = ?
+                      AND c.claim_epoch = ?
+                    FOR SHARE OF c, n
+                )
+                SELECT 1 FROM locked
+                WHERE NOT expired
+                  AND heartbeat >= clock_timestamp()
+                      - (lease_ttl_ms::text || ' milliseconds')::interval
+                "#,
+                crate::db_params![
+                    key,
+                    fence.owner.node_id.clone(),
+                    fence.owner.node_epoch.clone(),
+                    fence.epoch.0,
+                ],
             )
             .await
             .map_err(db_err)?;
@@ -220,12 +251,162 @@ impl PostgresMucRoomStore {
         if held {
             Ok(())
         } else {
-            self.claim_epochs.remove(room_jid);
-            Err(XmppError::internal(format!(
-                "durable write for room {room_jid} aborted: this node no longer holds the \
-                 room's ownership claim (0 rows from the fencing SELECT)"
-            )))
+            // Never let an old actor's failed E1 proof erase a newer E2
+            // cache entry for the same room.
+            self.claim_epochs
+                .remove_if(room_jid, |_, cached| *cached == fence.epoch);
+            Err(XmppError::RoomOwnershipLost(room_jid.clone()))
         }
+    }
+
+    async fn save_config_at(
+        &self,
+        room_jid: &BareJid,
+        waddle_id: &str,
+        channel_id: &str,
+        config: &RoomConfig,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), XmppError> {
+        let config_json = serde_json::to_string(config).map_err(|error| {
+            XmppError::internal(format!("durable room config encode failed: {error}"))
+        })?;
+        let mut tx = self.db.begin_fenced().await.map_err(db_err)?;
+        self.assert_fenced(&mut tx, room_jid, fence).await?;
+        tx.execute(
+            r#"
+            INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, updated_at)
+            VALUES (?, ?, ?, ?, now())
+            ON CONFLICT (room_jid) DO UPDATE SET
+                waddle_id = excluded.waddle_id,
+                channel_id = excluded.channel_id,
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at
+            "#,
+            crate::db_params![
+                room_jid.to_string(),
+                waddle_id.to_string(),
+                channel_id.to_string(),
+                config_json,
+            ],
+        )
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn save_subject_at(
+        &self,
+        room_jid: &BareJid,
+        subject: Option<&SubjectState>,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), XmppError> {
+        let subject_json = subject
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                XmppError::internal(format!("durable room subject encode failed: {error}"))
+            })?;
+        let mut tx = self.db.begin_fenced().await.map_err(db_err)?;
+        self.assert_fenced(&mut tx, room_jid, fence).await?;
+        let affected = tx
+            .execute(
+                "UPDATE clustering_muc_rooms SET subject_json = ?, updated_at = now() WHERE room_jid = ?",
+                crate::db_params![subject_json, room_jid.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        if affected == 0 {
+            tracing::warn!(
+                room = %room_jid,
+                "durable subject persist skipped: no durable room row exists yet \
+                 (config has not been durably written for this room)"
+            );
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn save_affiliation_at(
+        &self,
+        room_jid: &BareJid,
+        entry: &AffiliationEntry,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), XmppError> {
+        let mut tx = self.db.begin_fenced().await.map_err(db_err)?;
+        self.assert_fenced(&mut tx, room_jid, fence).await?;
+        if entry.affiliation == Affiliation::None {
+            tx.execute(
+                "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ? AND member_jid = ?",
+                crate::db_params![room_jid.to_string(), entry.jid.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        } else {
+            tx.execute(
+                r#"
+                INSERT INTO clustering_muc_room_affiliations
+                    (room_jid, member_jid, affiliation, reason)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (room_jid, member_jid) DO UPDATE SET
+                    affiliation = excluded.affiliation,
+                    reason = excluded.reason
+                "#,
+                crate::db_params![
+                    room_jid.to_string(),
+                    entry.jid.to_string(),
+                    affiliation_to_db_str(entry.affiliation).to_string(),
+                    entry.reason.clone(),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn check_fence_at(
+        &self,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<bool, XmppError> {
+        Self::validate_exact_fence(room_jid, fence)?;
+        let key = room_entity_key(room_jid);
+        let mut tx = self.db.begin_fenced().await.map_err(db_err)?;
+        let mut rows = tx
+            .query(
+                r#"
+                WITH locked AS MATERIALIZED (
+                    SELECT n.heartbeat, n.expired, n.lease_ttl_ms
+                    FROM clustering_claims AS c
+                    JOIN clustering_nodes AS n
+                      ON n.node_id = c.node_id
+                     AND n.node_epoch = c.node_epoch
+                    WHERE c.entity = ?
+                      AND c.node_id = ?
+                      AND c.node_epoch = ?
+                      AND c.claim_epoch = ?
+                    FOR SHARE OF c, n
+                )
+                SELECT 1 FROM locked
+                WHERE NOT expired
+                  AND heartbeat >= clock_timestamp()
+                      - (lease_ttl_ms::text || ' milliseconds')::interval
+                "#,
+                crate::db_params![
+                    key,
+                    fence.owner.node_id.clone(),
+                    fence.owner.node_epoch.clone(),
+                    fence.epoch.0,
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let held = rows.next().await.map_err(db_err)?.is_some();
+        drop(rows);
+        tx.commit().await.map_err(db_err)?;
+        Ok(held)
     }
 }
 
@@ -316,33 +497,23 @@ impl MucDurableStore for PostgresMucRoomStore {
         config: &'a RoomConfig,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let epoch = self.epoch_for(room_jid)?;
-            let config_json = serde_json::to_string(config).map_err(|error| {
-                XmppError::internal(format!("durable room config encode failed: {error}"))
-            })?;
-            let mut tx = self.db.begin().await.map_err(db_err)?;
-            self.assert_fenced(&mut tx, room_jid, epoch).await?;
-            tx.execute(
-                r#"
-                INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, updated_at)
-                VALUES (?, ?, ?, ?, now())
-                ON CONFLICT (room_jid) DO UPDATE SET
-                    waddle_id = excluded.waddle_id,
-                    channel_id = excluded.channel_id,
-                    config_json = excluded.config_json,
-                    updated_at = excluded.updated_at
-                "#,
-                crate::db_params![
-                    room_jid.to_string(),
-                    waddle_id.to_string(),
-                    channel_id.to_string(),
-                    config_json,
-                ],
-            )
-            .await
-            .map_err(db_err)?;
-            tx.commit().await.map_err(db_err)?;
-            Ok(())
+            let fence = self.current_fence_for(room_jid)?;
+            self.save_config_at(room_jid, waddle_id, channel_id, config, &fence)
+                .await
+        })
+    }
+
+    fn save_config_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        waddle_id: &'a str,
+        channel_id: &'a str,
+        config: &'a RoomConfig,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        Box::pin(async move {
+            self.save_config_at(room_jid, waddle_id, channel_id, config, fence)
+                .await
         })
     }
 
@@ -352,38 +523,18 @@ impl MucDurableStore for PostgresMucRoomStore {
         subject: Option<&'a SubjectState>,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let epoch = self.epoch_for(room_jid)?;
-            let subject_json = subject
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|error| {
-                    XmppError::internal(format!("durable room subject encode failed: {error}"))
-                })?;
-            let mut tx = self.db.begin().await.map_err(db_err)?;
-            self.assert_fenced(&mut tx, room_jid, epoch).await?;
-            // The room row must already exist (a subject can only be set on
-            // an already-spawned room, which always durably writes its
-            // config at spawn-adjacent points first) — an UPDATE-only
-            // statement here, not an upsert, so a missing row is a loud
-            // 0-rows-affected rather than a silently-incomplete insert
-            // missing `waddle_id`/`channel_id`.
-            let affected = tx
-                .execute(
-                    "UPDATE clustering_muc_rooms SET subject_json = ?, updated_at = now() WHERE room_jid = ?",
-                    crate::db_params![subject_json, room_jid.to_string()],
-                )
-                .await
-                .map_err(db_err)?;
-            if affected == 0 {
-                tracing::warn!(
-                    room = %room_jid,
-                    "durable subject persist skipped: no durable room row exists yet \
-                     (config has not been durably written for this room)"
-                );
-            }
-            tx.commit().await.map_err(db_err)?;
-            Ok(())
+            let fence = self.current_fence_for(room_jid)?;
+            self.save_subject_at(room_jid, subject, &fence).await
         })
+    }
+
+    fn save_subject_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        subject: Option<&'a SubjectState>,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        Box::pin(async move { self.save_subject_at(room_jid, subject, fence).await })
     }
 
     fn save_affiliation<'a>(
@@ -392,39 +543,18 @@ impl MucDurableStore for PostgresMucRoomStore {
         entry: &'a AffiliationEntry,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let epoch = self.epoch_for(room_jid)?;
-            let mut tx = self.db.begin().await.map_err(db_err)?;
-            self.assert_fenced(&mut tx, room_jid, epoch).await?;
-            if entry.affiliation == Affiliation::None {
-                tx.execute(
-                    "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ? AND member_jid = ?",
-                    crate::db_params![room_jid.to_string(), entry.jid.to_string()],
-                )
-                .await
-                .map_err(db_err)?;
-            } else {
-                tx.execute(
-                    r#"
-                    INSERT INTO clustering_muc_room_affiliations
-                        (room_jid, member_jid, affiliation, reason)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT (room_jid, member_jid) DO UPDATE SET
-                        affiliation = excluded.affiliation,
-                        reason = excluded.reason
-                    "#,
-                    crate::db_params![
-                        room_jid.to_string(),
-                        entry.jid.to_string(),
-                        affiliation_to_db_str(entry.affiliation).to_string(),
-                        entry.reason.clone(),
-                    ],
-                )
-                .await
-                .map_err(db_err)?;
-            }
-            tx.commit().await.map_err(db_err)?;
-            Ok(())
+            let fence = self.current_fence_for(room_jid)?;
+            self.save_affiliation_at(room_jid, entry, &fence).await
         })
+    }
+
+    fn save_affiliation_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        entry: &'a AffiliationEntry,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        Box::pin(async move { self.save_affiliation_at(room_jid, entry, fence).await })
     }
 
     fn record_claim_epoch(&self, room_jid: &BareJid, epoch: ClaimEpoch) {
@@ -436,29 +566,28 @@ impl MucDurableStore for PostgresMucRoomStore {
     }
 
     /// The guaranteed demotion backstop (element 7): a fenced,
-    /// standalone-autocommit `SELECT ... FOR SHARE` on the main pool, run
-    /// before every local fan-out. See the module doc's MAM-backstop
-    /// correction for why this is the sole backstop mechanism this slice
-    /// lands, unconditionally (both archiving-on and archiving-off).
+    /// bounded read-only transaction with `SELECT ... FOR SHARE` on the main pool, run
+    /// before every local fan-out. It proves both the exact claim and the
+    /// exact, non-expired, heartbeat-fresh node incarnation at the check boundary. The later
+    /// MAM write repeats and holds the same locks inside its insert
+    /// transaction when archiving is active.
     fn check_fenced_fanout<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
         Box::pin(async move {
-            let epoch = self.epoch_for(room_jid)?;
-            let identity = self.node_identity.current();
-            let key = room_entity_key(room_jid);
-            let conn = self.db.guard().await.map_err(db_err)?;
-            let mut rows = conn
-                .query(
-                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                    crate::db_params![key, identity.node_id.clone(), epoch.0],
-                )
-                .await
-                .map_err(db_err)?;
-            Ok(rows.next().await.map_err(db_err)?.is_some())
+            let fence = self.current_fence_for(room_jid)?;
+            self.check_fence_at(room_jid, &fence).await
         })
     }
 
+    fn check_fenced_fanout_exact<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, bool> {
+        Box::pin(async move { self.check_fence_at(room_jid, fence).await })
+    }
+
     /// ADR-0017 Phase 3 Slice 7 FIX 1: exposes the exact `(Entity,
-    /// ClaimEpoch, node_id)` triple [`Self::check_fenced_fanout`]/
+    /// ClaimEpoch, NodeIdentity)` triple [`Self::check_fenced_fanout`]/
     /// [`Self::assert_fenced`] already resolve from `self.claim_epochs`, so
     /// `groupchat_archive.rs`'s MAM fenced write can bind the identical
     /// typed context rather than re-deriving it from a second mechanism.
@@ -468,7 +597,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         Some(RoomClaimFenceContext {
             entity: Entity::new(EntityType::RoomActor, room_jid.to_string()),
             epoch,
-            node_id: identity.node_id,
+            owner: identity,
         })
     }
 
@@ -476,7 +605,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         &'a self,
         room_jid: &'a BareJid,
         previous_owner_node_id: &'a str,
-        _previous_owner_node_epoch: &'a str,
+        previous_owner_node_epoch: &'a str,
         new_epoch: ClaimEpoch,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
@@ -486,7 +615,11 @@ impl MucDurableStore for PostgresMucRoomStore {
                 self.stop_token.clone(),
             );
             relay_handle
-                .demote(entity, new_epoch)
+                .demote(
+                    entity,
+                    NodeIdentity::new(previous_owner_node_id, previous_owner_node_epoch),
+                    new_epoch,
+                )
                 .await
                 .map(|_reply| ())
                 .map_err(|error| {
@@ -501,7 +634,9 @@ impl MucDurableStore for PostgresMucRoomStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::clustering::claims::{
+        clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+    };
     use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use std::sync::Arc;
     use waddle_xmpp::muc::RoomSubjectTexts;
@@ -526,10 +661,139 @@ mod tests {
         stealer
     }
 
+    async fn expire_node(db: &crate::db::Database, identity: &NodeIdentity) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET expired = true \
+             WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![identity.node_id.clone(), identity.node_epoch.clone()],
+        )
+        .await
+        .expect("expire old owner incarnation");
+    }
+
+    async fn lapse_node_heartbeat(db: &crate::db::Database, identity: &NodeIdentity) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET heartbeat = now() - interval '1 hour', expired = false \
+             WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![identity.node_id.clone(), identity.node_epoch.clone()],
+        )
+        .await
+        .expect("lapse node heartbeat without committing expiry");
+    }
+
     fn room_jid(name: &str) -> BareJid {
         format!("{name}@muc.example.com")
             .parse()
             .expect("valid test room JID")
+    }
+
+    fn moderation_row(
+        room: &BareJid,
+        moderation_id: &str,
+        target_id: &str,
+    ) -> waddle_xmpp_core::mam::ArchivedMessage {
+        use waddle_xmpp_core::mam::{
+            ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload,
+            RichMessageId,
+        };
+        let room_jid = jid::Jid::from(room.clone());
+        let wire_id = format!("{moderation_id}-wire");
+        let stamp = chrono::Utc::now();
+        ArchivedMessage {
+            id: moderation_id.to_string(),
+            timestamp: stamp,
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                wire_id,
+                room_jid.clone(),
+            )),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            rich: Some(ArchivedRichMessage {
+                payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {
+                    target_id: RichMessageId::new(target_id).expect("target id"),
+                    moderated_by: format!("{room}/moderator").parse().expect("jid"),
+                    stamp: Some(stamp),
+                    reason: None,
+                })),
+                reply: None,
+                references: Vec::new(),
+                mentions: Vec::new(),
+                occupant_id: None,
+                muc_sender: None,
+            }),
+            ..ArchivedMessage::for_test(room_jid.clone(), room_jid)
+        }
+    }
+
+    fn retraction_tombstone(retraction_id: &str) -> waddle_xmpp_core::mam::ArchivedTombstone {
+        waddle_xmpp_core::mam::ArchivedTombstone {
+            retraction_id: waddle_xmpp_core::mam::RichMessageId::new(retraction_id),
+            stamp: chrono::Utc::now(),
+            moderation: None,
+        }
+    }
+
+    fn retraction_row(
+        room: &BareJid,
+        retraction_id: &str,
+        target_id: &str,
+        nickname_generation: u64,
+    ) -> waddle_xmpp_core::mam::ArchivedMessage {
+        use waddle_xmpp_core::mam::{
+            ArchivedMessage, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload,
+            RichMessageId,
+        };
+        let room_jid = jid::Jid::from(room.clone());
+        let from: jid::Jid = format!("{room}/alice").parse().expect("occupant");
+        ArchivedMessage {
+            id: retraction_id.to_string(),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                retraction_id,
+                room_jid.clone(),
+            )),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            rich: Some(ArchivedRichMessage {
+                payload: Some(ArchivedRichPayload::Retraction(ArchivedRetraction {
+                    target_id: RichMessageId::new(target_id).expect("target id"),
+                    stamp: None,
+                    retraction_id: RichMessageId::new(retraction_id),
+                })),
+                reply: None,
+                references: Vec::new(),
+                mentions: Vec::new(),
+                occupant_id: None,
+                muc_sender: None,
+            }),
+            nickname_generation: Some(nickname_generation),
+            ..ArchivedMessage::for_test(from, room_jid)
+        }
+    }
+
+    fn moderation_tombstone(
+        moderation: &waddle_xmpp_core::mam::ArchivedMessage,
+    ) -> waddle_xmpp_core::mam::ArchivedTombstone {
+        let payload = match moderation
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.payload.as_ref())
+        {
+            Some(waddle_xmpp_core::mam::ArchivedRichPayload::Moderation(payload)) => {
+                payload.clone()
+            }
+            other => panic!("expected moderation payload, got {other:?}"),
+        };
+        let wire_id = moderation
+            .stanza_id
+            .as_ref()
+            .expect("moderation wire id")
+            .id
+            .clone();
+        waddle_xmpp_core::mam::ArchivedTombstone {
+            retraction_id: waddle_xmpp_core::mam::RichMessageId::new(wire_id),
+            stamp: moderation.timestamp,
+            moderation: Some(payload),
+        }
     }
 
     /// Open a clean `PostgresMucRoomStore` alongside a `PostgresClaimStore`
@@ -571,6 +835,11 @@ mod tests {
         conn.execute("DELETE FROM clustering_muc_room_affiliations", ())
             .await
             .expect("clean affiliations");
+        drop(conn);
+        claim_store
+            .register(&store.node_identity.current(), None)
+            .await
+            .expect("register live room owner");
         Some((store, claim_store, db))
     }
 
@@ -707,10 +976,10 @@ mod tests {
             "the current owner's own fenced check must pass"
         );
 
-        // Simulate another node stealing via steal_stale(OwnerStale): `me`
-        // has no `clustering_nodes` liveness row, so the owner-stale
-        // predicate is true, while the stealer has a fresh live row as
-        // required by Slice 1a's hardened steal CAS.
+        // Simulate another node stealing via steal_stale(OwnerStale): expire
+        // the exact old owner incarnation while the stealer has a fresh live
+        // row, matching Slice 1a's hardened steal CAS.
+        expire_node(&db, &me).await;
         let stealer = live_stealer(&db).await;
         claim_store
             .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &stealer)
@@ -724,6 +993,567 @@ mod tests {
                 .expect("check_fenced_fanout"),
             "the deposed owner's very next fenced check must observe 0 rows"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_claim_is_not_authority_after_its_node_incarnation_expires() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let jid = room_jid("expired-owner-row");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let me = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&jid, epoch);
+        let fence = store
+            .current_claim_fence(&jid)
+            .expect("cached exact claim fence");
+
+        // Leave clustering_claims untouched. Only expire the exact node
+        // incarnation: a claim-only fence would incorrectly keep passing.
+        expire_node(&db, &me).await;
+
+        assert!(
+            !store
+                .check_fenced_fanout(&jid)
+                .await
+                .expect("fanout ownership check"),
+            "an exact claim row cannot outlive its owner node incarnation"
+        );
+        assert!(store
+            .save_config(&jid, "waddle", "channel", &RoomConfig::default())
+            .await
+            .is_err());
+
+        let mam_storage = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("open colocated MAM")
+            .with_cluster_fencing(true);
+        let archive_id = uuid::Uuid::new_v4().to_string();
+        let message = ArchivedMessage {
+            id: archive_id.clone(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{jid}/alice").parse().expect("valid occupant JID"),
+                jid::Jid::from(jid.clone()),
+            )
+        };
+        assert!(matches!(
+            mam_storage
+                .store_message_fenced(&jid, &message, &fence)
+                .await,
+            Err(MamStorageError::NotOwner { .. })
+        ));
+        assert!(mam_storage
+            .get_message(&archive_id)
+            .await
+            .expect("read MAM row")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn lapsed_nonexpired_room_owner_cannot_fanout_or_write_muc_or_mam_state() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let jid = room_jid("lapsed-owner-row");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let me = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&jid, epoch);
+        let fence = store
+            .current_claim_fence(&jid)
+            .expect("cached exact claim fence");
+        lapse_node_heartbeat(&db, &me).await;
+
+        assert!(
+            !store
+                .check_fenced_fanout(&jid)
+                .await
+                .expect("fanout ownership check"),
+            "raw deadline lapse must close fanout before a watchdog commits expiry"
+        );
+        assert!(store
+            .save_config(&jid, "waddle", "channel", &RoomConfig::default())
+            .await
+            .is_err());
+
+        let mam_storage = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("open colocated MAM")
+            .with_cluster_fencing(true);
+        let archive_id = uuid::Uuid::new_v4().to_string();
+        let message = ArchivedMessage {
+            id: archive_id.clone(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{jid}/alice").parse().expect("valid occupant JID"),
+                jid::Jid::from(jid.clone()),
+            )
+        };
+        assert!(matches!(
+            mam_storage
+                .store_message_fenced(&jid, &message, &fence)
+                .await,
+            Err(MamStorageError::NotOwner { .. })
+        ));
+        assert!(mam_storage
+            .get_message(&archive_id)
+            .await
+            .expect("read MAM row")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn origin_id_dedup_retry_still_requires_a_live_exact_owner() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+        use waddle_xmpp_core::xep0359::OriginId;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let jid = room_jid("dedup-expired-owner");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let me = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&jid, epoch);
+        let fence = store
+            .current_claim_fence(&jid)
+            .expect("cached exact claim fence");
+        let mam_storage = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("open colocated MAM")
+            .with_cluster_fencing(true);
+        let first_id = uuid::Uuid::new_v4().to_string();
+        let retry_id = uuid::Uuid::new_v4().to_string();
+        let origin_id = OriginId::new(uuid::Uuid::new_v4().to_string());
+        let first = ArchivedMessage {
+            id: first_id.clone(),
+            body: Some("deduplicated message".to_string()),
+            origin_id: Some(origin_id),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{jid}/alice").parse().expect("valid occupant JID"),
+                jid::Jid::from(jid.clone()),
+            )
+        };
+        mam_storage
+            .store_message_fenced(&jid, &first, &fence)
+            .await
+            .expect("live owner stores original");
+
+        expire_node(&db, &me).await;
+        let retry = ArchivedMessage {
+            id: retry_id.clone(),
+            ..first
+        };
+        assert!(matches!(
+            mam_storage.store_message_fenced(&jid, &retry, &fence).await,
+            Err(MamStorageError::NotOwner { .. })
+        ));
+        assert!(mam_storage
+            .get_message(&retry_id)
+            .await
+            .expect("read retry MAM row")
+            .is_none());
+        assert!(mam_storage
+            .get_message(&first_id)
+            .await
+            .expect("read original MAM row")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn draining_owner_can_finish_existing_room_and_mam_writes() {
+        use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let jid = room_jid("draining-owner");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let me = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&jid, epoch);
+        let fence = store
+            .current_claim_fence(&jid)
+            .expect("cached exact claim fence");
+        claim_store
+            .mark_draining(&me)
+            .await
+            .expect("mark owner draining");
+
+        assert!(
+            store
+                .check_fenced_fanout(&jid)
+                .await
+                .expect("fanout ownership check"),
+            "draining bars acquisition, not service of existing claims"
+        );
+        store
+            .save_config(&jid, "waddle", "channel", &RoomConfig::default())
+            .await
+            .expect("draining owner finishes durable room write");
+
+        let mam_storage = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("open colocated MAM")
+            .with_cluster_fencing(true);
+        let archive_id = uuid::Uuid::new_v4().to_string();
+        let message = ArchivedMessage {
+            id: archive_id.clone(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{jid}/alice").parse().expect("valid occupant JID"),
+                jid::Jid::from(jid.clone()),
+            )
+        };
+        assert_eq!(
+            mam_storage
+                .store_message_fenced(&jid, &message, &fence)
+                .await
+                .expect("draining owner finishes fenced MAM write"),
+            archive_id
+        );
+    }
+
+    #[tokio::test]
+    async fn same_node_id_epoch_rotation_blocks_room_and_mam_writes() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let jid = room_jid("same-node-new-epoch");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let old = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &old)
+            .await
+            .expect("old incarnation claims room");
+        store.record_claim_epoch(&jid, epoch);
+        store
+            .save_config(&jid, "waddle-old", "channel-old", &RoomConfig::default())
+            .await
+            .expect("old incarnation writes initial room state");
+        let stale_mam_fence = store
+            .current_claim_fence(&jid)
+            .expect("room claim fence is available");
+
+        let recovered = NodeIdentity::new(old.node_id.clone(), uuid::Uuid::new_v4().to_string());
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_nodes SET node_epoch = ? WHERE node_id = ?",
+            crate::db_params![recovered.node_epoch.clone(), recovered.node_id.clone()],
+        )
+        .await
+        .expect("rotate process node epoch");
+        conn.execute(
+            "UPDATE clustering_claims SET node_epoch = ? WHERE entity = ?",
+            crate::db_params![recovered.node_epoch.clone(), room_entity_key(&jid),],
+        )
+        .await
+        .expect("move claim without changing claim epoch");
+        drop(conn);
+
+        assert!(
+            !store
+                .check_fenced_fanout(&jid)
+                .await
+                .expect("fanout fence check"),
+            "the old node epoch must not fan out under the recovered incarnation"
+        );
+        assert!(
+            store
+                .save_config(
+                    &jid,
+                    "waddle-stale",
+                    "channel-stale",
+                    &RoomConfig::default(),
+                )
+                .await
+                .is_err(),
+            "the old node epoch must not mutate durable room state"
+        );
+
+        let mam_storage = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("open colocated mam storage")
+            .with_cluster_fencing(true);
+        let archive_id = uuid::Uuid::new_v4().to_string();
+        let message = ArchivedMessage {
+            id: archive_id.clone(),
+            body: Some("stale incarnation".to_string()),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{jid}/alice").parse().expect("valid full jid"),
+                jid::Jid::from(jid.clone()),
+            )
+        };
+        let result = mam_storage
+            .store_message_fenced(&jid, &message, &stale_mam_fence)
+            .await;
+        assert!(
+            matches!(result, Err(MamStorageError::NotOwner { .. })),
+            "MAM must reject an old node epoch even when node_id and claim_epoch match: {result:?}"
+        );
+        assert!(
+            mam_storage
+                .get_message(&archive_id)
+                .await
+                .expect("get message")
+                .is_none(),
+            "the rejected stale-epoch archive write must not land"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_e1_cannot_use_a_room_cache_that_has_advanced_to_e2() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let room = room_jid("retained-e1-new-e2");
+        let entity = Entity::new(EntityType::RoomActor, room.to_string());
+        let owner = store.node_identity.current();
+        let e1 = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("acquire E1");
+        store.record_claim_epoch(&room, e1);
+        let fence_e1 = store.current_claim_fence(&room).expect("E1 fence");
+
+        claim_store
+            .release(&entity, &owner, e1)
+            .await
+            .expect("release E1");
+        let e2 = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("acquire E2");
+        assert!(e2 > e1, "a replacement actor must receive a newer epoch");
+        store.record_claim_epoch(&room, e2);
+        let fence_e2 = store.current_claim_fence(&room).expect("E2 fence");
+
+        assert!(!store
+            .check_fenced_fanout_exact(&room, &fence_e1)
+            .await
+            .expect("stale E1 fanout check"));
+        assert!(store
+            .check_fenced_fanout_exact(&room, &fence_e2)
+            .await
+            .expect("live E2 fanout check"));
+
+        let stale_config = RoomConfig {
+            name: "must not persist from E1".to_string(),
+            ..RoomConfig::default()
+        };
+        let stale_save = store
+            .save_config_exact(&room, "waddle-e1", "channel-e1", &stale_config, &fence_e1)
+            .await;
+        assert!(matches!(
+            stale_save,
+            Err(XmppError::RoomOwnershipLost(ref lost_room)) if lost_room == &room
+        ));
+        assert_eq!(
+            store.current_claim_fence(&room),
+            Some(fence_e2.clone()),
+            "a failed E1 proof must not erase the newer cached E2"
+        );
+        assert!(store
+            .load_room_state(&room)
+            .await
+            .expect("load room")
+            .is_none());
+
+        let mam = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM")
+            .with_cluster_fencing(true);
+        let archive_id = uuid::Uuid::new_v4().to_string();
+        let stale_message = ArchivedMessage {
+            id: archive_id.clone(),
+            body: Some("must not archive from E1".to_string()),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{room}/alice").parse().expect("occupant"),
+                jid::Jid::from(room.clone()),
+            )
+        };
+        let stale_archive = mam
+            .store_message_fenced(&room, &stale_message, &fence_e1)
+            .await;
+        assert!(matches!(
+            stale_archive,
+            Err(MamStorageError::NotOwner { .. })
+        ));
+        assert!(mam
+            .get_message(&archive_id)
+            .await
+            .expect("read rejected archive")
+            .is_none());
+        assert!(store
+            .check_fenced_fanout_exact(&room, &fence_e2)
+            .await
+            .expect("E2 remains authoritative"));
+    }
+
+    #[tokio::test]
+    async fn muc_fence_uses_wall_clock_when_lease_lapses_inside_an_open_transaction() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let room = room_jid("muc-open-tx-lease-lapse");
+        let entity = Entity::new(EntityType::RoomActor, room.to_string());
+        let owner = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&room, epoch);
+        let fence = store.current_claim_fence(&room).expect("fence");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "UPDATE clustering_nodes SET heartbeat = clock_timestamp(), lease_ttl_ms = 50 WHERE node_id = ? AND node_epoch = ?",
+                crate::db_params![owner.node_id.clone(), owner.node_epoch.clone()],
+            )
+            .await
+            .expect("shorten lease");
+
+        let mut tx = db.begin().await.expect("begin before TTL lapse");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let result = store.assert_fenced(&mut tx, &room, &fence).await;
+        assert!(matches!(
+            result,
+            Err(XmppError::RoomOwnershipLost(ref lost_room)) if lost_room == &room
+        ));
+    }
+
+    #[tokio::test]
+    async fn blocked_muc_and_mam_fences_recheck_wall_clock_after_the_node_lock_releases() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let store = Arc::new(store);
+        let room = room_jid("blocked-fence-lease-lapse");
+        let entity = Entity::new(EntityType::RoomActor, room.to_string());
+        let owner = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&room, epoch);
+        let fence = store.current_claim_fence(&room).expect("fence");
+        let mam = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM")
+            .with_cluster_fencing(true);
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "UPDATE clustering_nodes SET heartbeat = clock_timestamp(), lease_ttl_ms = 100 WHERE node_id = ? AND node_epoch = ?",
+                crate::db_params![owner.node_id.clone(), owner.node_epoch.clone()],
+            )
+            .await
+            .expect("shorten lease");
+
+        let mut blocker = db.begin().await.expect("begin node-lock blocker");
+        let mut locked = blocker
+            .query(
+                "SELECT 1 FROM clustering_nodes WHERE node_id = ? AND node_epoch = ? FOR UPDATE",
+                crate::db_params![owner.node_id.clone(), owner.node_epoch.clone()],
+            )
+            .await
+            .expect("lock node row");
+        assert!(locked.next().await.expect("read lock row").is_some());
+        drop(locked);
+
+        let archive_id = uuid::Uuid::new_v4().to_string();
+        let message = ArchivedMessage {
+            id: archive_id.clone(),
+            body: Some("blocked until stale".to_string()),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{room}/alice").parse().expect("occupant"),
+                jid::Jid::from(room.clone()),
+            )
+        };
+
+        let muc_task = {
+            let store = Arc::clone(&store);
+            let room = room.clone();
+            let fence = fence.clone();
+            tokio::spawn(async move { store.check_fenced_fanout_exact(&room, &fence).await })
+        };
+        let mam_task = {
+            let room = room.clone();
+            let fence = fence.clone();
+            tokio::spawn(async move { mam.store_message_fenced(&room, &message, &fence).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        assert!(
+            !muc_task.is_finished(),
+            "MUC fence must wait on the node lock"
+        );
+        assert!(
+            !mam_task.is_finished(),
+            "MAM fence must wait on the node lock"
+        );
+        blocker.commit().await.expect("release node lock");
+
+        assert!(!muc_task
+            .await
+            .expect("join MUC fence")
+            .expect("MUC fence result"));
+        assert!(matches!(
+            mam_task.await.expect("join MAM fence"),
+            Err(MamStorageError::NotOwner { .. })
+        ));
+        let mam = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM readback");
+        assert!(mam
+            .get_message(&archive_id)
+            .await
+            .expect("read rejected message")
+            .is_none());
     }
 
     /// ADR-0017 Phase 3 Slice 7 FIX 1 (council-adjudicated): the MAM
@@ -771,7 +1601,7 @@ mod tests {
             .expect("current_claim_fence must resolve immediately after record_claim_epoch");
         assert_eq!(fence.entity, entity);
         assert_eq!(fence.epoch, epoch);
-        assert_eq!(fence.node_id, me.node_id);
+        assert_eq!(fence.owner, me);
 
         let message = ArchivedMessage {
             id: first_id.clone(),
@@ -794,9 +1624,10 @@ mod tests {
             .expect("row exists");
         assert_eq!(stored.body.as_deref(), Some("hello, fenced world"));
 
-        // Steal the claim exactly like `check_fenced_fanout`'s own test:
-        // the old owner is missing from `clustering_nodes`, and the stealer
-        // is explicitly live.
+        // Steal the claim exactly like `check_fenced_fanout`'s own test: the
+        // old owner incarnation is expired and the stealer is explicitly
+        // live.
+        expire_node(&db, &me).await;
         let stealer = live_stealer(&db).await;
         claim_store
             .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &stealer)
@@ -830,6 +1661,293 @@ mod tests {
         assert!(
             should_be_absent.is_none(),
             "a rejected fenced write must not have committed any row"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0424_and_xep0425_fenced_writes_are_atomic_after_owner_expiry() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let room = room_jid("xep042x-expired-owner");
+        let entity = Entity::new(EntityType::RoomActor, room.to_string());
+        let owner = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&room, epoch);
+        let fence = store.current_claim_fence(&room).expect("fence");
+        let mam = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM")
+            .with_cluster_fencing(true);
+
+        let target_id = uuid::Uuid::new_v4().to_string();
+        let target = ArchivedMessage {
+            id: target_id.clone(),
+            body: Some("secret".to_string()),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            nickname_generation: Some(1),
+            ..ArchivedMessage::for_test(
+                format!("{room}/alice").parse().expect("occupant"),
+                jid::Jid::from(room.clone()),
+            )
+        };
+        mam.store_message_fenced(&room, &target, &fence)
+            .await
+            .expect("seed target");
+        let retraction_id = uuid::Uuid::new_v4().to_string();
+        let retraction_from: jid::Jid = format!("{room}/alice").parse().expect("occupant");
+        let retraction = retraction_row(&room, &retraction_id, &target_id, 1);
+        mam.store_message_fenced(&room, &retraction, &fence)
+            .await
+            .expect("archive retraction event first");
+
+        expire_node(&db, &owner).await;
+        let xep0424 = mam
+            .replace_with_tombstone_fenced(
+                &room,
+                &target_id,
+                &retraction_id,
+                &retraction_from,
+                retraction_tombstone(&retraction_id),
+                &fence,
+            )
+            .await;
+        assert!(matches!(xep0424, Err(MamStorageError::NotOwner { .. })));
+
+        let moderation_id = uuid::Uuid::new_v4().to_string();
+        let moderation = moderation_row(&room, &moderation_id, &target_id);
+        let xep0425 = mam
+            .moderate_message_fenced(
+                &room,
+                &moderation,
+                &target_id,
+                moderation_tombstone(&moderation),
+                &fence,
+            )
+            .await;
+        assert!(matches!(xep0425, Err(MamStorageError::NotOwner { .. })));
+        assert!(mam
+            .get_message(&moderation_id)
+            .await
+            .expect("read moderation")
+            .is_none());
+        assert_eq!(
+            mam.get_message(&target_id)
+                .await
+                .expect("read target")
+                .expect("target exists")
+                .body
+                .as_deref(),
+            Some("secret"),
+            "neither failed transaction may tombstone the target"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0425_draining_exact_owner_commits_event_and_tombstone_together() {
+        use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let room = room_jid("xep0425-draining-owner");
+        let entity = Entity::new(EntityType::RoomActor, room.to_string());
+        let owner = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&room, epoch);
+        let fence = store.current_claim_fence(&room).expect("fence");
+        let mam = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM")
+            .with_cluster_fencing(true);
+        let target_id = uuid::Uuid::new_v4().to_string();
+        let target = ArchivedMessage {
+            id: target_id.clone(),
+            body: Some("moderate me".to_string()),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                format!("{room}/alice").parse().expect("occupant"),
+                jid::Jid::from(room.clone()),
+            )
+        };
+        mam.store_message_fenced(&room, &target, &fence)
+            .await
+            .expect("seed target");
+        claim_store
+            .mark_draining(&owner)
+            .await
+            .expect("mark draining");
+
+        let moderation_id = uuid::Uuid::new_v4().to_string();
+        let moderation = moderation_row(&room, &moderation_id, &target_id);
+        assert!(mam
+            .moderate_message_fenced(
+                &room,
+                &moderation,
+                &target_id,
+                moderation_tombstone(&moderation),
+                &fence,
+            )
+            .await
+            .expect("draining exact owner may finish"));
+        assert!(mam
+            .get_message(&moderation_id)
+            .await
+            .expect("read moderation")
+            .is_some());
+        assert!(mam
+            .get_message(&target_id)
+            .await
+            .expect("read target")
+            .expect("target")
+            .body
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn xep0424_and_xep0425_atomic_boundaries_reject_mismatched_typed_proofs() {
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp_core::mam::ArchivedMessage;
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db)) = clean_store().await else {
+            return;
+        };
+        let room = room_jid("xep042x-proof-binding");
+        let owner = store.node_identity.current();
+        let epoch = claim_store
+            .ensure_claimed(
+                &Entity::new(EntityType::RoomActor, room.to_string()),
+                &owner,
+            )
+            .await
+            .expect("claim room");
+        store.record_claim_epoch(&room, epoch);
+        let fence = store.current_claim_fence(&room).expect("fence");
+        let mam = SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM")
+            .with_cluster_fencing(true);
+        let target_id = uuid::Uuid::new_v4().to_string();
+        let target = ArchivedMessage {
+            id: target_id.clone(),
+            body: Some("must remain".to_string()),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            nickname_generation: Some(7),
+            ..ArchivedMessage::for_test(
+                format!("{room}/alice").parse().expect("occupant"),
+                jid::Jid::from(room.clone()),
+            )
+        };
+        mam.store_message_fenced(&room, &target, &fence)
+            .await
+            .expect("seed target");
+
+        let mismatched_retraction_id = uuid::Uuid::new_v4().to_string();
+        let mismatched_retraction = retraction_row(
+            &room,
+            &mismatched_retraction_id,
+            &uuid::Uuid::new_v4().to_string(),
+            7,
+        );
+        mam.store_message_fenced(&room, &mismatched_retraction, &fence)
+            .await
+            .expect("store mismatched retraction");
+        let from: jid::Jid = format!("{room}/alice").parse().expect("occupant");
+        assert!(!mam
+            .replace_with_tombstone_fenced(
+                &room,
+                &target_id,
+                &mismatched_retraction_id,
+                &from,
+                retraction_tombstone(&mismatched_retraction_id),
+                &fence,
+            )
+            .await
+            .expect("typed mismatch is a rejected proof"));
+
+        let reused_nick_retraction_id = uuid::Uuid::new_v4().to_string();
+        let reused_nick_retraction =
+            retraction_row(&room, &reused_nick_retraction_id, &target_id, 8);
+        mam.store_message_fenced(&room, &reused_nick_retraction, &fence)
+            .await
+            .expect("store later nickname generation");
+        assert!(!mam
+            .replace_with_tombstone_fenced(
+                &room,
+                &target_id,
+                &reused_nick_retraction_id,
+                &from,
+                retraction_tombstone(&reused_nick_retraction_id),
+                &fence,
+            )
+            .await
+            .expect("generation mismatch is a rejected proof"));
+
+        let moderation_id = uuid::Uuid::new_v4().to_string();
+        let moderation = moderation_row(&room, &moderation_id, &target_id);
+        let mut archive_id_as_wire_id = moderation_tombstone(&moderation);
+        archive_id_as_wire_id.retraction_id =
+            waddle_xmpp_core::mam::RichMessageId::new(moderation.id.clone());
+        let wrong_wire_result = mam
+            .moderate_message_fenced(
+                &room,
+                &moderation,
+                &target_id,
+                archive_id_as_wire_id,
+                &fence,
+            )
+            .await;
+        assert!(matches!(
+            wrong_wire_result,
+            Err(MamStorageError::Serialization(_))
+        ));
+        assert!(mam
+            .get_message(&moderation_id)
+            .await
+            .expect("wrong-wire moderation lookup")
+            .is_none());
+
+        let mut mismatched_tombstone = moderation_tombstone(&moderation);
+        mismatched_tombstone
+            .moderation
+            .as_mut()
+            .expect("moderation")
+            .target_id =
+            waddle_xmpp_core::mam::RichMessageId::new(uuid::Uuid::new_v4().to_string())
+                .expect("id");
+        let moderation_result = mam
+            .moderate_message_fenced(&room, &moderation, &target_id, mismatched_tombstone, &fence)
+            .await;
+        assert!(matches!(
+            moderation_result,
+            Err(MamStorageError::Serialization(_))
+        ));
+        assert!(mam
+            .get_message(&moderation_id)
+            .await
+            .expect("moderation lookup")
+            .is_none());
+        assert_eq!(
+            mam.get_message(&target_id)
+                .await
+                .expect("target lookup")
+                .expect("target")
+                .body
+                .as_deref(),
+            Some("must remain")
         );
     }
 }

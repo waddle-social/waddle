@@ -100,6 +100,14 @@ fn assert_moderation_shape(frame: &str, target: &str) {
     assert_eq!(reason.text(), "cleanup");
 }
 
+fn moderation_wire_id(frame: &str) -> String {
+    let element = frame.parse::<Element>().expect("valid XML frame");
+    find_moderation_message(&element)
+        .and_then(|message| message.attr("id"))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| panic!("moderation message missing wire id: {frame}"))
+}
+
 #[tokio::test]
 async fn moderation_broadcasts_and_replays_from_mam() {
     let _guard = TEST_SERIAL.lock().await;
@@ -122,6 +130,23 @@ async fn moderation_broadcasts_and_replays_from_mam() {
 
     client
         .send(&format!(
+            r#"<iq type="set" id="moderate-wire-id" to="{room}">
+                <moderate xmlns="urn:xmpp:message-moderate:1" id="orig-1">
+                    <retract xmlns="urn:xmpp:message-retract:1"/>
+                </moderate>
+            </iq>"#
+        ))
+        .await
+        .expect("send non-canonical moderation target");
+    client
+        .recv_matching(|frame| {
+            frame.contains("moderate-wire-id") && frame.contains("<item-not-found")
+        })
+        .await
+        .expect("client wire id must not resolve as a room moderation target");
+
+    client
+        .send(&format!(
             r#"<iq type="set" id="moderate-1" to="{room}">
                 <moderate xmlns="urn:xmpp:message-moderate:1" id="{target}">
                     <retract xmlns="urn:xmpp:message-retract:1"/>
@@ -140,6 +165,12 @@ async fn moderation_broadcasts_and_replays_from_mam() {
         .find(|frame| frame.contains("urn:xmpp:message-moderate:1"))
         .unwrap_or_else(|| panic!("missing moderation broadcast: {frames:?}"));
     assert_moderation_shape(broadcast, &target);
+    let live_moderation_wire_id = moderation_wire_id(broadcast);
+    let live_moderation_stanza_id = stanza_id(broadcast);
+    assert_ne!(
+        live_moderation_wire_id, live_moderation_stanza_id,
+        "wire message id and room-assigned stanza id are distinct identities"
+    );
 
     client
         .send(&format!(
@@ -167,6 +198,16 @@ async fn moderation_broadcasts_and_replays_from_mam() {
         })
         .unwrap_or_else(|| panic!("MAM did not replay live moderation event: {frames:?}"));
     assert_moderation_shape(live, &target);
+    assert_eq!(
+        moderation_wire_id(live),
+        live_moderation_wire_id,
+        "MAM replay must preserve the live moderation message id"
+    );
+    assert_eq!(
+        stanza_id(live),
+        live_moderation_stanza_id,
+        "MAM replay must preserve the room-assigned stanza id"
+    );
 
     let tombstone = frames
         .iter()
@@ -191,6 +232,11 @@ async fn moderation_broadcasts_and_replays_from_mam() {
     assert!(
         retracted.attr("stamp").is_some(),
         "tombstone must include stamp: {tombstone}"
+    );
+    assert_eq!(
+        retracted.attr("id"),
+        Some(live_moderation_wire_id.as_str()),
+        "moderation tombstone must cite the live retraction message wire id"
     );
     assert!(
         !tombstone.contains("<body>moderate me</body>"),

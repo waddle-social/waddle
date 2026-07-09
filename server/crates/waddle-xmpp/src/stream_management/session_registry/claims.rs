@@ -1,7 +1,7 @@
 use jid::FullJid;
 use tracing::debug;
 
-use crate::ownership::{ClaimError, Entity, EntityType};
+use crate::ownership::{ClaimError, ClaimGrant, Entity, EntityType};
 
 use super::core::{InMemorySmSessionRegistry, CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT};
 use super::{DetachedSession, SmClaimCompletion, SmRegistryError};
@@ -91,24 +91,28 @@ impl InMemorySmSessionRegistry {
     /// `demote`'s own contract, must not be REQUIRED to succeed while
     /// Postgres is unreachable (the self-fencing trigger this method
     /// exists to serve).
-    pub async fn forget_claim_locally(&self, stream_id: &str) {
+    pub async fn forget_claim_locally(&self, stream_id: &str) -> bool {
         let Ok(stream_lock) = self.stream_lock(stream_id) else {
-            return;
+            return false;
         };
         let _stream_guard = stream_lock.lock().await;
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.remove(stream_id);
-        }
-        if let Ok(mut claimed) = self.claimed_sessions.write() {
-            claimed.remove(stream_id);
-        }
-        if let Ok(mut epochs) = self.claim_epochs.write() {
-            epochs.remove(stream_id);
-        }
+        let Ok(mut sessions) = self.sessions.write() else {
+            return false;
+        };
+        let Ok(mut claimed) = self.claimed_sessions.write() else {
+            return false;
+        };
+        let Ok(mut epochs) = self.claim_epochs.write() else {
+            return false;
+        };
+        sessions.remove(stream_id);
+        claimed.remove(stream_id);
+        epochs.remove(stream_id);
         if let Some(storage) = &self.persistence {
             let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
             storage.evict_claim_cache(&session_id);
         }
+        true
     }
 
     /// Confirm that a drained session has been fully promoted —
@@ -345,29 +349,18 @@ impl InMemorySmSessionRegistry {
     /// them precisely because both go through the same idempotent-for-self
     /// primitive.
     ///
-    /// Best-effort by design, exactly like
-    /// [`Self::acquire_claim_store_entry_for_detach`]: `stream_id` is a
-    /// freshly minted UUID (element 8), so a genuine collision with
-    /// another node's claim is not expected in practice, and a failure
-    /// here must not fail the `<enable/>` handshake itself — the session
-    /// simply proceeds without a durable claim record until the detach
-    /// -time call retries. Logged at `warn` so a persistently failing
-    /// `ClaimStore` backend stays visible. Called with no stream-shard
-    /// lock held: `stream_id` is freshly minted and cannot yet appear in
-    /// `sessions`/`claimed_sessions`, so there is nothing else to
-    /// coordinate with under that lock.
-    pub async fn ensure_session_claim(&self, stream_id: &str) {
+    /// This admission is authoritative, not best-effort: clustered
+    /// `<enable/>` must fail closed when the exact live node incarnation
+    /// cannot acquire/fence the claim. Returning the exact grant also lets
+    /// ISR issuance bind its UPSERT to the same claim generation in one
+    /// transaction. Called with no stream-shard lock held: `stream_id` is
+    /// freshly minted and cannot yet appear in `sessions` or
+    /// `claimed_sessions`.
+    pub async fn ensure_session_claim(&self, stream_id: &str) -> Result<ClaimGrant, ClaimError> {
         let entity = sm_session_entity(stream_id);
         let identity = self.node_identity.current();
-        if let Err(error) = self.claim_store.ensure_claimed(&entity, &identity).await {
-            tracing::warn!(
-                stream_id = %stream_id,
-                %error,
-                "handle_sm_enable: ClaimStore ensure_claimed failed for a freshly enabled \
-                 session; proceeding without a durable claim record until the detach-time \
-                 retry (best-effort, see this method's doc comment)"
-            );
-        }
+        let epoch = self.claim_store.ensure_claimed(&entity, &identity).await?;
+        Ok(ClaimGrant::new(entity, identity, epoch))
     }
 
     /// Atomically claim a resumable session for a single resume attempt.

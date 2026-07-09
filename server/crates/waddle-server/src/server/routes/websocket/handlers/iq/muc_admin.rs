@@ -1,3 +1,4 @@
+use super::errors::resource_constraint_iq_error;
 use super::*;
 use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
 
@@ -401,6 +402,45 @@ pub(super) async fn handle_muc_admin_iq(
         Vec::new()
     };
     if let Some(channel_id) = managed_channel_id.as_deref() {
+        match room_actor
+            .ask(CheckMutationOwnership)
+            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+            .await
+        {
+            Ok(()) => {}
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner,
+            )) => {
+                demote_exact_room_actor(state, &room_jid, &room_actor).await;
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error("Room ownership recently moved; please retry."),
+                )];
+            }
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::OwnershipUncertain,
+            )) => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error(
+                        "Room ownership cannot currently be verified; please retry.",
+                    ),
+                )];
+            }
+            Err(error) => {
+                warn!(room = %room_jid, ?error, "MUC admin ownership admission failed");
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        }
         for (jid, affiliation) in &affiliation_updates {
             if let Err(error) =
                 persist_managed_channel_affiliation(state, channel_id, jid, *affiliation).await
@@ -440,6 +480,41 @@ pub(super) async fn handle_muc_admin_iq(
         .await
     {
         Ok(applied) => applied,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
+        )) => {
+            demote_exact_room_actor(state, &room_jid, &room_actor).await;
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error("Room ownership recently moved; please retry."),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUncertain,
+        )) => {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error(
+                    "Room ownership cannot currently be verified; please retry.",
+                ),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed(_),
+        )) => {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                internal_server_error_iq_error(
+                    "Moderation effects could not converge durably; please retry.",
+                ),
+            )];
+        }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
@@ -592,6 +667,28 @@ pub(super) async fn handle_muc_admin_iq(
             )];
         }
     };
+    match fence_room_effects(state, &room_jid, &room_actor).await {
+        FencedRoomEffectsOutcome::Authorized => {}
+        FencedRoomEffectsOutcome::NotOwner => {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error("Room ownership recently moved; please retry."),
+            )];
+        }
+        FencedRoomEffectsOutcome::OwnershipUncertain => {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error(
+                    "Room ownership cannot currently be verified; please retry.",
+                ),
+            )];
+        }
+    }
+    let persist_failure = applied.persist_failure.clone();
     for (recipient, presence) in applied.presence_updates {
         let _ = state
             .deps
@@ -610,6 +707,17 @@ pub(super) async fn handle_muc_admin_iq(
         super::super::super::muc_call_sfu::unregister_participant_from_room(
             state, &room_jid, removed,
         );
+    }
+    if let Some(error) = persist_failure {
+        warn!(room = %room_jid, %error, "MUC admin effects applied but durable convergence failed");
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            internal_server_error_iq_error(
+                "Moderation effects were applied but durable convergence failed; please retry.",
+            ),
+        )];
     }
     vec![iq_to_xml(build_admin_set_result(
         iq.id(),

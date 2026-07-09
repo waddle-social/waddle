@@ -23,6 +23,23 @@ pub(crate) fn build_interpret_deps<'a>(
         inbox_storage: Some(&state.deps.protocol.inbox_storage),
         extension_manager: Some(&state.deps.protocol.extension_manager),
         room_registry: Some(&state.deps.protocol.room_registry),
+        room_actor_incarnation: None,
+        #[cfg(feature = "clustering")]
+        muc_durable_store: state
+            .deps
+            .app_state
+            .clustering_claims
+            .muc_durable_store
+            .as_ref(),
+        #[cfg(feature = "clustering")]
+        clustered_muc_ownership_required: state
+            .deps
+            .app_state
+            .clustering_claims
+            .claim_store
+            .is_some(),
+        #[cfg(feature = "clustering")]
+        room_claim_fence: None,
         web_socket_state: Some(state),
         authenticated_session,
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),

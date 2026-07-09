@@ -207,13 +207,20 @@ impl ClaimStore for RecordingClaimStore {
 
     async fn release_many(
         &self,
-        _entities: &[Entity],
-        me: &NodeIdentity,
+        grants: &[crate::ownership::ClaimGrant],
     ) -> Result<(), ClaimError> {
-        self.release_owners.lock().expect("lock").push(me.clone());
+        self.release_owners
+            .lock()
+            .expect("lock")
+            .extend(grants.iter().map(|grant| grant.owner.clone()));
         let mut state = self.state.lock().expect("lock");
-        if matches!(&*state, Some((owner, _, _)) if owner == me) {
-            *state = None;
+        if let Some((owner, epoch, _)) = &*state {
+            if grants
+                .iter()
+                .any(|grant| grant.owner == *owner && grant.epoch == *epoch)
+            {
+                *state = None;
+            }
         }
         Ok(())
     }
@@ -784,7 +791,10 @@ async fn test_demote_user_actor_hard_kills_without_releasing_the_claim() {
         })
         .await
         .expect("demote");
-    assert!(demoted);
+    assert!(
+        demoted.is_empty(),
+        "an actor with no resources returns no detach targets"
+    );
     actor.wait_for_shutdown().await;
 
     let lookup = registry

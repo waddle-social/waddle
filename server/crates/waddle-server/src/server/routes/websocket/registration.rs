@@ -79,6 +79,48 @@ pub(super) fn publish_stream_id_and_presence(
     }
 }
 
+pub(super) fn rollback_registration_if_self_fenced(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    admission: Option<crate::clustering::ClusteringAdmissionToken>,
+) -> bool {
+    if admission.is_some_and(|token| state.deps.app_state.clustering_readiness.admits(token)) {
+        return false;
+    }
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister_if_owner(jid, owner);
+    true
+}
+
+fn clustering_admission_is_current(state: &WebSocketState, conn: &WsConnState) -> bool {
+    conn.clustering_admission
+        .is_some_and(|token| state.deps.app_state.clustering_readiness.admits(token))
+}
+
+pub(super) async fn rollback_authoritative_registration(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister_if_owner(jid, owner);
+    tokio::join!(
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            jid,
+            Some(owner.clone()),
+        ),
+        super::cleanup::unregister_remote_user_resource_if_owner(state, jid, owner),
+    );
+}
+
 pub(super) async fn register_bound_connection_after_frame(
     state: &WebSocketState,
     domain: &str,
@@ -88,6 +130,13 @@ pub(super) async fn register_bound_connection_after_frame(
     let Some(jid) = conn.phase.bound_jid().cloned() else {
         return RegistrationAfterFrame::Unchanged;
     };
+    if !clustering_admission_is_current(state, conn) {
+        warn!(
+            jid = %jid,
+            "Refusing XMPP resource registration while the cluster node is self-fenced"
+        );
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
     let Some(tx) = pending_tx.take() else {
         return RegistrationAfterFrame::Unchanged;
     };
@@ -130,18 +179,71 @@ pub(super) async fn register_bound_connection_after_frame(
         blocklist,
     );
 
-    let owner = state
+    // Construct the physical entry before publishing it. In cluster mode the
+    // bridge first reserves the one durable admission epoch shared by local-
+    // owner and remote-owner sockets; only then may either registry observe
+    // this full JID.
+    let entry = waddle_xmpp::registry::ConnectionEntry::new(tx);
+    entry
+        .carbons_enabled
+        .store(conn.carbons_enabled, std::sync::atomic::Ordering::Relaxed);
+    entry
+        .roster_interested
+        .store(conn.roster_interested, std::sync::atomic::Ordering::Relaxed);
+    entry.blocklist_interested.store(
+        conn.blocklist_interested,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let owner = entry.carbons_handle();
+    if let Some(retirement_handle) = conn.retirement_handle.clone() {
+        if !entry.install_retirement_handle(retirement_handle) {
+            error!(jid = %jid, "Connection retirement handle was already installed");
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        }
+    }
+
+    #[cfg(feature = "clustering")]
+    let mut physical_guard = {
+        let bridge = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref();
+        match bridge {
+            Some(bridge) => match bridge
+                .begin_physical_user_resource(&jid, owner.clone())
+                .await
+            {
+                Ok(guard) => Some(guard),
+                Err(_) => return RegistrationAfterFrame::SessionInitializationFailed,
+            },
+            None => None,
+        }
+    };
+
+    let published_owner = state
         .deps
         .protocol
         .connection_registry
-        .register_with_stream_state(
-            jid.clone(),
-            tx,
-            conn.carbons_enabled,
-            conn.roster_interested,
-            conn.blocklist_interested,
-        );
+        .register_entry(jid.clone(), entry.clone());
+    debug_assert!(std::sync::Arc::ptr_eq(&published_owner, &owner));
     conn.registry_owner = Some(owner.clone());
+
+    // Close the race where fencing begins after the pre-registration check
+    // but before publication. Since readiness flips before the terminal
+    // ConnectionRegistry snapshot, either that snapshot sees this entry or
+    // this owner-gated rollback removes it here.
+    if rollback_registration_if_self_fenced(state, &jid, &owner, conn.clustering_admission) {
+        #[cfg(feature = "clustering")]
+        abort_physical_registration(state, &mut physical_guard).await;
+        conn.registry_owner = None;
+        warn!(
+            jid = %jid,
+            "Rolled back XMPP resource registration because the cluster node self-fenced"
+        );
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
 
     // Publish the SM stream id + restored presence onto the
     // freshly-registered entry, owner-gated against a racing same-JID
@@ -196,44 +298,83 @@ pub(super) async fn register_bound_connection_after_frame(
         .connection_registry
         .entry_if_owner(&jid, &owner)
     {
-        let mirror_outcome = crate::server::dual_registration::mirror_register_outcome(
-            &state.deps.protocol.user_registry,
-            jid.clone(),
-            entry.clone(),
-        )
-        .await;
-        let registered = match mirror_outcome {
-            crate::server::dual_registration::MirrorRegisterOutcome::Registered => true,
-            crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
-                register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
-            }
-            crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
+        #[cfg(feature = "clustering")]
+        let registered = if physical_guard.is_some() {
+            publish_clustered_physical_resource(state, physical_guard.as_ref(), entry.clone()).await
+        } else {
+            matches!(
+                crate::server::dual_registration::mirror_register_outcome(
+                    &state.deps.protocol.user_registry,
+                    jid.clone(),
+                    entry.clone(),
+                )
+                .await,
+                crate::server::dual_registration::MirrorRegisterOutcome::Registered
+            )
         };
+        #[cfg(not(feature = "clustering"))]
+        let registered = matches!(
+            crate::server::dual_registration::mirror_register_outcome(
+                &state.deps.protocol.user_registry,
+                jid.clone(),
+                entry.clone(),
+            )
+            .await,
+            crate::server::dual_registration::MirrorRegisterOutcome::Registered
+        );
         if !registered {
-            // Rollback also clears the presence_states published above.
-            state
-                .deps
-                .protocol
-                .connection_registry
-                .unregister_if_owner(&jid, &owner);
             // kameo's reply_timeout does not cancel an already-enqueued
             // handler, so a register that *timed out* may still land in the
             // actor tree after this rollback. Reap it with an owner-gated
             // unregister: the `UserRegistryActor` mailbox is FIFO, so this is
             // ordered after the register ask and prunes the phantom if it ran
             // late; owner-gating leaves a racing replacement untouched.
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                &jid,
-                Some(owner.clone()),
-            )
-            .await;
+            #[cfg(feature = "clustering")]
+            abort_physical_registration(state, &mut physical_guard).await;
+            rollback_authoritative_registration(state, &jid, &owner).await;
             conn.registry_owner = None;
             return RegistrationAfterFrame::SessionInitializationFailed;
         }
     }
 
+    if !clustering_admission_is_current(state, conn) {
+        #[cfg(feature = "clustering")]
+        abort_physical_registration(state, &mut physical_guard).await;
+        rollback_authoritative_registration(state, &jid, &owner).await;
+        conn.registry_owner = None;
+        warn!(jid = %jid, "Rolled back authoritative registration after node self-fence");
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
+
     let sm_finalization = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
+    if !clustering_admission_is_current(state, conn) {
+        #[cfg(feature = "clustering")]
+        abort_physical_registration(state, &mut physical_guard).await;
+        rollback_authoritative_registration(state, &jid, &owner).await;
+        conn.registry_owner = None;
+        warn!(jid = %jid, "Rolled back finalized session after node self-fence");
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
+    #[cfg(feature = "clustering")]
+    if let Some(guard) = physical_guard.take() {
+        let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        else {
+            rollback_authoritative_registration(state, &jid, &owner).await;
+            conn.registry_owner = None;
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        };
+        let Some(token) = bridge.finalize_physical_user_resource(guard).await else {
+            rollback_authoritative_registration(state, &jid, &owner).await;
+            conn.registry_owner = None;
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        };
+        conn.physical_resource_admission = Some(token);
+    }
     info!(
         jid = %jid,
         resumed = conn.phase.is_resumed(),
@@ -245,11 +386,10 @@ pub(super) async fn register_bound_connection_after_frame(
 }
 
 #[cfg(feature = "clustering")]
-async fn register_remote_clustered_resource(
+async fn publish_clustered_physical_resource(
     state: &WebSocketState,
-    jid: &FullJid,
+    guard: Option<&crate::clustering::route_bridge::PhysicalResourceRegistrationGuard>,
     entry: waddle_xmpp::registry::ConnectionEntry,
-    owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> bool {
     let Some(bridge) = state
         .deps
@@ -260,22 +400,31 @@ async fn register_remote_clustered_resource(
     else {
         return false;
     };
-    match bridge
-        .try_register_remote_user_resource(jid, entry, owner)
-        .await
-    {
+    let Some(guard) = guard else {
+        return false;
+    };
+    match bridge.publish_physical_user_resource(guard, entry).await {
         crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Registered => true,
         crate::clustering::route_bridge::RemoteResourceRegisterOutcome::NotRemote
         | crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Failed => false,
     }
 }
 
-#[cfg(not(feature = "clustering"))]
-async fn register_remote_clustered_resource(
-    _state: &WebSocketState,
-    _jid: &FullJid,
-    _entry: waddle_xmpp::registry::ConnectionEntry,
-    _owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
-    false
+#[cfg(feature = "clustering")]
+async fn abort_physical_registration(
+    state: &WebSocketState,
+    guard: &mut Option<crate::clustering::route_bridge::PhysicalResourceRegistrationGuard>,
+) {
+    let Some(guard) = guard.take() else {
+        return;
+    };
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge.abort_physical_user_resource(guard).await;
+    }
 }

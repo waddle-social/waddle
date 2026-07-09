@@ -35,7 +35,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity};
+#[cfg(test)]
+use waddle_xmpp::ownership::Entity;
+use waddle_xmpp::ownership::{ClaimGrant, ClaimStore, EntityType, NodeIdentity};
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
@@ -81,18 +83,60 @@ pub(crate) async fn run_shutdown_drain<L>(
     mark_draining_bounded(lease, identity, MARK_DRAINING_BOUND.min(budget)).await;
 
     let deadline = start + budget;
-    let owned = local_claims.owned().await;
-    let mut to_release: Vec<Entity> = Vec::new();
+    let eligible = local_claims
+        .owned()
+        .await
+        .into_iter()
+        .filter(|entity| entity.entity_type == EntityType::RoomActor)
+        .collect::<Vec<_>>();
+    let snapshot_remaining = deadline.saturating_duration_since(Instant::now());
+    let grants = match tokio::time::timeout(
+        snapshot_remaining,
+        claim_store.owned_claims(&eligible, identity),
+    )
+    .await
+    {
+        Ok(Ok(grants)) => grants,
+        Ok(Err(error)) => {
+            let abandoned = eligible.len() as u64;
+            tracing::warn!(
+                %error,
+                count = abandoned,
+                "clustering drain: bulk exact-grant snapshot failed; leaving entities claimed"
+            );
+            if abandoned > 0 {
+                metrics::record_claims_abandoned_on_drain(abandoned);
+            }
+            metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
+            return;
+        }
+        Err(_) => {
+            let abandoned = eligible.len() as u64;
+            tracing::warn!(
+                count = abandoned,
+                "clustering drain: budget exhausted during bulk exact-grant snapshot; leaving entities claimed"
+            );
+            if abandoned > 0 {
+                metrics::record_claims_abandoned_on_drain(abandoned);
+            }
+            metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
+            return;
+        }
+    };
+    let mut grants_by_entity = grants
+        .into_iter()
+        .map(|grant| (grant.entity.clone(), grant))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut to_release: Vec<ClaimGrant> = Vec::new();
     let mut abandoned: u64 = 0;
 
-    for entity in owned {
-        // Only entities this generic loop owns draining for — see the
-        // module doc for why `SmSession` is deliberately excluded (the
-        // existing Q6 drain owns those) and `UserActor` has no production
-        // claim-acquisition call site yet (deviation 34).
-        if entity.entity_type != EntityType::RoomActor {
+    for entity in eligible {
+        let Some(grant) = grants_by_entity.remove(&entity) else {
+            // The bulk snapshot already proved this local entry is no longer
+            // authoritatively owned by `identity`; there is no claim to
+            // release. Reconciliation will demote the stale local copy.
             continue;
-        }
+        };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             tracing::warn!(
@@ -111,7 +155,7 @@ pub(crate) async fn run_shutdown_drain<L>(
             // entity enters `to_release` strictly after `seal_before_release`
             // — which performs/confirms the entity's final fenced write —
             // has already returned `true`, never before.
-            to_release.push(entity);
+            to_release.push(grant);
         } else {
             tracing::warn!(
                 entity_id = %entity.id,
@@ -124,16 +168,24 @@ pub(crate) async fn run_shutdown_drain<L>(
 
     if !to_release.is_empty() {
         let attempted = to_release.len() as u64;
-        match claim_store.release_many(&to_release, identity).await {
-            Ok(()) => {
+        let release_remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(release_remaining, claim_store.release_many(&to_release)).await {
+            Ok(Ok(())) => {
                 metrics::record_claims_released_on_drain(attempted);
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::warn!(
                     %error,
                     count = attempted,
                     "clustering drain: release_many failed; entities remain claimed \
                      (fenced-safe, reclaimed later)"
+                );
+                abandoned += attempted;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    count = attempted,
+                    "clustering drain: budget exhausted during release_many; entities remain claimed"
                 );
                 abandoned += attempted;
             }
@@ -235,7 +287,10 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, InProcessClaimStore, NodeIdentity};
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimError, ClaimGrant, ClaimSnapshot, InProcessClaimStore, NodeIdentity,
+        ResumeIdentityProof, StalePredicate,
+    };
 
     // --- rollout_backoff_delay: pure-function coverage -----------------
 
@@ -310,6 +365,8 @@ mod tests {
         async fn report_steal_intent(
             &self,
             _entity: &Entity,
+            _target_owner: &NodeIdentity,
+            _target_epoch: ClaimEpoch,
             _reporter: &NodeIdentity,
         ) -> Result<(), ClaimError> {
             Ok(())
@@ -356,6 +413,111 @@ mod tests {
         outcome: SealOutcome,
         seal_calls: Arc<Mutex<Vec<String>>>,
         demote_calls: Arc<AtomicU32>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum HangingStoreOperation {
+        OwnedClaims,
+        ReleaseMany,
+    }
+
+    /// Delegates real claim bookkeeping to `InProcessClaimStore`, but
+    /// wedges one selected bulk operation forever. This deterministically
+    /// proves that both newly-added bulk phases share the total shutdown
+    /// budget instead of extending shutdown indefinitely.
+    struct HangingBulkClaimStore {
+        inner: Arc<InProcessClaimStore>,
+        operation: HangingStoreOperation,
+    }
+
+    #[async_trait]
+    impl ClaimStore for HangingBulkClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.ensure_claimed(entity, me).await
+        }
+
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+
+        async fn owned_claims(
+            &self,
+            entities: &[Entity],
+            me: &NodeIdentity,
+        ) -> Result<Vec<ClaimGrant>, ClaimError> {
+            if matches!(self.operation, HangingStoreOperation::OwnedClaims) {
+                return std::future::pending().await;
+            }
+            self.inner.owned_claims(entities, me).await
+        }
+
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+
+        async fn release_many(&self, grants: &[ClaimGrant]) -> Result<(), ClaimError> {
+            if matches!(self.operation, HangingStoreOperation::ReleaseMany) {
+                return std::future::pending().await;
+            }
+            self.inner.release_many(grants).await
+        }
     }
 
     #[async_trait]
@@ -412,15 +574,15 @@ mod tests {
         let room_a = room("room-a@muc.example.com");
         let room_b = room("room-b@muc.example.com");
         let sm_c = sm("stream-c");
-        claim_store
+        let room_a_epoch = claim_store
             .acquire(&room_a, &me)
             .await
             .expect("acquire room a");
-        claim_store
+        let room_b_epoch = claim_store
             .acquire(&room_b, &me)
             .await
             .expect("acquire room b");
-        claim_store.acquire(&sm_c, &me).await.expect("acquire sm c");
+        let sm_c_epoch = claim_store.acquire(&sm_c, &me).await.expect("acquire sm c");
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
             owned: vec![room_a.clone(), room_b.clone(), sm_c.clone()],
@@ -440,21 +602,21 @@ mod tests {
 
         assert!(
             !claim_store
-                .fence(&room_a, &me, ClaimEpoch(0))
+                .fence(&room_a, &me, room_a_epoch)
                 .await
                 .unwrap_or(true),
             "room_a's claim must be released by the drain"
         );
         assert!(
             !claim_store
-                .fence(&room_b, &me, ClaimEpoch(0))
+                .fence(&room_b, &me, room_b_epoch)
                 .await
                 .unwrap_or(true),
             "room_b's claim must be released by the drain"
         );
         assert!(
             claim_store
-                .fence(&sm_c, &me, ClaimEpoch(0))
+                .fence(&sm_c, &me, sm_c_epoch)
                 .await
                 .unwrap_or(false),
             "the sm_session entity must be left untouched by the generic drain loop \
@@ -524,6 +686,74 @@ mod tests {
                 .unwrap_or(false),
             "a hung seal, once the budget overruns, must leave the claim held (merely \
              un-released, fenced-safe) rather than block shutdown indefinitely"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_abandons_claims_when_the_bulk_exact_grant_snapshot_hangs() {
+        let inner = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let room_a = room("room-snapshot-hangs@muc.example.com");
+        let epoch = inner.acquire(&room_a, &me).await.expect("acquire");
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(HangingBulkClaimStore {
+            inner: Arc::clone(&inner),
+            operation: HangingStoreOperation::OwnedClaims,
+        });
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
+            owned: vec![room_a.clone()],
+            outcome: SealOutcome::Succeed,
+            seal_calls: Arc::new(Mutex::new(Vec::new())),
+            demote_calls: Arc::new(AtomicU32::new(0)),
+        });
+
+        let budget = Duration::from_millis(50);
+        let task_me = me.clone();
+        let drain = tokio::spawn(async move {
+            run_shutdown_drain(&NoopLease, &claim_store, &task_me, &local_claims, budget).await;
+        });
+        tokio::time::advance(budget * 4).await;
+        drain.await.expect("drain task must stop at its budget");
+
+        assert!(
+            inner.fence(&room_a, &me, epoch).await.unwrap_or(false),
+            "a timed-out authority snapshot must leave the exact claim held"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_abandons_sealed_claims_when_the_exact_batch_release_hangs() {
+        let inner = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let room_a = room("room-release-hangs@muc.example.com");
+        let epoch = inner.acquire(&room_a, &me).await.expect("acquire");
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(HangingBulkClaimStore {
+            inner: Arc::clone(&inner),
+            operation: HangingStoreOperation::ReleaseMany,
+        });
+        let seal_calls = Arc::new(Mutex::new(Vec::new()));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
+            owned: vec![room_a.clone()],
+            outcome: SealOutcome::Succeed,
+            seal_calls: Arc::clone(&seal_calls),
+            demote_calls: Arc::new(AtomicU32::new(0)),
+        });
+
+        let budget = Duration::from_millis(50);
+        let task_me = me.clone();
+        let drain = tokio::spawn(async move {
+            run_shutdown_drain(&NoopLease, &claim_store, &task_me, &local_claims, budget).await;
+        });
+        tokio::time::advance(budget * 4).await;
+        drain.await.expect("drain task must stop at its budget");
+
+        assert_eq!(
+            seal_calls.lock().expect("seal calls lock").as_slice(),
+            [room_a.id.as_str()],
+            "the final fenced write must finish before the batch release is attempted"
+        );
+        assert!(
+            inner.fence(&room_a, &me, epoch).await.unwrap_or(false),
+            "a timed-out exact release must abandon, never silently drop, the claim"
         );
     }
 
@@ -626,6 +856,10 @@ mod tests {
             return;
         };
         let me = identity();
+        claim_store_typed
+            .register(&me, None)
+            .await
+            .expect("register modeled-scale owner");
         const MODELED_ENTITY_COUNT: usize = 2_000;
         let mut entities = Vec::with_capacity(MODELED_ENTITY_COUNT);
         for i in 0..MODELED_ENTITY_COUNT {
@@ -703,7 +937,7 @@ mod tests {
             .await
             .expect("register");
         let entity = room("room-post-release@muc.example.com");
-        claim_store_typed
+        let epoch = claim_store_typed
             .acquire(&entity, &me)
             .await
             .expect("acquire");
@@ -714,9 +948,15 @@ mod tests {
             .mark_draining(&me)
             .await
             .expect("mark draining");
+        let other = identity();
+        claim_store_typed
+            .register(&other, None)
+            .await
+            .expect("register non-draining claimant");
         let claim_store: Arc<dyn ClaimStore> = Arc::new(claim_store_typed);
+        let grant = ClaimGrant::new(entity.clone(), me.clone(), epoch);
         claim_store
-            .release_many(std::slice::from_ref(&entity), &me)
+            .release_many(std::slice::from_ref(&grant))
             .await
             .expect("release_many");
 
@@ -729,7 +969,6 @@ mod tests {
         );
 
         // A genuinely different, non-draining node can.
-        let other = identity();
         claim_store
             .acquire(&entity, &other)
             .await

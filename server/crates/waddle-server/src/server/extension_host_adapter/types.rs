@@ -116,6 +116,8 @@ pub enum ExtensionHostAdapterError {
     RoomNotFound(BareJid),
     #[error("room actor failed: {0}")]
     RoomActor(String),
+    #[error("room ownership cannot currently be verified: {0}")]
+    RoomOwnershipUncertain(BareJid),
     #[error("storage failed: {0}")]
     Storage(String),
     #[error("protocol failed: {0}")]

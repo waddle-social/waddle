@@ -2258,19 +2258,20 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
 }
 
 // ── ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): fenced Q6
-// promotion insert — duplicate-promotion (double-janitor) prevention ──
+// promotion insert — exact node-incarnation fencing ──
 //
 // Element 9's locked text: "promotion executes under the row-locked
 // fenced epoch." This proves `insert_fenced`'s wiring end-to-end against
-// real Postgres: two nodes attempting to promote the SAME SM session's
-// unacked queue under different claim states — one holds a now-stale
-// (deposed) claim, the other holds the current one — must have exactly
-// one succeed; the deposed node's attempt aborts fenced
+// real Postgres: two epochs of the same process-stable node_id attempting to
+// promote the SAME SM session's unacked queue under one unchanged claim epoch
+// must have exactly one succeed; the pre-fence incarnation aborts fenced
 // (`PendingStorageError::NotOwner`) before writing anything.
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
-    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+async fn insert_fenced_rejects_old_epoch_after_same_node_id_recovery() {
+    use crate::clustering::claims::{
+        clustering_control_plane_table_lock, NodeLeaseStore, PostgresClaimStore,
+    };
     use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
@@ -2307,46 +2308,38 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
     );
-    let node_b = NodeIdentity::new(
-        uuid::Uuid::new_v4().to_string(),
-        uuid::Uuid::new_v4().to_string(),
-    );
+    let node_b = NodeIdentity::new(node_a.node_id.clone(), uuid::Uuid::new_v4().to_string());
 
-    // Node A originally holds the claim — the ordinary "self-claimed
-    // session" state a Q6 promotion runs under.
     schema_store
+        .register(&node_a, None)
+        .await
+        .expect("register original node incarnation");
+    // The original epoch holds the claim before this process self-fences.
+    let old_claim_epoch = schema_store
         .acquire(&entity, &node_a)
         .await
         .expect("node A acquires");
 
-    // Simulate a concurrent double-janitor: another node's own
-    // `steal_stale`/orphan-reaper sweep won this exact entity's claim out
-    // from under node A between node A's own claim and this promotion
-    // attempt (element 9's "any node may steal such claims" text) — bump
-    // the row directly to node B's identity/epoch, the same observable
-    // end state a real concurrent steal would leave, without depending on
-    // real-time interleaving for a deterministic test.
-    {
-        let conn = db.guard().await.expect("guard");
-        conn.execute(
-            "UPDATE clustering_claims SET node_id = ?, node_epoch = ?, \
-             claim_epoch = claim_epoch + 1 WHERE entity = ?",
-            crate::db_params![
-                node_b.node_id.clone(),
-                node_b.node_epoch.clone(),
-                entity_key.clone(),
-            ],
+    // Recover under the same relay-address node_id but a new fencing epoch.
+    // Keep the entity claim epoch unchanged so only node_epoch can reject the
+    // stale pending-delivery writer.
+    schema_store
+        .register_draining_with_peer_id(
+            &node_a,
+            &node_b,
+            None,
+            None,
+            std::time::Duration::from_secs(30),
         )
         .await
-        .expect("simulate concurrent steal to node B");
-    }
+        .expect("register recovered node incarnation as draining");
 
     let recipient_str = format!("dup-promo-{}@example.com", uuid::Uuid::new_v4());
     let recipient = bare(&recipient_str);
     let row_for_a = transient_row(&recipient_str, "node A's promotion attempt");
     let row_for_b = transient_row(&recipient_str, "node B's promotion attempt");
 
-    // Node A's storage: fenced against its own (now-stale/deposed) identity.
+    // The pre-fence storage still reads the old process incarnation.
     let storage_a = crate::pending_delivery::open_for_cluster_mode(
         Some(&database_url),
         QuotaPolicy::Unlimited,
@@ -2361,8 +2354,7 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
     .await
     .expect("open node A's fenced pending_delivery storage");
 
-    // Node B's storage: fenced against the identity that actually won the
-    // claim.
+    // The recovered storage reads the new epoch under the same node_id.
     let storage_b = crate::pending_delivery::open_for_cluster_mode(
         Some(&database_url),
         QuotaPolicy::Unlimited,
@@ -2377,16 +2369,31 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
     .await
     .expect("open node B's fenced pending_delivery storage");
 
-    // Node A's promotion aborts fenced — its own `ensure_claimed` observes
-    // a genuinely different node/epoch now on the row and refuses before
-    // any write.
+    // The old epoch aborts before writing even though both node_id and
+    // claim_epoch still match the recovered owner.
     let outcome_a = storage_a.insert_fenced(row_for_a, &stream_id).await;
     assert!(
         matches!(outcome_a, Err(PendingStorageError::NotOwner { .. })),
-        "the deposed node's promotion attempt must abort fenced (NotOwner), got {outcome_a:?}"
+        "the old node epoch must abort fenced (NotOwner), got {outcome_a:?}"
     );
 
-    // Node B's promotion succeeds — it is the current, genuine owner.
+    let recovered_epoch = schema_store
+        .reclaim_after_self_fence(
+            &entity,
+            old_claim_epoch,
+            &node_a,
+            &node_b,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("reclaim old exact grant into draining recovery candidate");
+    assert_ne!(recovered_epoch, old_claim_epoch);
+    assert!(schema_store
+        .activate(&node_b, std::time::Duration::from_secs(30))
+        .await
+        .expect("activate recovered node"));
+
+    // The recovered epoch succeeds under the exact same node_id.
     let outcome_b = storage_b
         .insert_fenced(row_for_b, &stream_id)
         .await
@@ -2411,6 +2418,46 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
         Some("node B's promotion attempt"),
         "the landed row must be the current owner's, never the deposed node's"
     );
+
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE clustering_nodes SET heartbeat = clock_timestamp(), lease_ttl_ms = 50 WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![node_b.node_id.clone(), node_b.node_epoch.clone()],
+        )
+        .await
+        .expect("install short lease");
+    let mut blocker = db.begin().await.expect("begin node blocker");
+    let mut lock_rows = blocker
+        .query(
+            "SELECT 1 FROM clustering_nodes WHERE node_id = ? AND node_epoch = ? FOR UPDATE",
+            crate::db_params![node_b.node_id.clone(), node_b.node_epoch.clone()],
+        )
+        .await
+        .expect("lock destination node");
+    assert!(lock_rows.next().await.expect("read lock row").is_some());
+    drop(lock_rows);
+    let delayed_storage = storage_b.clone();
+    let delayed_stream = stream_id.clone();
+    let delayed_row = transient_row(&recipient_str, "post-TTL promotion must not land");
+    let delayed = tokio::spawn(async move {
+        delayed_storage
+            .insert_fenced(delayed_row, &delayed_stream)
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        !delayed.is_finished(),
+        "pending insert must wait on the held node row"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    blocker.commit().await.expect("release node blocker");
+    assert!(matches!(
+        delayed.await.expect("join delayed insert"),
+        Err(PendingStorageError::NotOwner { .. })
+    ));
+    assert_eq!(storage_b.list(&recipient).await.expect("list").len(), 1);
 
     // Cleanup — scoped to this test's own unique stream id/recipient, never
     // a global cutoff (see the i32-overflow test above for why).

@@ -32,6 +32,13 @@ pub enum MamStorageError {
     )]
     NotOwner { entity: Entity },
 
+    /// A caller requested a clustered, ownership-fenced archive write from
+    /// a storage implementation that cannot execute the fence. Falling back
+    /// to an unfenced insert would let a stale room owner fan out messages,
+    /// so this is a hard failure for the clustered groupchat path.
+    #[error("clustered MAM fencing is unavailable for entity '{entity}'")]
+    FencingUnavailable { entity: Entity },
+
     /// ADR-0017 Phase 3 Slice 7 FIX 1: clustered MAM fencing requires this
     /// storage's own database to be co-located with the clustering global
     /// database (the fencing `SELECT ... FOR SHARE` targets

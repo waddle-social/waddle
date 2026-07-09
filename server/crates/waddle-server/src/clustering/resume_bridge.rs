@@ -28,6 +28,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use jid::BareJid;
+use waddle_xmpp::ownership::{
+    ClaimEpoch, ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::registry::{ConnectionRegistry, ForceDetachOutcome, ForceDetachRequest};
 
@@ -55,6 +58,12 @@ pub enum LocalForcedDetachOutcome {
 /// rationale.
 pub struct ResumeStealBridge {
     connection_registry: OnceLock<Arc<ConnectionRegistry>>,
+    claim_fence: OnceLock<ResumeClaimFence>,
+}
+
+struct ResumeClaimFence {
+    claim_store: Arc<dyn ClaimStore>,
+    node_identity: SharedNodeIdentity,
 }
 
 impl ResumeStealBridge {
@@ -62,6 +71,7 @@ impl ResumeStealBridge {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             connection_registry: OnceLock::new(),
+            claim_fence: OnceLock::new(),
         })
     }
 
@@ -77,6 +87,65 @@ impl ResumeStealBridge {
         }
     }
 
+    /// Wire the exact-incarnation/claim-generation authority used to reject
+    /// delayed resume asks before they can close a local connection. This is
+    /// separate from [`Self::wire`] because the claim store and node identity
+    /// exist during clustering startup, while the connection registry is
+    /// constructed later by the HTTP dependency graph.
+    pub fn wire_claim_fence(
+        &self,
+        claim_store: Arc<dyn ClaimStore>,
+        node_identity: SharedNodeIdentity,
+    ) {
+        if self
+            .claim_fence
+            .set(ResumeClaimFence {
+                claim_store,
+                node_identity,
+            })
+            .is_err()
+        {
+            tracing::error!(
+                "ResumeStealBridge::wire_claim_fence called more than once; the claim-fence \
+                 handles were already wired (ignoring this call)"
+            );
+        }
+    }
+
+    async fn request_matches_current_claim(
+        &self,
+        stream_id: &SmSessionId,
+        expected_owner: &NodeIdentity,
+        observed: ClaimEpoch,
+    ) -> bool {
+        let Some(fence) = self.claim_fence.get() else {
+            return false;
+        };
+        if fence.node_identity.current() != *expected_owner {
+            return false;
+        }
+        let entity = Entity::new(EntityType::SmSession, stream_id.as_str());
+        let snapshot = match fence.claim_store.current_claim(&entity).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    %error,
+                    "cross-node resume force-detach: current-claim validation failed"
+                );
+                return false;
+            }
+        };
+        snapshot.owner == *expected_owner
+            && snapshot.claim_epoch == observed
+            && snapshot.owner_lease_fresh
+            // Re-check after the database await. A local self-fence can
+            // rotate SharedNodeIdentity while the claim read is in flight;
+            // that delayed read must not authorize the destructive send.
+            && fence.node_identity.current() == *expected_owner
+    }
+
     /// Ask this node's own live connection registry to force-detach
     /// `stream_id` on behalf of `requester_bare_jid`, bounded by `budget`.
     /// See [`LocalForcedDetachOutcome`] for the outcome shape.
@@ -84,6 +153,8 @@ impl ResumeStealBridge {
         &self,
         stream_id: &SmSessionId,
         requester_bare_jid: &BareJid,
+        expected_owner: &NodeIdentity,
+        observed: ClaimEpoch,
         budget: Duration,
     ) -> LocalForcedDetachOutcome {
         let Some(registry) = self.connection_registry.get() else {
@@ -101,9 +172,20 @@ impl ResumeStealBridge {
         if entry.sm_stream_id().as_ref() != Some(stream_id) {
             return LocalForcedDetachOutcome::NotLiveLocally;
         }
+        // This is the final gate before the destructive request enters the
+        // connection task. Stable relay node ids are intentionally reused
+        // across self-fence recovery, so both the exact node incarnation and
+        // the exact claim generation observed by the asker are required.
+        if !self
+            .request_matches_current_claim(stream_id, expected_owner, observed)
+            .await
+        {
+            return LocalForcedDetachOutcome::NotLiveLocally;
+        }
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         let request = ForceDetachRequest {
             requester_bare_jid: requester_bare_jid.clone(),
+            reason: waddle_xmpp::registry::ForceDetachReason::SessionResumed,
             ack: ack_tx,
         };
         // Council-adjudicated FIX 5: `try_send`, not a blocking
@@ -162,8 +244,15 @@ mod tests {
         let bridge = ResumeStealBridge::new();
         let stream_id = SmSessionId::new("stream-1");
         let jid: BareJid = "alice@example.com".parse().expect("valid jid");
+        let owner = NodeIdentity::new("node-a", "epoch-a");
         let outcome = bridge
-            .request_forced_detach(&stream_id, &jid, Duration::from_millis(50))
+            .request_forced_detach(
+                &stream_id,
+                &jid,
+                &owner,
+                ClaimEpoch(0),
+                Duration::from_millis(50),
+            )
             .await;
         assert_eq!(outcome, LocalForcedDetachOutcome::NotLiveLocally);
     }
@@ -174,9 +263,46 @@ mod tests {
         bridge.wire(Arc::new(ConnectionRegistry::new()));
         let stream_id = SmSessionId::new("stream-1");
         let jid: BareJid = "alice@example.com".parse().expect("valid jid");
+        let owner = NodeIdentity::new("node-a", "epoch-a");
         let outcome = bridge
-            .request_forced_detach(&stream_id, &jid, Duration::from_millis(50))
+            .request_forced_detach(
+                &stream_id,
+                &jid,
+                &owner,
+                ClaimEpoch(0),
+                Duration::from_millis(50),
+            )
             .await;
         assert_eq!(outcome, LocalForcedDetachOutcome::NotLiveLocally);
+    }
+
+    #[tokio::test]
+    async fn stale_epoch_of_same_stable_node_id_fails_before_detach_authorization() {
+        use waddle_xmpp::ownership::InProcessClaimStore;
+
+        let bridge = ResumeStealBridge::new();
+        let stream_id = SmSessionId::new("stream-stale-owner");
+        let current = NodeIdentity::new("stable-node", "current-epoch");
+        let stale = NodeIdentity::new(current.node_id.clone(), "stale-epoch");
+        let store = Arc::new(InProcessClaimStore::new());
+        let entity = Entity::new(EntityType::SmSession, stream_id.as_str());
+        let epoch = store
+            .acquire(&entity, &current)
+            .await
+            .expect("seed current claim");
+        let store_handle: Arc<dyn ClaimStore> = store;
+        bridge.wire_claim_fence(store_handle, SharedNodeIdentity::new(current.clone()));
+
+        assert!(
+            bridge
+                .request_matches_current_claim(&stream_id, &current, epoch)
+                .await
+        );
+        assert!(
+            !bridge
+                .request_matches_current_claim(&stream_id, &stale, epoch)
+                .await,
+            "a delayed ask for the previous incarnation must not authorize a force-detach"
+        );
     }
 }

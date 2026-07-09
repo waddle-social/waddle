@@ -109,10 +109,19 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
     // The retraction message itself is archived as its own row with a
     // live `<retract>` payload — that's the "I retracted X" timeline
     // entry clients render.
-    assert!(
-        frames.iter().any(|frame| frame.contains("<retract ")
-            && frame.contains(&format!("id='{room_stanza_id}'"))),
-        "MAM did not replay retraction event citing the room stanza-id: {frames:?}"
+    let retraction_event = frames
+        .iter()
+        .find(|frame| {
+            frame.contains("<retract ") && frame.contains(&format!("id='{room_stanza_id}'"))
+        })
+        .unwrap_or_else(|| {
+            panic!("MAM did not replay retraction event citing the room stanza-id: {frames:?}")
+        });
+    let retraction_archive_id = extract_attr_after(retraction_event, "stanza-id", "id")
+        .expect("archived retraction event has a canonical room stanza-id");
+    assert_ne!(
+        retraction_archive_id, "retract-1",
+        "the fenced archive proof uses the room stanza-id, while the tombstone cites wire id"
     );
 
     // XEP-0424 §"prevent further distribution… by replacing the
@@ -136,6 +145,75 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
             .iter()
             .all(|frame| !frame.contains("<body>remove me</body>")),
         "original body must not appear in any MAM result after retraction: {frames:?}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn groupchat_retraction_rejects_reused_nickname_generation() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("retract-generation-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="old-generation"><body>old occupancy</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    let original_echo = client
+        .recv_matching(|frame| frame.contains("old occupancy"))
+        .await
+        .expect("original echo");
+    let target = extract_attr_after(&original_echo, "stanza-id", "id").expect("room stanza-id");
+
+    client
+        .send(&format!(
+            r#"<presence type="unavailable" to="{room}/{USERNAME}"/>"#
+        ))
+        .await
+        .expect("leave old occupancy");
+    client
+        .recv_matching(|frame| frame.contains("type='unavailable'") && frame.contains(&room))
+        .await
+        .expect("self unavailable");
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="cross-generation-retract">
+                <retract xmlns="urn:xmpp:message-retract:1" id="{target}"/>
+                <body>/me tried to retract a previous occupancy</body>
+            </message>"#
+        ))
+        .await
+        .expect("send stale-generation retraction");
+    let error = client
+        .recv_matching(|frame| {
+            frame.contains("cross-generation-retract") && frame.contains("<error")
+        })
+        .await
+        .expect("retraction error");
+    assert!(
+        error.contains("<forbidden"),
+        "nick reuse must not authorize a prior occupancy's message: {error}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="mam-generation" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("query MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("mam-generation") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    assert!(
+        frames.iter().any(|frame| frame.contains("old occupancy")),
+        "rejected cross-generation retraction must leave the original intact: {frames:?}"
     );
 
     let _ = client.close().await;
