@@ -233,6 +233,14 @@ enum RemoteMucJoinDecision {
 }
 
 #[cfg(feature = "clustering")]
+enum RemoteMucLeaveDecision {
+    Delivered(Vec<Stanza>),
+    MaybeCommitted,
+    RetryableNoEffect,
+    LocalFallback,
+}
+
+#[cfg(feature = "clustering")]
 fn remote_muc_join_decision(
     outcome: Option<crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
 ) -> Option<RemoteMucJoinDecision> {
@@ -247,6 +255,26 @@ fn remote_muc_join_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
         | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
         | None => None,
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn remote_muc_leave_decision(
+    outcome: Option<crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
+) -> RemoteMucLeaveDecision {
+    match outcome {
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
+            RemoteMucLeaveDecision::Delivered(replies)
+        }
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+            RemoteMucLeaveDecision::MaybeCommitted
+        }
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
+            RemoteMucLeaveDecision::RetryableNoEffect
+        }
+        None => RemoteMucLeaveDecision::LocalFallback,
     }
 }
 
@@ -302,6 +330,48 @@ mod tests {
             panic!("expected delivered replies");
         };
         assert_eq!(replies.len(), 1);
+    }
+
+    #[test]
+    fn remote_muc_leave_decision_preserves_membership_for_uncertain_commit() {
+        assert!(matches!(
+            remote_muc_leave_decision(Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
+            )),
+            RemoteMucLeaveDecision::MaybeCommitted
+        ));
+        assert!(matches!(
+            remote_muc_leave_decision(Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+            )),
+            RemoteMucLeaveDecision::MaybeCommitted
+        ));
+    }
+
+    #[test]
+    fn remote_muc_leave_decision_clears_only_on_delivered() {
+        let decision = remote_muc_leave_decision(Some(
+            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
+                Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::None,
+                )),
+            ]),
+        ));
+        let RemoteMucLeaveDecision::Delivered(replies) = decision else {
+            panic!("expected delivered replies");
+        };
+        assert_eq!(replies.len(), 1);
+
+        assert!(matches!(
+            remote_muc_leave_decision(Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable,
+            )),
+            RemoteMucLeaveDecision::RetryableNoEffect
+        ));
+        assert!(matches!(
+            remote_muc_leave_decision(None),
+            RemoteMucLeaveDecision::LocalFallback
+        ));
     }
 }
 
@@ -607,6 +677,12 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                     presence.show = Some(show.to_xep0045());
                                 }
                                 let stanza = Stanza::Presence(presence);
+                                let _remote_muc_membership_guard = state
+                                    .deps
+                                    .protocol
+                                    .remote_muc_memberships
+                                    .lock_membership(sender_jid, room_jid)
+                                    .await;
                                 match remote_muc_join_decision(
                                     bridge
                                         .try_proxy_muc_remote(
@@ -1151,18 +1227,23 @@ pub async fn handle_muc_leave(
                     .ok()
                     .map(jid::Jid::from);
                 let stanza = Stanza::Presence(presence);
-                match bridge
-                    .try_proxy_muc_remote(
-                        room_jid,
-                        &stanza,
-                        crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
-                        origin,
-                    )
-                    .await
-                {
-                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
-                        replies,
-                    )) => {
+                let _remote_muc_membership_guard = state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .lock_membership(sender_jid, room_jid)
+                    .await;
+                match remote_muc_leave_decision(
+                    bridge
+                        .try_proxy_muc_remote(
+                            room_jid,
+                            &stanza,
+                            crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                            origin,
+                        )
+                        .await,
+                ) {
+                    RemoteMucLeaveDecision::Delivered(replies) => {
                         state
                             .deps
                             .protocol
@@ -1173,21 +1254,10 @@ pub async fn handle_muc_leave(
                             .map(|reply| stanza_to_xml(&reply))
                             .collect();
                     }
-                    Some(
-                        crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
-                    )
-                    | Some(
-                        crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-                    ) => {
-                        state
-                            .deps
-                            .protocol
-                            .remote_muc_memberships
-                            .record_leave(sender_jid, room_jid);
+                    RemoteMucLeaveDecision::MaybeCommitted => {
                         return Vec::new();
                     }
-                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
+                    RemoteMucLeaveDecision::RetryableNoEffect => {
                         return vec![build_muc_presence_error_xml(
                             room_jid,
                             nick,
@@ -1200,7 +1270,7 @@ pub async fn handle_muc_leave(
                             ),
                         )];
                     }
-                    None => {}
+                    RemoteMucLeaveDecision::LocalFallback => {}
                 }
             }
         }

@@ -737,12 +737,12 @@ async fn cleanup_remote_muc_presence(
         .ordered_relay_delivery_bridge
         .as_ref()
     else {
-        for (room_jid, nick) in memberships {
+        for membership in &memberships {
             state
                 .deps
                 .protocol
                 .remote_muc_memberships
-                .record_join(jid, &room_jid, &nick);
+                .restore_snapshot_if_current(membership);
         }
         return;
     };
@@ -751,66 +751,127 @@ async fn cleanup_remote_muc_presence(
         Some(origin) => origin,
         None => {
             let Some(origin) = acquire_remote_muc_cleanup_origin(state, jid).await else {
-                for (room_jid, nick) in memberships {
+                for membership in &memberships {
                     state
                         .deps
                         .protocol
                         .remote_muc_memberships
-                        .record_join(jid, &room_jid, &nick);
+                        .restore_snapshot_if_current(membership);
                 }
                 return;
             };
             origin
         }
     };
-    for (room_jid, nick) in memberships {
+    for membership in memberships {
+        let room_jid = membership.room().clone();
+        let nick = membership.nick().to_string();
         let Some(to) = room_jid
             .clone()
             .with_resource_str(&nick)
             .ok()
             .map(jid::Jid::from)
         else {
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .restore_snapshot_if_current(&membership);
             continue;
         };
+        let _remote_muc_membership_guard = state
+            .deps
+            .protocol
+            .remote_muc_memberships
+            .lock_snapshot(&membership)
+            .await;
+        if !state
+            .deps
+            .protocol
+            .remote_muc_memberships
+            .snapshot_is_current_tombstone(&membership)
+        {
+            debug!(
+                room = %room_jid,
+                nick = %nick,
+                jid = %jid,
+                "skipped stale remote MUC unavailable cleanup after newer membership generation"
+            );
+            continue;
+        }
         super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));
         presence.to = Some(to);
         let stanza = Stanza::Presence(presence);
-        match bridge
+        let outcome = bridge
             .try_proxy_muc_remote(
                 &room_jid,
                 &stanza,
                 crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
                 &origin,
             )
-            .await
-        {
-            Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(_)) => {}
-            Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
-            | Some(
-                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-            )
-            | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-            | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
-            | None => {
-                warn!(
-                    room = %room_jid,
-                    nick = %nick,
-                    jid = %jid,
-                    "failed to relay remote MUC unavailable during disconnect cleanup"
-                );
-                state
-                    .deps
-                    .protocol
-                    .remote_muc_memberships
-                    .record_join(jid, &room_jid, &nick);
+            .await;
+        if let Some(retry_kind) = remote_muc_cleanup_retry_kind(outcome.as_ref()) {
+            match retry_kind {
+                RemoteMucCleanupRetryKind::UncertainCommit => {
+                    debug!(
+                        room = %room_jid,
+                        nick = %nick,
+                        jid = %jid,
+                        outcome = ?outcome,
+                        "remote MUC unavailable cleanup commit uncertain; keeping retry provenance"
+                    );
+                }
+                RemoteMucCleanupRetryKind::DefiniteNoEffect => {
+                    warn!(
+                        room = %room_jid,
+                        nick = %nick,
+                        jid = %jid,
+                        outcome = ?outcome,
+                        "failed to relay remote MUC unavailable during disconnect cleanup"
+                    );
+                }
             }
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .restore_snapshot_if_current(&membership);
+        } else {
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .forget_snapshot_if_current(&membership);
         }
     }
     if acquired_user_actor_origin {
         reap_remote_muc_cleanup_origin_if_empty(state, jid).await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteMucCleanupRetryKind {
+    UncertainCommit,
+    DefiniteNoEffect,
+}
+
+#[cfg(feature = "clustering")]
+fn remote_muc_cleanup_retry_kind(
+    outcome: Option<&crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
+) -> Option<RemoteMucCleanupRetryKind> {
+    match outcome {
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(_)) => None,
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+            Some(RemoteMucCleanupRetryKind::UncertainCommit)
+        }
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
+        | None => Some(RemoteMucCleanupRetryKind::DefiniteNoEffect),
     }
 }
 
@@ -1105,6 +1166,90 @@ mod eviction_tests {
         format!("{local}@muc.example.com")
             .parse()
             .expect("bare jid")
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn remote_muc_cleanup_classifies_retry_outcomes() {
+        use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::{
+            Delivered, Dropped, JoinMaybeCommitted, MaybeCommitted, Unavailable,
+        };
+
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(Some(&Delivered(Vec::new()))),
+            None
+        );
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(Some(&MaybeCommitted)),
+            Some(RemoteMucCleanupRetryKind::UncertainCommit)
+        );
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(Some(&JoinMaybeCommitted)),
+            Some(RemoteMucCleanupRetryKind::UncertainCommit)
+        );
+
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(Some(&Unavailable)),
+            Some(RemoteMucCleanupRetryKind::DefiniteNoEffect)
+        );
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(Some(&Dropped)),
+            Some(RemoteMucCleanupRetryKind::DefiniteNoEffect)
+        );
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(None),
+            Some(RemoteMucCleanupRetryKind::DefiniteNoEffect)
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn remote_muc_cleanup_retry_restore_does_not_overwrite_fresh_join() {
+        let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
+        let occupant = full_jid("alice@example.com/web");
+        let room = room_bare_jid("race");
+
+        memberships.record_join(&occupant, &room, "old-nick");
+        let snapshot = memberships.take_for_occupant(&occupant);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].room(), &room);
+        assert_eq!(snapshot[0].nick(), "old-nick");
+
+        memberships.record_join(&occupant, &room, "fresh-nick");
+        memberships.restore_snapshot_if_current(&snapshot[0]);
+
+        assert_eq!(
+            memberships.nick_for(&occupant, &room).as_deref(),
+            Some("fresh-nick")
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn remote_muc_cleanup_success_leaves_fresh_join_untouched() {
+        use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered;
+
+        let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
+        let occupant = full_jid("alice@example.com/web");
+        let room = room_bare_jid("race-success");
+
+        memberships.record_join(&occupant, &room, "old-nick");
+        let snapshot = memberships.take_for_occupant(&occupant);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].room(), &room);
+        assert_eq!(snapshot[0].nick(), "old-nick");
+
+        memberships.record_join(&occupant, &room, "fresh-nick");
+        assert_eq!(
+            remote_muc_cleanup_retry_kind(Some(&Delivered(Vec::new()))),
+            None
+        );
+        memberships.forget_snapshot_if_current(&snapshot[0]);
+
+        assert_eq!(
+            memberships.nick_for(&occupant, &room).as_deref(),
+            Some("fresh-nick")
+        );
     }
 
     #[tokio::test]
