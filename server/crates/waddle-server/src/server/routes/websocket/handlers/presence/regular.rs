@@ -337,6 +337,10 @@ fn spawn_session_recovery_delivery(
                     // blocked a sender AFTER intake doesn't see queued
                     // messages from that sender on reconnect.
                     blocking_storage: Some(&blocking_storage),
+                    // Owner-gate SM pushes so a same-full-JID replacement
+                    // racing in mid-flush can't receive this session's
+                    // SM-claimed rows (issue #1220 review).
+                    owner: Some(&owner),
                     archive_resolver: &resolver,
                 },
             )

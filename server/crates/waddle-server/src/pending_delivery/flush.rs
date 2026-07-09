@@ -60,6 +60,12 @@ where
     /// re-evaluation. `None` skips the check (test fixtures only;
     /// production always wires the real backend).
     pub blocking_storage: Option<&'a Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
+    /// The recovering connection's registry ownership token (issue #1220
+    /// review). When `Some`, SM flush pushes are owner-gated
+    /// (`send_pending_flush_if_owner`) so a same-full-JID replacement that
+    /// races in mid-flush does not receive rows claimed under the original
+    /// session's stream id. `None` (test fixtures) uses the ungated send.
+    pub owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Resolves Archived `PendingRow` references against MAM.
     pub archive_resolver: &'a R,
 }
@@ -89,6 +95,7 @@ where
         server_domain,
         sm_session,
         blocking_storage,
+        owner,
         archive_resolver,
     } = ctx;
     // Snapshot the recipient's current blocklist once for the whole
@@ -293,9 +300,36 @@ where
             // Non-SM path: same outbound tag (cheap), but we delete on Sent
             // because there's no SM session to ack against.
             let push_result = if sm_session.is_some() {
-                registry
-                    .send_pending_flush(resource, stanza, row.id.clone(), row.original_receipt_at)
-                    .await
+                // Owner-gate the SM push when the caller provided an ownership
+                // token (issue #1220 review): binds the flush to the session
+                // it was planned for so a same-full-JID replacement racing in
+                // mid-flush cannot receive rows claimed under the original
+                // stream id. On mismatch the send returns NotConnected and the
+                // `other =>` arm below releases this row and the rest for the
+                // replacement's own flush.
+                match owner {
+                    Some(owner) => {
+                        registry
+                            .send_pending_flush_if_owner(
+                                resource,
+                                owner,
+                                stanza,
+                                row.id.clone(),
+                                row.original_receipt_at,
+                            )
+                            .await
+                    }
+                    None => {
+                        registry
+                            .send_pending_flush(
+                                resource,
+                                stanza,
+                                row.id.clone(),
+                                row.original_receipt_at,
+                            )
+                            .await
+                    }
+                }
             } else {
                 registry.send_to(resource, stanza).await
             };

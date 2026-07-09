@@ -84,6 +84,49 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Owner-gated variant of [`Self::send_pending_flush`]. Delivers only if
+    /// the resource's current registry entry still belongs to `owner` (the
+    /// carbons ownership token, mirroring [`Self::entry_if_owner`] /
+    /// [`Self::try_send_outbound_if_owner`]); otherwise returns
+    /// `NotConnected` without sending.
+    ///
+    /// The XEP-0160 offline flush (issue #1220) runs on a spawned task and
+    /// pushes SM-claimed rows tagged with the ORIGINAL session's stream id.
+    /// If that session were superseded by a same-full-JID replacement
+    /// mid-flush, an ungated send would deliver those rows to the
+    /// replacement, whose `<a h>` acks key on a DIFFERENT stream id and so
+    /// never clear the original session's claim — wedging the rows until the
+    /// claim-expiry janitor releases them, with a duplicate-delivery risk.
+    /// Gating the send binds the flush to the session it was planned for; on
+    /// a mismatch the caller releases the row for the replacement's own flush.
+    #[instrument(skip(self, stanza), fields(to = %jid, row = %row_id))]
+    pub async fn send_pending_flush_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        stanza: Stanza,
+        row_id: crate::pending_delivery::PendingRowId,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+    ) -> SendResult {
+        let sender = match self.connections.get(jid) {
+            Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
+                entry.value().sender.clone()
+            }
+            _ => {
+                debug!("Recipient not owned by this session for pending flush");
+                return SendResult::NotConnected;
+            }
+        };
+        let outbound = OutboundStanza::for_pending_flush(stanza, row_id, original_receipt_at);
+        match sender.send(outbound).await {
+            Ok(()) => SendResult::Sent,
+            Err(_) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                SendResult::ChannelClosed
+            }
+        }
+    }
+
     /// Non-blocking send as [`DeliveryKind::DirectFrame`]. Returns a
     /// typed `BroadcastOutcome` describing delivery, absence, or
     /// which silent-drop path was taken.

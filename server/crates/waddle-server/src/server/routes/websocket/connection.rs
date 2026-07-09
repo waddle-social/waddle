@@ -185,10 +185,22 @@ async fn handle_xmpp_websocket(
         // construction.
         let send_window_paused = conn.sm_state.needs_send_pause();
         if send_window_paused {
-            if conn.send_window_pause_deadline.is_none() {
+            let rising_edge = conn.send_window_pause_deadline.is_none();
+            if rising_edge {
                 conn.send_window_pause_deadline =
                     Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
                 waddle_xmpp::prometheus::increment_sm_send_window_pause();
+            }
+            // Prompt an ack on the rising edge, and AGAIN whenever the client
+            // has acked since our last prompt but not yet recovered the
+            // window. The wasm client acks only when asked, so without the
+            // re-request a partial ack (XEP-0198 §5 `h` = handled ≤ received)
+            // would strand the stream in the hysteresis band until the
+            // deadline (mirrors the batch writer's inline re-request). The
+            // deadline stays armed from the rising edge as the true dead-peer
+            // bound, so a genuinely stuck client is still detached in time.
+            if rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked {
+                conn.send_window_last_request_acked = conn.sm_state.last_acked;
                 if !send_ws_message(
                     &mut ws_sender,
                     Message::Text(SmRequest::to_xml().into()),

@@ -135,6 +135,7 @@ async fn flush_with_no_rows_is_noop() {
             server_domain: "example.com",
             sm_session: None,
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -286,6 +287,7 @@ async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -353,6 +355,7 @@ async fn flush_non_sm_session_deletes_on_push() {
             server_domain: "example.com",
             sm_session: None, // ← no SM session: delete-on-push fallback
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -395,6 +398,7 @@ async fn flush_releases_rows_when_no_push_succeeds() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -457,6 +461,7 @@ async fn flush_drains_large_backlog_in_bounded_batches_with_concurrent_consumer(
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -478,7 +483,108 @@ async fn flush_drains_large_backlog_in_bounded_batches_with_concurrent_consumer(
     );
 }
 
+#[tokio::test]
+async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
+    // Issue #1220 review: the SM flush push is owner-gated so a same-full-JID
+    // replacement racing in mid-flush cannot receive rows claimed under the
+    // original session's stream id. A flush carrying a NON-matching owner
+    // token must deliver nothing and release the row for the replacement's own
+    // flush; the SAME flush with the live owner token delivers.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(transient_row("alice@example.com", "hi"))
+        .await
+        .unwrap();
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let live_owner = registry.register(resource.clone(), tx); // the entry's real owner token
+    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // a DIFFERENT token
+    let sm_session = SmSessionId::new("sm-owner");
+    let recipient = bare("alice@example.com");
+
+    let gated = flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            owner: Some(&stale_owner),
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+    assert_eq!(gated.claimed, 1);
+    assert_eq!(gated.pushed, 0, "mismatched-owner SM push is gated out");
+    assert!(
+        rx.try_recv().is_err(),
+        "nothing delivered when the owner token does not match"
+    );
+    let rows = storage.list(&recipient).await.unwrap();
+    assert!(
+        rows[0].flushed_in_session.is_none(),
+        "gated-out row is released for the replacement's own flush"
+    );
+
+    // Same flush, live owner token: delivers.
+    let delivered = flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            owner: Some(&live_owner),
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+    assert_eq!(delivered.pushed, 1, "matching owner token delivers");
+    assert!(rx.try_recv().is_ok());
+}
+
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
+
+#[tokio::test]
+async fn db_storage_claim_batch_first_caller_wins_across_sessions() {
+    // Issue #1220 review: the SQL claim's outer `flushed_in_session IS NULL`
+    // guard makes it first-caller-wins even under concurrent claims of the
+    // same recipient (re-checked at commit time, so a READ COMMITTED loser's
+    // UPDATE becomes a no-op). This sequential test pins the contract; the
+    // serialized in-memory libSQL harness cannot reproduce the concurrent
+    // interleave, so the concurrency rationale lives in the SQL comment.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let recipient = bare("alice@example.com");
+    for n in 0..3 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("m{n}")))
+            .await
+            .unwrap();
+    }
+    let s1 = SmSessionId::new("s1");
+    let s2 = SmSessionId::new("s2");
+    let b1 = storage
+        .claim_batch_for_session(&recipient, &s1, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(b1.len(), 3);
+    let b2 = storage
+        .claim_batch_for_session(&recipient, &s2, None, 8)
+        .await
+        .unwrap();
+    assert!(
+        b2.is_empty(),
+        "first caller wins: the second session claims nothing"
+    );
+}
 
 #[tokio::test]
 async fn db_storage_claim_batch_does_not_redeliver_unstamped_prior_pass_rows() {
@@ -875,6 +981,7 @@ async fn pending_row_deleted_only_after_sm_ack() {
             server_domain: "example.com",
             sm_session: Some(&session_id),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -948,6 +1055,7 @@ async fn pending_row_released_on_pre_ack_session_death() {
             server_domain: "example.com",
             sm_session: Some(&session_a),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -986,6 +1094,7 @@ async fn pending_row_released_on_pre_ack_session_death() {
             server_domain: "example.com",
             sm_session: Some(&session_b),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1162,6 +1271,7 @@ async fn flush_drops_pending_row_when_sender_blocked_after_intake() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1220,6 +1330,7 @@ async fn flush_aborts_on_blocking_storage_failure_fail_closed() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1618,6 +1729,7 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1691,6 +1803,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
             server_domain: "example.com",
             sm_session: Some(&sm_session_id),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -2268,6 +2381,7 @@ async fn flush_archived_row_transient_resolver_error_releases_row_for_retry() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2325,6 +2439,7 @@ async fn flush_archived_row_genuine_mam_miss_is_poison_pill_deleted() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2381,6 +2496,7 @@ async fn flush_archived_row_unparseable_stanza_xml_is_poison_pill() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2438,6 +2554,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2457,6 +2574,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2551,6 +2669,7 @@ async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserve
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2599,6 +2718,7 @@ async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserve
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2659,6 +2779,7 @@ async fn flush_archived_row_serialization_error_is_poison_pill_not_transient() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2768,6 +2889,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2791,6 +2913,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )

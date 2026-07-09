@@ -661,6 +661,14 @@ pub(super) struct WsConnState {
     /// connection into detach-for-resume if a dead peer never acks it down.
     /// Uses `tokio::time::Instant` so the arm can `sleep_until` it.
     pub(super) send_window_pause_deadline: Option<tokio::time::Instant>,
+    /// `sm_state.last_acked` at the moment the loop last emitted a
+    /// send-window `<r/>` (issue #1219 review). The wasm client acks only
+    /// when prompted, so while paused the loop re-requests each time the
+    /// client has acked since its last prompt but not yet recovered the
+    /// window — otherwise a partial ack (XEP-0198 §5 `h` = stanzas *handled*
+    /// ≤ received) would leave the stream stalled in the hysteresis band
+    /// until the pause deadline, disconnecting a merely-slow client.
+    pub(super) send_window_last_request_acked: u32,
     /// Per-connection sans-I/O state machine.
     ///
     /// Initialized in the `Unauthenticated` phase at WS upgrade by
@@ -713,6 +721,7 @@ impl WsConnState {
             suppress_sm_record_next_batch: false,
             deferred_inbound: std::collections::VecDeque::new(),
             send_window_pause_deadline: None,
+            send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }

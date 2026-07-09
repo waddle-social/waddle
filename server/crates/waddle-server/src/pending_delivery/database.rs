@@ -706,11 +706,24 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // scopes the result to this UPDATE's rows only, matching the
         // in-memory backend, which returns only rows it transitioned from
         // unclaimed.
+        // The outer `flushed_in_session IS NULL` is load-bearing under
+        // concurrent flushes of the SAME recipient (two resources of one user
+        // recovering at once) on a READ COMMITTED backend (Postgres,
+        // clustering). Two sessions can both evaluate the inner SELECT and see
+        // the same unclaimed prefix; without the outer re-check, the loser's
+        // UPDATE would still match those row_ids and overwrite the winner's
+        // claim, and RETURNING would emit rows the other session already
+        // claimed — a double delivery. Re-checking `flushed_in_session IS
+        // NULL` at the outer level makes the loser's UPDATE a no-op for
+        // already-claimed rows, so RETURNING yields only the rows THIS call
+        // actually transitioned (first-caller-wins, matching the in-memory
+        // mutex and the original single-shot `claim_for_session`). SQLite
+        // serializes writers so it is safe there too. (Issue #1220 review.)
         let mut rows = match after {
             Some(after) => {
                 self.query(
                     "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
-                     WHERE row_id IN ( \
+                     WHERE flushed_in_session IS NULL AND row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL AND row_id > ? \
                          ORDER BY row_id ASC LIMIT ? \
@@ -730,7 +743,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             None => {
                 self.query(
                     "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
-                     WHERE row_id IN ( \
+                     WHERE flushed_in_session IS NULL AND row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL \
                          ORDER BY row_id ASC LIMIT ? \
