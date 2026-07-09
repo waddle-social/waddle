@@ -70,7 +70,7 @@
             version = "0.1.0";
             src = serverPackageSrc;
             strictDeps = true;
-            cargoExtraArgs = "--locked --package waddle-server --bin waddle-server";
+            cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf
@@ -303,7 +303,7 @@
             baseArgs
             // {
               CARGO_PROFILE = "ci";
-              cargoExtraArgs = "--locked --package waddle-server --bin waddle-server";
+              cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
               cargoTestExtraArgs = "";
@@ -350,7 +350,7 @@
               pname = "waddle-server-ci-build";
               CARGO_PROFILE = "ci";
               cargoArtifacts = ciServerArtifacts;
-              cargoExtraArgs = "--locked --package waddle-server --bin waddle-server";
+              cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
             }
           );
           waddle-server-extension-modules = craneLib.cargoBuild (
