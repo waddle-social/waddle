@@ -481,6 +481,100 @@ async fn flush_drains_large_backlog_in_bounded_batches_with_concurrent_consumer(
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
 
 #[tokio::test]
+async fn db_storage_claim_batch_does_not_redeliver_unstamped_prior_pass_rows() {
+    // Issue #1220 review regression (SQL backend). A flush pass claims rows and
+    // pushes them, but the recipient's connection task stamps `outbound_sequence`
+    // asynchronously — so between passes the rows linger as
+    // flushed_in_session=session, outbound_sequence=NULL. A re-flush pass
+    // (cursor=None, same session, triggered by reset_offline_flush after a
+    // transient MAM error) must NOT re-return those already-claimed unstamped
+    // rows, or they double-deliver. The SQL backend upholds this via
+    // UPDATE ... RETURNING (returns only rows it transitioned), matching the
+    // in-memory backend's flushed_in_session.is_none() filter.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let recipient = bare("alice@example.com");
+    for n in 0..3 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("m{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("sm-reflush");
+
+    // Pass 1 claims all three; they remain flushed=session, outbound_sequence
+    // NULL (pushed but not yet stamped).
+    let pass1 = storage
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(pass1.len(), 3);
+
+    // Pass 2 (reset retry): cursor=None, same session, nothing newly unclaimed.
+    let pass2 = storage
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert!(
+        pass2.is_empty(),
+        "already-claimed unstamped rows must not be re-returned on a re-flush pass"
+    );
+
+    // A genuinely new row IS picked up by the retry (the retry still works).
+    storage
+        .insert(transient_row("alice@example.com", "m3"))
+        .await
+        .unwrap();
+    let pass3 = storage
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(
+        pass3.len(),
+        1,
+        "a freshly inserted unclaimed row is still claimed"
+    );
+}
+
+#[tokio::test]
+async fn db_storage_claim_batch_returns_fifo_prefix_and_continues_by_cursor() {
+    // Cross-check the SQL batch path against the storage-level in-memory tests:
+    // bounded FIFO prefix + cursor continuation.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let recipient = bare("alice@example.com");
+    for n in 0..5 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("m{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("sm-fifo");
+
+    let b1 = storage
+        .claim_batch_for_session(&recipient, &session, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(b1.len(), 2);
+    let cursor = b1.last().unwrap().id.clone();
+    let b2 = storage
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert_eq!(b2.len(), 2);
+    // Batches are disjoint and strictly increasing by row_id (FIFO).
+    assert!(b1.last().unwrap().id.as_str() < b2.first().unwrap().id.as_str());
+    let cursor = b2.last().unwrap().id.clone();
+    let b3 = storage
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert_eq!(b3.len(), 1, "final short batch drains the backlog");
+}
+
+#[tokio::test]
 async fn db_storage_round_trips_archived_and_transient_rows() {
     let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
         .await

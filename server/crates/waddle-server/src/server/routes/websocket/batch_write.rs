@@ -118,6 +118,17 @@ where
     RE: std::fmt::Display,
 {
     let mut frames = frames.into_iter();
+    // Send-window pacing applies ONLY to batches that actually grow the SM
+    // unacked queue (issue #1219 review). A `ReplaySuppressed` batch is the
+    // XEP-0198 resume replay: its stanzas are ALREADY in the restored unacked
+    // queue and are re-sent without recording, so it never grows the window.
+    // If a stream resumes with a backlog ≥ the high watermark, the pause latch
+    // is already set from `restore_from_session`; pacing the replay batch
+    // would block waiting for acks of frames it has not sent yet and livelock
+    // the resume (re-introducing the #1219 poisoning class). The post-replay
+    // connection-loop gate paces any NEW traffic and elicits the ack that
+    // drains the restored backlog.
+    let pacing = matches!(policy, BatchSmPolicy::Record);
     // Once the deferred buffer fills while paused we cannot read the awaited
     // ack in order, so pacing is abandoned for the rest of THIS batch and we
     // fall back to the pre-#1219 evict-oldest behaviour. Latched so we don't
@@ -168,7 +179,7 @@ where
         // queue and poison resume. XEP-0198 §4: the server may request an
         // ack at any time and is under no obligation to transmit queued
         // stanzas immediately (xep-0198.xml:307/357).
-        if !send_window_degraded && conn.sm_state.needs_send_pause() {
+        if pacing && !send_window_degraded && conn.sm_state.needs_send_pause() {
             match await_send_window_recovery(sender, reader, state, conn).await {
                 SendWindowOutcome::Recovered => {}
                 SendWindowOutcome::DeferredCapReached => {

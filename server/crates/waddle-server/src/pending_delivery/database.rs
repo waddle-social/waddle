@@ -693,63 +693,34 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         }
         // Claim ONLY the FIFO prefix: at most `limit` currently-unclaimed rows
         // whose row_id sorts after the cursor. The inner SELECT + LIMIT picks
-        // the prefix; the outer UPDATE tags exactly those. Both the UPDATE and
-        // the select-back carry `row_id > ?` so each batch is isolated from
-        // the previous batch's not-yet-`record_pushed_at`-stamped rows
-        // (stamping is async on the recipient connection task) — see the trait
-        // doc for why a bare `outbound_sequence IS NULL` select-back would
-        // double-deliver across batches (issue #1220).
-        match after {
+        // the prefix; the UPDATE tags exactly those and `RETURNING` hands back
+        // exactly the rows it transitioned.
+        //
+        // `RETURNING` (not a separate select-back) is load-bearing for
+        // correctness (issue #1220 review). The recipient's connection task
+        // stamps `outbound_sequence` asynchronously (see `record_pushed_at`),
+        // so a select-back keyed on `(flushed_in_session, outbound_sequence IS
+        // NULL)` would ALSO match rows a PRIOR flush pass on the same session
+        // already pushed-but-not-yet-stamped — and re-deliver them on a
+        // `reset_offline_flush` retry (transient MAM failure). `RETURNING`
+        // scopes the result to this UPDATE's rows only, matching the
+        // in-memory backend, which returns only rows it transitioned from
+        // unclaimed.
+        let mut rows = match after {
             Some(after) => {
-                self.execute(
+                self.query(
                     "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
                      WHERE row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL AND row_id > ? \
                          ORDER BY row_id ASC LIMIT ? \
-                     )",
+                     ) \
+                     RETURNING row_id, recipient_jid, original_receipt_at, payload_kind, \
+                               archive_stanza_by, archive_stanza_id, transient_xml, \
+                               flushed_in_session, outbound_sequence",
                     crate::db_params![
                         session.as_str().to_string(),
                         recipient.to_string(),
-                        after.as_str().to_string(),
-                        limit as i64,
-                    ],
-                )
-                .await?;
-            }
-            None => {
-                self.execute(
-                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
-                     WHERE row_id IN ( \
-                         SELECT row_id FROM pending_delivery \
-                         WHERE recipient_jid = ? AND flushed_in_session IS NULL \
-                         ORDER BY row_id ASC LIMIT ? \
-                     )",
-                    crate::db_params![
-                        session.as_str().to_string(),
-                        recipient.to_string(),
-                        limit as i64,
-                    ],
-                )
-                .await?;
-            }
-        }
-        // Select back exactly this batch: claimed by this session, not yet
-        // pushed (`outbound_sequence IS NULL` excludes rows a prior flush pass
-        // on the same session already stamped), strictly after the cursor.
-        let mut rows = match after {
-            Some(after) => {
-                self.query(
-                    "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
-                            archive_stanza_by, archive_stanza_id, transient_xml, \
-                            flushed_in_session, outbound_sequence \
-                     FROM pending_delivery \
-                     WHERE recipient_jid = ? AND flushed_in_session = ? \
-                       AND outbound_sequence IS NULL AND row_id > ? \
-                     ORDER BY row_id ASC LIMIT ?",
-                    crate::db_params![
-                        recipient.to_string(),
-                        session.as_str().to_string(),
                         after.as_str().to_string(),
                         limit as i64,
                     ],
@@ -758,16 +729,18 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             }
             None => {
                 self.query(
-                    "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
-                            archive_stanza_by, archive_stanza_id, transient_xml, \
-                            flushed_in_session, outbound_sequence \
-                     FROM pending_delivery \
-                     WHERE recipient_jid = ? AND flushed_in_session = ? \
-                       AND outbound_sequence IS NULL \
-                     ORDER BY row_id ASC LIMIT ?",
+                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+                     WHERE row_id IN ( \
+                         SELECT row_id FROM pending_delivery \
+                         WHERE recipient_jid = ? AND flushed_in_session IS NULL \
+                         ORDER BY row_id ASC LIMIT ? \
+                     ) \
+                     RETURNING row_id, recipient_jid, original_receipt_at, payload_kind, \
+                               archive_stanza_by, archive_stanza_id, transient_xml, \
+                               flushed_in_session, outbound_sequence",
                     crate::db_params![
-                        recipient.to_string(),
                         session.as_str().to_string(),
+                        recipient.to_string(),
                         limit as i64,
                     ],
                 )
@@ -782,6 +755,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         {
             out.push(decode_row(&row)?);
         }
+        // `RETURNING` row order is undefined; the flush loop needs FIFO
+        // (row_id ASC — UUID v7, so lexical == chronological) both to preserve
+        // XEP-0160 order of receipt and because it advances the batch cursor
+        // from `batch.last()`.
+        out.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
         Ok(out)
     }
 

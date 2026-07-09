@@ -313,7 +313,16 @@ fn spawn_session_recovery_delivery(
     let resource = resource.clone();
     let owner = std::sync::Arc::clone(owner);
     tokio::spawn(async move {
-        if let Some(plan) = flush_plan {
+        // If this session was superseded (same full JID re-registered) before
+        // the task ran, skip the flush: the replacement runs its OWN flush via
+        // its own once-per-session CAS, and pushing SM-claimed rows to a
+        // replacement whose stream id differs would leave them claimed by the
+        // now-dead session (self-healed later by the claim-expiry janitor, but
+        // redundant and a duplicate-delivery risk). The rows stay unclaimed
+        // for the replacement. This narrows the window the off-task spawn
+        // opened; a replacement racing in mid-flush is still janitor-healed.
+        let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
+        if let Some(plan) = flush_plan.filter(|_| still_owner) {
             let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
             let outcome = crate::pending_delivery::flush_for_resource(
                 &storage,

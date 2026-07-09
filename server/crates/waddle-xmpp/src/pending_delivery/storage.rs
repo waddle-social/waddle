@@ -181,16 +181,22 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// mpsc capacity, instead of the whole queue landing wholesale in the SM
     /// unacked queue.
     ///
-    /// `after` is a FIFO cursor: pass `None` for the first batch, then the
-    /// last claimed row's id for each subsequent batch. The cursor is what
-    /// makes multi-batch flushing correct. The SM flush stamps
+    /// `after` is a FIFO cursor advancing batch-to-batch progress: pass `None`
+    /// for the first batch, then the last claimed row's id for each subsequent
+    /// batch so the next batch starts strictly after it.
+    ///
+    /// CORRECTNESS INVARIANT: an implementation MUST return ONLY the rows it
+    /// just transitioned from unclaimed — never a row already claimed by an
+    /// earlier call. This matters because the SM flush stamps
     /// `outbound_sequence` asynchronously, on the recipient's connection task
-    /// (see [`Self::record_pushed_at`]) — so between batches the previous
-    /// batch's rows are still `flushed_in_session = session, outbound_sequence
-    /// = NULL`. A select-back keyed only on `(session, outbound_sequence IS
-    /// NULL)` would re-return them and double-deliver; `row_id > after`
-    /// isolates each batch from the one before it. `limit == 0` claims
-    /// nothing.
+    /// (see [`Self::record_pushed_at`]), so a prior flush pass's rows can
+    /// linger as `flushed_in_session = session, outbound_sequence = NULL`; a
+    /// query keyed only on `(session, outbound_sequence IS NULL)` would
+    /// re-return and double-deliver them on a `reset_offline_flush` retry.
+    /// The in-memory backend upholds this by only claiming rows whose
+    /// `flushed_in_session.is_none()`; the SQL backend uses
+    /// `UPDATE … RETURNING`, which yields exactly the transitioned rows.
+    /// `limit == 0` claims nothing.
     async fn claim_batch_for_session(
         &self,
         recipient: &BareJid,

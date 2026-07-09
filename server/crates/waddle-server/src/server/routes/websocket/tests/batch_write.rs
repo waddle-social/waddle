@@ -733,6 +733,63 @@ async fn send_window_pause_timeout_records_capped_tail_and_closes() {
     );
 }
 
+/// Issue #1219 review regression: a `ReplaySuppressed` resume-replay batch
+/// must NEVER send-window pause, even when the restored backlog already sits
+/// at/above the high watermark. Pausing the replay would block waiting for
+/// acks of frames it has not sent yet — a permanent resume livelock. The
+/// replay re-sends already-queued stanzas without growing the window, so the
+/// post-replay connection-loop gate is what paces subsequent new traffic.
+#[tokio::test]
+async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_watermark() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    // cap=10 → high=8. Simulate a resumed stream whose restored backlog is
+    // already above the high watermark: record 9 unacked stanzas so the pause
+    // latch is set, exactly as restore_from_session would leave it.
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state.enable("resumed".to_string(), true, Some(300));
+    for i in 0..9 {
+        let _ = conn.sm_state.record_outbound(countable_message(i));
+    }
+    assert!(
+        conn.sm_state.needs_send_pause(),
+        "precondition: the restored backlog latched the send-window pause"
+    );
+    let outbound_before = conn.sm_state.outbound_count;
+
+    let mut sink = CollectSink::default();
+    // Pending reader with NO acks: if the replay wrongly paused, it would
+    // block here forever. The timeout turns a regression into a fast failure.
+    let mut reader = reader_with(vec![]);
+    let replay: Vec<String> = (100..103).map(countable_message).collect();
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        write_response_batch(
+            &mut sink,
+            &mut reader,
+            state.as_ref(),
+            &mut conn,
+            replay,
+            BatchSmPolicy::ReplaySuppressed,
+        ),
+    )
+    .await
+    .expect("ReplaySuppressed batch must not stall on the send-window pause");
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    let texts = sink_texts(&sink);
+    assert_eq!(texts.len(), 3, "all 3 replay frames written, no <r/> pause");
+    assert!(
+        !texts.iter().any(|t| *t == SmRequest::to_xml()),
+        "replay must not emit a send-window <r/>"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, outbound_before,
+        "ReplaySuppressed must not record (grow) the window"
+    );
+}
+
 /// When the client floods the socket with non-ack frames while the writer
 /// is paused, the awaited `<a/>` cannot be read in order once 64 frames are
 /// parked. The writer then degrades to the pre-#1219 evict-oldest behaviour

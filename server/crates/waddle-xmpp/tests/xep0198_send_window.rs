@@ -117,7 +117,11 @@ fn partial_acks_keep_the_window_open_without_evicting() {
         }
     }
 
-    assert_eq!(state.replay_gap_through(), None, "partial-ack pacing never evicts");
+    assert_eq!(
+        state.replay_gap_through(),
+        None,
+        "partial-ack pacing never evicts"
+    );
     assert!(state.can_resume_from(client_h));
 }
 
@@ -152,5 +156,9 @@ fn resume_after_paced_burst_replays_exactly_the_unacked_tail_in_order() {
             entry.stanza_xml
         );
     }
-    assert_eq!(state.replay_gap_through(), None, "no gap — tail is fully retained");
+    assert_eq!(
+        state.replay_gap_through(),
+        None,
+        "no gap — tail is fully retained"
+    );
 }
