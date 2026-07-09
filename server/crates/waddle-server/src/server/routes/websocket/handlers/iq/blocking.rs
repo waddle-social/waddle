@@ -7,8 +7,7 @@ pub(super) async fn handle_blocking_iq(
     sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
-    blocklist_interested: &mut bool,
-    state_machine: Option<&mut waddle_xmpp::protocol::XmppStateMachine>,
+    conn_state: &mut IqConnState<'_>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
@@ -54,7 +53,10 @@ pub(super) async fn handle_blocking_iq(
                         .protocol
                         .connection_registry
                         .mark_blocklist_interested(sender_jid);
-                    *blocklist_interested = true;
+                    if let Some(owner) = conn_state.registry_owner {
+                        mirror_remote_blocklist_interest(state, sender_jid, owner).await;
+                    }
+                    *conn_state.blocklist_interested = true;
                     vec![iq_to_xml(
                         waddle_xmpp::xep::xep0191::build_blocklist_response(iq, &blocked),
                     )]
@@ -81,7 +83,9 @@ pub(super) async fn handle_blocking_iq(
                 )];
             }
             send_blocking_presence_side_effects(state, &user_bare, &jids, true, None).await;
-            send_blocking_pushes(state, &user_bare, true, &jids).await;
+            if !try_remote_owner_blocklist_push(state, sender_jid, &user_bare, true, &jids).await {
+                send_blocking_pushes(state, &user_bare, true, &jids).await;
+            }
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
             )]
@@ -147,7 +151,11 @@ pub(super) async fn handle_blocking_iq(
             } else {
                 unblocked_jids.as_slice()
             };
-            send_blocking_pushes(state, &user_bare, false, push_jids).await;
+            if !try_remote_owner_blocklist_push(state, sender_jid, &user_bare, false, push_jids)
+                .await
+            {
+                send_blocking_pushes(state, &user_bare, false, push_jids).await;
+            }
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
             )]
@@ -165,7 +173,7 @@ pub(super) async fn handle_blocking_iq(
     // storage layer is authoritative on disk and the next bind will
     // reload, while the request itself already succeeded for the
     // client.
-    if let Some(sm) = state_machine {
+    if let Some(sm) = conn_state.state_machine.as_deref_mut() {
         match storage.list_blocked_jid_entries(&user_bare).await {
             Ok(jids) => {
                 sm.set_blocklist(waddle_xmpp::protocol::Blocklist::new(jids));
@@ -182,6 +190,37 @@ pub(super) async fn handle_blocking_iq(
     }
 
     response
+}
+
+#[cfg(feature = "clustering")]
+async fn mirror_remote_blocklist_interest(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge
+            .update_remote_user_resource_if_owner(
+                jid,
+                owner,
+                crate::clustering::route_bridge::RemoteResourceStateUpdate::BlocklistInterested,
+            )
+            .await;
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn mirror_remote_blocklist_interest(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
 }
 
 async fn send_blocking_presence_side_effects(
@@ -262,7 +301,7 @@ async fn send_blocking_presence_side_effects(
     }
 }
 
-async fn send_blocking_pushes(
+pub(crate) async fn send_blocking_pushes(
     state: &WebSocketState,
     user_bare: &BareJid,
     blocked: bool,
@@ -342,4 +381,37 @@ async fn send_blocking_pushes(
             .send_to(&resource_jid, Stanza::Iq(Box::new(push)))
             .await;
     }
+}
+
+#[cfg(feature = "clustering")]
+async fn try_remote_owner_blocklist_push(
+    state: &WebSocketState,
+    source_jid: &FullJid,
+    user_bare: &BareJid,
+    blocked: bool,
+    jids: &[Jid],
+) -> bool {
+    let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    else {
+        return false;
+    };
+    bridge
+        .try_fanout_remote_user_blocklist_push(source_jid, user_bare, blocked, jids)
+        .await
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn try_remote_owner_blocklist_push(
+    _state: &WebSocketState,
+    _source_jid: &FullJid,
+    _user_bare: &BareJid,
+    _blocked: bool,
+    _jids: &[Jid],
+) -> bool {
+    false
 }

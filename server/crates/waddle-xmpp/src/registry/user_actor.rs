@@ -124,6 +124,41 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
     }
 }
 
+/// Register a resource only if the slot is empty or still belongs to `owner`.
+///
+/// Used by clustered remote-resource mirrors, where the socket node has already
+/// published a local registry entry and the owner node must not clobber a newer
+/// local same-resource bind while mirroring the remote entry.
+pub struct RegisterConnectionIfOwnerOrAbsent {
+    pub jid: FullJid,
+    pub entry: ConnectionEntry,
+    pub owner: Arc<AtomicBool>,
+}
+
+impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: RegisterConnectionIfOwnerOrAbsent,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !Arc::ptr_eq(&msg.entry.carbons_enabled, &msg.owner) {
+            return false;
+        }
+        if self
+            .connections
+            .get(&msg.jid)
+            .is_some_and(|entry| !Arc::ptr_eq(&entry.carbons_enabled, &msg.owner))
+        {
+            return false;
+        }
+        debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering owner-gated connection");
+        self.connections.insert(msg.jid, msg.entry);
+        true
+    }
+}
+
 /// Unregister a connection (resource) for this user.
 ///
 /// `owner` is the ownership token (the resource's `carbons_enabled`

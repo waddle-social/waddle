@@ -10,24 +10,31 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use kameo::actor::ActorRef;
 use libp2p::identity::{Keypair, PublicKey};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{
     ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
 };
-use waddle_xmpp::registry::{BroadcastOutcome, ConnectionRegistry, UserRegistryActor};
+use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::registry::{
+    BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
+    ForceDetachRequest, OutboundStanza, PresenceState, RegisterUserResourceIfOwnerOrAbsent,
+    UnregisterUserResource, UserRegistryActor,
+};
+use waddle_xmpp::roster::{RosterItem, RosterVersion};
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
 use waddle_xmpp::Stanza;
 
 use super::allowlist::AllowlistStore;
 use super::claims::NodeLeaseStore;
-use super::codec::RemoteStanza;
+use super::codec::{RemoteElement, RemoteStanza};
 use super::ordered_relay::{
     OrderedRelayChannel, OrderedRelayClaim, OrderedRelayClaimRole, OrderedRelayDiversion,
     OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims, OrderedRelayMucProxyKind,
@@ -35,7 +42,17 @@ use super::ordered_relay::{
     OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply, OrderedRelaySenderState,
     OriginInboundSequence, RemoteStanzaEnvelope,
 };
-use super::relay::{RelayAskError, RelayHandle, RelaySendEffect, RelaySendFailure};
+use super::relay::{
+    RelayAskError, RelayDeliverRemoteResourceFrame, RelayForceDetachRemoteUserResource,
+    RelayForceDetachRemoteUserResourceReply, RelayHandle, RelayRegisterRemoteUserResource,
+    RelayRemoteResourceForceDetachStatus, RelayRemoteResourceFrameReply,
+    RelayRemoteResourceFrameStatus, RelayRemoteResourceRegistrationReply,
+    RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUnregisterReply,
+    RelayRemoteResourceUpdateReply, RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect,
+    RelayRemoteUserSideEffectReply, RelayRemoteUserSideEffectStatus,
+    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelaySendEffect,
+    RelaySendFailure, RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
+};
 use super::NodeId;
 use crate::config::ClusteringMessagingConfig;
 use crate::server::routes::interpret::{
@@ -47,6 +64,8 @@ const ORDERED_DELIVERY_REPLY_TIMEOUT: Duration = Duration::from_secs(8);
 const ORDERED_RECEIVER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(6);
 const ORDERED_RECEIVER_EFFECT_TIMEOUT_MARGIN: Duration = Duration::from_millis(250);
 const MAX_ORDERED_RELAY_CHANNEL_LOCKS: usize = 4096;
+const MAX_REMOTE_OWNER_REGISTRATION_LOCKS: usize = 4096;
+const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 type RemoteDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
@@ -63,6 +82,237 @@ pub struct OrderedRelayDeliveryServices {
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
     pub blocking_storage: Arc<dyn BlockingStorage>,
     pub web_socket_state: Weak<WebSocketState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct RemoteResourceRegistrationId(uuid::Uuid);
+
+impl RemoteResourceRegistrationId {
+    fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct RemoteResourceSocketGeneration(u64);
+
+impl RemoteResourceSocketGeneration {
+    fn next(current: Option<Self>) -> Self {
+        Self(
+            current
+                .map(|generation| generation.0)
+                .unwrap_or(0)
+                .saturating_add(1),
+        )
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemotePresenceStateSnapshot {
+    pub show: Option<String>,
+    pub status: Option<String>,
+    pub priority: i8,
+    pub payloads: Vec<RemoteElement>,
+}
+
+impl From<PresenceState> for RemotePresenceStateSnapshot {
+    fn from(state: PresenceState) -> Self {
+        Self {
+            show: state.show,
+            status: state.status,
+            priority: state.priority,
+            payloads: state.payloads.into_iter().map(RemoteElement).collect(),
+        }
+    }
+}
+
+impl From<RemotePresenceStateSnapshot> for PresenceState {
+    fn from(state: RemotePresenceStateSnapshot) -> Self {
+        Self {
+            show: state.show,
+            status: state.status,
+            priority: state.priority,
+            payloads: state
+                .payloads
+                .into_iter()
+                .map(|element| element.0)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteResourceStateSnapshot {
+    pub carbons_enabled: bool,
+    pub roster_interested: bool,
+    pub blocklist_interested: bool,
+    pub presence_available: bool,
+    pub presence_priority: i8,
+    pub presence_state: Option<RemotePresenceStateSnapshot>,
+}
+
+impl RemoteResourceStateSnapshot {
+    fn from_entry(entry: &ConnectionEntry, presence_state: Option<PresenceState>) -> Self {
+        Self {
+            carbons_enabled: entry.carbons_enabled.load(Ordering::Relaxed),
+            roster_interested: entry.roster_interested.load(Ordering::Relaxed),
+            blocklist_interested: entry.blocklist_interested.load(Ordering::Relaxed),
+            presence_available: entry.presence_available.load(Ordering::Relaxed),
+            presence_priority: entry.presence_priority.load(Ordering::Relaxed),
+            presence_state: presence_state.map(RemotePresenceStateSnapshot::from),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum RemoteResourceStateUpdate {
+    Presence {
+        available: bool,
+        priority: i8,
+        state: Option<RemotePresenceStateSnapshot>,
+    },
+    Carbons {
+        enabled: bool,
+    },
+    RosterInterested,
+    BlocklistInterested,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum RemoteCarbonKind {
+    Sent,
+    Received,
+}
+
+impl From<CarbonKind> for RemoteCarbonKind {
+    fn from(kind: CarbonKind) -> Self {
+        match kind {
+            CarbonKind::Sent => Self::Sent,
+            CarbonKind::Received => Self::Received,
+        }
+    }
+}
+
+impl From<RemoteCarbonKind> for CarbonKind {
+    fn from(kind: RemoteCarbonKind) -> Self {
+        match kind {
+            RemoteCarbonKind::Sent => Self::Sent,
+            RemoteCarbonKind::Received => Self::Received,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum RemoteUserSideEffect {
+    Carbons {
+        owner: jid::BareJid,
+        message: RemoteStanza,
+        kind: RemoteCarbonKind,
+        exclude: Vec<jid::FullJid>,
+    },
+    RosterPush {
+        user_jid: jid::BareJid,
+        source_jid: jid::FullJid,
+        item: RosterItem,
+        version: RosterVersion,
+    },
+    BlocklistPush {
+        user_bare: jid::BareJid,
+        blocked: bool,
+        jids: Vec<jid::Jid>,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteResourceOutboundFrame {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub stanza: RemoteStanza,
+    pub kind: DeliveryKind,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum RemoteResourceRouteTarget {
+    FullJid {
+        target: jid::FullJid,
+        stanza: RemoteStanza,
+    },
+    BareJid {
+        target: jid::BareJid,
+        stanza: RemoteStanza,
+    },
+    MucProxy {
+        room_jid: jid::BareJid,
+        kind: OrderedRelayMucProxyKind,
+        stanza: RemoteStanza,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemoteResourceRouteOutcome {
+    Delivered,
+    QueuedDetached,
+    Unavailable,
+    Dropped,
+    StaleRegistration,
+}
+
+impl From<FullJidDeliveryOutcome> for RemoteResourceRouteOutcome {
+    fn from(outcome: FullJidDeliveryOutcome) -> Self {
+        match outcome {
+            FullJidDeliveryOutcome::Delivered => Self::Delivered,
+            FullJidDeliveryOutcome::QueuedDetached => Self::QueuedDetached,
+            FullJidDeliveryOutcome::Unavailable => Self::Unavailable,
+            FullJidDeliveryOutcome::Dropped => Self::Dropped,
+        }
+    }
+}
+
+impl From<RemoteResourceRouteOutcome> for FullJidDeliveryOutcome {
+    fn from(outcome: RemoteResourceRouteOutcome) -> Self {
+        match outcome {
+            RemoteResourceRouteOutcome::Delivered => Self::Delivered,
+            RemoteResourceRouteOutcome::QueuedDetached => Self::QueuedDetached,
+            RemoteResourceRouteOutcome::Unavailable
+            | RemoteResourceRouteOutcome::StaleRegistration => Self::Unavailable,
+            RemoteResourceRouteOutcome::Dropped => Self::Dropped,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteResourceRegisterOutcome {
+    Registered,
+    NotRemote,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteSocketRegistration {
+    registration_id: RemoteResourceRegistrationId,
+    socket_generation: RemoteResourceSocketGeneration,
+    owner: Arc<AtomicBool>,
+    user_owner: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteResourceOriginSnapshot {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub user_owner: NodeId,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteOwnerRegistration {
+    registration_id: RemoteResourceRegistrationId,
+    socket_node: NodeId,
+    socket_generation: RemoteResourceSocketGeneration,
+    owner: Arc<AtomicBool>,
 }
 
 struct RelayOriginSigner {
@@ -120,6 +370,10 @@ pub struct OrderedRelayDeliveryBridge {
     origin_signer: OnceLock<RelayOriginSigner>,
     sender_state: Mutex<OrderedRelaySenderState>,
     channel_locks: Mutex<HashMap<OrderedRelayChannel, Arc<Mutex<()>>>>,
+    remote_socket_resources: Mutex<HashMap<jid::FullJid, RemoteSocketRegistration>>,
+    remote_socket_generations: Mutex<HashMap<jid::FullJid, RemoteResourceSocketGeneration>>,
+    remote_owner_resources: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
+    remote_owner_registration_locks: Mutex<HashMap<jid::FullJid, Arc<Mutex<()>>>>,
     stop_token: CancellationToken,
     mailbox_timeout: Duration,
     reply_timeout: Duration,
@@ -141,6 +395,10 @@ impl OrderedRelayDeliveryBridge {
             origin_signer: OnceLock::new(),
             sender_state: Mutex::new(OrderedRelaySenderState::default()),
             channel_locks: Mutex::new(HashMap::new()),
+            remote_socket_resources: Mutex::new(HashMap::new()),
+            remote_socket_generations: Mutex::new(HashMap::new()),
+            remote_owner_resources: Mutex::new(HashMap::new()),
+            remote_owner_registration_locks: Mutex::new(HashMap::new()),
             stop_token,
             // WebSocket stanza dispatch has a 15s wedge backstop. Full-JID
             // ordered delivery must resolve before that backstop can cancel
@@ -182,6 +440,44 @@ impl OrderedRelayDeliveryBridge {
             .unwrap_or_else(|| self.reply_timeout / 2)
     }
 
+    pub(crate) async fn remote_resource_origin_if_owner(
+        &self,
+        jid: &jid::FullJid,
+        owner: &Arc<AtomicBool>,
+    ) -> Option<RemoteResourceOriginSnapshot> {
+        let registrations = self.remote_socket_resources.lock().await;
+        let registration = registrations
+            .get(jid)
+            .filter(|registration| Arc::ptr_eq(&registration.owner, owner))?;
+        Some(RemoteResourceOriginSnapshot {
+            jid: jid.clone(),
+            registration_id: registration.registration_id,
+            socket_generation: registration.socket_generation,
+            user_owner: registration.user_owner.clone(),
+        })
+    }
+
+    pub(crate) async fn try_deliver_registered_remote_resource(
+        &self,
+        target: &jid::FullJid,
+        stanza: &Stanza,
+        kind: DeliveryKind,
+    ) -> Option<FullJidDeliveryOutcome> {
+        let registration = {
+            let registrations = self.remote_owner_resources.lock().await;
+            registrations.get(target).cloned()
+        }?;
+        Some(
+            self.deliver_registered_remote_resource_with_registration(
+                target,
+                stanza,
+                kind,
+                &registration,
+            )
+            .await,
+        )
+    }
+
     /// Return `Some` only when this exact full-JID target is currently owned
     /// by a fresh foreign `UserActor` claim and an ordered-relay send was
     /// attempted. `None` means the caller must keep the existing local path.
@@ -192,6 +488,19 @@ impl OrderedRelayDeliveryBridge {
         origin: &'a OrderedRelayRouteOrigin,
     ) -> RemoteDeliveryFuture<'a> {
         Box::pin(async move {
+            if let Some(remote_origin) = remote_resource_origin(origin) {
+                return Arc::clone(self)
+                    .route_remote_resource_origin(
+                        remote_origin,
+                        RemoteResourceRouteTarget::FullJid {
+                            target: target.clone(),
+                            stanza: RemoteStanza(stanza.clone()),
+                        },
+                        stanza,
+                        origin,
+                    )
+                    .await;
+            }
             let services = self.services.get()?.clone();
             let target_entity = user_entity(&target.to_bare());
             let target_snapshot = current_claim(&services, &target_entity).await?;
@@ -286,6 +595,19 @@ impl OrderedRelayDeliveryBridge {
         origin: &'a OrderedRelayRouteOrigin,
     ) -> RemoteDeliveryFuture<'a> {
         Box::pin(async move {
+            if let Some(remote_origin) = remote_resource_origin(origin) {
+                return Arc::clone(self)
+                    .route_remote_resource_origin(
+                        remote_origin,
+                        RemoteResourceRouteTarget::BareJid {
+                            target: target.clone(),
+                            stanza: RemoteStanza(stanza.clone()),
+                        },
+                        stanza,
+                        origin,
+                    )
+                    .await;
+            }
             let services = self.services.get()?.clone();
             let target_entity = user_entity(target);
             let target_snapshot = current_claim(&services, &target_entity).await?;
@@ -381,6 +703,20 @@ impl OrderedRelayDeliveryBridge {
         kind: OrderedRelayMucProxyKind,
         origin: &OrderedRelayRouteOrigin,
     ) -> Option<OrderedRelayMucProxyOutcome> {
+        if let Some(remote_origin) = remote_resource_origin(origin) {
+            return Arc::clone(self)
+                .route_remote_resource_origin_muc(
+                    remote_origin,
+                    RemoteResourceRouteTarget::MucProxy {
+                        room_jid: room_jid.clone(),
+                        kind,
+                        stanza: RemoteStanza(stanza.clone()),
+                    },
+                    stanza,
+                    origin,
+                )
+                .await;
+        }
         let services = self.services.get()?.clone();
         let target_entity = room_entity(room_jid);
         let target_snapshot = current_claim(&services, &target_entity).await?;
@@ -507,6 +843,1430 @@ impl OrderedRelayDeliveryBridge {
             FullJidDeliveryOutcome::Unavailable => OrderedRelayMucProxyOutcome::Unavailable,
             FullJidDeliveryOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
         })
+    }
+
+    pub(crate) async fn try_register_remote_user_resource(
+        self: &Arc<Self>,
+        jid: &jid::FullJid,
+        entry: ConnectionEntry,
+        owner: Arc<AtomicBool>,
+    ) -> RemoteResourceRegisterOutcome {
+        let Some(services) = self.services.get().cloned() else {
+            return RemoteResourceRegisterOutcome::Failed;
+        };
+        let target_entity = user_entity(&jid.to_bare());
+        let Some(target_snapshot) = current_claim(&services, &target_entity).await else {
+            return RemoteResourceRegisterOutcome::NotRemote;
+        };
+        if !target_snapshot.owner_lease_fresh {
+            return RemoteResourceRegisterOutcome::NotRemote;
+        }
+        let me = services.node_identity.current();
+        if target_snapshot.owner == me {
+            return RemoteResourceRegisterOutcome::NotRemote;
+        }
+
+        let registration_id = RemoteResourceRegistrationId::fresh();
+        let socket_generation = {
+            let mut generations = self.remote_socket_generations.lock().await;
+            let next = RemoteResourceSocketGeneration::next(generations.get(jid).copied());
+            generations.insert(jid.clone(), next);
+            next
+        };
+        let socket_node = NodeId::new(me.node_id.clone());
+        let user_owner = NodeId::new(target_snapshot.owner.node_id.clone());
+        let state = RemoteResourceStateSnapshot::from_entry(
+            &entry,
+            services.connection_registry.get_presence_state(jid),
+        );
+        let mut handle = RelayHandle::new(user_owner.clone(), self.stop_token.clone())
+            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        let reply = match handle
+            .register_remote_user_resource(RelayRegisterRemoteUserResource {
+                jid: jid.clone(),
+                registration_id,
+                socket_generation,
+                socket_node,
+                state,
+            })
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                tracing::warn!(
+                    jid = %jid,
+                    owner_node = %user_owner.as_str(),
+                    %error,
+                    "clustered remote-resource register ask failed"
+                );
+                return RemoteResourceRegisterOutcome::Failed;
+            }
+        };
+        match reply.status {
+            RelayRemoteResourceRegistrationStatus::Registered => {
+                if services
+                    .connection_registry
+                    .entry_if_owner(jid, &owner)
+                    .is_none()
+                {
+                    let _ = handle
+                        .unregister_remote_user_resource(RelayUnregisterRemoteUserResource {
+                            jid: jid.clone(),
+                            registration_id,
+                            socket_generation,
+                        })
+                        .await;
+                    return RemoteResourceRegisterOutcome::Failed;
+                }
+                self.remote_socket_resources.lock().await.insert(
+                    jid.clone(),
+                    RemoteSocketRegistration {
+                        registration_id,
+                        socket_generation,
+                        owner,
+                        user_owner,
+                    },
+                );
+                RemoteResourceRegisterOutcome::Registered
+            }
+            RelayRemoteResourceRegistrationStatus::NotOwner => {
+                RemoteResourceRegisterOutcome::NotRemote
+            }
+            RelayRemoteResourceRegistrationStatus::StaleRegistration
+            | RelayRemoteResourceRegistrationStatus::Unavailable => {
+                RemoteResourceRegisterOutcome::Failed
+            }
+        }
+    }
+
+    pub(crate) async fn unregister_remote_user_resource_if_owner(
+        &self,
+        jid: &jid::FullJid,
+        owner: &Arc<AtomicBool>,
+    ) {
+        let registration = {
+            let mut registrations = self.remote_socket_resources.lock().await;
+            match registrations.get(jid) {
+                Some(registration) if Arc::ptr_eq(&registration.owner, owner) => {
+                    registrations.remove(jid)
+                }
+                _ => None,
+            }
+        };
+        let Some(registration) = registration else {
+            return;
+        };
+        let mut handle = RelayHandle::new(registration.user_owner.clone(), self.stop_token.clone())
+            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        if let Err(error) = handle
+            .unregister_remote_user_resource(RelayUnregisterRemoteUserResource {
+                jid: jid.clone(),
+                registration_id: registration.registration_id,
+                socket_generation: registration.socket_generation,
+            })
+            .await
+        {
+            tracing::warn!(
+                jid = %jid,
+                %error,
+                "clustered remote-resource unregister ask failed; owner-side stale \
+                 entry will self-heal on closed-channel delivery"
+            );
+        }
+    }
+
+    pub(crate) async fn update_remote_user_resource_if_owner(
+        &self,
+        jid: &jid::FullJid,
+        owner: &Arc<AtomicBool>,
+        update: RemoteResourceStateUpdate,
+    ) {
+        let registration = {
+            let registrations = self.remote_socket_resources.lock().await;
+            registrations
+                .get(jid)
+                .filter(|registration| Arc::ptr_eq(&registration.owner, owner))
+                .cloned()
+        };
+        let Some(registration) = registration else {
+            return;
+        };
+        let mut handle = RelayHandle::new(registration.user_owner.clone(), self.stop_token.clone())
+            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        match handle
+            .update_remote_user_resource(RelayUpdateRemoteUserResource {
+                jid: jid.clone(),
+                registration_id: registration.registration_id,
+                socket_generation: registration.socket_generation,
+                update,
+            })
+            .await
+        {
+            Ok(RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::Updated,
+            }) => {}
+            Ok(RelayRemoteResourceUpdateReply { status }) => {
+                tracing::warn!(
+                    jid = %jid,
+                    status = ?status,
+                    "clustered remote-resource state update failed closed; detaching socket"
+                );
+                self.detach_stale_remote_socket_resource(jid, &registration)
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %jid,
+                    %error,
+                    "clustered remote-resource state update ask failed; detaching socket"
+                );
+                self.detach_stale_remote_socket_resource(jid, &registration)
+                    .await;
+            }
+        }
+    }
+
+    pub(crate) async fn try_fanout_remote_user_carbons(
+        &self,
+        source_jid: &jid::FullJid,
+        owner: &jid::BareJid,
+        message: &xmpp_parsers::message::Message,
+        kind: CarbonKind,
+        exclude: Vec<jid::FullJid>,
+    ) -> bool {
+        self.try_remote_user_side_effect(
+            source_jid,
+            RemoteUserSideEffect::Carbons {
+                owner: owner.clone(),
+                message: RemoteStanza(Stanza::Message(message.clone())),
+                kind: kind.into(),
+                exclude,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn try_fanout_remote_user_roster_push(
+        &self,
+        source_jid: &jid::FullJid,
+        user_jid: &jid::BareJid,
+        item: &RosterItem,
+        version: &RosterVersion,
+    ) -> bool {
+        self.try_remote_user_side_effect(
+            source_jid,
+            RemoteUserSideEffect::RosterPush {
+                user_jid: user_jid.clone(),
+                source_jid: source_jid.clone(),
+                item: item.clone(),
+                version: version.clone(),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn try_fanout_remote_user_blocklist_push(
+        &self,
+        source_jid: &jid::FullJid,
+        user_bare: &jid::BareJid,
+        blocked: bool,
+        jids: &[jid::Jid],
+    ) -> bool {
+        self.try_remote_user_side_effect(
+            source_jid,
+            RemoteUserSideEffect::BlocklistPush {
+                user_bare: user_bare.clone(),
+                blocked,
+                jids: jids.to_vec(),
+            },
+        )
+        .await
+    }
+
+    async fn try_remote_user_side_effect(
+        &self,
+        source_jid: &jid::FullJid,
+        effect: RemoteUserSideEffect,
+    ) -> bool {
+        let Some(registration) = self.remote_socket_registration_if_current(source_jid).await
+        else {
+            return false;
+        };
+        let mut handle = RelayHandle::new(registration.user_owner.clone(), self.stop_token.clone())
+            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        match handle
+            .remote_user_side_effect(RelayRemoteUserSideEffect {
+                source_jid: source_jid.clone(),
+                registration_id: registration.registration_id,
+                socket_generation: registration.socket_generation,
+                effect,
+            })
+            .await
+        {
+            Ok(RelayRemoteUserSideEffectReply {
+                status: RelayRemoteUserSideEffectStatus::Applied,
+            }) => true,
+            Ok(RelayRemoteUserSideEffectReply {
+                status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+            }) => {
+                self.remove_remote_socket_registration_if_current(source_jid, &registration)
+                    .await;
+                false
+            }
+            Ok(RelayRemoteUserSideEffectReply {
+                status: RelayRemoteUserSideEffectStatus::Unavailable,
+            }) => false,
+            Err(RelayAskError::Send {
+                effect: RelaySendEffect::MaybeCommitted,
+                message,
+                ..
+            }) => {
+                tracing::warn!(
+                    jid = %source_jid,
+                    %message,
+                    "clustered remote-user side-effect relay may have committed; suppressing local fallback"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %source_jid,
+                    %error,
+                    "clustered remote-user side-effect relay ask failed"
+                );
+                false
+            }
+        }
+    }
+
+    async fn remote_socket_registration_if_current(
+        &self,
+        jid: &jid::FullJid,
+    ) -> Option<RemoteSocketRegistration> {
+        let registration = self
+            .remote_socket_resources
+            .lock()
+            .await
+            .get(jid)
+            .cloned()?;
+        let services = self.services.get()?;
+        services
+            .connection_registry
+            .entry_if_owner(jid, &registration.owner)
+            .map(|_| registration)
+    }
+
+    async fn remove_remote_socket_registration_if_current(
+        &self,
+        jid: &jid::FullJid,
+        registration: &RemoteSocketRegistration,
+    ) {
+        let mut registrations = self.remote_socket_resources.lock().await;
+        if registrations.get(jid).is_some_and(|current| {
+            current.registration_id == registration.registration_id
+                && current.socket_generation == registration.socket_generation
+                && current.user_owner == registration.user_owner
+                && Arc::ptr_eq(&current.owner, &registration.owner)
+        }) {
+            registrations.remove(jid);
+        }
+    }
+
+    async fn remove_remote_owner_registration_if_current(
+        &self,
+        jid: &jid::FullJid,
+        registration: &RemoteOwnerRegistration,
+    ) {
+        let mut registrations = self.remote_owner_resources.lock().await;
+        if registrations
+            .get(jid)
+            .is_some_and(|current| remote_owner_registration_matches(current, registration))
+        {
+            registrations.remove(jid);
+        }
+    }
+
+    pub(crate) async fn register_remote_user_resource_on_owner(
+        self: &Arc<Self>,
+        msg: RelayRegisterRemoteUserResource,
+    ) -> RelayRemoteResourceRegistrationReply {
+        let jid = msg.jid.clone();
+        let Some(lock) = self.lock_for_remote_owner_registration(&jid).await else {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::Unavailable,
+            };
+        };
+        let guard = lock.lock().await;
+        let reply = self
+            .register_remote_user_resource_on_owner_locked(msg)
+            .await;
+        drop(guard);
+        self.remove_remote_owner_registration_lock_if_unused(&jid, &lock)
+            .await;
+        reply
+    }
+
+    async fn register_remote_user_resource_on_owner_locked(
+        self: &Arc<Self>,
+        msg: RelayRegisterRemoteUserResource,
+    ) -> RelayRemoteResourceRegistrationReply {
+        let Some(services) = self.services.get().cloned() else {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::Unavailable,
+            };
+        };
+        let target_entity = user_entity(&msg.jid.to_bare());
+        let Some(snapshot) = current_claim(&services, &target_entity).await else {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::NotOwner,
+            };
+        };
+        let me = services.node_identity.current();
+        if !snapshot.owner_lease_fresh || snapshot.owner != me {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::NotOwner,
+            };
+        }
+
+        if let Some(displaced) = self
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&msg.jid)
+            .cloned()
+        {
+            if displaced.registration_id == msg.registration_id
+                && displaced.socket_node == msg.socket_node
+                && displaced.socket_generation == msg.socket_generation
+            {
+                match remote_owner_registration_is_current(&services, &msg.jid, &displaced).await {
+                    Ok(()) => {
+                        return RelayRemoteResourceRegistrationReply {
+                            status: RelayRemoteResourceRegistrationStatus::Registered,
+                        };
+                    }
+                    Err(RelayRemoteResourceRegistrationStatus::StaleRegistration) => {
+                        self.remove_remote_owner_registration_if_current(&msg.jid, &displaced)
+                            .await;
+                    }
+                    Err(status) => return RelayRemoteResourceRegistrationReply { status },
+                }
+            } else if displaced.socket_node == msg.socket_node
+                && displaced.socket_generation >= msg.socket_generation
+            {
+                return RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+                };
+            } else {
+                if !self
+                    .retire_remote_owner_registration(&services, &msg.jid, &displaced)
+                    .await
+                {
+                    return RelayRemoteResourceRegistrationReply {
+                        status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                    };
+                }
+                let mut registrations = self.remote_owner_resources.lock().await;
+                match registrations.get(&msg.jid) {
+                    Some(current) if remote_owner_registration_matches(current, &displaced) => {
+                        registrations.remove(&msg.jid);
+                    }
+                    Some(_) => {
+                        return RelayRemoteResourceRegistrationReply {
+                            status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+                        };
+                    }
+                    None => {}
+                }
+            }
+            if self
+                .remote_owner_resources
+                .lock()
+                .await
+                .contains_key(&msg.jid)
+            {
+                return RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+                };
+            }
+        }
+
+        let (tx, rx) = mpsc::channel(REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE);
+        let entry = ConnectionEntry::new(tx);
+        apply_remote_resource_state(&entry, &msg.state);
+        let owner = entry.carbons_handle();
+        let force_detach_rx = entry.take_force_detach_rx();
+        match services
+            .user_registry
+            .ask(RegisterUserResourceIfOwnerOrAbsent {
+                jid: msg.jid.clone(),
+                entry: entry.clone(),
+                owner: owner.clone(),
+            })
+            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .await
+        {
+            Ok(true) => {
+                let registration = RemoteOwnerRegistration {
+                    registration_id: msg.registration_id,
+                    socket_node: msg.socket_node.clone(),
+                    socket_generation: msg.socket_generation,
+                    owner: owner.clone(),
+                };
+                if !services
+                    .connection_registry
+                    .register_entry_if_owner_or_absent(msg.jid.clone(), entry.clone(), &owner)
+                {
+                    if !unregister_remote_owner_actor_entry(&services, &msg.jid, &owner).await {
+                        return RelayRemoteResourceRegistrationReply {
+                            status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                        };
+                    }
+                    return RelayRemoteResourceRegistrationReply {
+                        status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+                    };
+                }
+                match remote_owner_registration_is_current(&services, &msg.jid, &registration).await
+                {
+                    Ok(()) => {}
+                    Err(status) => {
+                        if !unregister_remote_owner_actor_entry(&services, &msg.jid, &owner).await {
+                            return RelayRemoteResourceRegistrationReply {
+                                status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                            };
+                        }
+                        services
+                            .connection_registry
+                            .unregister_if_owner(&msg.jid, &owner);
+                        return RelayRemoteResourceRegistrationReply { status };
+                    }
+                }
+                apply_remote_resource_presence_to_registry(
+                    &services.connection_registry,
+                    &msg.jid,
+                    &owner,
+                    msg.state.presence_available,
+                    msg.state.presence_priority,
+                    msg.state.presence_state.clone(),
+                );
+                self.remote_owner_resources
+                    .lock()
+                    .await
+                    .insert(msg.jid.clone(), registration);
+                self.spawn_remote_resource_forwarder(
+                    msg.jid,
+                    msg.registration_id,
+                    msg.socket_node,
+                    rx,
+                    force_detach_rx,
+                );
+                RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::Registered,
+                }
+            }
+            Ok(false) => RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    jid = %msg.jid,
+                    %error,
+                    "clustered remote-resource owner registration failed"
+                );
+                RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn unregister_remote_user_resource_on_owner(
+        &self,
+        msg: RelayUnregisterRemoteUserResource,
+    ) -> RelayRemoteResourceUnregisterReply {
+        let Some(services) = self.services.get().cloned() else {
+            return RelayRemoteResourceUnregisterReply { removed: false };
+        };
+        let registration = self
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&msg.jid)
+            .filter(|registration| {
+                registration.registration_id == msg.registration_id
+                    && registration.socket_generation == msg.socket_generation
+            })
+            .cloned();
+        let Some(registration) = registration else {
+            return RelayRemoteResourceUnregisterReply { removed: false };
+        };
+        let actor_removed = services
+            .user_registry
+            .ask(UnregisterUserResource {
+                jid: msg.jid.clone(),
+                owner: Some(registration.owner.clone()),
+            })
+            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .await
+            .is_ok();
+        if !actor_removed {
+            return RelayRemoteResourceUnregisterReply { removed: false };
+        }
+        let registry_removed = services
+            .connection_registry
+            .unregister_if_owner(&msg.jid, &registration.owner)
+            .is_some();
+        let mut registrations = self.remote_owner_resources.lock().await;
+        if registrations.get(&msg.jid).is_some_and(|registration| {
+            registration.registration_id == msg.registration_id
+                && registration.socket_generation == msg.socket_generation
+        }) {
+            registrations.remove(&msg.jid);
+        }
+        RelayRemoteResourceUnregisterReply {
+            removed: registry_removed,
+        }
+    }
+
+    pub(crate) async fn update_remote_user_resource_on_owner(
+        &self,
+        msg: RelayUpdateRemoteUserResource,
+    ) -> RelayRemoteResourceUpdateReply {
+        let Some(services) = self.services.get().cloned() else {
+            return RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::Unavailable,
+            };
+        };
+        let registration = self
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&msg.jid)
+            .filter(|registration| {
+                registration.registration_id == msg.registration_id
+                    && registration.socket_generation == msg.socket_generation
+            })
+            .cloned();
+        let Some(registration) = registration else {
+            return RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::StaleRegistration,
+            };
+        };
+        let actor = match services
+            .user_registry
+            .ask(waddle_xmpp::registry::GetUser {
+                bare_jid: msg.jid.to_bare(),
+            })
+            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .await
+        {
+            Ok(Some(actor)) => actor,
+            Ok(None) => {
+                return RelayRemoteResourceUpdateReply {
+                    status: RelayRemoteResourceUpdateStatus::StaleRegistration,
+                };
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %msg.jid,
+                    %error,
+                    "clustered remote-resource state update could not resolve owner UserActor"
+                );
+                return RelayRemoteResourceUpdateReply {
+                    status: RelayRemoteResourceUpdateStatus::Unavailable,
+                };
+            }
+        };
+        let jid = msg.jid;
+        let status = match msg.update {
+            RemoteResourceStateUpdate::Presence {
+                available,
+                priority,
+                state,
+            } => {
+                match owner_remote_entry_if_current(
+                    &actor,
+                    &services.connection_registry,
+                    &jid,
+                    &registration.owner,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        if apply_remote_resource_presence_to_registry(
+                            &services.connection_registry,
+                            &jid,
+                            &registration.owner,
+                            available,
+                            priority,
+                            state,
+                        ) {
+                            RelayRemoteResourceUpdateStatus::Updated
+                        } else {
+                            RelayRemoteResourceUpdateStatus::StaleRegistration
+                        }
+                    }
+                    Err(status) => status,
+                }
+            }
+            RemoteResourceStateUpdate::Carbons { enabled } => {
+                match owner_remote_entry_if_current(
+                    &actor,
+                    &services.connection_registry,
+                    &jid,
+                    &registration.owner,
+                )
+                .await
+                {
+                    Ok(entry) => {
+                        entry.carbons_enabled.store(enabled, Ordering::Relaxed);
+                        RelayRemoteResourceUpdateStatus::Updated
+                    }
+                    Err(status) => status,
+                }
+            }
+            RemoteResourceStateUpdate::RosterInterested => match owner_remote_entry_if_current(
+                &actor,
+                &services.connection_registry,
+                &jid,
+                &registration.owner,
+            )
+            .await
+            {
+                Ok(entry) => {
+                    entry.roster_interested.store(true, Ordering::Relaxed);
+                    RelayRemoteResourceUpdateStatus::Updated
+                }
+                Err(status) => status,
+            },
+            RemoteResourceStateUpdate::BlocklistInterested => {
+                match owner_remote_entry_if_current(
+                    &actor,
+                    &services.connection_registry,
+                    &jid,
+                    &registration.owner,
+                )
+                .await
+                {
+                    Ok(entry) => {
+                        entry.blocklist_interested.store(true, Ordering::Relaxed);
+                        RelayRemoteResourceUpdateStatus::Updated
+                    }
+                    Err(status) => status,
+                }
+            }
+        };
+        RelayRemoteResourceUpdateReply { status }
+    }
+
+    pub(crate) async fn apply_remote_user_side_effect_on_owner(
+        &self,
+        msg: RelayRemoteUserSideEffect,
+    ) -> RelayRemoteUserSideEffectReply {
+        let Some(services) = self.services.get().cloned() else {
+            return RelayRemoteUserSideEffectReply {
+                status: RelayRemoteUserSideEffectStatus::Unavailable,
+            };
+        };
+        let registration = self
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&msg.source_jid)
+            .filter(|registration| {
+                registration.registration_id == msg.registration_id
+                    && registration.socket_generation == msg.socket_generation
+            })
+            .cloned();
+        let Some(registration) = registration else {
+            return RelayRemoteUserSideEffectReply {
+                status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+            };
+        };
+        let actor = match services
+            .user_registry
+            .ask(waddle_xmpp::registry::GetUser {
+                bare_jid: msg.source_jid.to_bare(),
+            })
+            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .await
+        {
+            Ok(Some(actor)) => actor,
+            Ok(None) => {
+                return RelayRemoteUserSideEffectReply {
+                    status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+                };
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %msg.source_jid,
+                    %error,
+                    "clustered remote-user side effect could not resolve owner UserActor"
+                );
+                return RelayRemoteUserSideEffectReply {
+                    status: RelayRemoteUserSideEffectStatus::Unavailable,
+                };
+            }
+        };
+        if let Err(status) = owner_remote_entry_if_current(
+            &actor,
+            &services.connection_registry,
+            &msg.source_jid,
+            &registration.owner,
+        )
+        .await
+        {
+            return RelayRemoteUserSideEffectReply {
+                status: match status {
+                    RelayRemoteResourceUpdateStatus::Updated => {
+                        RelayRemoteUserSideEffectStatus::Applied
+                    }
+                    RelayRemoteResourceUpdateStatus::StaleRegistration => {
+                        RelayRemoteUserSideEffectStatus::StaleRegistration
+                    }
+                    RelayRemoteResourceUpdateStatus::Unavailable => {
+                        RelayRemoteUserSideEffectStatus::Unavailable
+                    }
+                },
+            };
+        }
+
+        let status = match msg.effect {
+            RemoteUserSideEffect::Carbons {
+                owner,
+                message,
+                kind,
+                exclude,
+            } => match message.0 {
+                Stanza::Message(message) => {
+                    crate::server::routes::interpret::carbons::send_carbons_to_registry(
+                        &services.connection_registry,
+                        Some(&services.sm_session_registry),
+                        owner,
+                        Box::new(message),
+                        kind.into(),
+                        exclude,
+                    )
+                    .await;
+                    RelayRemoteUserSideEffectStatus::Applied
+                }
+                _ => RelayRemoteUserSideEffectStatus::StaleRegistration,
+            },
+            RemoteUserSideEffect::RosterPush {
+                user_jid,
+                source_jid,
+                item,
+                version,
+            } => {
+                let Some(state) = services.web_socket_state.upgrade() else {
+                    return RelayRemoteUserSideEffectReply {
+                        status: RelayRemoteUserSideEffectStatus::Unavailable,
+                    };
+                };
+                crate::server::routes::websocket::handlers::iq::roster::push::send_roster_push_to_sibling_resources(
+                    &state,
+                    &user_jid,
+                    &source_jid,
+                    &item,
+                    &version,
+                )
+                .await;
+                RelayRemoteUserSideEffectStatus::Applied
+            }
+            RemoteUserSideEffect::BlocklistPush {
+                user_bare,
+                blocked,
+                jids,
+            } => {
+                let Some(state) = services.web_socket_state.upgrade() else {
+                    return RelayRemoteUserSideEffectReply {
+                        status: RelayRemoteUserSideEffectStatus::Unavailable,
+                    };
+                };
+                crate::server::routes::websocket::handlers::iq::blocking::send_blocking_pushes(
+                    &state, &user_bare, blocked, &jids,
+                )
+                .await;
+                RelayRemoteUserSideEffectStatus::Applied
+            }
+        };
+        RelayRemoteUserSideEffectReply { status }
+    }
+
+    async fn route_remote_resource_origin(
+        self: Arc<Self>,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+        origin_stanza: &Stanza,
+        origin: &OrderedRelayRouteOrigin,
+    ) -> Option<FullJidDeliveryOutcome> {
+        if let Some(handoff) = origin.handoff.clone() {
+            if handoff.mark_deferred() {
+                let bridge = Arc::clone(&self);
+                let origin_stanza = origin_stanza.clone();
+                tokio::spawn(async move {
+                    let outcome = bridge
+                        .route_remote_resource_origin_once(remote_origin, target)
+                        .await
+                        .unwrap_or(FullJidDeliveryOutcome::Dropped);
+                    handoff.complete(replies_for_origin_handoff(&origin_stanza, outcome));
+                });
+                return Some(FullJidDeliveryOutcome::Delivered);
+            }
+        }
+        self.route_remote_resource_origin_once(remote_origin, target)
+            .await
+    }
+
+    async fn route_remote_resource_origin_once(
+        &self,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<FullJidDeliveryOutcome> {
+        let mut handle =
+            RelayHandle::new(remote_origin.user_owner.clone(), self.stop_token.clone())
+                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        let reply = handle
+            .route_remote_resource_stanza(RelayRouteRemoteResourceStanza {
+                source_jid: remote_origin.jid,
+                registration_id: remote_origin.registration_id,
+                socket_generation: remote_origin.socket_generation,
+                target,
+            })
+            .await;
+        match reply {
+            Ok(reply) => Some(reply.outcome.into()),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "clustered remote-resource origin route ask failed"
+                );
+                Some(FullJidDeliveryOutcome::Dropped)
+            }
+        }
+    }
+
+    async fn route_remote_resource_origin_muc(
+        self: Arc<Self>,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+        origin_stanza: &Stanza,
+        origin: &OrderedRelayRouteOrigin,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
+        if let Some(handoff) = origin.handoff.clone() {
+            if handoff.mark_deferred() {
+                let bridge = Arc::clone(&self);
+                let origin_stanza = origin_stanza.clone();
+                tokio::spawn(async move {
+                    let outcome = bridge
+                        .route_remote_resource_origin_muc_once(remote_origin, target)
+                        .await
+                        .unwrap_or(OrderedRelayMucProxyOutcome::Dropped);
+                    let replies = match outcome {
+                        OrderedRelayMucProxyOutcome::Delivered(replies) => replies,
+                        OrderedRelayMucProxyOutcome::Unavailable => {
+                            fallback_reply_for_remote_muc_handoff(&origin_stanza)
+                        }
+                        OrderedRelayMucProxyOutcome::Dropped
+                        | OrderedRelayMucProxyOutcome::MaybeCommitted
+                        | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => Vec::new(),
+                    };
+                    handoff.complete(replies);
+                });
+                return Some(OrderedRelayMucProxyOutcome::Delivered(Vec::new()));
+            }
+        }
+        self.route_remote_resource_origin_muc_once(remote_origin, target)
+            .await
+    }
+
+    async fn route_remote_resource_origin_muc_once(
+        &self,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
+        let mut handle =
+            RelayHandle::new(remote_origin.user_owner.clone(), self.stop_token.clone())
+                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        match handle
+            .route_remote_resource_stanza(RelayRouteRemoteResourceStanza {
+                source_jid: remote_origin.jid,
+                registration_id: remote_origin.registration_id,
+                socket_generation: remote_origin.socket_generation,
+                target,
+            })
+            .await
+        {
+            Ok(reply) => Some(match reply.outcome {
+                RemoteResourceRouteOutcome::Delivered
+                | RemoteResourceRouteOutcome::QueuedDetached => {
+                    OrderedRelayMucProxyOutcome::Delivered(
+                        reply.replies.into_iter().map(|reply| reply.0).collect(),
+                    )
+                }
+                RemoteResourceRouteOutcome::Unavailable
+                | RemoteResourceRouteOutcome::StaleRegistration => {
+                    OrderedRelayMucProxyOutcome::Unavailable
+                }
+                RemoteResourceRouteOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "clustered remote-resource MUC origin route ask failed"
+                );
+                Some(OrderedRelayMucProxyOutcome::Dropped)
+            }
+        }
+    }
+
+    pub(crate) async fn route_remote_resource_stanza_on_owner(
+        self: &Arc<Self>,
+        msg: RelayRouteRemoteResourceStanza,
+    ) -> RelayRouteRemoteResourceStanzaReply {
+        let Some(services) = self.services.get().cloned() else {
+            return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
+        };
+        let Some(registration) = self
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&msg.source_jid)
+            .filter(|registration| {
+                registration.registration_id == msg.registration_id
+                    && registration.socket_generation == msg.socket_generation
+            })
+            .cloned()
+        else {
+            return remote_resource_route_reply(RemoteResourceRouteOutcome::StaleRegistration);
+        };
+        let actor = match services
+            .user_registry
+            .ask(waddle_xmpp::registry::GetUser {
+                bare_jid: msg.source_jid.to_bare(),
+            })
+            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .await
+        {
+            Ok(Some(actor)) => actor,
+            Ok(None) => {
+                return remote_resource_route_reply(RemoteResourceRouteOutcome::StaleRegistration);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %msg.source_jid,
+                    %error,
+                    "clustered remote-resource origin route could not resolve owner UserActor"
+                );
+                return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
+            }
+        };
+        if let Err(status) = owner_remote_entry_if_current(
+            &actor,
+            &services.connection_registry,
+            &msg.source_jid,
+            &registration.owner,
+        )
+        .await
+        {
+            return remote_resource_route_reply(match status {
+                RelayRemoteResourceUpdateStatus::Updated => RemoteResourceRouteOutcome::Delivered,
+                RelayRemoteResourceUpdateStatus::StaleRegistration => {
+                    RemoteResourceRouteOutcome::StaleRegistration
+                }
+                RelayRemoteResourceUpdateStatus::Unavailable => RemoteResourceRouteOutcome::Dropped,
+            });
+        }
+
+        let sender_entity = user_entity(&msg.source_jid.to_bare());
+        let origin = OrderedRelayRouteOrigin {
+            kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+            sender_entity,
+            inbound_sequence: 0,
+            handoff: None,
+        };
+
+        match msg.target {
+            RemoteResourceRouteTarget::FullJid { target, stanza } => {
+                let outcome = if let Some(remote) = self
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin)
+                    .await
+                {
+                    remote
+                } else if let Some(registered) = self
+                    .try_deliver_registered_remote_resource(
+                        &target,
+                        &stanza.0,
+                        DeliveryKind::PeerStanza,
+                    )
+                    .await
+                {
+                    registered
+                } else {
+                    deliver_local_full_jid_after_target_refresh(&services, &target, &stanza.0).await
+                };
+                remote_resource_route_reply(outcome.into())
+            }
+            RemoteResourceRouteTarget::BareJid { target, stanza } => {
+                match route_local_bare_jid_with_timeout(&services, &target, &stanza.0, Some(origin))
+                    .await
+                {
+                    Ok(replies) if replies.is_empty() => {
+                        remote_resource_route_reply(RemoteResourceRouteOutcome::Delivered)
+                    }
+                    Ok(_) => remote_resource_route_reply(RemoteResourceRouteOutcome::Unavailable),
+                    Err(OrderedRelayNackReason::TargetUnavailable) => {
+                        remote_resource_route_reply(RemoteResourceRouteOutcome::Unavailable)
+                    }
+                    Err(_) => remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped),
+                }
+            }
+            RemoteResourceRouteTarget::MucProxy {
+                room_jid,
+                kind,
+                stanza,
+            } => {
+                let outcome = if let Some(remote) = self
+                    .try_proxy_muc_remote(&room_jid, &stanza.0, kind, &origin)
+                    .await
+                {
+                    remote
+                } else {
+                    muc_proxy_result_to_ordered_outcome(
+                        deliver_reserved_muc_proxy(&services, &room_jid, kind, &stanza.0).await,
+                    )
+                };
+                match outcome {
+                    OrderedRelayMucProxyOutcome::Delivered(replies) => {
+                        RelayRouteRemoteResourceStanzaReply {
+                            outcome: RemoteResourceRouteOutcome::Delivered,
+                            replies: replies.into_iter().map(RemoteStanza).collect(),
+                        }
+                    }
+                    OrderedRelayMucProxyOutcome::Unavailable => {
+                        remote_resource_route_reply(RemoteResourceRouteOutcome::Unavailable)
+                    }
+                    OrderedRelayMucProxyOutcome::Dropped
+                    | OrderedRelayMucProxyOutcome::MaybeCommitted
+                    | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                        remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped)
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn deliver_remote_resource_frame_on_socket(
+        &self,
+        msg: RelayDeliverRemoteResourceFrame,
+    ) -> RelayRemoteResourceFrameReply {
+        let Some(services) = self.services.get().cloned() else {
+            return RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Unavailable,
+            };
+        };
+        let registration = {
+            let registrations = self.remote_socket_resources.lock().await;
+            registrations
+                .get(&msg.frame.jid)
+                .filter(|registration| registration.registration_id == msg.frame.registration_id)
+                .cloned()
+        };
+        let Some(registration) = registration else {
+            return RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Unavailable,
+            };
+        };
+        let outbound = OutboundStanza {
+            stanza: msg.frame.stanza.0,
+            kind: msg.frame.kind,
+            pending_row_id: None,
+            pending_row_original_receipt_at: None,
+        };
+        let outcome = services.connection_registry.try_send_outbound_if_owner(
+            &msg.frame.jid,
+            &registration.owner,
+            outbound,
+        );
+        let status = match outcome {
+            BroadcastOutcome::Delivered => RelayRemoteResourceFrameStatus::Delivered,
+            BroadcastOutcome::DroppedFull => RelayRemoteResourceFrameStatus::Backpressure,
+            BroadcastOutcome::NotConnected | BroadcastOutcome::DroppedClosed => {
+                RelayRemoteResourceFrameStatus::Unavailable
+            }
+        };
+        RelayRemoteResourceFrameReply { status }
+    }
+
+    async fn deliver_registered_remote_resource_with_registration(
+        &self,
+        target: &jid::FullJid,
+        stanza: &Stanza,
+        kind: DeliveryKind,
+        registration: &RemoteOwnerRegistration,
+    ) -> FullJidDeliveryOutcome {
+        let mut handle =
+            RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
+                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        match handle
+            .deliver_remote_resource_frame(RelayDeliverRemoteResourceFrame {
+                frame: RemoteResourceOutboundFrame {
+                    jid: target.clone(),
+                    registration_id: registration.registration_id,
+                    stanza: RemoteStanza(stanza.clone()),
+                    kind,
+                },
+            })
+            .await
+        {
+            Ok(RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Delivered,
+            }) => FullJidDeliveryOutcome::Delivered,
+            Ok(RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Backpressure,
+            }) => FullJidDeliveryOutcome::Dropped,
+            Ok(RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Unavailable,
+            }) => {
+                self.cleanup_remote_owner_resource_if_registration(
+                    target,
+                    registration.registration_id,
+                )
+                .await;
+                FullJidDeliveryOutcome::Unavailable
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %target,
+                    %error,
+                    "clustered remote-resource acked delivery relay ask failed"
+                );
+                FullJidDeliveryOutcome::Dropped
+            }
+        }
+    }
+
+    pub(crate) async fn force_detach_remote_user_resource_on_socket(
+        &self,
+        msg: RelayForceDetachRemoteUserResource,
+    ) -> RelayForceDetachRemoteUserResourceReply {
+        let Some(services) = self.services.get().cloned() else {
+            return RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::NotPersisted,
+                status: RelayRemoteResourceForceDetachStatus::Unknown,
+            };
+        };
+        let registration = {
+            let registrations = self.remote_socket_resources.lock().await;
+            registrations
+                .get(&msg.jid)
+                .filter(|registration| registration.registration_id == msg.registration_id)
+                .cloned()
+        };
+        let Some(registration) = registration else {
+            return RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::NotPersisted,
+                status: RelayRemoteResourceForceDetachStatus::NotLive,
+            };
+        };
+        let Some(entry) = services
+            .connection_registry
+            .entry_if_owner(&msg.jid, &registration.owner)
+        else {
+            return RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::NotPersisted,
+                status: RelayRemoteResourceForceDetachStatus::NotLive,
+            };
+        };
+        let (ack, ack_rx) = tokio::sync::oneshot::channel();
+        let request = ForceDetachRequest {
+            requester_bare_jid: msg.requester_bare_jid,
+            ack,
+        };
+        if entry.force_detach_sender().try_send(request).is_err() {
+            return RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::NotPersisted,
+                status: RelayRemoteResourceForceDetachStatus::Unknown,
+            };
+        }
+        let (outcome, status) =
+            match tokio::time::timeout(ORDERED_DELIVERY_REPLY_TIMEOUT, ack_rx).await {
+                Ok(Ok(ForceDetachOutcome::Detached)) => (
+                    ForceDetachOutcome::Detached,
+                    RelayRemoteResourceForceDetachStatus::Detached,
+                ),
+                Ok(Ok(ForceDetachOutcome::NotPersisted)) => (
+                    ForceDetachOutcome::NotPersisted,
+                    RelayRemoteResourceForceDetachStatus::Detached,
+                ),
+                Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => (
+                    ForceDetachOutcome::IdentityMismatch,
+                    RelayRemoteResourceForceDetachStatus::Refused,
+                ),
+                Ok(Err(_)) | Err(_) => (
+                    ForceDetachOutcome::NotPersisted,
+                    RelayRemoteResourceForceDetachStatus::Unknown,
+                ),
+            };
+        RelayForceDetachRemoteUserResourceReply { outcome, status }
+    }
+
+    async fn detach_stale_remote_socket_resource(
+        &self,
+        jid: &jid::FullJid,
+        registration: &RemoteSocketRegistration,
+    ) {
+        let Some(services) = self.services.get().cloned() else {
+            return;
+        };
+        {
+            let mut registrations = self.remote_socket_resources.lock().await;
+            if registrations.get(jid).is_some_and(|current| {
+                current.registration_id == registration.registration_id
+                    && current.socket_generation == registration.socket_generation
+            }) {
+                registrations.remove(jid);
+            }
+        }
+        let Some(entry) = services
+            .connection_registry
+            .entry_if_owner(jid, &registration.owner)
+        else {
+            return;
+        };
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+        let _ = entry.force_detach_sender().try_send(ForceDetachRequest {
+            requester_bare_jid: jid.to_bare(),
+            ack,
+        });
+    }
+
+    async fn retire_remote_owner_registration(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        jid: &jid::FullJid,
+        registration: &RemoteOwnerRegistration,
+    ) -> bool {
+        let mut handle =
+            RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
+                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        let detach = handle
+            .force_detach_remote_user_resource(RelayForceDetachRemoteUserResource {
+                jid: jid.clone(),
+                registration_id: registration.registration_id,
+                requester_bare_jid: jid.to_bare(),
+            })
+            .await;
+        let Ok(reply) = detach else {
+            return false;
+        };
+        if !matches!(
+            reply.status,
+            RelayRemoteResourceForceDetachStatus::Detached
+                | RelayRemoteResourceForceDetachStatus::NotLive
+        ) {
+            tracing::warn!(
+                jid = %jid,
+                status = ?reply.status,
+                "clustered remote-resource replacement refused uncertain old-socket detach"
+            );
+            return false;
+        }
+        if !unregister_remote_owner_actor_entry(services, jid, &registration.owner).await {
+            return false;
+        }
+        services
+            .connection_registry
+            .unregister_if_owner(jid, &registration.owner);
+        true
+    }
+
+    async fn cleanup_remote_owner_resource_if_registration(
+        &self,
+        jid: &jid::FullJid,
+        registration_id: RemoteResourceRegistrationId,
+    ) {
+        let Some(services) = self.services.get().cloned() else {
+            return;
+        };
+        let registration = self
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(jid)
+            .filter(|registration| registration.registration_id == registration_id)
+            .cloned();
+        let Some(registration) = registration else {
+            return;
+        };
+        let actor_removed = services
+            .user_registry
+            .ask(UnregisterUserResource {
+                jid: jid.clone(),
+                owner: Some(registration.owner.clone()),
+            })
+            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+            .await
+            .is_ok();
+        if !actor_removed {
+            return;
+        }
+        services
+            .connection_registry
+            .unregister_if_owner(jid, &registration.owner);
+        let mut registrations = self.remote_owner_resources.lock().await;
+        if registrations
+            .get(jid)
+            .is_some_and(|registration| registration.registration_id == registration_id)
+        {
+            registrations.remove(jid);
+        }
+    }
+
+    fn spawn_remote_resource_forwarder(
+        self: &Arc<Self>,
+        jid: jid::FullJid,
+        registration_id: RemoteResourceRegistrationId,
+        socket_node: NodeId,
+        mut rx: mpsc::Receiver<OutboundStanza>,
+        force_detach_rx: Option<mpsc::Receiver<ForceDetachRequest>>,
+    ) {
+        let outbound_bridge = Arc::clone(self);
+        let outbound_jid = jid.clone();
+        let outbound_socket_node = socket_node.clone();
+        tokio::spawn(async move {
+            while let Some(outbound) = rx.recv().await {
+                forward_remote_resource_outbound(
+                    &outbound_bridge,
+                    &outbound_jid,
+                    registration_id,
+                    &outbound_socket_node,
+                    outbound,
+                )
+                .await;
+            }
+        });
+        if let Some(mut force_detach_rx) = force_detach_rx {
+            let control_bridge = Arc::clone(self);
+            tokio::spawn(async move {
+                while let Some(request) = force_detach_rx.recv().await {
+                    forward_remote_resource_force_detach(
+                        &control_bridge,
+                        &jid,
+                        registration_id,
+                        &socket_node,
+                        request,
+                    )
+                    .await;
+                }
+            });
+        }
     }
 
     async fn try_proxy_muc_join_repair(
@@ -699,6 +2459,43 @@ impl OrderedRelayDeliveryBridge {
             .is_some_and(|existing| Arc::ptr_eq(existing, lock) && Arc::strong_count(lock) == 2)
         {
             locks.remove(channel);
+        }
+    }
+
+    async fn lock_for_remote_owner_registration(
+        &self,
+        jid: &jid::FullJid,
+    ) -> Option<Arc<Mutex<()>>> {
+        let mut locks = self.remote_owner_registration_locks.lock().await;
+        if !locks.contains_key(jid) && locks.len() >= MAX_REMOTE_OWNER_REGISTRATION_LOCKS {
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        if !locks.contains_key(jid) && locks.len() >= MAX_REMOTE_OWNER_REGISTRATION_LOCKS {
+            tracing::warn!(
+                limit = MAX_REMOTE_OWNER_REGISTRATION_LOCKS,
+                "clustered remote-resource registration lock map is full"
+            );
+            return None;
+        }
+        Some(
+            locks
+                .entry(jid.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone(),
+        )
+    }
+
+    async fn remove_remote_owner_registration_lock_if_unused(
+        &self,
+        jid: &jid::FullJid,
+        lock: &Arc<Mutex<()>>,
+    ) {
+        let mut locks = self.remote_owner_registration_locks.lock().await;
+        if locks
+            .get(jid)
+            .is_some_and(|existing| Arc::ptr_eq(existing, lock) && Arc::strong_count(lock) == 2)
+        {
+            locks.remove(jid);
         }
     }
 
@@ -925,11 +2722,10 @@ impl OrderedRelayDeliveryBridge {
         };
         validate_claims(&services, envelope).await?;
         match relay_payload_target(envelope)? {
-            RelayPayloadTarget::Full(target, stanza) => {
-                deliver_reserved_full_jid(&services, target, stanza)
-                    .await
-                    .map(|()| Vec::new())
-            }
+            RelayPayloadTarget::Full(target, stanza) => self
+                .deliver_reserved_full_jid(&services, target, stanza)
+                .await
+                .map(|()| Vec::new()),
             RelayPayloadTarget::Bare(target, stanza) => {
                 deliver_reserved_bare_jid(&services, &target, stanza)
                     .await
@@ -993,25 +2789,269 @@ impl OrderedRelayDeliveryBridge {
     }
 }
 
-async fn deliver_reserved_full_jid(
-    services: &OrderedRelayDeliveryServices,
-    target: &jid::FullJid,
-    stanza: &Stanza,
-) -> Result<(), OrderedRelayNackReason> {
-    if matches!(stanza, Stanza::Iq(_)) {
-        return deliver_reserved_full_jid_peer_live_only(services, target, stanza).await;
+fn apply_remote_resource_presence_to_registry(
+    registry: &ConnectionRegistry,
+    jid: &jid::FullJid,
+    owner: &Arc<AtomicBool>,
+    available: bool,
+    priority: i8,
+    state: Option<RemotePresenceStateSnapshot>,
+) -> bool {
+    if !registry.update_presence_if_owner(jid, owner, available, priority) {
+        return false;
     }
-    match crate::server::routes::interpret::deliver_peer_to_full(
-        Some(&services.user_registry),
-        Some(&services.sm_session_registry),
-        target,
-        stanza,
+    if available {
+        let state = state.map(PresenceState::from).unwrap_or(PresenceState {
+            show: None,
+            status: None,
+            priority,
+            payloads: Vec::new(),
+        });
+        registry.update_presence_state_if_owner(
+            jid,
+            owner,
+            state.show,
+            state.status,
+            state.priority,
+            state.payloads,
+        )
+    } else {
+        registry.clear_presence_state_if_owner(jid, owner)
+    }
+}
+
+async fn owner_remote_entry_if_current(
+    actor: &ActorRef<waddle_xmpp::registry::user_actor::UserActor>,
+    registry: &ConnectionRegistry,
+    jid: &jid::FullJid,
+    owner: &Arc<AtomicBool>,
+) -> Result<ConnectionEntry, RelayRemoteResourceUpdateStatus> {
+    let actor_entry = match actor
+        .ask(waddle_xmpp::registry::GetConnectionEntry { jid: jid.clone() })
+        .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return Err(RelayRemoteResourceUpdateStatus::StaleRegistration),
+        Err(_) => return Err(RelayRemoteResourceUpdateStatus::Unavailable),
+    };
+    if !Arc::ptr_eq(&actor_entry.carbons_enabled, owner) {
+        return Err(RelayRemoteResourceUpdateStatus::StaleRegistration);
+    }
+    let Some(registry_entry) = registry.entry_if_owner(jid, owner) else {
+        return Err(RelayRemoteResourceUpdateStatus::StaleRegistration);
+    };
+    if !Arc::ptr_eq(
+        &registry_entry.carbons_enabled,
+        &actor_entry.carbons_enabled,
+    ) {
+        return Err(RelayRemoteResourceUpdateStatus::StaleRegistration);
+    }
+    Ok(registry_entry)
+}
+
+async fn remote_owner_registration_is_current(
+    services: &OrderedRelayDeliveryServices,
+    jid: &jid::FullJid,
+    registration: &RemoteOwnerRegistration,
+) -> Result<(), RelayRemoteResourceRegistrationStatus> {
+    let actor = match services
+        .user_registry
+        .ask(waddle_xmpp::registry::GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return Err(RelayRemoteResourceRegistrationStatus::StaleRegistration),
+        Err(_) => return Err(RelayRemoteResourceRegistrationStatus::Unavailable),
+    };
+    owner_remote_entry_if_current(
+        &actor,
+        &services.connection_registry,
+        jid,
+        &registration.owner,
     )
     .await
+    .map(|_| ())
+    .map_err(|status| match status {
+        RelayRemoteResourceUpdateStatus::Updated => {
+            RelayRemoteResourceRegistrationStatus::Registered
+        }
+        RelayRemoteResourceUpdateStatus::StaleRegistration => {
+            RelayRemoteResourceRegistrationStatus::StaleRegistration
+        }
+        RelayRemoteResourceUpdateStatus::Unavailable => {
+            RelayRemoteResourceRegistrationStatus::Unavailable
+        }
+    })
+}
+
+async fn unregister_remote_owner_actor_entry(
+    services: &OrderedRelayDeliveryServices,
+    jid: &jid::FullJid,
+    owner: &Arc<AtomicBool>,
+) -> bool {
+    match services
+        .user_registry
+        .ask(UnregisterUserResource {
+            jid: jid.clone(),
+            owner: Some(owner.clone()),
+        })
+        .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .await
     {
-        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
-        FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
-        FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                jid = %jid,
+                %error,
+                "clustered remote-resource owner actor unregister failed"
+            );
+            false
+        }
+    }
+}
+
+fn remote_owner_registration_matches(
+    left: &RemoteOwnerRegistration,
+    right: &RemoteOwnerRegistration,
+) -> bool {
+    left.registration_id == right.registration_id
+        && left.socket_node == right.socket_node
+        && left.socket_generation == right.socket_generation
+        && Arc::ptr_eq(&left.owner, &right.owner)
+}
+
+async fn forward_remote_resource_outbound(
+    bridge: &Arc<OrderedRelayDeliveryBridge>,
+    jid: &jid::FullJid,
+    registration_id: RemoteResourceRegistrationId,
+    socket_node: &NodeId,
+    outbound: OutboundStanza,
+) {
+    if outbound.pending_row_id.is_some() {
+        tracing::warn!(
+            jid = %jid,
+            "clustered remote-resource forwarder received pending-delivery \
+             flush frame; dropping to avoid breaking SM row ack accounting"
+        );
+        return;
+    }
+    let kind = outbound.kind;
+    let frame = RemoteResourceOutboundFrame {
+        jid: jid.clone(),
+        registration_id,
+        stanza: RemoteStanza(outbound.stanza),
+        kind,
+    };
+    let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
+        .with_ask_timeouts(bridge.mailbox_timeout, bridge.reply_timeout);
+    match handle
+        .deliver_remote_resource_frame(RelayDeliverRemoteResourceFrame { frame })
+        .await
+    {
+        Ok(RelayRemoteResourceFrameReply {
+            status: RelayRemoteResourceFrameStatus::Delivered,
+        }) => {}
+        Ok(RelayRemoteResourceFrameReply {
+            status: RelayRemoteResourceFrameStatus::Unavailable,
+        }) => {
+            tracing::debug!(
+                jid = %jid,
+                "clustered remote-resource socket registration unavailable; cleaning owner mirror"
+            );
+            bridge
+                .cleanup_remote_owner_resource_if_registration(jid, registration_id)
+                .await;
+        }
+        Ok(reply) => {
+            tracing::debug!(
+                jid = %jid,
+                status = ?reply.status,
+                "clustered remote-resource forwarder did not deliver frame"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                jid = %jid,
+                %error,
+                "clustered remote-resource forwarder relay ask failed"
+            );
+        }
+    }
+}
+
+async fn forward_remote_resource_force_detach(
+    bridge: &Arc<OrderedRelayDeliveryBridge>,
+    jid: &jid::FullJid,
+    registration_id: RemoteResourceRegistrationId,
+    socket_node: &NodeId,
+    request: ForceDetachRequest,
+) {
+    let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
+        .with_ask_timeouts(bridge.mailbox_timeout, bridge.reply_timeout);
+    let outcome = match handle
+        .force_detach_remote_user_resource(RelayForceDetachRemoteUserResource {
+            jid: jid.clone(),
+            registration_id,
+            requester_bare_jid: request.requester_bare_jid,
+        })
+        .await
+    {
+        Ok(reply) => reply.outcome,
+        Err(error) => {
+            tracing::warn!(
+                jid = %jid,
+                %error,
+                "clustered remote-resource force-detach relay ask failed"
+            );
+            ForceDetachOutcome::NotPersisted
+        }
+    };
+    let _ = request.ack.send(outcome);
+}
+
+impl OrderedRelayDeliveryBridge {
+    async fn deliver_reserved_full_jid(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        target: &jid::FullJid,
+        stanza: &Stanza,
+    ) -> Result<(), OrderedRelayNackReason> {
+        if let Some(outcome) = self
+            .try_deliver_registered_remote_resource(target, stanza, DeliveryKind::PeerStanza)
+            .await
+        {
+            return match outcome {
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    Ok(())
+                }
+                FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+                FullJidDeliveryOutcome::Unavailable => {
+                    Err(OrderedRelayNackReason::TargetUnavailable)
+                }
+            };
+        }
+        if matches!(stanza, Stanza::Iq(_)) {
+            return deliver_reserved_full_jid_peer_live_only(services, target, stanza).await;
+        }
+        match crate::server::routes::interpret::deliver_peer_to_full(
+            Some(&services.user_registry),
+            Some(&services.sm_session_registry),
+            target,
+            stanza,
+        )
+        .await
+        {
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
+            FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+            FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
+        }
     }
 }
 
@@ -1115,14 +3155,7 @@ async fn deliver_reserved_bare_presence_direct(
         live_targets.iter().map(|(jid, _)| jid.clone()).collect();
     let mut landed = false;
     for resource in live_targets.into_iter().map(|(jid, _)| jid) {
-        match crate::server::routes::interpret::deliver_direct_to_full(
-            Some(&services.user_registry),
-            Some(&services.sm_session_registry),
-            &resource,
-            stanza,
-        )
-        .await
-        {
+        match deliver_direct_or_registered_remote_resource(services, &resource, stanza).await {
             FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                 landed = true;
             }
@@ -1173,6 +3206,36 @@ async fn deliver_reserved_bare_presence_direct(
     } else {
         Err(OrderedRelayNackReason::TargetUnavailable)
     }
+}
+
+async fn deliver_direct_or_registered_remote_resource(
+    services: &OrderedRelayDeliveryServices,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    if let Some(state) = services.web_socket_state.upgrade() {
+        if let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        {
+            if let Some(outcome) = bridge
+                .try_deliver_registered_remote_resource(target, stanza, DeliveryKind::DirectFrame)
+                .await
+            {
+                return outcome;
+            }
+        }
+    }
+    crate::server::routes::interpret::deliver_direct_to_full(
+        Some(&services.user_registry),
+        Some(&services.sm_session_registry),
+        target,
+        stanza,
+    )
+    .await
 }
 
 async fn remote_presence_blocked_for_recipient(
@@ -1305,6 +3368,15 @@ fn no_client_reply_outcome(delivery: FullJidDeliveryOutcome) -> RemoteDeliveryOu
     no_client_reply_outcome_with_commit_state(delivery, false)
 }
 
+fn remote_resource_route_reply(
+    outcome: RemoteResourceRouteOutcome,
+) -> RelayRouteRemoteResourceStanzaReply {
+    RelayRouteRemoteResourceStanzaReply {
+        outcome,
+        replies: Vec::new(),
+    }
+}
+
 fn no_client_reply_outcome_with_commit_state(
     delivery: FullJidDeliveryOutcome,
     maybe_committed: bool,
@@ -1338,6 +3410,19 @@ fn route_origin_claim(kind: &OrderedRelayRouteOriginKind) -> (Entity, OrderedRel
         OrderedRelayRouteOriginKind::Entity(entity) => {
             (entity.clone(), OrderedRelayOrigin::Entity(entity.clone()))
         }
+        OrderedRelayRouteOriginKind::RemoteResource(remote) => {
+            let entity = user_entity(&remote.jid.to_bare());
+            (entity.clone(), OrderedRelayOrigin::Entity(entity))
+        }
+    }
+}
+
+fn remote_resource_origin(
+    origin: &OrderedRelayRouteOrigin,
+) -> Option<RemoteResourceOriginSnapshot> {
+    match &origin.kind {
+        OrderedRelayRouteOriginKind::RemoteResource(remote) => Some(remote.clone()),
+        OrderedRelayRouteOriginKind::SmSession(_) | OrderedRelayRouteOriginKind::Entity(_) => None,
     }
 }
 
@@ -1382,6 +3467,24 @@ fn payload_for_recipient(recipient: jid::Jid, stanza: &Stanza) -> Option<Ordered
             stanza: RemoteStanza(stanza.clone()),
         }),
     }
+}
+
+fn apply_remote_resource_state(entry: &ConnectionEntry, state: &RemoteResourceStateSnapshot) {
+    entry
+        .carbons_enabled
+        .store(state.carbons_enabled, Ordering::Relaxed);
+    entry
+        .roster_interested
+        .store(state.roster_interested, Ordering::Relaxed);
+    entry
+        .blocklist_interested
+        .store(state.blocklist_interested, Ordering::Relaxed);
+    entry
+        .presence_available
+        .store(state.presence_available, Ordering::Relaxed);
+    entry
+        .presence_priority
+        .store(state.presence_priority, Ordering::Relaxed);
 }
 
 enum RelayPayloadTarget<'a> {
@@ -1681,6 +3784,18 @@ fn muc_proxy_result_to_outcome(
             no_client_reply_outcome(FullJidDeliveryOutcome::Unavailable)
         }
         Err(_) => no_client_reply_outcome(FullJidDeliveryOutcome::Dropped),
+    }
+}
+
+fn muc_proxy_result_to_ordered_outcome(
+    result: Result<Vec<RemoteStanza>, OrderedRelayNackReason>,
+) -> OrderedRelayMucProxyOutcome {
+    match result {
+        Ok(replies) => OrderedRelayMucProxyOutcome::Delivered(
+            replies.into_iter().map(|reply| reply.0).collect(),
+        ),
+        Err(OrderedRelayNackReason::TargetUnavailable) => OrderedRelayMucProxyOutcome::Unavailable,
+        Err(_) => OrderedRelayMucProxyOutcome::Dropped,
     }
 }
 
@@ -2037,6 +4152,10 @@ fn replies_for_origin_handoff(stanza: &Stanza, outcome: FullJidDeliveryOutcome) 
         | FullJidDeliveryOutcome::QueuedDetached
         | FullJidDeliveryOutcome::Dropped => Vec::new(),
     }
+}
+
+fn fallback_reply_for_remote_muc_handoff(stanza: &Stanza) -> Vec<Stanza> {
+    replies_for_origin_handoff(stanza, FullJidDeliveryOutcome::Unavailable)
 }
 
 fn diversion_reason_for_nack(nack: &OrderedRelayNack) -> OrderedRelayDiversionReason {

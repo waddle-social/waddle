@@ -8,6 +8,33 @@ use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 
+#[cfg(feature = "clustering")]
+async fn unregister_remote_user_resource_if_owner(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge
+            .unregister_remote_user_resource_if_owner(jid, owner)
+            .await;
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn unregister_remote_user_resource_if_owner(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+}
+
 fn muji_reflection_rank(muji: &Muji) -> u8 {
     if muji.is_empty() {
         0
@@ -462,6 +489,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         Some(std::sync::Arc::clone(owner)),
                     )
                     .await;
+                    unregister_remote_user_resource_if_owner(state, &jid, owner).await;
                     outbound_rx.close();
                     // Second detach drain: anything that arrived
                     // between the first drain and the registry
@@ -520,6 +548,7 @@ pub(super) async fn cleanup_connection_shutdown(
                             Some(std::sync::Arc::clone(owner)),
                         )
                         .await;
+                        unregister_remote_user_resource_if_owner(state, &jid, owner).await;
                     }
                     // PR #438 review (Copilot): when SM detachment
                     // fails we fall back to a full unregister, so the
@@ -567,9 +596,10 @@ pub(super) async fn cleanup_connection_shutdown(
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             &jid,
-            Some(owner),
+            Some(std::sync::Arc::clone(&owner)),
         )
         .await;
+        unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
     } else {
         debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
     }
@@ -919,6 +949,8 @@ pub(super) async fn cleanup_invalidated_detached_session(
                 Some(std::sync::Arc::clone(&entry.carbons_enabled)),
             )
             .await;
+            unregister_remote_user_resource_if_owner(state, &detached.jid, &entry.carbons_enabled)
+                .await;
         }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an

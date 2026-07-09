@@ -6,6 +6,7 @@ pub(super) async fn handle_roster_iq(
     state: &WebSocketState,
     bound_jid: Option<&FullJid>,
     roster_interested: &mut bool,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
     let Some(full_jid) = bound_jid else {
         return vec![build_xmpp_error_response(
@@ -31,8 +32,16 @@ pub(super) async fn handle_roster_iq(
     };
 
     if waddle_xmpp::roster::is_roster_get(iq) {
-        return handle_roster_get(iq, &storage, state, &user_jid, full_jid, roster_interested)
-            .await;
+        return handle_roster_get(
+            iq,
+            &storage,
+            state,
+            &user_jid,
+            full_jid,
+            roster_interested,
+            registry_owner,
+        )
+        .await;
     }
     if waddle_xmpp::roster::is_roster_set(iq) {
         return handle_roster_set(iq, &storage, state, &user_jid, full_jid).await;
@@ -48,6 +57,7 @@ async fn handle_roster_get(
     user_jid: &BareJid,
     full_jid: &FullJid,
     roster_interested: &mut bool,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
     let query = match parse_roster_get(iq) {
         Ok(query) => query,
@@ -82,6 +92,9 @@ async fn handle_roster_get(
         .protocol
         .connection_registry
         .mark_roster_interested(full_jid);
+    if let Some(owner) = registry_owner {
+        mirror_remote_roster_interest(state, full_jid, owner).await;
+    }
     *roster_interested = true;
     // XEP-0237 §2.6: matching ver -> empty <iq type='result'/> (no <query>);
     // anything else (Absent, Bootstrap, Cached(stale)) -> full roster + ver.
@@ -91,6 +104,37 @@ async fn handle_roster_get(
         }
     }
     vec![iq_to_xml(build_roster_result(iq, &items, Some(&version)))]
+}
+
+#[cfg(feature = "clustering")]
+async fn mirror_remote_roster_interest(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge
+            .update_remote_user_resource_if_owner(
+                jid,
+                owner,
+                crate::clustering::route_bridge::RemoteResourceStateUpdate::RosterInterested,
+            )
+            .await;
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn mirror_remote_roster_interest(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
 }
 
 async fn handle_roster_set(
@@ -225,7 +269,10 @@ async fn handle_roster_set(
         )));
     }
 
-    send_roster_push_to_sibling_resources(state, user_jid, full_jid, &push_item, &version).await;
+    if !try_remote_owner_roster_push(state, full_jid, user_jid, &push_item, &version).await {
+        send_roster_push_to_sibling_resources(state, user_jid, full_jid, &push_item, &version)
+            .await;
+    }
     // Drop the user_jid mutation lock before invoking subscription side
     // effects on the *contact's* roster — the side-effect path acquires the
     // contact's lock, and holding two user-locks simultaneously could
@@ -241,8 +288,41 @@ async fn handle_roster_set(
     frames
 }
 
-mod push;
+pub(crate) mod push;
 use push::{send_roster_push_to_sibling_resources, send_roster_remove_subscription_side_effects};
+
+#[cfg(feature = "clustering")]
+async fn try_remote_owner_roster_push(
+    state: &WebSocketState,
+    source_jid: &FullJid,
+    user_jid: &BareJid,
+    item: &RosterItem,
+    version: &RosterVersion,
+) -> bool {
+    let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    else {
+        return false;
+    };
+    bridge
+        .try_fanout_remote_user_roster_push(source_jid, user_jid, item, version)
+        .await
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn try_remote_owner_roster_push(
+    _state: &WebSocketState,
+    _source_jid: &FullJid,
+    _user_jid: &BareJid,
+    _item: &RosterItem,
+    _version: &RosterVersion,
+) -> bool {
+    false
+}
 
 fn roster_target_allowed(iq: &xmpp_parsers::iq::Iq, domain: &str, user_jid: &BareJid) -> bool {
     match iq.to() {

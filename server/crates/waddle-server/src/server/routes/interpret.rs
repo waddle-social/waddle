@@ -150,7 +150,7 @@ use crate::server::routes::websocket::WebSocketState;
 mod archive_groupchat_event;
 mod archive_lookup;
 mod bot;
-mod carbons;
+pub(crate) mod carbons;
 mod deps;
 mod direct_archive;
 mod direct_call_thread;

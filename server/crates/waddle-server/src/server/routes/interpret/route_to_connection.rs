@@ -167,13 +167,7 @@ pub(crate) async fn route_to_connection(
                     match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await {
                         Some(outcome) => outcome,
                         None => {
-                            deliver_peer_to_full(
-                                deps.user_registry,
-                                deps.sm_session_registry,
-                                &full,
-                                &stanza,
-                            )
-                            .await
+                            deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await
                         }
                     };
                 if delivery == FullJidDeliveryOutcome::Unavailable {
@@ -319,11 +313,8 @@ pub(crate) async fn route_to_connection(
                                     // (`TrySendDirect`, non-blocking) via
                                     // `deliver_direct_to_full`.
                                     for full in &live_targets {
-                                        deliver_direct_to_full(
-                                            deps.user_registry,
-                                            deps.sm_session_registry,
-                                            full,
-                                            &processed,
+                                        deliver_direct_to_full_with_registered_remote(
+                                            deps, full, &processed,
                                         )
                                         .await;
                                     }
@@ -397,13 +388,8 @@ pub(crate) async fn route_to_connection(
                     // above already runs.
                     let mut any_landed = false;
                     for full in live_targets {
-                        let disposition = deliver_peer_to_full(
-                            deps.user_registry,
-                            deps.sm_session_registry,
-                            &full,
-                            &stanza,
-                        )
-                        .await;
+                        let disposition =
+                            deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
                         if matches!(
                             disposition,
                             FullJidDeliveryOutcome::Delivered
@@ -534,6 +520,68 @@ fn deliver_full_jid_via_ordered_relay<'a>(
             None
         }
     })
+}
+
+async fn deliver_peer_to_full_with_registered_remote(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    if let Some(outcome) = deliver_registered_remote_resource(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::PeerStanza,
+    )
+    .await
+    {
+        return outcome;
+    }
+    deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+}
+
+async fn deliver_direct_to_full_with_registered_remote(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    if let Some(outcome) = deliver_registered_remote_resource(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::DirectFrame,
+    )
+    .await
+    {
+        return outcome;
+    }
+    deliver_direct_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+}
+
+async fn deliver_registered_remote_resource(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: waddle_xmpp::registry::DeliveryKind,
+) -> Option<FullJidDeliveryOutcome> {
+    #[cfg(feature = "clustering")]
+    {
+        let state = deps.web_socket_state?;
+        let bridge = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()?;
+        bridge
+            .try_deliver_registered_remote_resource(target, stanza, kind)
+            .await
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (deps, target, stanza, kind);
+        None
+    }
 }
 
 fn deliver_bare_jid_via_ordered_relay<'a>(

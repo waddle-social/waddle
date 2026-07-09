@@ -22,7 +22,8 @@ use tracing::{debug, info, warn};
 use super::connection_registry::{ConnectionEntry, ForceDetachOutcome, ForceDetachRequest};
 use super::user_actor::delivery::GetConnectionEntry;
 use super::user_actor::{
-    GetResources, RegisterConnection, ResourceCount, UnregisterConnectionAndReportEmpty, UserActor,
+    GetResources, RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
+    UnregisterConnectionAndReportEmpty, UserActor,
 };
 use crate::metrics;
 use crate::ownership::{
@@ -545,6 +546,60 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
         }
 
         Ok(())
+    }
+}
+
+/// Register a user resource without replacing a different owner token.
+///
+/// This keeps clustered remote-resource mirrors from deleting a live local
+/// same-full-JID resource that won the slot while the remote register was in
+/// flight. It otherwise follows [`RegisterUserResource`] so user lifecycle and
+/// claim acquisition remain serialized by this actor.
+pub struct RegisterUserResourceIfOwnerOrAbsent {
+    pub jid: FullJid,
+    pub entry: ConnectionEntry,
+    pub owner: Arc<AtomicBool>,
+}
+
+impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegistryActor {
+    type Reply = Result<bool, UserRegistryError>;
+
+    async fn handle(
+        &mut self,
+        msg: RegisterUserResourceIfOwnerOrAbsent,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bare_jid = msg.jid.to_bare();
+        if self.poisoned_users.contains(&bare_jid) {
+            return Err(UserRegistryError::UserActorStateLost(bare_jid));
+        }
+
+        let user_actor = if let Some(actor_ref) = self
+            .existing_user_actor_for_current_claim(&bare_jid)
+            .await?
+        {
+            actor_ref
+        } else {
+            let claim = self.acquire_user_claim(&bare_jid).await?;
+            self.spawn_user_actor(bare_jid.clone(), claim)
+        };
+
+        match user_actor
+            .ask(RegisterConnectionIfOwnerOrAbsent {
+                jid: msg.jid.clone(),
+                entry: msg.entry,
+                owner: msg.owner,
+            })
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+        {
+            Ok(registered) => Ok(registered),
+            Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
+                Err(UserRegistryError::UserActorBusy(bare_jid))
+            }
+            Err(_) => Err(self.mark_actor_state_lost(&bare_jid).await),
+        }
     }
 }
 

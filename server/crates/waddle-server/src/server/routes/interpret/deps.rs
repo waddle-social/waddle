@@ -13,6 +13,7 @@ use waddle_xmpp::protocol::TimerId;
 pub enum OrderedRelayRouteOriginKind {
     SmSession(waddle_xmpp::pending_delivery::SmSessionId),
     Entity(waddle_xmpp::ownership::Entity),
+    RemoteResource(crate::clustering::route_bridge::RemoteResourceOriginSnapshot),
 }
 
 #[derive(Clone, Debug)]

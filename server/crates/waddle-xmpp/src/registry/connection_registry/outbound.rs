@@ -12,7 +12,7 @@ use super::*;
 /// runs in production for peer-routed stanzas.
 ///
 /// [`OutboundEvent::RouteToConnection`]: crate::protocol::OutboundEvent::RouteToConnection
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeliveryKind {
     /// **Peer-routed stanza** — the destination connection's main
     /// loop must feed this through its [`crate::protocol::XmppStateMachine`]
@@ -144,7 +144,7 @@ pub struct ForceDetachRequest {
 }
 
 /// Outcome of a [`ForceDetachRequest`], reported back to the asker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForceDetachOutcome {
     /// Identity matched, the connection sent `<conflict/>` and closed, AND
     /// its subsequent XEP-0198 detach-for-resume cleanup actually persisted

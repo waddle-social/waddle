@@ -73,7 +73,7 @@ pub(super) async fn handle_regular_presence_update(
             if priority >= 0 {
                 maybe_flush_pending_delivery(state, sender_jid, owner).await;
             }
-            state
+            let presence_state_written = state
                 .deps
                 .protocol
                 .connection_registry
@@ -91,6 +91,16 @@ pub(super) async fn handle_regular_presence_update(
                     // delivery relays the real advertisements (issue #1101).
                     presence.payloads.clone(),
                 );
+            mirror_remote_presence_update(
+                state,
+                sender_jid,
+                owner,
+                true,
+                priority,
+                presence_state_written
+                    .then(|| remote_presence_state_from_presence(&presence, priority)),
+            )
+            .await;
             // RFC 6121 §3.1.3: deliver queued inbound subscription requests on
             // this resource's INITIAL available presence only. The per-connection
             // CAS mirrors `claim_offline_flush` so auto-away/available flips
@@ -132,6 +142,7 @@ pub(super) async fn handle_regular_presence_update(
             .protocol
             .connection_registry
             .clear_presence_state_if_owner(sender_jid, owner);
+        mirror_remote_presence_update(state, sender_jid, owner, false, priority, None).await;
         state
             .deps
             .protocol
@@ -147,6 +158,75 @@ pub(super) async fn handle_regular_presence_update(
         );
     }
     broadcast_presence_to_subscribers(state, sender_jid, &presence, ordered_relay_origin).await;
+}
+
+#[cfg(feature = "clustering")]
+async fn mirror_remote_presence_update(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    available: bool,
+    priority: i8,
+    presence_state: Option<crate::clustering::route_bridge::RemotePresenceStateSnapshot>,
+) {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge
+            .update_remote_user_resource_if_owner(
+                jid,
+                owner,
+                crate::clustering::route_bridge::RemoteResourceStateUpdate::Presence {
+                    available,
+                    priority,
+                    state: presence_state,
+                },
+            )
+            .await;
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn mirror_remote_presence_update(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _available: bool,
+    _priority: i8,
+    _presence_state: Option<()>,
+) {
+}
+
+#[cfg(feature = "clustering")]
+fn remote_presence_state_from_presence(
+    presence: &xmpp_parsers::presence::Presence,
+    priority: i8,
+) -> crate::clustering::route_bridge::RemotePresenceStateSnapshot {
+    crate::clustering::route_bridge::RemotePresenceStateSnapshot {
+        show: presence
+            .show
+            .as_ref()
+            .map(|show| show_name(show).to_string()),
+        status: presence.statuses.values().next().cloned(),
+        priority,
+        payloads: presence
+            .payloads
+            .iter()
+            .cloned()
+            .map(crate::clustering::codec::RemoteElement)
+            .collect(),
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+fn remote_presence_state_from_presence(
+    _presence: &xmpp_parsers::presence::Presence,
+    _priority: i8,
+) {
 }
 
 /// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering

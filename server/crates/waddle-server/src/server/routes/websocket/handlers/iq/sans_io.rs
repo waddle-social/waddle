@@ -117,6 +117,9 @@ pub(super) async fn handle_sans_io_iq(
                 .protocol
                 .connection_registry
                 .set_carbons_enabled(full_jid, enabled);
+            if let Some(owner) = conn_state.registry_owner {
+                mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
+            }
         }
         // XMPP-native MUC-call membership gate (XEP-0272 Muji): a
         // session may only mint a LiveKit JWT for a room it has
@@ -180,4 +183,37 @@ pub(super) async fn handle_sans_io_iq(
         return Some(outcome.frames);
     }
     None
+}
+
+#[cfg(feature = "clustering")]
+async fn mirror_remote_carbons_update(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    enabled: bool,
+) {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge
+            .update_remote_user_resource_if_owner(
+                jid,
+                owner,
+                crate::clustering::route_bridge::RemoteResourceStateUpdate::Carbons { enabled },
+            )
+            .await;
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn mirror_remote_carbons_update(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _enabled: bool,
+) {
 }
