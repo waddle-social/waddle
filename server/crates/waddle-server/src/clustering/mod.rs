@@ -225,6 +225,13 @@ pub enum ClusteringError {
     #[error("clustering node-lease registration failed: {0}")]
     NodeLease(waddle_xmpp::ownership::ClaimError),
 
+    /// The Postgres claim/node-lease control-plane schema failed to provision.
+    /// This is fatal because every clustered node must register in
+    /// `clustering_nodes` before it can safely claim or route work.
+    #[cfg(feature = "clustering")]
+    #[error("clustering claim-store schema initialization failed: {0}")]
+    ClaimStoreSchema(waddle_xmpp::ownership::ClaimError),
+
     /// ADR-0017 Phase 3 Slice 7 FIX 8 (council-adjudicated): the durable MUC
     /// room store's own startup init (`ensure_schema`) failed. Fails
     /// clustering startup entirely rather than continuing with entity
@@ -641,7 +648,7 @@ pub async fn start_if_enabled(
         // sibling var) rather than a raw `std::env::var` at this call site.
         let pod_template_hash = config.pod_template_hash.clone();
         let local_peer_id = handle.local_peer_id.to_string();
-        register_node_lease(
+        prepare_node_lease(
             &node_lease,
             &node_identity,
             pod_template_hash.clone(),
@@ -782,9 +789,31 @@ async fn register_node_lease(
         .map_err(ClusteringError::NodeLease)
 }
 
+/// Provision the Postgres-backed claim/node-lease control-plane schema before
+/// the first node registration. Production startup must own this ordering; the
+/// multi-process harness may also pre-provision tables, but a fresh clustered
+/// deployment cannot rely on that.
+#[cfg(feature = "clustering")]
+async fn prepare_node_lease(
+    node_lease: &claims::PostgresClaimStore,
+    identity: &waddle_xmpp::ownership::NodeIdentity,
+    pod_template_hash: Option<String>,
+    peer_id: Option<String>,
+) -> Result<(), ClusteringError> {
+    use waddle_xmpp::ownership::ClaimStore as _;
+
+    node_lease
+        .ensure_schema()
+        .await
+        .map_err(ClusteringError::ClaimStoreSchema)?;
+    register_node_lease(node_lease, identity, pod_template_hash, peer_id).await
+}
+
 #[cfg(all(test, feature = "clustering"))]
 mod tests {
     use super::*;
+    use crate::db::{DatabaseConfig, DatabaseDriver};
+    use waddle_xmpp::ownership::NodeIdentity;
 
     // Regression coverage for the cancellation-scope invariant: a
     // clustering self-fence must not take down the whole process, but
@@ -808,5 +837,142 @@ mod tests {
         parent.cancel();
 
         assert!(child.is_cancelled());
+    }
+
+    async fn isolated_test_control_db(
+        name: &str,
+        schema: &str,
+    ) -> anyhow::Result<Option<(Database, sqlx::PgPool)>> {
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            return Ok(None);
+        };
+        let admin = sqlx::PgPool::connect(&url)
+            .await
+            .map_err(|error| anyhow::anyhow!("connect postgres admin pool: {error}"))?;
+        let create_schema = format!("CREATE SCHEMA {schema}");
+        sqlx::query(&create_schema)
+            .execute(&admin)
+            .await
+            .map_err(|error| anyhow::anyhow!("create isolated schema {schema}: {error}"))?;
+        let scoped_url = postgres_url_with_search_path(&url, schema);
+        let db = match Database::from_config(
+            name,
+            &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url)
+                .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        {
+            Ok(db) => db,
+            Err(error) => {
+                drop_isolated_schema(&admin, schema).await?;
+                return Err(anyhow::anyhow!("open isolated test postgres: {error}"));
+            }
+        };
+        Ok(Some((db, admin)))
+    }
+
+    #[tokio::test]
+    async fn prepare_node_lease_provisions_schema_before_registration() -> anyhow::Result<()> {
+        let schema = unique_postgres_schema_name("clustering_startup");
+        let Some((db, admin)) =
+            isolated_test_control_db("clustering-startup-schema-test", &schema).await?
+        else {
+            eprintln!(
+                "skipping: WADDLE_TEST_POSTGRES_URL not set \
+                 (clustering startup claim/node-lease schema regression)"
+            );
+            return Ok(());
+        };
+
+        let result = async {
+            let store = claims::PostgresClaimStore::new(db.clone());
+            let identity = NodeIdentity::new(
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            );
+            prepare_node_lease(
+                &store,
+                &identity,
+                Some("test-template".to_string()),
+                Some("test-peer".to_string()),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("prepare node lease: {error}"))?;
+
+            let conn = db
+                .guard()
+                .await
+                .map_err(|error| anyhow::anyhow!("guard: {error}"))?;
+            let mut rows = conn
+                .query(
+                    "SELECT pod_template_hash, peer_id, expired \
+                     FROM clustering_nodes \
+                     WHERE node_id = ?",
+                    crate::db_params![identity.node_id.as_str()],
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("query node row: {error}"))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| anyhow::anyhow!("node row query: {error}"))?
+                .ok_or_else(|| anyhow::anyhow!("node row missing"))?;
+            let pod_template_hash = row
+                .get::<Option<String>>(0)
+                .map_err(|error| anyhow::anyhow!("decode pod_template_hash: {error}"))?;
+            if pod_template_hash.as_deref() != Some("test-template") {
+                anyhow::bail!(
+                    "unexpected pod_template_hash: {:?}",
+                    pod_template_hash.as_deref()
+                );
+            }
+            let peer_id = row
+                .get::<Option<String>>(1)
+                .map_err(|error| anyhow::anyhow!("decode peer_id: {error}"))?;
+            if peer_id.as_deref() != Some("test-peer") {
+                anyhow::bail!("unexpected peer_id: {:?}", peer_id.as_deref());
+            }
+            let expired = row
+                .get::<bool>(2)
+                .map_err(|error| anyhow::anyhow!("decode expired: {error}"))?;
+            if expired {
+                anyhow::bail!("fresh node lease row must start non-expired");
+            }
+            Ok(())
+        }
+        .await;
+        drop(db);
+
+        let cleanup = drop_isolated_schema(&admin, &schema).await;
+        result?;
+        cleanup?;
+        Ok(())
+    }
+
+    async fn drop_isolated_schema(admin: &sqlx::PgPool, schema: &str) -> anyhow::Result<()> {
+        let drop_schema = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
+        sqlx::query(&drop_schema)
+            .execute(admin)
+            .await
+            .map_err(|error| anyhow::anyhow!("drop isolated schema {schema}: {error}"))?;
+        Ok(())
+    }
+
+    fn unique_postgres_schema_name(prefix: &str) -> String {
+        format!("waddle_test_{prefix}_{}", uuid::Uuid::new_v4().simple())
+    }
+
+    fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+        let mut url = url::Url::parse(database_url).expect("parse postgres url");
+        let retained: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "options")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+            .append_pair("options", &format!("-c search_path={schema}"));
+        url.to_string()
     }
 }
