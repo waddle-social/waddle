@@ -36,6 +36,7 @@ pub(super) async fn send_carbons(
     send_carbons_to_registry(
         registry,
         deps.sm_session_registry,
+        deps.web_socket_state,
         owner,
         message,
         kind,
@@ -47,6 +48,7 @@ pub(super) async fn send_carbons(
 pub(crate) async fn send_carbons_to_registry(
     registry: &ConnectionRegistry,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    web_socket_state: Option<&WebSocketState>,
     owner: BareJid,
     message: Box<Message>,
     kind: CarbonKind,
@@ -121,7 +123,40 @@ pub(crate) async fn send_carbons_to_registry(
                 continue;
             }
         };
-        match registry.send_to(&target, Stanza::Message(envelope)).await {
+        let stanza = Stanza::Message(envelope);
+        if let Some(outcome) =
+            try_deliver_registered_remote_resource(web_socket_state, &target, &stanza).await
+        {
+            match outcome {
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    debug!(target = %target, kind = ?kind, "SendCarbons: delivered to remote resource");
+                }
+                FullJidDeliveryOutcome::Unavailable => {
+                    debug!(
+                        target = %target,
+                        kind = ?kind,
+                        "SendCarbons: remote target unavailable at fan-out time, dropping"
+                    );
+                }
+                FullJidDeliveryOutcome::Dropped => {
+                    warn!(
+                        target = %target,
+                        kind = ?kind,
+                        "SendCarbons: remote target backpressured or relay failed, dropping"
+                    );
+                }
+                #[cfg(feature = "clustering")]
+                FullJidDeliveryOutcome::MaybeCommitted => {
+                    debug!(
+                        target = %target,
+                        kind = ?kind,
+                        "SendCarbons: remote delivery maybe committed; suppressing local fallback"
+                    );
+                }
+            }
+            continue;
+        }
+        match registry.send_to(&target, stanza).await {
             waddle_xmpp::registry::SendResult::Sent => {
                 debug!(target = %target, kind = ?kind, "SendCarbons: delivered");
             }
@@ -193,5 +228,34 @@ pub(crate) async fn send_carbons_to_registry(
                 }
             }
         }
+    }
+}
+
+async fn try_deliver_registered_remote_resource(
+    web_socket_state: Option<&WebSocketState>,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> Option<FullJidDeliveryOutcome> {
+    #[cfg(feature = "clustering")]
+    {
+        let state = web_socket_state?;
+        let bridge = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()?;
+        bridge
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            )
+            .await
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (web_socket_state, target, stanza);
+        None
     }
 }

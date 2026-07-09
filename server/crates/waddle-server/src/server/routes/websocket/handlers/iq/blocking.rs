@@ -374,12 +374,48 @@ pub(crate) async fn send_blocking_pushes(
         } else {
             waddle_xmpp::xep::xep0191::build_unblock_push(&resource_jid.clone().into(), jids)
         };
+        let stanza = Stanza::Iq(Box::new(push));
+        if try_deliver_registered_remote_resource(state, &resource_jid, &stanza).await {
+            continue;
+        }
         let _ = state
             .deps
             .protocol
             .connection_registry
-            .send_to(&resource_jid, Stanza::Iq(Box::new(push)))
+            .send_to(&resource_jid, stanza)
             .await;
+    }
+}
+
+async fn try_deliver_registered_remote_resource(
+    state: &WebSocketState,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> bool {
+    #[cfg(feature = "clustering")]
+    {
+        let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        else {
+            return false;
+        };
+        bridge
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            )
+            .await
+            .is_some()
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (state, target, stanza);
+        false
     }
 }
 

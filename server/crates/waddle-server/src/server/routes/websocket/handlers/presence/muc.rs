@@ -140,6 +140,9 @@ pub(crate) async fn route_room_presence_to_occupant(
     recipient: &FullJid,
     stanza: Stanza,
 ) {
+    if try_deliver_registered_remote_resource(state, recipient, &stanza).await {
+        return;
+    }
     match state
         .deps
         .protocol
@@ -188,6 +191,117 @@ pub(crate) async fn route_room_presence_to_occupant(
             reply_count = replies.len(),
             "MUC presence fan-out produced unexpected route fallback replies"
         );
+    }
+}
+
+async fn try_deliver_registered_remote_resource(
+    state: &WebSocketState,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> bool {
+    #[cfg(feature = "clustering")]
+    {
+        let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        else {
+            return false;
+        };
+        bridge
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            )
+            .await
+            .is_some()
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (state, target, stanza);
+        false
+    }
+}
+
+#[cfg(feature = "clustering")]
+enum RemoteMucJoinDecision {
+    Delivered(Vec<Stanza>),
+    MaybeCommitted,
+}
+
+#[cfg(feature = "clustering")]
+fn remote_muc_join_decision(
+    outcome: Option<crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
+) -> Option<RemoteMucJoinDecision> {
+    match outcome {
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
+            Some(RemoteMucJoinDecision::Delivered(replies))
+        }
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+            Some(RemoteMucJoinDecision::MaybeCommitted)
+        }
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
+        | None => None,
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_muc_join_decision_suppresses_errors_for_uncertain_commit() {
+        assert!(matches!(
+            remote_muc_join_decision(Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
+                    Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                        xmpp_parsers::presence::Type::None,
+                    )),
+                ]),
+            )),
+            Some(RemoteMucJoinDecision::Delivered(_))
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
+            )),
+            Some(RemoteMucJoinDecision::MaybeCommitted)
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(Some(
+                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+            )),
+            Some(RemoteMucJoinDecision::MaybeCommitted)
+        ));
+        assert!(remote_muc_join_decision(Some(
+            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable,
+        ))
+        .is_none());
+        assert!(remote_muc_join_decision(Some(
+            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped,
+        ))
+        .is_none());
+        assert!(remote_muc_join_decision(None).is_none());
+    }
+
+    #[test]
+    fn remote_muc_join_decision_keeps_delivered_replies() {
+        let decision = remote_muc_join_decision(Some(
+            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
+                Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::None,
+                )),
+            ]),
+        ));
+        let Some(RemoteMucJoinDecision::Delivered(replies)) = decision else {
+            panic!("expected delivered replies");
+        };
+        assert_eq!(replies.len(), 1);
     }
 }
 
@@ -493,16 +607,17 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                     presence.show = Some(show.to_xep0045());
                                 }
                                 let stanza = Stanza::Presence(presence);
-                                match bridge
-                                    .try_proxy_muc_remote(
-                                        room_jid,
-                                        &stanza,
-                                        crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
-                                        origin,
-                                    )
-                                    .await
-                                {
-                                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
+                                match remote_muc_join_decision(
+                                    bridge
+                                        .try_proxy_muc_remote(
+                                            room_jid,
+                                            &stanza,
+                                            crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
+                                            origin,
+                                        )
+                                        .await,
+                                ) {
+                                    Some(RemoteMucJoinDecision::Delivered(replies)) => {
                                         state
                                             .deps
                                             .protocol
@@ -513,17 +628,18 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                             .map(|reply| stanza_to_xml(&reply))
                                             .collect();
                                     }
-                                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
-                                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+                                    Some(RemoteMucJoinDecision::MaybeCommitted) => {
+                                        // The remote owner may already have mutated room state; a
+                                        // local presence error would lie. Keep cleanup state and let
+                                        // the client retry/resynchronize instead.
                                         state
                                             .deps
                                             .protocol
                                             .remote_muc_memberships
                                             .record_join(sender_jid, room_jid, &nick);
+                                        return Vec::new();
                                     }
-                                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-                                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
-                                    | None => {}
+                                    None => {}
                                 }
                             }
                         }
@@ -1062,8 +1178,15 @@ pub async fn handle_muc_leave(
                     )
                     | Some(
                         crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-                    )
-                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+                    ) => {
+                        state
+                            .deps
+                            .protocol
+                            .remote_muc_memberships
+                            .record_leave(sender_jid, room_jid);
+                        return Vec::new();
+                    }
+                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
                     | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
                         return vec![build_muc_presence_error_xml(
                             room_jid,

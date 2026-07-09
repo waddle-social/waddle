@@ -114,13 +114,7 @@ pub(super) async fn try_handle_remote_subscription_presence(
         outcome = ?outcome,
         "remote subscription presence relay attempt completed"
     );
-    let delivered = matches!(
-        outcome,
-        Some(
-            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
-        )
-    );
+    let delivered = outcome.is_some_and(|outcome| outcome.suppresses_fallback());
     if !delivered {
         return false;
     }

@@ -42,6 +42,7 @@ pub(super) async fn route_full_jid_iq(
     }
     *iq.from_mut() = Some(Jid::from(sender_jid.clone()));
     *iq.to_mut() = Some(Jid::from(target.clone()));
+    let stanza = Stanza::Iq(Box::new(iq.clone()));
     #[cfg(feature = "clustering")]
     if let (Some(origin), Some(bridge)) = (
         ordered_relay_origin.as_ref(),
@@ -53,13 +54,38 @@ pub(super) async fn route_full_jid_iq(
             .as_ref(),
     ) {
         if let Some(outcome) = bridge
-            .try_deliver_full_jid_remote(&target, &Stanza::Iq(Box::new(iq.clone())), origin)
+            .try_deliver_full_jid_remote(&target, &stanza, origin)
             .await
         {
             return match outcome {
                 crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
                 | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
                 | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => Vec::new(),
+                #[cfg(feature = "clustering")]
+                crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
+                    Vec::new()
+                }
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable => {
+                    fallback_iq_frames(&iq)
+                }
+            };
+        }
+        if let Some(outcome) = bridge
+            .try_deliver_registered_remote_resource(
+                &target,
+                &stanza,
+                waddle_xmpp::registry::DeliveryKind::PeerStanza,
+            )
+            .await
+        {
+            return match outcome {
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => Vec::new(),
+                #[cfg(feature = "clustering")]
+                crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
+                    Vec::new()
+                }
                 crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable => {
                     fallback_iq_frames(&iq)
                 }
@@ -72,7 +98,7 @@ pub(super) async fn route_full_jid_iq(
         .deps
         .protocol
         .connection_registry
-        .send_to(&target, Stanza::Iq(Box::new(iq.clone())))
+        .send_to(&target, stanza)
         .await
     {
         waddle_xmpp::registry::SendResult::Sent => Vec::new(),

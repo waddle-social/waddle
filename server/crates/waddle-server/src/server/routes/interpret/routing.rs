@@ -324,10 +324,11 @@ enum ActorSendFailure {
 ///   when to synthesize a fallback IQ reply to the sender.
 /// - `route_to_connection`'s bare-JID headless-persistence gate (ADR-0017
 ///   Phase 3 Slice 9) needs to know whether ANY target in a delivery set
-///   actually landed somewhere durable (`Delivered` or `QueuedDetached`) —
-///   self-healing via `DroppedClosed` eviction means a target selected as
-///   "live" can still turn out not to land by the time delivery runs, and if
-///   every target fails to land, the message must not be silently lost.
+///   is handled somewhere durable or maybe-committed in clustered builds
+///   (`Delivered`, `QueuedDetached`, or `MaybeCommitted`) — self-healing via
+///   `DroppedClosed` eviction means a target selected as "live" can still
+///   turn out not to land by the time delivery runs, and if every target
+///   fails to land, the message must not be silently lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FullJidDeliveryOutcome {
     /// Delivered onto a live resource's channel.
@@ -342,6 +343,22 @@ pub(crate) enum FullJidDeliveryOutcome {
     /// classified `MaybeEnqueued` (never routed to detached, to avoid
     /// double-delivery).
     Dropped,
+    /// The relay ask may have reached the target and committed the delivery,
+    /// but the sender did not observe the reply. Callers must suppress local
+    /// or headless fallback to avoid duplicate user-visible effects.
+    #[cfg(feature = "clustering")]
+    MaybeCommitted,
+}
+
+impl FullJidDeliveryOutcome {
+    pub(crate) fn suppresses_fallback(self) -> bool {
+        match self {
+            Self::Delivered | Self::QueuedDetached => true,
+            Self::Unavailable | Self::Dropped => false,
+            #[cfg(feature = "clustering")]
+            Self::MaybeCommitted => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
