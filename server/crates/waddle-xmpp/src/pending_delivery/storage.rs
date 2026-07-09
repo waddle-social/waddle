@@ -312,9 +312,13 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// janitor pass overlapping an in-flight flush would release its
     /// claims mid-flight and let a second resource re-push the same
     /// offline messages. Claims stamped after the floor are
-    /// considered in-flight and skipped; a claim with no stamp
-    /// (legacy row) is always release-eligible. Pass `i64::MAX` to
-    /// disable the floor (startup recovery).
+    /// considered in-flight and skipped. A claim with NO stamp is
+    /// also skipped — an unstamped claim means "recency unknown"
+    /// (e.g. written by a pre-#1124 binary during a rolling deploy),
+    /// and treating unknown as old would re-open the mid-flight
+    /// release. Callers first adopt unstamped claims via
+    /// [`Self::stamp_unstamped_claims`], which starts their floor
+    /// clock, so they become release-eligible one floor-window later.
     ///
     /// Implementations MUST scan only rows with
     /// `flushed_in_session IS NOT NULL`. The caller passes a
@@ -327,6 +331,22 @@ pub trait PendingDeliveryStorage: Send + Sync {
         live_sessions: &[SmSessionId],
         claimed_before_ms: i64,
     ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError>;
+
+    /// Stamp `now_ms` onto every claimed row that has no claim-recency
+    /// stamp, returning the number of rows stamped. The claim-expiry
+    /// janitor calls this before [`Self::list_orphaned_claims`] so a
+    /// claim written without a stamp (a pre-#1124 binary during a
+    /// rolling deploy) is adopted into the recency floor instead of
+    /// being either released mid-flight (unknown treated as old) or
+    /// leaked forever (unknown treated as always-fresh). Adopted
+    /// claims become release-eligible one floor-window after adoption.
+    ///
+    /// Default impl is a no-op: backends that always stamp on claim
+    /// (every in-process backend) have nothing to adopt.
+    async fn stamp_unstamped_claims(&self, now_ms: i64) -> Result<u64, PendingStorageError> {
+        let _ = now_ms;
+        Ok(0)
+    }
 
     /// Current row count for `recipient` (used by the quota check;
     /// also exposed for metrics).
@@ -899,18 +919,42 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                     // #1124 recency floor: a claim stamped after the
                     // floor is an in-flight flush (e.g. a `transient:`
                     // non-SM flush the live-set can never contain) —
-                    // skip it. A missing stamp means no recency info;
-                    // treat as always release-eligible.
-                    let claim_is_fresh = stamps
+                    // skip it. A missing stamp means "recency unknown"
+                    // and is also skipped; the janitor adopts such
+                    // claims via `stamp_unstamped_claims` first, so
+                    // they age into eligibility instead of being
+                    // released while possibly mid-flight.
+                    let release_eligible = stamps
                         .get(&row.id)
-                        .is_some_and(|claimed_at| *claimed_at > claimed_before_ms);
-                    if !live.contains(session) && !claim_is_fresh {
+                        .is_some_and(|claimed_at| *claimed_at <= claimed_before_ms);
+                    if !live.contains(session) && release_eligible {
                         out.push((row.id.clone(), session.clone()));
                     }
                 }
             }
         }
         Ok(out)
+    }
+
+    async fn stamp_unstamped_claims(&self, now_ms: i64) -> Result<u64, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut stamps = self
+            .claimed_at_ms
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut adopted = 0u64;
+        for queue in guard.values() {
+            for row in queue.iter() {
+                if row.flushed_in_session.is_some() && !stamps.contains_key(&row.id) {
+                    stamps.insert(row.id.clone(), now_ms);
+                    adopted += 1;
+                }
+            }
+        }
+        Ok(adopted)
     }
 
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {

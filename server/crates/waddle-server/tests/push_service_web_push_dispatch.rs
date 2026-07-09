@@ -92,15 +92,26 @@ impl WebPushSender for FixedOutcomeSender {
 /// A `WebPushSender` that picks its outcome by matching the request
 /// endpoint against a configured substring, and records every
 /// endpoint it was invoked for so tests can assert exactly which
-/// devices were (re-)dispatched.
+/// devices were (re-)dispatched. Each endpoint carries a SEQUENCE of
+/// outcomes consumed per call (the last one repeats), so a test can
+/// model "transient on the first pass, permanent on the retry".
 #[derive(Clone)]
 struct PerEndpointSender {
-    outcomes: Arc<Vec<(String, WebPushOutcome)>>,
+    outcomes: Arc<Vec<(String, Vec<WebPushOutcome>)>>,
     calls: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl PerEndpointSender {
     fn new(outcomes: Vec<(String, WebPushOutcome)>) -> Self {
+        Self::with_sequences(
+            outcomes
+                .into_iter()
+                .map(|(fragment, outcome)| (fragment, vec![outcome]))
+                .collect(),
+        )
+    }
+
+    fn with_sequences(outcomes: Vec<(String, Vec<WebPushOutcome>)>) -> Self {
         Self {
             outcomes: Arc::new(outcomes),
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -123,15 +134,18 @@ impl WebPushSender for PerEndpointSender {
         request: WebPushRequest<'_>,
     ) -> Pin<Box<dyn Future<Output = WebPushOutcome> + Send + '_>> {
         let endpoint = request.endpoint.to_string();
-        self.calls
-            .lock()
-            .expect("calls lock")
-            .push(endpoint.clone());
+        let mut calls = self.calls.lock().expect("calls lock");
+        let prior_calls = calls
+            .iter()
+            .filter(|called| called.as_str() == endpoint)
+            .count();
+        calls.push(endpoint.clone());
+        drop(calls);
         let outcome = self
             .outcomes
             .iter()
             .find(|(fragment, _)| endpoint.contains(fragment.as_str()))
-            .map(|(_, outcome)| outcome.clone())
+            .map(|(_, sequence)| sequence[prior_calls.min(sequence.len() - 1)].clone())
             .unwrap_or(WebPushOutcome::Delivered { status: 201 });
         Box::pin(async move { outcome })
     }
@@ -548,6 +562,68 @@ async fn retried_job_with_all_devices_delivered_finalizes_published() {
         row.get::<String>(0).expect("status"),
         "published",
         "a fully-delivered job must finalize as published, not requeue forever"
+    );
+}
+
+// #1123 companion (Codex review): on a retry whose fan-out excluded an
+// already-delivered sibling, a permanent encoder-bug status from the
+// one REMAINING device must not trip the "all devices returned an
+// encoder-bug status" FAILED classification — the payload demonstrably
+// delivered to the sibling, so the job completes as PUBLISHED (the
+// same outcome a single mixed-result pass would produce).
+#[tokio::test]
+async fn retry_with_prior_delivery_does_not_fail_job_on_uniform_encoder_status() {
+    let sender = PerEndpointSender::with_sequences(vec![
+        (
+            "delivered-device".to_string(),
+            vec![WebPushOutcome::Delivered { status: 201 }],
+        ),
+        (
+            "flaky-device".to_string(),
+            vec![
+                WebPushOutcome::Transient {
+                    kind: waddle_xmpp::push::types::TransientFailure::Network,
+                },
+                WebPushOutcome::PayloadTooLarge { status: 413 },
+            ],
+        ),
+    ]);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    register_web_device(&store, &owner, node.node(), "web-ok", "delivered-device").await;
+    register_web_device(&store, &owner, node.node(), "web-flaky", "flaky-device").await;
+    store
+        .publish_notification_from_user_server(
+            node.node(),
+            &web_push_notification_item("mixed-retry-item-1", "alice@example.com", "dm", 1),
+            &owner,
+        )
+        .await
+        .expect("publish");
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("first drain");
+    force_retry_eligibility(&store).await;
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("retry drain");
+
+    assert_eq!(sender.calls_matching("delivered-device"), 1);
+    assert_eq!(sender.calls_matching("flaky-device"), 2);
+    let mut rows = query(
+        &store,
+        "SELECT status FROM push_publish_jobs WHERE item_id = 'mixed-retry-item-1'",
+        (),
+    )
+    .await;
+    let row = rows.next().await.expect("job row").expect("job present");
+    assert_eq!(
+        row.get::<String>(0).expect("status"),
+        "published",
+        "a prior delivered sibling means the retry's uniform 413 is not an all-device encoder bug"
     );
 }
 

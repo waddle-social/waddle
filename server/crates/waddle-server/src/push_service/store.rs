@@ -263,6 +263,16 @@ impl DatabasePushServiceStore {
             (),
         )
         .await?;
+        // #1123 retry-path idempotency lookup:
+        // `delivered_device_ids_for_item_tx` filters by
+        // (node, item_id, status) and reads device_id — this covering
+        // index keeps the per-retry query off a node-wide scan.
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_item_status \
+             ON push_delivery_attempts (node, item_id, status, device_id)",
+            (),
+        )
+        .await?;
         self.execute(
             &format!(
                 r#"

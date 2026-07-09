@@ -1202,6 +1202,12 @@ async fn list_orphaned_claims_returns_only_dead_session_rows() {
         row.flushed_in_session = session_opt.cloned();
         storage.insert(row).await.unwrap();
     }
+    // Janitor sequence: adopt unstamped claims (these rows were
+    // inserted with the claim pre-set, so no stamp exists), then list.
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage
         .list_orphaned_claims(std::slice::from_ref(&session_live), i64::MAX)
         .await
@@ -1234,8 +1240,54 @@ async fn list_orphaned_claims_with_empty_live_set_returns_all_claims() {
         row.flushed_in_session = Some(SmSessionId::new("sm-stream-pre-restart"));
         storage.insert(row).await.unwrap();
     }
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
     assert_eq!(orphans.len(), 2);
+}
+
+// #1124 mixed-version guard (Greptile review): a claim with NO
+// recency stamp — written by a pre-#1124 binary during a rolling
+// deploy — means "recency unknown" and must NOT be release-eligible
+// until the janitor adopts it, even with an empty live-set and a
+// wide-open floor. Otherwise the mid-flight release re-opens exactly
+// during the deploy window.
+#[tokio::test]
+async fn unstamped_claim_is_skipped_until_adopted() {
+    let storage = InMemoryPendingDeliveryStorage::unlimited();
+    let mut row = transient_row("alice@example.com", "legacy-claimed");
+    row.flushed_in_session = Some(SmSessionId::new("transient:web:legacy"));
+    storage.insert(row).await.unwrap();
+
+    let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
+    assert!(
+        orphans.is_empty(),
+        "an unstamped claim must be invisible until adopted"
+    );
+
+    let adopted = storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    assert_eq!(adopted, 1);
+    // Adoption starts the floor clock: still fresh under the
+    // production floor, eligible once aged past it.
+    let floor_in_past = chrono::Utc::now().timestamp_millis() - 180_000;
+    assert!(storage
+        .list_orphaned_claims(&[], floor_in_past)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        storage
+            .list_orphaned_claims(&[], i64::MAX)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1484,6 +1536,10 @@ async fn list_orphaned_claims_excludes_active_session_rows() {
     storage.insert(row).await.unwrap();
 
     // Sweep with active_session in the live set: NOT an orphan.
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage
         .list_orphaned_claims(std::slice::from_ref(&active_session), i64::MAX)
         .await
@@ -1547,7 +1603,12 @@ async fn janitor_releases_rows_with_dead_sessions() {
     }
     assert_eq!(storage.count(&alice).await.unwrap(), 4);
 
-    // Janitor sweep step 1: ask for orphans given the live set.
+    // Janitor sweep step 1: adopt unstamped claims, then ask for
+    // orphans given the live set.
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage
         .list_orphaned_claims(std::slice::from_ref(&live_session), i64::MAX)
         .await
@@ -1695,6 +1756,72 @@ async fn db_storage_orphan_listing_respects_claim_recency_floor() {
         .await
         .unwrap();
     assert_eq!(reclaimed.len(), 2);
+}
+
+// #1124 mixed-version guard, DB backend: a claim row written by a
+// pre-#1124 binary (flushed_in_session set, claimed_at_ms NULL) must
+// be invisible to the janitor until adopted, then age normally.
+#[tokio::test]
+async fn db_storage_unstamped_claim_is_skipped_until_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("pending_delivery-unstamped.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let url = format!("sqlite://{path}");
+    let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+        .await
+        .unwrap();
+    let raw = crate::db::Database::from_config(
+        "pending_delivery_unstamped_raw",
+        &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+    )
+    .await
+    .expect("raw db handle");
+    storage
+        .insert(transient_row("alice@example.com", "legacy"))
+        .await
+        .unwrap();
+    // Simulate the old binary's claim: session tag without a stamp
+    // (claim_batch always stamps in this binary, so write it raw).
+    let conn = raw.guard().await.expect("db guard");
+    conn.execute(
+        "UPDATE pending_delivery SET flushed_in_session = 'transient:web:legacy'",
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    assert!(
+        storage
+            .list_orphaned_claims(&[], i64::MAX)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unstamped claim must be invisible until adopted"
+    );
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    assert_eq!(storage.stamp_unstamped_claims(now_ms).await.unwrap(), 1);
+    assert!(
+        storage
+            .list_orphaned_claims(&[], now_ms - 180_000)
+            .await
+            .unwrap()
+            .is_empty(),
+        "adopted claim is fresh under the production floor"
+    );
+    assert_eq!(
+        storage
+            .list_orphaned_claims(&[], i64::MAX)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "adopted claim ages into release-eligibility"
+    );
 }
 
 #[tokio::test]

@@ -299,6 +299,15 @@ pub(super) async fn prune_delivery_attempts_tx(
     node: &str,
     limit: i64,
 ) -> Result<(), XmppError> {
+    // Terminal-success attempts of a still-retryable job are exempt
+    // from the retention tail (#1123, Greptile review): the per-device
+    // idempotency filter reads `web-delivered`/`fake-sent` rows for
+    // the job's `(node, item_id)` on every retry, so evicting one
+    // mid-retry would re-push the item to a device that already
+    // received it. Only that narrow slice is protected — failure/
+    // transient attempts (pure audit) and attempts of terminal jobs
+    // (published/failed/deleted — no re-dispatch to protect) prune
+    // normally.
     tx.execute(
         r#"
         DELETE FROM push_delivery_attempts
@@ -310,8 +319,26 @@ pub(super) async fn prune_delivery_attempts_tx(
               ORDER BY created_at_ms DESC, attempt_id DESC
               LIMIT ?
           )
+          AND NOT (
+              status IN (?, ?)
+              AND item_id IN (
+                  SELECT item_id
+                  FROM push_publish_jobs
+                  WHERE node = ?
+                    AND status IN (?, ?)
+              )
+          )
         "#,
-        crate::db_params![node, node, limit],
+        crate::db_params![
+            node,
+            node,
+            limit,
+            super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+            super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            node,
+            PUBLISH_JOB_STATUS_QUEUED,
+            PUBLISH_JOB_STATUS_IN_PROGRESS,
+        ],
     )
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -923,5 +950,94 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(item_ids, vec!["item-2", "item-3", "item-4"]);
+    }
+
+    // #1123 (Greptile review): retention pruning must not evict the
+    // delivered-attempt record of a job that is still retryable — the
+    // per-device idempotency filter reads it on the next retry, and
+    // losing it would re-push the item to an already-delivered device.
+    #[tokio::test]
+    async fn delivery_attempt_pruning_exempts_still_retryable_jobs() {
+        let store = store().await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("push node");
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+            )
+            .await
+            .expect("device");
+        // A QUEUED (retryable) publish job for the oldest item.
+        store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item("retrying-item"),
+                &owner,
+            )
+            .await
+            .expect("enqueue retryable job");
+        // Oldest attempt belongs to the retryable job; the rest are
+        // newer attempts for terminal (no-job) items.
+        for (idx, item_id) in ["retrying-item", "done-1", "done-2", "done-3", "done-4"]
+            .iter()
+            .enumerate()
+        {
+            store
+                .execute(
+                    r#"
+                    INSERT INTO push_delivery_attempts (
+                        attempt_id,
+                        node,
+                        device_id,
+                        platform,
+                        item_id,
+                        status,
+                        last_error,
+                        created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                    "#,
+                    crate::db_params![
+                        format!("attempt-{idx}"),
+                        node.node(),
+                        "web-1",
+                        PushDevicePlatform::Web.to_string(),
+                        item_id.to_string(),
+                        dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+                        idx as i64,
+                    ],
+                )
+                .await
+                .expect("attempt row");
+        }
+
+        let db = store.database();
+        let mut tx = db.begin().await.expect("transaction");
+        prune_delivery_attempts_tx(&mut tx, node.node(), 2)
+            .await
+            .expect("prune attempts");
+        tx.commit().await.expect("commit prune");
+
+        let attempts = store
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts");
+        let item_ids = attempts
+            .iter()
+            .map(|attempt| attempt.item_id())
+            .collect::<Vec<_>>();
+
+        assert!(
+            item_ids.contains(&"retrying-item"),
+            "the retryable job's delivered attempt must survive pruning, got {item_ids:?}"
+        );
+        assert!(
+            item_ids.contains(&"done-3") && item_ids.contains(&"done-4"),
+            "the newest terminal attempts stay within the retention tail"
+        );
+        assert!(
+            !item_ids.contains(&"done-1"),
+            "terminal items past the tail still prune"
+        );
     }
 }

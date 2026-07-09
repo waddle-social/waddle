@@ -1248,10 +1248,34 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
             // re-examined on later sweeps, so genuinely orphaned
             // (post-crash) claims are still released — just a few
             // intervals later.
-            let claim_release_floor_ms = (interval_secs as i64)
+            let claim_release_floor_ms = i64::try_from(interval_secs)
+                .unwrap_or(i64::MAX)
                 .saturating_mul(1_000)
                 .saturating_mul(PENDING_CLAIM_RELEASE_FLOOR_INTERVALS);
-            let claimed_before_ms = chrono::Utc::now().timestamp_millis() - claim_release_floor_ms;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let claimed_before_ms = now_ms.saturating_sub(claim_release_floor_ms);
+            // Adopt claims written without a recency stamp (a
+            // pre-#1124 binary during a rolling deploy) so they age
+            // into release-eligibility instead of being skipped
+            // forever — `list_orphaned_claims` ignores unstamped rows.
+            match state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .stamp_unstamped_claims(now_ms)
+                .await
+            {
+                Ok(adopted) if adopted > 0 => {
+                    debug!(
+                        adopted,
+                        "claim-expiry janitor: adopted unstamped pending_delivery claims"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(error = %error, "claim-expiry janitor: stamp_unstamped_claims failed");
+                }
+            }
             match state
                 .deps
                 .protocol

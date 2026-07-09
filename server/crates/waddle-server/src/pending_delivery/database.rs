@@ -908,13 +908,18 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         //
         // #1124 recency floor: claims stamped after `claimed_before_ms`
         // belong to in-flight flushes (a `transient:` non-SM flush is
-        // never in the live-set) and are skipped in SQL. Rows with no
-        // stamp (legacy claims) stay release-eligible.
+        // never in the live-set) and are skipped in SQL. Rows with NO
+        // stamp are skipped too — "recency unknown" (a pre-#1124
+        // binary during a rolling deploy) must not be treated as old,
+        // or the mid-flight release re-opens exactly during the
+        // deploy. The janitor adopts unstamped claims first via
+        // `stamp_unstamped_claims`, so they age into eligibility.
         let mut rows = self
             .query(
                 "SELECT row_id, flushed_in_session FROM pending_delivery \
                  WHERE flushed_in_session IS NOT NULL \
-                   AND (claimed_at_ms IS NULL OR claimed_at_ms <= ?)",
+                   AND claimed_at_ms IS NOT NULL \
+                   AND claimed_at_ms <= ?",
                 crate::db_params![claimed_before_ms],
             )
             .await?;
@@ -937,6 +942,15 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             }
         }
         Ok(out)
+    }
+
+    async fn stamp_unstamped_claims(&self, now_ms: i64) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET claimed_at_ms = ? \
+             WHERE flushed_in_session IS NOT NULL AND claimed_at_ms IS NULL",
+            crate::db_params![now_ms],
+        )
+        .await
     }
 
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
