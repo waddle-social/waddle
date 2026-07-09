@@ -1,0 +1,344 @@
+{
+  "schemaVersion": 1,
+  "milestone": "switchable-alternative",
+  "journeyStatus": "not-ready",
+  "gateReadiness": { "2": "not-ready", "3": "not-ready", "4": "not-ready" },
+  "performanceProfile": "docs/product/performance-profile.json",
+  "releasePolicy": "Every generated scenario is release-blocking and must have end-to-end evidence before the milestone can ship.",
+  "dimensions": {
+    "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+    "topologies": ["local", "federated"]
+  },
+  "journeys": [
+    {
+      "id": "authenticate",
+      "title": "Authenticate and restore a session",
+      "owner": "identity",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": [],
+      "requirements": [
+        { "id": "valid-login", "given": "a valid account on the home server", "when": "the member authenticates", "then": "the client reaches the workspace with the correct identity" },
+        { "id": "session-restore", "given": "an authenticated member who restarts the client", "when": "the client opens again", "then": "the session is restored or reauthentication is requested without losing local state" },
+        { "id": "invalid-login", "given": "invalid or expired credentials", "when": "authentication is attempted", "then": "access is denied with a recoverable, non-secret-bearing error" }
+      ]
+    },
+    {
+      "id": "invite-and-join",
+      "title": "Accept an invite and join the community",
+      "owner": "community-onboarding",
+      "gate": 4,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "metric"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0045", "XEP-0401", "XEP-0503"],
+      "requirements": [
+        { "id": "accept-invite", "given": "a valid invitation", "when": "a new member accepts it", "then": "the member joins the intended community and starter conversations" },
+        { "id": "rules-roles-and-template", "given": "a community with rules, default roles, starter rooms, and a selected developer-community template", "when": "a new member completes onboarding", "then": "rules acceptance is durably recorded and only the configured roles, rooms, forums, and welcome checklist are applied" },
+        { "id": "invalid-invite", "given": "an expired, revoked, or unauthorized invitation", "when": "it is opened", "then": "joining is refused without creating partial membership" },
+        { "id": "activation-metric", "given": "a pilot onboarding cohort", "when": "invite acceptance and first engagement are measured", "then": "median invite-to-first-message is below three minutes and at least 60 percent of accepted invitees read, react, or post within 24 hours" }
+      ]
+    },
+    {
+      "id": "room-messaging",
+      "title": "Discover, join, and converse in a room",
+      "owner": "messaging",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0045", "XEP-0359"],
+      "requirements": [
+        { "id": "join-room", "given": "an authorized member and visible room", "when": "the member joins the room", "then": "membership, occupants, and recent context become visible" },
+        { "id": "exchange-message", "given": "two joined members", "when": "either sends a message", "then": "both clients show one stable, correctly attributed message" },
+        { "id": "leave-room", "given": "a joined member", "when": "the member leaves", "then": "the room stops producing member-only traffic for that member" }
+      ]
+    },
+    {
+      "id": "direct-messaging",
+      "title": "Exchange direct messages",
+      "owner": "messaging",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0280", "XEP-0359"],
+      "requirements": [
+        { "id": "exchange-message", "given": "two members permitted to contact each other", "when": "one sends a direct message", "then": "both members see one stable, correctly attributed message" },
+        { "id": "blocked-sender", "given": "a blocked sender", "when": "the sender attempts contact", "then": "the recipient receives no message or presence leak" }
+      ]
+    },
+    {
+      "id": "history",
+      "title": "Load and navigate durable history",
+      "owner": "messaging-history",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0059", "XEP-0313"],
+      "requirements": [
+        { "id": "page-history", "given": "a conversation with archived messages", "when": "the member pages backward and jumps to context", "then": "messages remain ordered, deduplicated, and permission-filtered" },
+        { "id": "revoked-access", "given": "a member whose access was revoked", "when": "history is requested", "then": "protected history is not disclosed" }
+      ]
+    },
+    {
+      "id": "unread-state",
+      "title": "Track unread, mentions, and displayed state",
+      "owner": "inbox",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0333", "XEP-0430", "XEP-0490"],
+      "requirements": [
+        { "id": "increment-and-clear", "given": "new messages in an unfocused conversation", "when": "the member opens and reads through them", "then": "unread and mention counts increment once and clear on every device" },
+        { "id": "restart-consistency", "given": "read state recorded before restart", "when": "the client reconnects", "then": "counts converge without resurrecting cleared items" }
+      ]
+    },
+    {
+      "id": "notifications",
+      "title": "Deliver notification preferences and alerts",
+      "owner": "notifications",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0357", "XEP-0492"],
+      "requirements": [
+        { "id": "eligible-alert", "given": "an eligible message while the client is backgrounded", "when": "the message is accepted", "then": "one privacy-preserving alert reaches the member and opens the correct context" },
+        { "id": "muted-alert", "given": "a muted conversation or disabled notification class", "when": "a matching message arrives", "then": "no alert is emitted while unread state remains correct" }
+      ]
+    },
+    {
+      "id": "search",
+      "title": "Search the workspace and jump to context",
+      "owner": "search",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0313"],
+      "requirements": [
+        { "id": "find-result", "given": "authorized searchable messages, people, rooms, forums, threads, and files", "when": "the member searches with entity, sender, room, and date filters and selects a result", "then": "matching results identify their type and context and open at the selected entity" },
+        { "id": "permission-filter", "given": "history outside the member's permissions", "when": "the member searches", "then": "no result, snippet, count, or identifier leaks that history" }
+      ]
+    },
+    {
+      "id": "file-sharing",
+      "title": "Upload, send, and open a file",
+      "owner": "files",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0363", "XEP-0446", "XEP-0447"],
+      "requirements": [
+        { "id": "share-file", "given": "an authorized member and supported file", "when": "the member uploads and sends it", "then": "recipients can inspect metadata and open the uncorrupted file" },
+        { "id": "failed-upload", "given": "a rejected or interrupted upload", "when": "the transfer fails", "then": "no successful message is shown and retry is safe" }
+      ]
+    },
+    {
+      "id": "threads-and-replies",
+      "title": "Reply in and catch up with a thread",
+      "owner": "threads",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0201", "XEP-0461"],
+      "requirements": [
+        { "id": "reply", "given": "a message that can be replied to", "when": "a member replies in its thread", "then": "the reply retains stable parent and thread context on every client" },
+        { "id": "thread-catch-up", "given": "unread thread activity", "when": "the member opens the thread inbox", "then": "the activity is discoverable and can be marked read without changing unrelated conversations" }
+      ]
+    },
+    {
+      "id": "reactions",
+      "title": "Add and remove message reactions",
+      "owner": "messaging",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0444"],
+      "requirements": [
+        { "id": "toggle-reaction", "given": "a visible message", "when": "members add or remove reactions", "then": "all clients converge on the same per-sender reaction set without duplicate counts" }
+      ]
+    },
+    {
+      "id": "moderation",
+      "title": "Report, moderate, and block abuse",
+      "owner": "trust-and-safety",
+      "gate": 4,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "authorization", "audit", "metric"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0191", "XEP-0377", "XEP-0425"],
+      "requirements": [
+        { "id": "report-content", "given": "reportable content", "when": "a member submits a report", "then": "authorized moderators receive attributable evidence without notifying the reported member" },
+        { "id": "moderation-queue", "given": "open reports with evidence and reasons", "when": "a moderator reviews, assigns, resolves, or escalates them", "then": "queue state is durable, permission-scoped, auditable, and visible to the moderation team within five seconds" },
+        { "id": "moderate-content", "given": "an authorized moderator", "when": "the moderator retracts content or applies timeout, kick, or ban", "then": "the action propagates within two seconds, is auditable, and is denied to unauthorized actors" },
+        { "id": "automod-and-appeal", "given": "configured keyword or rate rules and an appeal policy", "when": "automod acts or a sanctioned member appeals", "then": "the rule, evidence, decision, reviewer, and resulting action remain attributable and fail closed" }
+      ]
+    },
+    {
+      "id": "calls",
+      "title": "Start, join, recover, and leave a call",
+      "owner": "calls",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0166", "XEP-0167", "XEP-0215", "XEP-0272", "XEP-0353"],
+      "requirements": [
+        { "id": "call-lifecycle", "given": "permitted members and available media devices", "when": "a member starts or joins a direct or room call", "then": "participants can exchange media, observe participant state, and leave cleanly" },
+        { "id": "screen-share-and-controls", "given": "an active call with permitted participants", "when": "a member selects input/output devices, shares or stops sharing a screen, mutes, raises a hand, or a moderator manages a participant", "then": "every participant observes the authorized state transition exactly once and denied controls remain unavailable" },
+        { "id": "call-recovery", "given": "an active call with a transient connection loss", "when": "connectivity returns", "then": "the call recovers or ends with an explicit actionable state" }
+      ]
+    },
+    {
+      "id": "reconnect",
+      "title": "Reconnect without message loss or duplication",
+      "owner": "connection-reliability",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "chaos"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0198", "XEP-0313", "XEP-0359"],
+      "requirements": [
+        { "id": "resume-or-catch-up", "given": "a connected client with in-flight and missed traffic", "when": "the connection drops and returns", "then": "stream resumption or archive catch-up produces a complete deduplicated timeline" },
+        { "id": "expired-resume", "given": "an expired resumable session", "when": "the client reconnects", "then": "the client establishes a fresh stream and catches up without silent gaps" }
+      ]
+    },
+    {
+      "id": "multi-device",
+      "title": "Keep simultaneous devices consistent",
+      "owner": "multi-device",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0280", "XEP-0333", "XEP-0490"],
+      "requirements": [
+        { "id": "cross-device-convergence", "given": "the same member online on two clients", "when": "either client sends, receives, or displays a message", "then": "both clients converge on message and read state without duplicate notifications" },
+        { "id": "device-revocation", "given": "a revoked client session", "when": "that client attempts to reconnect", "then": "access is denied without disrupting other active clients" }
+      ]
+    },
+    {
+      "id": "accessibility",
+      "title": "Operate core collaboration journeys accessibly",
+      "owner": "design-system",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "accessibility"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": [],
+      "requirements": [
+        { "id": "wcag-core-flows", "given": "a member using screen-reader, high-contrast, zoom, reduced-motion, or switch-control settings", "when": "the member completes authentication, navigation, messaging, search, files, calls, and moderation flows", "then": "the flow meets WCAG 2.2 AA with named controls, logical focus order, announced state changes, and no pointer-only action" }
+      ]
+    },
+    {
+      "id": "keyboard-navigation",
+      "title": "Operate core collaboration journeys by keyboard",
+      "owner": "design-system",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "accessibility"], "records": [] },
+      "clients": ["desktop-web", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": [],
+      "requirements": [
+        { "id": "keyboard-core-flows", "given": "a keyboard-only member", "when": "the member navigates workspaces, conversations, messages, threads, search, composer actions, settings, calls, and moderation", "then": "every action is reachable with visible focus, documented shortcuts do not conflict, and focus returns to the initiating control after dismissal" }
+      ]
+    },
+    {
+      "id": "performance-budgets",
+      "title": "Meet interactive performance budgets",
+      "owner": "web-platform",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "performance"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": [],
+      "requirements": [
+        { "id": "interactive-budgets", "given": "the versioned dataset, hardware, and network in the contract performance profile", "when": "a member launches, opens a conversation, searches, sends, or joins a call", "then": "web p75 LCP is at most 2.5 seconds, web p75 INP is at most 200 milliseconds, native launch-to-interactive is at most 2.5 seconds, and conversation/search actions acknowledge input within 100 milliseconds" }
+      ]
+    },
+    {
+      "id": "pwa-lifecycle",
+      "title": "Install, update, and recover the Android PWA",
+      "owner": "web-platform",
+      "gate": 3,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "device"], "records": [] },
+      "clients": ["android-pwa"],
+      "topologies": ["local", "federated"],
+      "protocols": [],
+      "requirements": [
+        { "id": "install-and-launch", "given": "a supported Android browser and authenticated member", "when": "the member installs and launches Waddle", "then": "the standalone app restores the authenticated workspace and deep links to the intended conversation" },
+        { "id": "offline-shell", "given": "a previously launched installation", "when": "the device temporarily loses connectivity", "then": "the app shell and cached context remain usable and clearly distinguish unavailable network actions" },
+        { "id": "safe-update", "given": "an installed older application version with queued local state", "when": "a new service worker activates", "then": "the update preserves queued state and either migrates or explicitly rejects incompatible state without silent loss" }
+      ]
+    },
+    {
+      "id": "member-lifecycle-and-administration",
+      "title": "Administer member and role lifecycles",
+      "owner": "community-administration",
+      "gate": 4,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "authorization", "audit", "metric"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0050", "XEP-0191", "XEP-0503"],
+      "requirements": [
+        { "id": "member-lifecycle", "given": "an authorized community administrator", "when": "the administrator invites, approves, assigns roles, suspends, bans, revokes sessions, removes, exports, or deletes a member", "then": "the requested lifecycle transition is atomic, permission-scoped, visible on active clients within 60 seconds, and durably audited" },
+        { "id": "role-preview", "given": "a configured role and channel policy", "when": "an administrator previews the community as that role", "then": "the preview matches server authorization without granting the administrator a new session or mutating membership" },
+        { "id": "audit-completeness", "given": "destructive and administrative actions", "when": "the audit ledger is reconciled", "then": "100 percent contain actor, target, reason, timestamp, result, and correlation identifier" }
+      ]
+    },
+    {
+      "id": "admin-operational-health",
+      "title": "Operate community health surfaces",
+      "owner": "community-administration",
+      "gate": 4,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "authorization", "metric"], "records": [] },
+      "clients": ["desktop-web", "macos"],
+      "topologies": ["local", "federated"],
+      "protocols": ["XEP-0050"],
+      "requirements": [
+        { "id": "health-overview", "given": "an authorized administrator", "when": "the administrator opens operational health", "then": "delivery, push, federation, extensions, backups, and recent incidents show freshness, degraded state, and an actionable diagnostic without exposing member content" },
+        { "id": "health-authorization", "given": "a non-administrator", "when": "the member requests operational health", "then": "the request is denied without leaking infrastructure, identity, or incident details" }
+      ]
+    },
+    {
+      "id": "federation-interoperability",
+      "title": "Interoperate with supported XMPP servers",
+      "owner": "federation",
+      "gate": 2,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "interop", "security"], "records": [] },
+      "clients": ["desktop-web"],
+      "topologies": ["federated"],
+      "protocols": ["XEP-0045", "XEP-0156", "XEP-0220", "XEP-0313", "XEP-0368", "XEP-0425"],
+      "requirements": [
+        { "id": "prosody", "given": "a current supported Prosody peer", "when": "users exchange presence, direct messages, history, and reconnect across domains", "then": "delivery is bidirectional, ordered, deduplicated, and capability-aware" },
+        { "id": "ejabberd", "given": "a current supported ejabberd peer", "when": "users exchange presence, direct messages, history, and reconnect across domains", "then": "delivery is bidirectional, ordered, deduplicated, and capability-aware" },
+        { "id": "snikket", "given": "a current supported Snikket peer", "when": "users exchange presence, direct messages, history, and reconnect across domains", "then": "delivery is bidirectional, ordered, deduplicated, and capability-aware" },
+        { "id": "remote-room-lifecycle", "given": "authorized local and remote members", "when": "a remote member accepts an invitation, joins a Waddle room, exchanges messages and files, reconnects, and is moderated", "then": "room state, archive visibility, invitation semantics, moderation, and recovery remain conformant across domains" },
+        { "id": "transport-authentication", "given": "valid, invalid, expired, and mismatched peer certificates plus dialback fallback", "when": "S2S streams negotiate", "then": "TLS, SASL EXTERNAL, SRV/direct-TLS discovery, and encrypted dialback enforce the configured trust policy without downgrade" }
+      ]
+    },
+    {
+      "id": "federation-failure-isolation",
+      "title": "Recover safely from a remote-domain failure",
+      "owner": "federation",
+      "gate": 2,
+      "evidence": { "defaultStatus": "missing", "requiredKinds": ["e2e", "chaos", "security"], "records": [] },
+      "clients": ["desktop-web", "android-pwa", "ios", "macos"],
+      "topologies": ["federated"],
+      "protocols": ["XEP-0198", "XEP-0359"],
+      "requirements": [
+        { "id": "remote-outage", "given": "a remote domain that is unavailable or rejects delivery", "when": "local members continue using Waddle", "then": "local traffic remains healthy and remote delivery is queued, retried, or visibly failed without duplication" },
+        { "id": "hostile-domain", "given": "a blocked, malformed, or quota-exhausting remote domain", "when": "it sends traffic", "then": "the traffic is rejected and cannot exhaust shared resources or bypass moderation policy" }
+      ]
+    }
+  ]
+}

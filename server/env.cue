@@ -146,6 +146,7 @@ schema.#Project & {
 			tasks: [
 				_t.checkRootSyncDrift,
 				_t.checkCiDrift,
+				_t.checkSwitchableAlternativeProgram,
 				_t.fmt,
 				_t.clippy,
 				_t.test,
@@ -184,7 +185,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -232,6 +233,85 @@ schema.#Project & {
 				"../cuenv.lock",
 				"../.rules.cue",
 				"../.gitignore",
+			]
+		}
+
+		checkSwitchableAlternativeProgram: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					tracker=../docs/planning/switchable-alternative.md
+					test -f capabilities.toml
+					test -f ../docs/product/critical-journeys.json
+					test -f ../docs/product/gate-evidence.json
+					for gate in 0 1 2 3 4 5; do
+					  test "$(grep -c "^## Gate ${gate} —" "${tracker}")" -eq 1
+					done
+					test "$(grep -Ec '^\| [0-5] \| (planned|in-progress|blocked|complete) \|' "${tracker}")" -eq 6
+					test "$(grep -Ec '^\*\*Current gate: (Gate [0-5]|Program complete)\*\*$' "${tracker}")" -eq 1
+					journey_status="$(bun -e 'const contract = await Bun.file("../docs/product/critical-journeys.json").json(); console.log(contract.journeyStatus)')"
+					if grep -q '^\*\*Current gate: Program complete\*\*$' "${tracker}"; then
+					  test "$(grep -Ec '^\| [0-5] \| complete \|' "${tracker}")" -eq 6
+					  test "$(grep -Ec '^\| [0-5] \| in-progress \|' "${tracker}")" -eq 0
+					  test "${journey_status}" = ready
+					else
+					  test "$(grep -Ec '^\| [0-5] \| in-progress \|' "${tracker}")" -eq 1
+					  current_gate="$(grep '^\*\*Current gate: Gate [0-5]\*\*$' "${tracker}" | grep -Eo '[0-5]')"
+					  grep -q "^| ${current_gate} | in-progress |" "${tracker}"
+					  for gate in 0 1 2 3 4 5; do
+					    status="$(grep "^| ${gate} |" "${tracker}" | cut -d '|' -f 3 | xargs)"
+					    if [ "${gate}" -lt "${current_gate}" ]; then
+					      test "${status}" = complete
+					    elif [ "${gate}" -gt "${current_gate}" ]; then
+					      test "${status}" = planned -o "${status}" = blocked
+					    fi
+					  done
+					fi
+					for gate in 2 3 4; do
+					  tracker_status="$(grep "^| ${gate} |" "${tracker}" | cut -d '|' -f 3 | xargs)"
+					  evidence_status="$(GATE="${gate}" bun -e 'const contract = await Bun.file("../docs/product/critical-journeys.json").json(); console.log(contract.gateReadiness[process.env.GATE])')"
+					  if [ "${tracker_status}" = complete ]; then
+					    test "${evidence_status}" = ready
+					  elif [ "${evidence_status}" = ready ]; then
+					    echo "Gate ${gate} journey evidence cannot be ready before the tracker gate is complete" >&2
+					    exit 1
+					  fi
+					done
+					for gate in 0 1 5; do
+					  tracker_status="$(grep "^| ${gate} |" "${tracker}" | cut -d '|' -f 3 | xargs)"
+					  evidence_status="$(GATE="${gate}" bun -e 'const ledger = await Bun.file("../docs/product/gate-evidence.json").json(); console.log(ledger.gates[process.env.GATE].status)')"
+					  if [ "${tracker_status}" = complete ]; then
+					    test "${evidence_status}" = ready
+					  elif [ "${evidence_status}" = ready ]; then
+					    echo "Gate ${gate} evidence cannot be ready before the tracker gate is complete" >&2
+					    exit 1
+					  fi
+					done
+					while IFS= read -r row; do
+					  echo "${row}" | grep -Eq '\[[^]]+\]\([^)]+\)'
+					  if echo "${row}" | grep -Eq 'pending|[[:space:]][—-][[:space:]]'; then
+					    echo "completed program gates must link durable non-pending evidence" >&2
+					    exit 1
+					  fi
+					done < <(grep '^| [0-5] | complete |' "${tracker}" || true)
+					bun test ../tests/critical-journeys.test.ts
+				"""#]
+			inputs: [
+				"../apps/apple/**/Tests/**",
+				"../chat/tests/**",
+				"../docs/evidence/**",
+				"capabilities.toml",
+				"crates/**/tests/**",
+				"crates/waddle-server/src/server/routes/websocket/tests/**",
+				"crates/waddle-server/tests/server_capability_manifest.rs",
+				"../docs/product/critical-journeys.json",
+				"../docs/product/gate-evidence.json",
+				"../docs/product/performance-profile.json",
+				"../docs/planning/switchable-alternative.md",
+				"../tests/**",
+				"../cuenv.lock",
+				"../xeps/xep-*.xml",
+				"env.cue",
 			]
 		}
 

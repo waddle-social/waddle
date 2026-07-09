@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "gates": {
+    "0": {
+      "status": "not-ready",
+      "requiredKinds": ["capability-baseline", "journey-baseline", "telemetry-baseline"],
+      "records": []
+    },
+    "1": {
+      "status": "not-ready",
+      "requiredKinds": ["availability-slo", "delivery-slo", "authentication-slo", "restore-drill", "security"],
+      "records": []
+    },
+    "5": {
+      "status": "not-ready",
+      "requiredKinds": ["hosted-pilot", "self-hosted-pilot", "federated-pilot", "eight-week-retention", "restore-drill", "extension-isolation", "views-adoption"],
+      "records": []
+    }
+  }
+}

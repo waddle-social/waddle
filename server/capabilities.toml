@@ -1,0 +1,167 @@
+schema_version = 1
+
+# This curated inventory describes user-visible server capabilities; the
+# exhaustive advertised-feature/XEP coverage gate remains in xmpp_e2e_cue.rs.
+# `server_maturity` is intentionally server-scoped. Cross-client readiness and
+# evidence live in docs/product/critical-journeys.json.
+
+[[capability]]
+id = "room-messaging"
+server_maturity = "production"
+protocols = ["XEP-0045", "XEP-0359"]
+advertised_features = ["http://jabber.org/protocol/muc", "urn:xmpp:sid:0"]
+server_evidence = ["crates/waddle-server/tests/xep0045_join_lifecycle_ws.rs"]
+topologies = { local = "production", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0045 = ["crates/waddle-server/tests/xep0045_join_lifecycle_ws.rs"]
+XEP-0359 = ["crates/waddle-server/tests/xep0359_stanza_ids_ws.rs"]
+
+[[capability]]
+id = "direct-messaging"
+server_maturity = "production"
+protocols = ["XEP-0280", "XEP-0359"]
+advertised_features = ["urn:xmpp:carbons:2", "urn:xmpp:sid:0"]
+server_evidence = ["crates/waddle-server/tests/xep0280_carbons_integration.rs"]
+topologies = { local = "production", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0280 = ["crates/waddle-server/tests/xep0280_carbons_integration.rs"]
+XEP-0359 = ["crates/waddle-server/tests/xep0359_stanza_ids_ws.rs"]
+
+[[capability]]
+id = "durable-history"
+server_maturity = "production"
+protocols = ["XEP-0059", "XEP-0313"]
+advertised_features = ["urn:xmpp:mam:2"]
+server_evidence = ["crates/waddle-server/tests/xep0313_mam_integration.rs"]
+topologies = { local = "production", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0059 = ["crates/waddle-server/tests/xep0313_mam_integration.rs"]
+XEP-0313 = ["crates/waddle-server/tests/xep0313_mam_integration.rs"]
+
+[[capability]]
+id = "unread-and-read-state"
+server_maturity = "beta"
+protocols = ["XEP-0333", "XEP-0430", "XEP-0490"]
+advertised_features = ["urn:xmpp:chat-markers:0", "urn:xmpp:inbox:1"]
+server_evidence = ["crates/waddle-server/tests/xep0430_inbox_ws.rs", "crates/waddle-server/tests/xep0490_mds_ws.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0333 = ["crates/waddle-server/tests/xep0490_mds_ws.rs"]
+XEP-0430 = ["crates/waddle-server/tests/xep0430_inbox_ws.rs"]
+XEP-0490 = ["crates/waddle-server/tests/xep0490_mds_ws.rs"]
+
+[[capability]]
+id = "push-notifications"
+server_maturity = "beta"
+protocols = ["XEP-0357", "XEP-0492"]
+advertised_features = ["urn:xmpp:push:0"]
+server_evidence = ["crates/waddle-server/tests/xep0357_push_service_ws.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0357 = ["crates/waddle-server/tests/xep0357_push_service_ws.rs"]
+XEP-0492 = ["crates/waddle-server/tests/xep0492_push_enforcement_ws.rs"]
+
+[[capability]]
+id = "message-search"
+server_maturity = "beta"
+protocols = ["XEP-0313"]
+advertised_features = ["urn:xmpp:mam:2", "urn:xmpp:mam:2#extended"]
+server_evidence = ["crates/waddle-server/tests/xep0313_mam_integration.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0313 = ["crates/waddle-server/tests/xep0313_mam_integration.rs"]
+
+[[capability]]
+id = "file-sharing"
+server_maturity = "beta"
+protocols = ["XEP-0363", "XEP-0446", "XEP-0447"]
+advertised_features = ["urn:xmpp:http:upload:0"]
+server_evidence = ["crates/waddle-server/src/server/routes/websocket/tests/iq.rs", "crates/waddle-server/tests/xmpp_e2e_scenarios/xep_0447_stateless_file_sharing.cue"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0363 = ["crates/waddle-xmpp/tests/xep0363_http_upload.rs"]
+XEP-0446 = ["crates/waddle-xmpp/tests/xep0446_file_metadata.rs"]
+XEP-0447 = ["crates/waddle-xmpp/tests/xep0447_stateless_file_sharing.rs"]
+
+[[capability]]
+id = "threads-and-replies"
+server_maturity = "beta"
+protocols = ["XEP-0201", "XEP-0461"]
+advertised_features = ["urn:xmpp:reply:0"]
+server_evidence = ["crates/waddle-server/tests/xep0461_replies_ws.rs", "crates/waddle-server/tests/waddle_threads_query_ws.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0201 = ["crates/waddle-server/tests/waddle_threads_query_ws.rs"]
+XEP-0461 = ["crates/waddle-server/tests/xep0461_replies_ws.rs"]
+
+[[capability]]
+id = "reactions"
+server_maturity = "production"
+protocols = ["XEP-0444"]
+advertised_features = ["urn:xmpp:reactions:0"]
+server_evidence = ["crates/waddle-server/tests/xep0444_reactions_ws.rs"]
+topologies = { local = "production", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0444 = ["crates/waddle-server/tests/xep0444_reactions_ws.rs"]
+
+[[capability]]
+id = "moderation"
+server_maturity = "experimental"
+protocols = ["XEP-0191", "XEP-0425"]
+advertised_features = ["urn:xmpp:blocking", "urn:xmpp:message-moderate:1"]
+server_evidence = ["crates/waddle-server/tests/xep0425_message_moderation_ws.rs"]
+topologies = { local = "experimental", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0191 = ["crates/waddle-server/tests/xep0054_0049_0191_ws.rs"]
+XEP-0425 = ["crates/waddle-server/tests/xep0425_message_moderation_ws.rs"]
+
+[[capability]]
+id = "audio-video-calls"
+server_maturity = "beta"
+availability = "configured"
+protocols = ["XEP-0166", "XEP-0167", "XEP-0215", "XEP-0272", "XEP-0353"]
+advertised_features = ["urn:xmpp:jingle:1", "urn:xmpp:jingle:apps:rtp:1", "urn:xmpp:jingle:apps:rtp:audio", "urn:xmpp:jingle:apps:rtp:video", "urn:xmpp:jingle-message:0", "urn:xmpp:extdisco:2", "urn:xmpp:jingle:muji:0"]
+custom_namespaces = ["urn:waddle:transports:livekit:0"]
+server_evidence = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0166 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+XEP-0167 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+XEP-0215 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+XEP-0272 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+XEP-0353 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+
+[[capability]]
+id = "reconnect-and-resume"
+server_maturity = "beta"
+protocols = ["XEP-0198", "XEP-0313", "XEP-0359"]
+advertised_features = ["urn:xmpp:sm:3", "urn:xmpp:mam:2", "urn:xmpp:sid:0"]
+server_evidence = ["crates/waddle-server/tests/xep0198_cross_node_resume.rs", "crates/waddle-server/tests/xmpp_e2e_scenarios/xep_0313_reconnect_after_catchup.cue"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0198 = ["crates/waddle-server/tests/xep0198_cross_node_resume.rs"]
+XEP-0313 = ["crates/waddle-server/tests/xmpp_e2e_scenarios/xep_0313_reconnect_after_catchup.cue"]
+XEP-0359 = ["crates/waddle-server/tests/xep0359_stanza_ids_ws.rs"]
+
+[[capability]]
+id = "spaces-and-administration"
+server_maturity = "beta"
+protocols = ["XEP-0050", "XEP-0503"]
+advertised_features = ["http://jabber.org/protocol/commands", "urn:xmpp:spaces:0"]
+server_evidence = ["crates/waddle-server/tests/admin_spaces_ws.rs", "crates/waddle-server/tests/admin_channels_ws.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0050 = ["crates/waddle-server/tests/admin_spaces_ws.rs", "crates/waddle-server/tests/admin_channels_ws.rs"]
+XEP-0503 = ["crates/waddle-server/tests/xep0503_spaces_ws.rs"]
+
+[[capability]]
+id = "community-feed-stories"
+server_maturity = "experimental"
+protocols = ["XEP-0060", "XEP-0472", "XEP-0501"]
+advertised_features = ["http://jabber.org/protocol/pubsub", "urn:xmpp:pubsub-social-feed:1", "urn:xmpp:pubsub-social-feed:stories:0"]
+server_evidence = ["crates/waddle-server/tests/xep0472_social_feed_ws.rs", "crates/waddle-server/tests/xep0501_stories_ws.rs"]
+topologies = { local = "experimental", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0060 = ["crates/waddle-server/tests/xep0060_pubsub_ws.rs"]
+XEP-0472 = ["crates/waddle-server/tests/xep0472_social_feed_ws.rs"]
+XEP-0501 = ["crates/waddle-server/tests/xep0501_stories_ws.rs"]
