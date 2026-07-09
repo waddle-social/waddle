@@ -59,6 +59,57 @@ impl ConnectionRegistry {
         carbons_handle
     }
 
+    /// Register an already-constructed connection entry.
+    ///
+    /// This is used by clustering's owner-side remote-resource mirror: the
+    /// owner `UserActor` and owner `ConnectionRegistry` must share the exact
+    /// same [`ConnectionEntry`] so registry-backed fanout surfaces and
+    /// actor-backed full-JID routing both drain into the remote-resource
+    /// forwarder.
+    #[instrument(skip(self, entry), fields(jid = %jid))]
+    pub fn register_entry(&self, jid: FullJid, entry: ConnectionEntry) -> Arc<AtomicBool> {
+        let carbons_handle = entry.carbons_handle();
+        let existing = self.connections.insert(jid, entry);
+        if existing.is_some() {
+            debug!("Replaced existing connection registration");
+        } else {
+            prometheus::increment_connected_users();
+            debug!("Registered new connection");
+        }
+        carbons_handle
+    }
+
+    /// Register a prebuilt entry only when the full-JID slot is empty or still
+    /// belongs to the provided owner token.
+    pub fn register_entry_if_owner_or_absent(
+        &self,
+        jid: FullJid,
+        entry: ConnectionEntry,
+        owner: &Arc<AtomicBool>,
+    ) -> bool {
+        if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
+            debug!("Skipped register: entry owner does not match guard owner");
+            return false;
+        }
+        match self.connections.entry(jid) {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                if !Arc::ptr_eq(&occupied.get().carbons_enabled, owner) {
+                    debug!("Skipped register: ownership moved to replacement connection");
+                    return false;
+                }
+                occupied.insert(entry);
+                debug!("Replaced owned connection registration");
+                true
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+                prometheus::increment_connected_users();
+                debug!("Registered new connection");
+                true
+            }
+        }
+    }
+
     /// Unregister a connection.
     ///
     /// Returns the connection entry if the connection was registered, None otherwise.

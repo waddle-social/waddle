@@ -225,11 +225,14 @@ async fn handle_xmpp_frame_impl(
                 .enabled
                 .then(|| sm_inbound_completion.reserve(sm_state));
             let ordered_relay_origin = ordered_relay_origin_for_inbound_stanza(
+                state,
                 sm_state,
                 phase.bound_jid(),
+                registry_owner.as_ref(),
                 reserved_inbound_for_sm,
                 ordered_relay_handoff_tx.as_ref(),
-            );
+            )
+            .await;
 
             // Resource binding is stream setup, not request processing: handle
             // it inline and return BEFORE the wedge backstop (#808 ADR-008 scope
@@ -264,6 +267,7 @@ async fn handle_xmpp_frame_impl(
                             carbons_enabled,
                             roster_interested,
                             blocklist_interested,
+                            registry_owner: registry_owner.as_ref(),
                             state_machine: state_machine.as_mut(),
                             ordered_relay_origin: ordered_relay_origin.clone(),
                         };
@@ -320,9 +324,11 @@ async fn handle_xmpp_frame_impl(
 }
 
 #[cfg(feature = "clustering")]
-fn ordered_relay_origin_for_inbound_stanza(
+async fn ordered_relay_origin_for_inbound_stanza(
+    state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
     handoff_tx: Option<
         &tokio::sync::mpsc::UnboundedSender<
@@ -336,6 +342,38 @@ fn ordered_relay_origin_for_inbound_stanza(
             jid.to_bare().to_string(),
         )
     })?;
+    if let (Some(jid), Some(owner), Some(bridge)) = (
+        bound_jid,
+        registry_owner,
+        state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref(),
+    ) {
+        if let Some(remote) = bridge.remote_resource_origin_if_owner(jid, owner).await {
+            return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::RemoteResource(
+                    remote,
+                ),
+                sender_entity,
+                inbound_sequence: inbound_sequence.map(|sequence| sequence.0).unwrap_or(0),
+                handoff: if sm_state.enabled {
+                    inbound_sequence.and_then(|sequence| {
+                        handoff_tx.map(|tx| {
+                            crate::server::routes::interpret::OrderedRelayHandoffHandle::new(
+                                sequence,
+                                tx.clone(),
+                            )
+                        })
+                    })
+                } else {
+                    None
+                },
+            });
+        }
+    }
     if sm_state.enabled {
         let stream_id = sm_state.stream_id.as_ref()?;
         let inbound_sequence = inbound_sequence?;
@@ -364,9 +402,11 @@ fn ordered_relay_origin_for_inbound_stanza(
 }
 
 #[cfg(not(feature = "clustering"))]
-fn ordered_relay_origin_for_inbound_stanza(
+async fn ordered_relay_origin_for_inbound_stanza(
+    state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
     handoff_tx: Option<
         &tokio::sync::mpsc::UnboundedSender<
@@ -374,7 +414,14 @@ fn ordered_relay_origin_for_inbound_stanza(
         >,
     >,
 ) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
-    let _ = (sm_state, bound_jid, inbound_sequence, handoff_tx);
+    let _ = (
+        state,
+        sm_state,
+        bound_jid,
+        registry_owner,
+        inbound_sequence,
+        handoff_tx,
+    );
     None
 }
 

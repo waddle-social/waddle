@@ -4635,6 +4635,7 @@ async fn inbox_query_requires_ready_phase() {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
     };

@@ -10,14 +10,13 @@
 //! panics (removing this node from the routing fabric while its Postgres
 //! heartbeat stays fresh — a steady-state, cluster-wide degradation with no
 //! self-healing path), so an owning task respawns it and **re-registers it
-//! under the same name**. Sender-side stale-ref errors (`ActorNotRunning`/
-//! `ActorStopped`/`UnknownActor`/`BadActorType`) trigger a bounded-backoff
-//! kademlia re-lookup — the transport-layer refresh path, distinct from
-//! Phase 3's `NotOwner` claims-refresh path.
+//! under the same name**. Sender-side no-effect stale-ref errors
+//! (`ActorNotRunning`/`UnknownActor`/`BadActorType`) trigger a bounded-backoff
+//! kademlia re-lookup for non-idempotent delivery paths; `ActorStopped` is
+//! treated as maybe committed so callers do not duplicate user-visible work.
 //!
-//! Phase 2 is **discovery only**: the relay's message set proves the
-//! cross-node ask round-trip and the XML codec on the wire (spike exit
-//! criteria); it is not wired into the stanza delivery path (Phase 4).
+//! Phase 4 wires DM/MUC/presence routing through this relay. Kademlia still
+//! discovers node relays only; entity ownership remains in Postgres claims.
 
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
@@ -27,7 +26,11 @@ use super::ordered_relay::{
     OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation, RemoteStanzaEnvelope,
 };
 use super::resume_bridge::ResumeStealBridge;
-use super::route_bridge::OrderedRelayDeliveryBridge;
+use super::route_bridge::{
+    OrderedRelayDeliveryBridge, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
+    RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
+    RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
+};
 use super::self_fence::LocallyClaimedEntities;
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
@@ -317,6 +320,234 @@ fn record_ordered_relay_reply(reply: &OrderedRelayReply) {
         OrderedRelayReply::Nack(nack) => {
             metrics::record_ordered_relay_nack(nack.reason.metric_label());
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayRegisterRemoteUserResource {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub socket_node: NodeId,
+    pub state: RemoteResourceStateSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceRegistrationStatus {
+    Registered,
+    StaleRegistration,
+    NotOwner,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRemoteResourceRegistrationReply {
+    pub status: RelayRemoteResourceRegistrationStatus,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v1")]
+impl Message<RelayRegisterRemoteUserResource> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceRegistrationReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayRegisterRemoteUserResource,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move { bridge.register_remote_user_resource_on_owner(msg).await })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayUnregisterRemoteUserResource {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRemoteResourceUnregisterReply {
+    pub removed: bool,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_unregister.v1")]
+impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceUnregisterReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayUnregisterRemoteUserResource,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move { bridge.unregister_remote_user_resource_on_owner(msg).await })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayUpdateRemoteUserResource {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub update: RemoteResourceStateUpdate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceUpdateStatus {
+    Updated,
+    StaleRegistration,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRemoteResourceUpdateReply {
+    pub status: RelayRemoteResourceUpdateStatus,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_update.v1")]
+impl Message<RelayUpdateRemoteUserResource> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceUpdateReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayUpdateRemoteUserResource,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move { bridge.update_remote_user_resource_on_owner(msg).await })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayRemoteUserSideEffect {
+    pub source_jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub effect: RemoteUserSideEffect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteUserSideEffectStatus {
+    Applied,
+    StaleRegistration,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRemoteUserSideEffectReply {
+    pub status: RelayRemoteUserSideEffectStatus,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v1")]
+impl Message<RelayRemoteUserSideEffect> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteUserSideEffectReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayRemoteUserSideEffect,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move { bridge.apply_remote_user_side_effect_on_owner(msg).await })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayRouteRemoteResourceStanza {
+    pub source_jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub target: RemoteResourceRouteTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRouteRemoteResourceStanzaReply {
+    pub outcome: RemoteResourceRouteOutcome,
+    pub replies: Vec<RemoteStanza>,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v1")]
+impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayRouteRemoteResourceStanza,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move { bridge.route_remote_resource_stanza_on_owner(msg).await })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayDeliverRemoteResourceFrame {
+    pub frame: RemoteResourceOutboundFrame,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceFrameStatus {
+    Delivered,
+    Backpressure,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRemoteResourceFrameReply {
+    pub status: RelayRemoteResourceFrameStatus,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_frame.v1")]
+impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceFrameReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayDeliverRemoteResourceFrame,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move { bridge.deliver_remote_resource_frame_on_socket(msg).await })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayForceDetachRemoteUserResource {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub requester_bare_jid: jid::BareJid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceForceDetachStatus {
+    Detached,
+    NotLive,
+    Refused,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayForceDetachRemoteUserResourceReply {
+    pub outcome: waddle_xmpp::registry::ForceDetachOutcome,
+    pub status: RelayRemoteResourceForceDetachStatus,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_force_detach.v1")]
+impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayForceDetachRemoteUserResourceReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayForceDetachRemoteUserResource,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        ctx.spawn(async move {
+            bridge
+                .force_detach_remote_user_resource_on_socket(msg)
+                .await
+        })
     }
 }
 
@@ -996,7 +1227,7 @@ impl RelayHandle {
             .await
         {
             Ok(reply) => Ok(reply),
-            Err(error) if is_stale_ref_error(&error) => {
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
                 remote_ref
@@ -1040,7 +1271,7 @@ impl RelayHandle {
             .await
         {
             Ok(reply) => Ok(reply),
-            Err(error) if is_ordered_relookup_retry_error(&error) => {
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
                 match remote_ref
@@ -1054,6 +1285,259 @@ impl RelayHandle {
                 }
             }
             Err(error) => ordered_send_error(&message.envelope, error),
+        }
+    }
+
+    pub async fn register_remote_user_resource(
+        &mut self,
+        message: RelayRegisterRemoteUserResource,
+    ) -> Result<RelayRemoteResourceRegistrationReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.register_remote_user_resource_inner(message) => result,
+        }
+    }
+
+    async fn register_remote_user_resource_inner(
+        &mut self,
+        message: RelayRegisterRemoteUserResource,
+    ) -> Result<RelayRemoteResourceRegistrationReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    pub async fn unregister_remote_user_resource(
+        &mut self,
+        message: RelayUnregisterRemoteUserResource,
+    ) -> Result<RelayRemoteResourceUnregisterReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.unregister_remote_user_resource_inner(message) => result,
+        }
+    }
+
+    async fn unregister_remote_user_resource_inner(
+        &mut self,
+        message: RelayUnregisterRemoteUserResource,
+    ) -> Result<RelayRemoteResourceUnregisterReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    pub async fn update_remote_user_resource(
+        &mut self,
+        message: RelayUpdateRemoteUserResource,
+    ) -> Result<RelayRemoteResourceUpdateReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.update_remote_user_resource_inner(message) => result,
+        }
+    }
+
+    async fn update_remote_user_resource_inner(
+        &mut self,
+        message: RelayUpdateRemoteUserResource,
+    ) -> Result<RelayRemoteResourceUpdateReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    pub async fn remote_user_side_effect(
+        &mut self,
+        message: RelayRemoteUserSideEffect,
+    ) -> Result<RelayRemoteUserSideEffectReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.remote_user_side_effect_inner(message) => result,
+        }
+    }
+
+    async fn remote_user_side_effect_inner(
+        &mut self,
+        message: RelayRemoteUserSideEffect,
+    ) -> Result<RelayRemoteUserSideEffectReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+            .map_err(send_error)
+    }
+
+    pub async fn route_remote_resource_stanza(
+        &mut self,
+        message: RelayRouteRemoteResourceStanza,
+    ) -> Result<RelayRouteRemoteResourceStanzaReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.route_remote_resource_stanza_inner(message) => result,
+        }
+    }
+
+    async fn route_remote_resource_stanza_inner(
+        &mut self,
+        message: RelayRouteRemoteResourceStanza,
+    ) -> Result<RelayRouteRemoteResourceStanzaReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    pub async fn deliver_remote_resource_frame(
+        &mut self,
+        message: RelayDeliverRemoteResourceFrame,
+    ) -> Result<RelayRemoteResourceFrameReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.deliver_remote_resource_frame_inner(message) => result,
+        }
+    }
+
+    async fn deliver_remote_resource_frame_inner(
+        &mut self,
+        message: RelayDeliverRemoteResourceFrame,
+    ) -> Result<RelayRemoteResourceFrameReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    pub async fn force_detach_remote_user_resource(
+        &mut self,
+        message: RelayForceDetachRemoteUserResource,
+    ) -> Result<RelayForceDetachRemoteUserResourceReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.force_detach_remote_user_resource_inner(message) => result,
+        }
+    }
+
+    async fn force_detach_remote_user_resource_inner(
+        &mut self,
+        message: RelayForceDetachRemoteUserResource,
+    ) -> Result<RelayForceDetachRemoteUserResourceReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_stale_ref_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
         }
     }
 
@@ -1167,12 +1651,12 @@ fn is_stale_ref_error<E>(error: &RemoteSendError<E>) -> bool {
     classify(error) == RelaySendFailure::StaleRef
 }
 
-/// Ordered relay envelopes are not retried after `ActorStopped`: that error
-/// may have been enqueued before the actor stopped, so a re-send against a
-/// respawned relay could duplicate a committed side effect once production
-/// delivery is wired. `ActorNotRunning`/`UnknownActor`/`BadActorType` are
-/// still safe re-lookup cases because they prove the cached ref was unusable.
-fn is_ordered_relookup_retry_error<E>(error: &RemoteSendError<E>) -> bool {
+/// Non-idempotent relay messages are not retried after `ActorStopped`: that
+/// error may have been enqueued before the actor stopped, so a re-send against
+/// a respawned relay could duplicate a committed side effect.
+/// `ActorNotRunning`/`UnknownActor`/`BadActorType` are still safe re-lookup
+/// cases because they prove the cached ref was unusable.
+fn is_no_effect_stale_ref_relookup_error<E>(error: &RemoteSendError<E>) -> bool {
     matches!(
         error,
         RemoteSendError::ActorNotRunning
@@ -1539,23 +2023,19 @@ mod tests {
     }
 
     #[test]
-    fn ordered_relookup_excludes_maybe_enqueued_actor_stopped() {
-        assert!(is_ordered_relookup_retry_error::<std::convert::Infallible>(
-            &RemoteSendError::ActorNotRunning
-        ));
-        assert!(is_ordered_relookup_retry_error::<std::convert::Infallible>(
-            &RemoteSendError::BadActorType
-        ));
-        assert!(
-            !is_ordered_relookup_retry_error::<std::convert::Infallible>(
-                &RemoteSendError::ActorStopped
-            )
-        );
-        assert!(
-            !is_ordered_relookup_retry_error::<std::convert::Infallible>(
-                &RemoteSendError::ReplyTimeout
-            )
-        );
+    fn no_effect_relookup_excludes_maybe_enqueued_actor_stopped() {
+        assert!(is_no_effect_stale_ref_relookup_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::ActorNotRunning));
+        assert!(is_no_effect_stale_ref_relookup_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::BadActorType));
+        assert!(!is_no_effect_stale_ref_relookup_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::ActorStopped));
+        assert!(!is_no_effect_stale_ref_relookup_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::ReplyTimeout));
     }
 
     #[test]

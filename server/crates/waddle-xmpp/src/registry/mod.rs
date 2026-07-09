@@ -23,7 +23,7 @@ pub mod user_registry;
 
 pub use connection_registry::{
     BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
-    ForceDetachRequest, OutboundStanza, SendResult,
+    ForceDetachRequest, OutboundStanza, PresenceState, SendResult,
 };
 pub use selection::{
     available_resources_for_user, get_resources_for_user, select_routable_resources_for_user,
@@ -34,6 +34,6 @@ pub use user_actor::delivery::{
 pub use user_actor::GetResources;
 pub use user_registry::{
     DemoteUserActor, GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers, ReapUserIfEmpty,
-    RegisterUserResource, RemoveUser, UnregisterUserResource, UserCount, UserRegistryActor,
-    UserRegistryError, WireUserClusteringClaims,
+    RegisterUserResource, RegisterUserResourceIfOwnerOrAbsent, RemoveUser, UnregisterUserResource,
+    UserCount, UserRegistryActor, UserRegistryError, WireUserClusteringClaims,
 };

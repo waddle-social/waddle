@@ -85,6 +85,7 @@ async fn link_preview_lookup_for_test(
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
     };
@@ -674,6 +675,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
     };

@@ -76,7 +76,7 @@ use waddle_xmpp::{
 use xmpp_parsers::minidom::Element;
 
 mod archive_inbox_upload;
-mod blocking;
+pub(crate) mod blocking;
 mod caps_result;
 mod commands;
 mod community_items;
@@ -106,7 +106,7 @@ mod pin_query;
 mod pubsub_admin;
 mod pubsub_dispatch;
 mod push;
-mod roster;
+pub(crate) mod roster;
 mod sans_io;
 mod search;
 mod session_jid;
@@ -318,6 +318,7 @@ pub async fn handle_iq_with_conn_state(
             state,
             phase.bound_jid(),
             conn_state.roster_interested,
+            conn_state.registry_owner,
         )
         .await;
     }
@@ -406,8 +407,7 @@ pub async fn handle_iq_with_conn_state(
             phase.bound_jid(),
             response_from,
             response_to,
-            conn_state.blocklist_interested,
-            conn_state.state_machine.as_deref_mut(),
+            conn_state,
         )
         .await
     } else if is_push_enable(&iq) || is_push_disable(&iq) {

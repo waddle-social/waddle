@@ -114,6 +114,44 @@ async fn test_unregister_cleans_up() {
 }
 
 #[tokio::test]
+async fn test_register_if_owner_or_absent_refuses_replacement_owner() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+
+    let (entry1, _rx1) = entry();
+    let owner1 = std::sync::Arc::clone(&entry1.carbons_enabled);
+    let registered: bool = actor
+        .ask(RegisterConnectionIfOwnerOrAbsent {
+            jid: jid.clone(),
+            entry: entry1,
+            owner: owner1.clone(),
+        })
+        .await
+        .expect("guarded register empty slot");
+    assert!(registered);
+
+    let (entry2, _rx2) = entry();
+    let owner2 = std::sync::Arc::clone(&entry2.carbons_enabled);
+    let registered: bool = actor
+        .ask(RegisterConnectionIfOwnerOrAbsent {
+            jid: jid.clone(),
+            entry: entry2,
+            owner: owner2.clone(),
+        })
+        .await
+        .expect("guarded register occupied slot");
+    assert!(!registered);
+
+    let current = actor
+        .ask(GetConnectionEntry { jid })
+        .await
+        .expect("entry lookup")
+        .expect("entry remains registered");
+    assert!(std::sync::Arc::ptr_eq(&current.carbons_enabled, &owner1));
+    assert!(!std::sync::Arc::ptr_eq(&current.carbons_enabled, &owner2));
+}
+
+#[tokio::test]
 async fn test_unregister_and_report_empty_is_atomic_per_user_actor() {
     let actor = spawn_actor("alice").await;
     let jid = full("alice", "phone");

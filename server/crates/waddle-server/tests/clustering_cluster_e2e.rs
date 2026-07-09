@@ -822,6 +822,99 @@ async fn cluster_exit_criteria_end_to_end() {
         "origin handled count should include the cross-node stanza: {origin_ack}"
     );
 
+    // PR #1231 regression: a second resource for the SAME bare JID can land on
+    // a non-owner node. The authoritative UserActor claim stays on node A, but
+    // node A registers a remote resource whose outbound frames are relayed back
+    // to node B's real WebSocket.
+    let remote_resource = format!("ordered-remote-device-{}", uuid::Uuid::new_v4());
+    let mut remote_target_client = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &remote_resource,
+    )
+    .await
+    .expect("same-bare remote resource binds on node B without stealing node A's UserActor");
+    let remote_target_full: jid::FullJid = remote_target_client
+        .full_jid
+        .as_ref()
+        .expect("remote target bind full jid")
+        .parse()
+        .expect("remote target full jid");
+    let after_remote_bind = claim_store
+        .current_claim(&target_entity)
+        .await
+        .expect("target claim lookup after same-bare remote bind")
+        .expect("target claim remains present after same-bare remote bind");
+    assert_eq!(
+        after_remote_bind.owner.node_id, node_a,
+        "same-bare remote bind must not steal the authoritative UserActor claim"
+    );
+    assert_eq!(
+        after_remote_bind.claim_epoch, target_snapshot.claim_epoch,
+        "same-bare remote bind must not advance the UserActor claim epoch"
+    );
+
+    let mut same_bare_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_target_full.clone())));
+    same_bare_message.thread = Some(xmpp_parsers::message::Thread {
+        id: "ordered-remote-same-bare".to_string(),
+        parent: None,
+    });
+    same_bare_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "phase4 same-bare remote resource".to_string(),
+    );
+    let same_bare_xml = waddle_xmpp::parser::message_to_string(&same_bare_message)
+        .expect("serialize typed same-bare remote message");
+    ordered_origin_client
+        .send(&same_bare_xml)
+        .await
+        .expect("origin sends full-JID message to same-bare remote resource");
+    let same_bare_delivered = remote_target_client
+        .recv_matching(|frame| {
+            frame.contains("ordered-remote-same-bare")
+                && frame.contains("phase4 same-bare remote resource")
+        })
+        .await
+        .expect("same-bare remote resource receives owner-forwarded message");
+    assert!(
+        same_bare_delivered.contains(remote_target_full.as_str()),
+        "same-bare remote frame should remain addressed to the node-B full JID: \
+         {same_bare_delivered}"
+    );
+
+    let mut remote_origin_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(ordered_target_full.clone())));
+    remote_origin_message.thread = Some(xmpp_parsers::message::Thread {
+        id: "ordered-remote-origin".to_string(),
+        parent: None,
+    });
+    remote_origin_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "phase4 remote resource origin route".to_string(),
+    );
+    let remote_origin_xml = waddle_xmpp::parser::message_to_string(&remote_origin_message)
+        .expect("serialize typed remote-origin message");
+    remote_target_client
+        .send(&remote_origin_xml)
+        .await
+        .expect("same-bare remote resource sends to owner-node sibling resource");
+    let remote_origin_delivered = ordered_target_client
+        .recv_matching(|frame| {
+            frame.contains("ordered-remote-origin")
+                && frame.contains("phase4 remote resource origin route")
+        })
+        .await
+        .expect("owner-node sibling receives message originated by remote resource");
+    assert!(
+        remote_origin_delivered.contains(ordered_target_full.as_str()),
+        "remote-origin frame should remain addressed to the owner-node full JID: \
+         {remote_origin_delivered}"
+    );
+    let _ = remote_target_client.close().await;
+
     let ordered_origin_node = NodeId::new(handle.node_id.as_str().to_string());
     let ordered_channel = ordered_channel(
         ordered_stream_id,

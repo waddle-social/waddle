@@ -196,12 +196,19 @@ pub(super) async fn register_bound_connection_after_frame(
         .connection_registry
         .entry_if_owner(&jid, &owner)
     {
-        let registered = crate::server::dual_registration::mirror_register(
+        let mirror_outcome = crate::server::dual_registration::mirror_register_outcome(
             &state.deps.protocol.user_registry,
             jid.clone(),
-            entry,
+            entry.clone(),
         )
         .await;
+        let registered = match mirror_outcome {
+            crate::server::dual_registration::MirrorRegisterOutcome::Registered => true,
+            crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
+                register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
+            }
+            crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
+        };
         if !registered {
             // Rollback also clears the presence_states published above.
             state
@@ -235,4 +242,40 @@ pub(super) async fn register_bound_connection_after_frame(
     );
 
     RegistrationAfterFrame::Registered(sm_finalization)
+}
+
+#[cfg(feature = "clustering")]
+async fn register_remote_clustered_resource(
+    state: &WebSocketState,
+    jid: &FullJid,
+    entry: waddle_xmpp::registry::ConnectionEntry,
+    owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    else {
+        return false;
+    };
+    match bridge
+        .try_register_remote_user_resource(jid, entry, owner)
+        .await
+    {
+        crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Registered => true,
+        crate::clustering::route_bridge::RemoteResourceRegisterOutcome::NotRemote
+        | crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Failed => false,
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn register_remote_clustered_resource(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _entry: waddle_xmpp::registry::ConnectionEntry,
+    _owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    false
 }

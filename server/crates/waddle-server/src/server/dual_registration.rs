@@ -42,9 +42,11 @@ use std::time::Duration;
 
 use jid::FullJid;
 use kameo::actor::ActorRef;
+use kameo::error::SendError;
 use tracing::warn;
 use waddle_xmpp::registry::{
     ConnectionEntry, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
+    UserRegistryError,
 };
 
 /// Upper bound on how long the fail-closed register `ask` may wait for the
@@ -59,6 +61,13 @@ const BIND_REGISTER_TIMEOUT: Duration = Duration::from_secs(2);
 /// wedged actor cannot meaningfully delay teardown.
 const MIRROR_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MirrorRegisterOutcome {
+    Registered,
+    ForeignOwner,
+    Failed,
+}
+
 /// Mirror a resource registration into the actor tree (authoritative, bounded).
 ///
 /// `entry` MUST be the live DashMap [`ConnectionEntry`] (obtained via
@@ -72,11 +81,23 @@ const MIRROR_TIMEOUT: Duration = Duration::from_secs(2);
 /// resource (ADR-0017 Phase 1 completion).
 #[must_use = "a false return means the actor tree did not record the resource; \
               the caller must roll back the DashMap registration and fail the bind"]
+#[cfg(test)]
 pub(crate) async fn mirror_register(
     user_registry: &ActorRef<UserRegistryActor>,
     jid: FullJid,
     entry: ConnectionEntry,
 ) -> bool {
+    matches!(
+        mirror_register_outcome(user_registry, jid, entry).await,
+        MirrorRegisterOutcome::Registered
+    )
+}
+
+pub(crate) async fn mirror_register_outcome(
+    user_registry: &ActorRef<UserRegistryActor>,
+    jid: FullJid,
+    entry: ConnectionEntry,
+) -> MirrorRegisterOutcome {
     // `RegisterUserResource` replies `Result<(), UserRegistryError>`, and kameo
     // *flattens* a `Result` reply: `ask().await` yields
     // `Result<(), SendError<RegisterUserResource, UserRegistryError>>`, NOT a
@@ -94,7 +115,10 @@ pub(crate) async fn mirror_register(
         .reply_timeout(BIND_REGISTER_TIMEOUT)
         .await
     {
-        Ok(()) => true,
+        Ok(()) => MirrorRegisterOutcome::Registered,
+        Err(SendError::HandlerError(UserRegistryError::ClaimHeldByAnotherNode(_))) => {
+            MirrorRegisterOutcome::ForeignOwner
+        }
         Err(error) => {
             warn!(
                 jid = %jid,
@@ -103,7 +127,7 @@ pub(crate) async fn mirror_register(
                  actor failed; rolling back DashMap registration and failing \
                  the bind"
             );
-            false
+            MirrorRegisterOutcome::Failed
         }
     }
 }

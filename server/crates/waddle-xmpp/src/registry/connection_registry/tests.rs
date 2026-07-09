@@ -70,6 +70,69 @@ fn test_register_replaces_existing() {
     assert_eq!(registry.connection_count(), 1);
 }
 
+#[tokio::test]
+async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
+    let registry = ConnectionRegistry::new();
+    let jid: FullJid = "user@example.com/web".parse().unwrap();
+    let bare = jid.to_bare();
+    let (tx, mut rx) = mpsc::channel(16);
+    let entry = ConnectionEntry::new(tx);
+    entry.carbons_enabled.store(true, Ordering::Relaxed);
+    entry.roster_interested.store(true, Ordering::Relaxed);
+    entry.blocklist_interested.store(true, Ordering::Relaxed);
+    entry.presence_available.store(true, Ordering::Relaxed);
+    entry.presence_priority.store(7, Ordering::Relaxed);
+
+    let owner = registry.register_entry(jid.clone(), entry.clone());
+
+    assert!(Arc::ptr_eq(&owner, &entry.carbons_enabled));
+    assert!(registry.is_carbons_enabled(&jid));
+    assert_eq!(
+        registry.get_roster_interested_resources_for_user(&bare),
+        vec![jid.clone()]
+    );
+    assert_eq!(
+        registry.get_blocklist_interested_resources_for_user(&bare),
+        vec![jid.clone()]
+    );
+    assert_eq!(
+        registry.get_available_resources_for_user(&bare),
+        vec![(jid.clone(), 7)]
+    );
+
+    let message = Stanza::Message(make_test_message("user@example.com"));
+    assert!(registry.send_to(&jid, message.clone()).await.is_sent());
+    let outbound = rx
+        .try_recv()
+        .expect("prebuilt sender receives registry fanout");
+    assert_eq!(outbound.stanza.name(), message.name());
+}
+
+#[test]
+fn test_register_entry_if_owner_or_absent_refuses_replacement_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid: FullJid = "user@example.com/web".parse().unwrap();
+    let (tx1, _rx1) = mpsc::channel(16);
+    let entry1 = ConnectionEntry::new(tx1);
+    let owner1 = entry1.carbons_handle();
+
+    assert!(registry.register_entry_if_owner_or_absent(jid.clone(), entry1.clone(), &owner1));
+    assert!(registry.entry_if_owner(&jid, &owner1).is_some());
+
+    let (tx2, _rx2) = mpsc::channel(16);
+    let entry2 = ConnectionEntry::new(tx2);
+    let owner2 = entry2.carbons_handle();
+
+    assert!(!registry.register_entry_if_owner_or_absent(jid.clone(), entry2.clone(), &owner2));
+    assert!(registry.entry_if_owner(&jid, &owner1).is_some());
+    assert!(registry.entry_if_owner(&jid, &owner2).is_none());
+    assert_eq!(registry.connection_count(), 1);
+
+    assert!(registry.register_entry_if_owner_or_absent(jid.clone(), entry1.clone(), &owner1));
+    assert!(registry.entry_if_owner(&jid, &owner1).is_some());
+    assert_eq!(registry.connection_count(), 1);
+}
+
 #[test]
 fn test_register_replacement_does_not_inherit_roster_interest() {
     let registry = ConnectionRegistry::new();
@@ -814,4 +877,33 @@ fn update_presence_state_if_owner_refuses_absent_entry() {
         Vec::new(),
     ));
     assert!(registry.get_presence_state(&jid).is_none());
+}
+
+#[test]
+fn try_send_outbound_if_owner_preserves_kind_and_refuses_stale_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+
+    let (tx_a, _rx_a) = mpsc::channel(4);
+    let stale_owner = registry.register(jid.clone(), tx_a);
+
+    let (tx_b, mut rx_b) = mpsc::channel(4);
+    let live_owner = registry.register(jid.clone(), tx_b);
+
+    let stale = registry.try_send_outbound_if_owner(
+        &jid,
+        &stale_owner,
+        OutboundStanza::peer_stanza(Stanza::Message(make_test_message("alice@example.com"))),
+    );
+    assert_eq!(stale, BroadcastOutcome::NotConnected);
+    assert!(rx_b.try_recv().is_err());
+
+    let live = registry.try_send_outbound_if_owner(
+        &jid,
+        &live_owner,
+        OutboundStanza::peer_stanza(Stanza::Message(make_test_message("alice@example.com"))),
+    );
+    assert_eq!(live, BroadcastOutcome::Delivered);
+    let outbound = rx_b.try_recv().expect("live owner should receive frame");
+    assert_eq!(outbound.kind, DeliveryKind::PeerStanza);
 }

@@ -241,7 +241,7 @@ async fn send_roster_push_to_all_resources(
     }
 }
 
-pub(super) async fn send_roster_push_to_sibling_resources(
+pub(crate) async fn send_roster_push_to_sibling_resources(
     state: &WebSocketState,
     user_jid: &BareJid,
     source_jid: &FullJid,

@@ -143,6 +143,47 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Non-blocking send of an already-tagged outbound frame, gated on the
+    /// resource still belonging to the provided connection owner.
+    ///
+    /// Clustered remote-resource delivery uses this on the socket node: the
+    /// authoritative `UserActor` may live on another node, but the real
+    /// WebSocket channel remains in this registry. The owner check mirrors
+    /// [`Self::entry_if_owner`] so a delayed relay frame from an older same
+    /// full-JID connection cannot be written to a replacement session.
+    pub fn try_send_outbound_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        outbound: OutboundStanza,
+    ) -> BroadcastOutcome {
+        let sender = match self.connections.get(jid) {
+            Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
+                entry.value().sender.clone()
+            }
+            _ => {
+                prometheus::increment_broadcast_not_connected();
+                return BroadcastOutcome::NotConnected;
+            }
+        };
+
+        match sender.try_send(outbound) {
+            Ok(()) => {
+                prometheus::increment_broadcast_delivered();
+                BroadcastOutcome::Delivered
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                prometheus::increment_broadcast_dropped_full();
+                BroadcastOutcome::DroppedFull
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                prometheus::increment_broadcast_dropped_closed();
+                self.remove_if_sender_closed_owner(jid, &sender);
+                BroadcastOutcome::DroppedClosed
+            }
+        }
+    }
+
     /// Race-safe eviction of a stale entry whose outbound channel is closed.
     ///
     /// Used on the non-blocking broadcast path to clean up zombies without

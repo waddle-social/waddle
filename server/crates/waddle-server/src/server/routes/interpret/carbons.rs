@@ -8,6 +8,50 @@ pub(super) async fn send_carbons(
     kind: CarbonKind,
     exclude: Vec<FullJid>,
 ) {
+    #[cfg(feature = "clustering")]
+    if let Some(state) = deps.web_socket_state {
+        if let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        {
+            for source_jid in &exclude {
+                if bridge
+                    .try_fanout_remote_user_carbons(
+                        source_jid,
+                        &owner,
+                        &message,
+                        kind,
+                        exclude.clone(),
+                    )
+                    .await
+                {
+                    return;
+                }
+            }
+        }
+    }
+    send_carbons_to_registry(
+        registry,
+        deps.sm_session_registry,
+        owner,
+        message,
+        kind,
+        exclude,
+    )
+    .await;
+}
+
+pub(crate) async fn send_carbons_to_registry(
+    registry: &ConnectionRegistry,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    owner: BareJid,
+    message: Box<Message>,
+    kind: CarbonKind,
+    exclude: Vec<FullJid>,
+) {
     // Per XEP-0280 §5, a carbon copy is the original
     // <message/> wrapped in <sent>/<received> →
     // <forwarded xmlns='urn:xmpp:forward:0'> → original.
@@ -41,7 +85,7 @@ pub(super) async fn send_carbons(
     // resources via
     // `record_stanza_for_detached_bound_resource`; the
     // interpreter does the same here.
-    let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry {
+    let detached_targets: Vec<jid::FullJid> = match sm_session_registry {
         Some(sm) => sm
             .detached_carbon_resources_for_user(&owner, &exclude)
             .await
@@ -105,7 +149,7 @@ pub(super) async fn send_carbons(
     }
     // Detached pass — queue the same envelope for replay
     // when the resource resumes its XEP-0198 session.
-    if let Some(sm) = deps.sm_session_registry {
+    if let Some(sm) = sm_session_registry {
         for target in detached_targets {
             let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
                 Ok(env) => env,
