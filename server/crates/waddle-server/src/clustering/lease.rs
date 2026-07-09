@@ -268,7 +268,6 @@ fn stable_offset(node_id: &str) -> usize {
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabaseDriver};
-    use std::sync::OnceLock;
     use std::time::Duration;
 
     // These tests share one `clustering_keypair_slots` table, so serialize
@@ -276,11 +275,6 @@ mod tests {
     // `WADDLE_TEST_POSTGRES_URL` points at a Postgres (the control-plane CAS
     // has no SQLite equivalent). CI runs them under the clustering feature +
     // the Nix-spawned Postgres.
-    fn serial_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
-
     fn ident() -> LeaseIdentity {
         LeaseIdentity {
             node_id: NodeId::generate(),
@@ -317,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_nodes_lease_distinct_slots() {
-        let _guard = serial_lock().lock().await;
+        let _guard = crate::clustering::keypair_slot_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
         };
@@ -329,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_slot_pool_admits_exactly_one() {
-        let _guard = serial_lock().lock().await;
+        let _guard = crate::clustering::keypair_slot_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
         };
@@ -341,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_renews_and_release_frees() {
-        let _guard = serial_lock().lock().await;
+        let _guard = crate::clustering::keypair_slot_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
         };
@@ -358,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_slot_is_stolen_and_old_holder_fences() {
-        let _guard = serial_lock().lock().await;
+        let _guard = crate::clustering::keypair_slot_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
         };
@@ -382,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn sub_second_ttl_uses_millisecond_precision() {
-        let _guard = serial_lock().lock().await;
+        let _guard = crate::clustering::keypair_slot_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
         };

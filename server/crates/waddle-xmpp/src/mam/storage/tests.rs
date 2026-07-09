@@ -77,9 +77,13 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     let archive = bare("room@conference.example.com");
     let archive_jid = jid("room@conference.example.com");
     let origin_id = waddle_xmpp_core::xep0359::OriginId::new("client-origin-1");
+    let base_timestamp = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
 
     let first = ArchivedMessage {
         id: "archive-first".to_string(),
+        timestamp: base_timestamp,
         body: Some("first copy".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
@@ -88,6 +92,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     };
     let retry = ArchivedMessage {
         id: "archive-retry".to_string(),
+        timestamp: base_timestamp,
         body: Some("first copy".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
@@ -96,6 +101,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     };
     let same_sender_different_body = ArchivedMessage {
         id: "archive-distinct-body".to_string(),
+        timestamp: base_timestamp + ChronoDuration::seconds(1),
         body: Some("distinct send with reused origin-id".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
@@ -104,6 +110,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     };
     let other_sender = ArchivedMessage {
         id: "archive-other-sender".to_string(),
+        timestamp: base_timestamp + ChronoDuration::seconds(2),
         body: Some("other sender".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
@@ -112,6 +119,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     };
     let same_nick_next_generation = ArchivedMessage {
         id: "archive-next-generation".to_string(),
+        timestamp: base_timestamp + ChronoDuration::seconds(3),
         body: Some("same nick next generation".to_string()),
         origin_id: Some(origin_id),
         message_type: xmpp_parsers::message::MessageType::Groupchat,

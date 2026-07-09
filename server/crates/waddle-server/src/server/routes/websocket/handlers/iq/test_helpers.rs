@@ -34,6 +34,7 @@ pub async fn handle_iq(
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
         state_machine: None,
+        ordered_relay_origin: None,
     };
     handle_iq_with_conn_state(
         *iq,

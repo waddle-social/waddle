@@ -10,21 +10,51 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::join_all;
 use jid::{BareJid, FullJid};
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use kameo::message::Context;
 use kameo::Actor;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use super::connection_registry::ConnectionEntry;
+use super::connection_registry::{ConnectionEntry, ForceDetachOutcome, ForceDetachRequest};
+use super::user_actor::delivery::GetConnectionEntry;
 use super::user_actor::{
-    RegisterConnection, ResourceCount, UnregisterConnectionAndReportEmpty, UserActor,
+    GetResources, RegisterConnection, ResourceCount, UnregisterConnectionAndReportEmpty, UserActor,
 };
 use crate::metrics;
+use crate::ownership::{
+    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    SharedNodeIdentity, StalePredicate,
+};
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A locally-held UserActor ownership lease. The `owner` is captured at
+/// acquisition time rather than read back from `SharedNodeIdentity` on
+/// release, because self-fence rotates the shared identity while old local
+/// actors may still be demoted or removed.
+#[derive(Clone)]
+struct UserClaimLease {
+    owner: NodeIdentity,
+    epoch: ClaimEpoch,
+}
+
+/// A locally-spawned user's actor ref plus the ownership lease this node holds
+/// for that bare JID.
+#[derive(Clone)]
+struct UserEntry {
+    actor_ref: ActorRef<UserActor>,
+    claim: UserClaimLease,
+}
+
+enum UserEntryClaimStatus {
+    Current,
+    ProvenStale,
+    ValidationUnavailable,
+}
 
 /// Server-wide registry that maps bare JIDs to their `UserActor`.
 ///
@@ -32,8 +62,10 @@ const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 /// external synchronisation is required.
 #[derive(Actor)]
 pub struct UserRegistryActor {
-    users: HashMap<BareJid, ActorRef<UserActor>>,
+    users: HashMap<BareJid, UserEntry>,
     poisoned_users: HashSet<BareJid>,
+    claim_store: Arc<dyn ClaimStore>,
+    node_identity: SharedNodeIdentity,
 }
 
 impl UserRegistryActor {
@@ -43,18 +75,292 @@ impl UserRegistryActor {
         Self {
             users: HashMap::new(),
             poisoned_users: HashSet::new(),
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
         }
     }
 
-    fn spawn_user_actor(&mut self, bare_jid: BareJid) -> ActorRef<UserActor> {
+    async fn acquire_user_claim(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Result<UserClaimLease, UserRegistryError> {
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        let identity = self.node_identity.current();
+        match self.claim_store.ensure_claimed(&entity, &identity).await {
+            Ok(epoch) => Ok(UserClaimLease {
+                owner: identity,
+                epoch,
+            }),
+            Err(ClaimError::AlreadyClaimed) => {
+                self.steal_from_dead_user_owner(&entity, bare_jid, &identity)
+                    .await
+            }
+            Err(error) => {
+                warn!(
+                    jid = %bare_jid,
+                    %error,
+                    "UserActor claim acquisition failed"
+                );
+                Err(UserRegistryError::ClaimUnavailable(bare_jid.clone()))
+            }
+        }
+    }
+
+    async fn steal_from_dead_user_owner(
+        &self,
+        entity: &Entity,
+        bare_jid: &BareJid,
+        identity: &NodeIdentity,
+    ) -> Result<UserClaimLease, UserRegistryError> {
+        let snapshot = match self.claim_store.current_claim(entity).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) | Err(_) => {
+                return Err(UserRegistryError::ClaimHeldByAnotherNode(bare_jid.clone()))
+            }
+        };
+        if snapshot.owner_lease_fresh {
+            debug!(
+                jid = %bare_jid,
+                owner = %snapshot.owner.node_id,
+                "UserActor ownership claim is held by a live foreign node"
+            );
+            return Err(UserRegistryError::ClaimHeldByAnotherNode(bare_jid.clone()));
+        }
+        match self
+            .claim_store
+            .steal_stale(
+                entity,
+                snapshot.claim_epoch,
+                StalePredicate::OwnerStale,
+                identity,
+            )
+            .await
+        {
+            Ok(epoch) => {
+                info!(
+                    jid = %bare_jid,
+                    previous_owner = %snapshot.owner.node_id,
+                    "reclaimed UserActor ownership from a dead owner"
+                );
+                Ok(UserClaimLease {
+                    owner: identity.clone(),
+                    epoch,
+                })
+            }
+            Err(error) => {
+                debug!(
+                    jid = %bare_jid,
+                    %error,
+                    "UserActor dead-owner steal lost the claim race"
+                );
+                Err(UserRegistryError::ClaimHeldByAnotherNode(bare_jid.clone()))
+            }
+        }
+    }
+
+    fn spawn_user_actor(
+        &mut self,
+        bare_jid: BareJid,
+        claim: UserClaimLease,
+    ) -> ActorRef<UserActor> {
         let actor = UserActor::new(bare_jid.clone());
         let actor_ref = UserActor::spawn(actor);
-        self.users.insert(bare_jid, actor_ref.clone());
+        self.users.insert(
+            bare_jid,
+            UserEntry {
+                actor_ref: actor_ref.clone(),
+                claim,
+            },
+        );
         actor_ref
     }
 
-    fn mark_actor_state_lost(&mut self, bare_jid: &BareJid) -> UserRegistryError {
+    async fn release_user_claim(&self, bare_jid: &BareJid, claim: &UserClaimLease) {
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        if let Err(error) = self
+            .claim_store
+            .release(&entity, &claim.owner, claim.epoch)
+            .await
+        {
+            warn!(
+                jid = %bare_jid,
+                owner = %claim.owner.node_id,
+                epoch = claim.epoch.0,
+                %error,
+                "failed to release UserActor ownership claim"
+            );
+        }
+    }
+
+    async fn validate_existing_user_entry_claim(
+        &self,
+        bare_jid: &BareJid,
+        entry: &UserEntry,
+    ) -> UserEntryClaimStatus {
+        let current_identity = self.node_identity.current();
+        if entry.claim.owner != current_identity {
+            warn!(
+                jid = %bare_jid,
+                claim_owner = %entry.claim.owner.node_id,
+                current_owner = %current_identity.node_id,
+                "existing UserActor claim identity is stale; demoting before reuse"
+            );
+            return UserEntryClaimStatus::ProvenStale;
+        }
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        match self
+            .claim_store
+            .fence(&entity, &entry.claim.owner, entry.claim.epoch)
+            .await
+        {
+            Ok(true) => UserEntryClaimStatus::Current,
+            Ok(false) => {
+                warn!(
+                    jid = %bare_jid,
+                    epoch = entry.claim.epoch.0,
+                    "existing UserActor no longer owns its fenced claim; demoting before reuse"
+                );
+                UserEntryClaimStatus::ProvenStale
+            }
+            Err(error) => {
+                warn!(
+                    jid = %bare_jid,
+                    epoch = entry.claim.epoch.0,
+                    %error,
+                    "failed to validate existing UserActor claim; refusing reuse without mutating actor state"
+                );
+                UserEntryClaimStatus::ValidationUnavailable
+            }
+        }
+    }
+
+    async fn existing_user_actor_for_current_claim(
+        &mut self,
+        bare_jid: &BareJid,
+    ) -> Result<Option<ActorRef<UserActor>>, UserRegistryError> {
+        let Some(entry) = self.users.get(bare_jid).cloned() else {
+            return Ok(None);
+        };
+        if !entry.actor_ref.is_alive() {
+            debug!(jid = %bare_jid, "Detected dead UserActor; failing fast");
+            return Err(self.mark_actor_state_lost(bare_jid).await);
+        }
+        match self
+            .validate_existing_user_entry_claim(bare_jid, &entry)
+            .await
+        {
+            UserEntryClaimStatus::Current => return Ok(Some(entry.actor_ref)),
+            UserEntryClaimStatus::ValidationUnavailable => {
+                return Err(UserRegistryError::ClaimUnavailable(bare_jid.clone()));
+            }
+            UserEntryClaimStatus::ProvenStale => {}
+        }
+        if !self
+            .force_detach_stale_actor_resources(bare_jid, &entry.actor_ref)
+            .await
+        {
+            return Err(UserRegistryError::StaleUserActorRetirementFailed(
+                bare_jid.clone(),
+            ));
+        }
         self.users.remove(bare_jid);
+        entry.actor_ref.kill();
+        Ok(None)
+    }
+
+    async fn force_detach_stale_actor_resources(
+        &self,
+        bare_jid: &BareJid,
+        actor_ref: &ActorRef<UserActor>,
+    ) -> bool {
+        let resources = match actor_ref
+            .ask(GetResources)
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+        {
+            Ok(resources) => resources,
+            Err(error) => {
+                warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "failed to enumerate stale UserActor resources; refusing claim reuse"
+                );
+                return false;
+            }
+        };
+        let mut ack_receivers = Vec::new();
+        for jid in resources {
+            let entry = match actor_ref
+                .ask(GetConnectionEntry { jid: jid.clone() })
+                .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+                .reply_timeout(CHILD_ACTOR_TIMEOUT)
+                .await
+            {
+                Ok(Some(entry)) => entry,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(
+                        jid = %jid,
+                        ?error,
+                        "failed to read stale UserActor resource entry; refusing claim reuse"
+                    );
+                    return false;
+                }
+            };
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            let request = ForceDetachRequest {
+                requester_bare_jid: bare_jid.clone(),
+                ack,
+            };
+            if let Err(error) = entry.force_detach_sender().try_send(request) {
+                warn!(
+                    jid = %jid,
+                    ?error,
+                    "failed to queue stale UserActor resource force-detach; refusing claim reuse"
+                );
+                return false;
+            }
+            ack_receivers.push((jid, ack_rx));
+        }
+        let ack_waits = ack_receivers.into_iter().map(|(jid, ack_rx)| async move {
+            (jid, tokio::time::timeout(CHILD_ACTOR_TIMEOUT, ack_rx).await)
+        });
+        for (jid, outcome) in join_all(ack_waits).await {
+            match outcome {
+                Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {}
+                Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
+                    warn!(
+                        jid = %jid,
+                        requester = %bare_jid,
+                        "stale UserActor resource force-detach identity mismatch; refusing claim reuse"
+                    );
+                    return false;
+                }
+                Ok(Err(_closed)) => {
+                    warn!(
+                        jid = %jid,
+                        "stale UserActor resource force-detach ack channel closed; refusing claim reuse"
+                    );
+                    return false;
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        jid = %jid,
+                        timeout_ms = CHILD_ACTOR_TIMEOUT.as_millis() as u64,
+                        "stale UserActor resource force-detach timed out; refusing claim reuse"
+                    );
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    async fn mark_actor_state_lost(&mut self, bare_jid: &BareJid) -> UserRegistryError {
+        if let Some(entry) = self.users.remove(bare_jid) {
+            self.release_user_claim(bare_jid, &entry.claim).await;
+        }
         self.poisoned_users.insert(bare_jid.clone());
         metrics::record_actor_restart("user_actor", "detected_dead_actor_fail_fast");
         UserRegistryError::UserActorStateLost(bare_jid.clone())
@@ -77,6 +383,37 @@ pub enum UserRegistryError {
     UserActorStateLost(BareJid),
     #[error("user actor for {0} is temporarily overloaded")]
     UserActorBusy(BareJid),
+    #[error("user actor {0}'s ownership claim is held by another node")]
+    ClaimHeldByAnotherNode(BareJid),
+    #[error("user actor {0}'s ownership claim is unavailable")]
+    ClaimUnavailable(BareJid),
+    #[error("stale user actor {0} could not be retired before claim reuse")]
+    StaleUserActorRetirementFailed(BareJid),
+}
+
+/// Wire the real, clustering-backed claim store/identity into an
+/// already-spawned user registry (ADR-0017 Phase 4 Slice 1b).
+///
+/// Construction-order note: the user registry is spawned while constructing
+/// `WebSocketState`, after clustering startup has produced its shared claim
+/// pair on `AppState`. A `None` pair leaves this registry on its default
+/// single-node [`InProcessClaimStore`] plus [`NodeIdentity::local`].
+pub struct WireUserClusteringClaims {
+    pub claim_store: Arc<dyn ClaimStore>,
+    pub node_identity: SharedNodeIdentity,
+}
+
+impl kameo::message::Message<WireUserClusteringClaims> for UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: WireUserClusteringClaims,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.claim_store = msg.claim_store;
+        self.node_identity = msg.node_identity;
+    }
 }
 
 /// Return the `UserActor` for the given bare JID, spawning one if it does not
@@ -97,17 +434,17 @@ impl kameo::message::Message<GetOrCreateUser> for UserRegistryActor {
             return Err(UserRegistryError::UserActorStateLost(msg.bare_jid));
         }
 
-        if let Some(actor_ref) = self.users.get(&msg.bare_jid) {
-            if actor_ref.is_alive() {
-                debug!(jid = %msg.bare_jid, "Returning existing UserActor");
-                return Ok(actor_ref.clone());
-            }
-            debug!(jid = %msg.bare_jid, "Detected dead UserActor; failing fast");
-            return Err(self.mark_actor_state_lost(&msg.bare_jid));
+        if let Some(actor_ref) = self
+            .existing_user_actor_for_current_claim(&msg.bare_jid)
+            .await?
+        {
+            debug!(jid = %msg.bare_jid, "Returning existing UserActor");
+            return Ok(actor_ref);
         }
 
         debug!(jid = %msg.bare_jid, "Spawning new UserActor");
-        let actor_ref = self.spawn_user_actor(msg.bare_jid);
+        let claim = self.acquire_user_claim(&msg.bare_jid).await?;
+        let actor_ref = self.spawn_user_actor(msg.bare_jid, claim);
         Ok(actor_ref)
     }
 }
@@ -124,14 +461,34 @@ impl kameo::message::Message<GetUser> for UserRegistryActor {
         if self.poisoned_users.contains(&msg.bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(msg.bare_jid));
         }
-        if let Some(actor_ref) = self.users.get(&msg.bare_jid) {
-            if actor_ref.is_alive() {
-                return Ok(Some(actor_ref.clone()));
+        self.existing_user_actor_for_current_claim(&msg.bare_jid)
+            .await
+    }
+}
+
+/// Look up a local `UserActor` for local-claim health/demotion logic without
+/// triggering the dead-actor state-lost path. A caller that is already in the
+/// self-fence/deposed-owner path must not release the durable claim as a side
+/// effect of observing a dead actor; demotion owns the fenced cleanup.
+pub struct GetUserForLocalClaim {
+    pub bare_jid: BareJid,
+}
+
+impl kameo::message::Message<GetUserForLocalClaim> for UserRegistryActor {
+    type Reply = Option<ActorRef<UserActor>>;
+
+    async fn handle(
+        &mut self,
+        msg: GetUserForLocalClaim,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.users.get(&msg.bare_jid).and_then(|entry| {
+            if entry.actor_ref.is_alive() {
+                Some(entry.actor_ref.clone())
+            } else {
+                None
             }
-            debug!(jid = %msg.bare_jid, "Detected dead UserActor; failing fast");
-            return Err(self.mark_actor_state_lost(&msg.bare_jid));
-        }
-        Ok(None)
+        })
     }
 }
 
@@ -161,14 +518,14 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
 
-        let user_actor = if let Some(actor_ref) = self.users.get(&bare_jid) {
-            if actor_ref.is_alive() {
-                actor_ref.clone()
-            } else {
-                return Err(self.mark_actor_state_lost(&bare_jid));
-            }
+        let user_actor = if let Some(actor_ref) = self
+            .existing_user_actor_for_current_claim(&bare_jid)
+            .await?
+        {
+            actor_ref
         } else {
-            self.spawn_user_actor(bare_jid.clone())
+            let claim = self.acquire_user_claim(&bare_jid).await?;
+            self.spawn_user_actor(bare_jid.clone(), claim)
         };
 
         match user_actor
@@ -184,7 +541,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 return Err(UserRegistryError::UserActorBusy(bare_jid));
             }
-            Err(_) => return Err(self.mark_actor_state_lost(&bare_jid)),
+            Err(_) => return Err(self.mark_actor_state_lost(&bare_jid).await),
         }
 
         Ok(())
@@ -214,14 +571,15 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
 
-        let Some(user_actor) = self.users.get(&bare_jid).cloned() else {
+        let Some(entry) = self.users.get(&bare_jid).cloned() else {
             return Ok(());
         };
-        if !user_actor.is_alive() {
-            return Err(self.mark_actor_state_lost(&bare_jid));
+        if !entry.actor_ref.is_alive() {
+            return Err(self.mark_actor_state_lost(&bare_jid).await);
         }
 
-        let is_empty = match user_actor
+        let is_empty = match entry
+            .actor_ref
             .ask(UnregisterConnectionAndReportEmpty {
                 jid: msg.jid,
                 owner: msg.owner,
@@ -234,11 +592,13 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 return Err(UserRegistryError::UserActorBusy(bare_jid));
             }
-            Err(_) => return Err(self.mark_actor_state_lost(&bare_jid)),
+            Err(_) => return Err(self.mark_actor_state_lost(&bare_jid).await),
         };
 
         if is_empty {
-            self.users.remove(&bare_jid);
+            if let Some(entry) = self.users.remove(&bare_jid) {
+                self.release_user_claim(&bare_jid, &entry.claim).await;
+            }
             self.poisoned_users.remove(&bare_jid);
         }
 
@@ -261,12 +621,42 @@ impl kameo::message::Message<RemoveUser> for UserRegistryActor {
         msg: RemoveUser,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let removed = self.users.remove(&msg.bare_jid).is_some();
+        let removed_entry = self.users.remove(&msg.bare_jid);
+        let removed = removed_entry.is_some();
         let cleared_poison = self.poisoned_users.remove(&msg.bare_jid);
+        if let Some(entry) = removed_entry {
+            self.release_user_claim(&msg.bare_jid, &entry.claim).await;
+        }
         if removed {
             debug!(jid = %msg.bare_jid, "Removed user from registry");
         }
         removed || cleared_poison
+    }
+}
+
+/// Forget and hard-kill a locally held user actor after this node has been
+/// demoted as owner. The Postgres claim is deliberately not released here:
+/// demotion means the claim has already moved or this node's old identity is
+/// no longer valid. Releasing would race the new owner; forgetting locally is
+/// the safe fenced outcome.
+pub struct DemoteUserActor {
+    pub bare_jid: BareJid,
+}
+
+impl kameo::message::Message<DemoteUserActor> for UserRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DemoteUserActor,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(entry) = self.users.remove(&msg.bare_jid) else {
+            return false;
+        };
+        entry.actor_ref.kill();
+        debug!(jid = %msg.bare_jid, "Demoted local UserActor");
+        true
     }
 }
 
@@ -328,14 +718,14 @@ impl kameo::message::Message<ReapUserIfEmpty> for UserRegistryActor {
         let Some(actor_ref) = self.users.get(&msg.bare_jid) else {
             return false;
         };
-        if !actor_ref.is_alive() {
+        if !actor_ref.actor_ref.is_alive() {
             // A dead actor is a state-lost condition, not an empty one; fold it
             // into the poison path so that set stays the single source of
             // dead-actor truth rather than silently dropping it here.
-            self.mark_actor_state_lost(&msg.bare_jid);
+            self.mark_actor_state_lost(&msg.bare_jid).await;
             return false;
         }
-        let actor_ref = actor_ref.clone();
+        let actor_ref = actor_ref.actor_ref.clone();
         let count = match actor_ref
             .ask(ResourceCount)
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
@@ -348,7 +738,9 @@ impl kameo::message::Message<ReapUserIfEmpty> for UserRegistryActor {
             Err(_) => return false,
         };
         if count == 0 {
-            self.users.remove(&msg.bare_jid);
+            if let Some(entry) = self.users.remove(&msg.bare_jid) {
+                self.release_user_claim(&msg.bare_jid, &entry.claim).await;
+            }
             debug!(jid = %msg.bare_jid, "Reaped empty UserActor");
             true
         } else {

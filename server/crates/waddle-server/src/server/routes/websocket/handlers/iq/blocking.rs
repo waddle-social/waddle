@@ -255,9 +255,9 @@ async fn send_blocking_presence_side_effects(
             continue;
         }
         if blocked {
-            send_unavailable_presence_from_user_to_jid(state, user_bare, &target).await;
+            send_unavailable_presence_from_user_to_jid(state, user_bare, &target, None).await;
         } else {
-            send_current_presence_from_user_to_jid(state, user_bare, &target).await;
+            send_current_presence_from_user_to_jid(state, user_bare, &target, None).await;
         }
     }
 }

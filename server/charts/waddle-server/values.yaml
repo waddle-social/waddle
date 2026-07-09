@@ -1,12 +1,18 @@
 replicaCount: 1
 
-# ADR-0017 clustering gate. Multi-replica (replicaCount > 1) is refused until
-# clustering ships in Phase 4; this flag does not enable clustering on its own
-# (the swarm/claims machinery is not built yet) — it exists so the chart can
-# gate replicaCount and the RollingUpdate strategy on a single switch once it
-# does. Leave false.
+# ADR-0017 clustering. Multi-replica deployments must set this true and use
+# Postgres plus shared blob storage/RWX persistence so routing, claims, MUC,
+# SM, and ISR state have one durable source of truth.
 clustering:
   enabled: false
+  swarmPort: 7900
+  listenAddrs:
+    - /ip4/0.0.0.0/tcp/7900
+  bootstrapPeers: []
+  # Required when the keypair pool is supplied by an external Secret. When
+  # secret.clusteringKeypairPool is set directly, the chart counts it.
+  enrolledKeyCount: 0
+  keypairHeadroom: 1
   # ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain budget
   # ("claimReleaseBudget" in the ADR's own Implementation Plan text, named
   # as a chart value "consumed from Phase 3 on"). Included in the
@@ -74,6 +80,16 @@ service:
   annotations: {}
   ports:
     http: 3000
+
+headlessService:
+  annotations: {}
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
 
 ingress:
   enabled: false
@@ -209,6 +225,10 @@ secret:
   xmppInboxDatabaseUrl: ""
   xmppPubsubDatabaseUrl: ""
   spicedbPresharedKey: ""
+  # Comma-separated base64 ed25519 secret-key pool for
+  # WADDLE_CLUSTERING_KEYPAIR_POOL. Prefer an ExternalSecret via
+  # secret.existingSecret/extraSecretRefs in production.
+  clusteringKeypairPool: ""
 
 probes:
   liveness:
@@ -229,6 +249,11 @@ probes:
 containerExtraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
+
+podAntiAffinity:
+  enabled: true
+  weight: 50
+  topologyKey: kubernetes.io/hostname
 
 nodeSelector: {}
 tolerations: []

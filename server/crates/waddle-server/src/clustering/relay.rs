@@ -22,7 +22,12 @@
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
 use super::metrics;
+use super::ordered_relay::{
+    OrderedRelayMucProxyKind, OrderedRelayNack, OrderedRelayNackReason, OrderedRelayPayload,
+    OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation, RemoteStanzaEnvelope,
+};
 use super::resume_bridge::ResumeStealBridge;
+use super::route_bridge::OrderedRelayDeliveryBridge;
 use super::self_fence::LocallyClaimedEntities;
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
@@ -32,6 +37,7 @@ use kameo::{Actor, RemoteActor, Reply};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity};
 
@@ -74,6 +80,49 @@ const LOOKUP_BACKOFF: [Duration; 3] = [
     Duration::from_millis(1_600),
 ];
 
+/// Lightweight signal the swarm event loop uses to make a relay registration
+/// visible immediately after a peer connection forms. The periodic refresh
+/// remains the fallback; this just removes the startup discovery window.
+#[derive(Clone)]
+pub struct RelayRegistrationTrigger {
+    tx: mpsc::Sender<()>,
+}
+
+impl RelayRegistrationTrigger {
+    pub fn trigger(&self) {
+        let _ = self.tx.try_send(());
+    }
+}
+
+enum RelayRegisterAttempt {
+    Registered,
+    Cancelled,
+    Failed(String),
+}
+
+async fn register_relay_actor(
+    actor_ref: &ActorRef<RelayActor>,
+    name: &str,
+    stop_token: &CancellationToken,
+) -> RelayRegisterAttempt {
+    // Race registration against cancellation instead of plain `.await`:
+    // kameo's swarm-command reply future panics (`.expect(..)` on a dropped
+    // oneshot sender) if the event loop observes this SAME stop token, drops
+    // `Swarm<WaddleBehaviour>`, and the pending register command's reply is
+    // abandoned as a result. `biased` is load-bearing: the event loop drops
+    // the swarm only AFTER observing this token, so polling the cancellation
+    // arm first guarantees `register` is never polled against an already-closed
+    // swarm command channel.
+    match tokio::select! {
+        biased;
+        _ = stop_token.cancelled() => return RelayRegisterAttempt::Cancelled,
+        result = actor_ref.register(name.to_string()) => result,
+    } {
+        Ok(()) => RelayRegisterAttempt::Registered,
+        Err(error) => RelayRegisterAttempt::Failed(error.to_string()),
+    }
+}
+
 /// The per-node relay actor. Phase 2 carries only the liveness/codec-proof
 /// message set plus harness fault-injection; the ordered per-peer relay
 /// channel semantics (sequencing, gap detection, sticky failover) land with
@@ -96,6 +145,12 @@ pub struct RelayActor {
     /// [`Demote`] asks — the two-part demotion protocol's part (a)
     /// receiving side.
     room_local_claims: Arc<RoomLocalClaims>,
+    /// ADR-0017 Phase 4 Slice 3: bridge to local full-JID delivery services.
+    ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
+    /// ADR-0017 Phase 4 Slice 2: internal ordered-relay receiver state. This
+    /// validates sequence ACK/NACK behavior only; no production delivery actor
+    /// is called from this substrate.
+    ordered_receiver: Arc<Mutex<OrderedRelayReceiverState>>,
 }
 
 impl RelayActor {
@@ -104,12 +159,15 @@ impl RelayActor {
         fault_injection: bool,
         resume_bridge: Arc<ResumeStealBridge>,
         room_local_claims: Arc<RoomLocalClaims>,
+        ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
     ) -> Self {
         Self {
             node_id,
             fault_injection,
             resume_bridge,
             room_local_claims,
+            ordered_delivery_bridge,
+            ordered_receiver: Arc::new(Mutex::new(OrderedRelayReceiverState::default())),
         }
     }
 }
@@ -166,6 +224,98 @@ impl Message<RelayEchoStanza> for RelayActor {
         RelayEchoReply {
             node_id: self.node_id.clone(),
             stanza: msg.stanza,
+        }
+    }
+}
+
+/// Ordered relay substrate ask: validate one sequenced typed stanza envelope
+/// and return an internal ACK/NACK. This deliberately does not call any
+/// production delivery actor or mutate client-visible XEP state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayDeliverOrdered {
+    pub envelope: RemoteStanzaEnvelope,
+}
+
+async fn finish_ordered_reservation(
+    receiver: Arc<Mutex<OrderedRelayReceiverState>>,
+    delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
+    reservation: OrderedRelayReservation,
+) -> OrderedRelayReply {
+    match reservation {
+        OrderedRelayReservation::Reserved(reserved) => {
+            let envelope = reserved.envelope().clone();
+            let delivery_timeout = delivery_bridge.reserved_delivery_effect_timeout();
+            match tokio::time::timeout(
+                delivery_timeout,
+                delivery_bridge.deliver_reserved(&envelope),
+            )
+            .await
+            {
+                Ok(Ok(client_replies)) => receiver
+                    .lock()
+                    .await
+                    .commit_reserved_with_replies(*reserved, client_replies),
+                Ok(Err(reason)) => receiver.lock().await.abort_reserved(*reserved, reason),
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_ms = delivery_timeout.as_millis(),
+                        channel = ?envelope.channel,
+                        sequence = envelope.sequence.0,
+                        "ordered relay: reserved receiver delivery effect timed out"
+                    );
+                    if is_idempotent_join_presence_envelope(&envelope) {
+                        receiver.lock().await.abort_reserved_without_diversion(
+                            *reserved,
+                            OrderedRelayNackReason::MaybeCommitted,
+                        )
+                    } else {
+                        receiver
+                            .lock()
+                            .await
+                            .abort_reserved(*reserved, OrderedRelayNackReason::MaybeCommitted)
+                    }
+                }
+            }
+        }
+        OrderedRelayReservation::Completed(reply) => reply,
+    }
+}
+
+fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool {
+    matches!(
+        &envelope.payload,
+        OrderedRelayPayload::MucProxy {
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            ..
+        }
+    )
+}
+
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v1")]
+impl Message<RelayDeliverOrdered> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayDeliverOrdered,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let receiver = Arc::clone(&self.ordered_receiver);
+        let delivery_bridge = Arc::clone(&self.ordered_delivery_bridge);
+        let reservation = receiver.lock().await.reserve(msg.envelope);
+        ctx.spawn(async move {
+            let reply = finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
+            record_ordered_relay_reply(&reply);
+            reply
+        })
+    }
+}
+
+fn record_ordered_relay_reply(reply: &OrderedRelayReply) {
+    match reply {
+        OrderedRelayReply::Ack(_) => metrics::record_ordered_relay_ack(),
+        OrderedRelayReply::Nack(nack) => {
+            metrics::record_ordered_relay_nack(nack.reason.metric_label());
         }
     }
 }
@@ -368,10 +518,13 @@ pub fn spawn_supervised(
     stop_token: CancellationToken,
     resume_bridge: Arc<ResumeStealBridge>,
     room_local_claims: Arc<RoomLocalClaims>,
-) {
+    ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
+) -> RelayRegistrationTrigger {
+    let (trigger_tx, mut trigger_rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let name = relay_name(&node_id);
         let mut respawns: u64 = 0;
+        let mut trigger_closed = false;
         loop {
             if stop_token.is_cancelled() {
                 break;
@@ -381,30 +534,10 @@ pub fn spawn_supervised(
                 fault_injection,
                 Arc::clone(&resume_bridge),
                 Arc::clone(&room_local_claims),
+                Arc::clone(&ordered_delivery_bridge),
             ));
-            // Race registration against cancellation instead of plain
-            // `.await`: kameo's swarm-command reply future panics
-            // (`.expect(..)` on a dropped oneshot sender) if the event loop
-            // observes this SAME stop token, drops `Swarm<WaddleBehaviour>`,
-            // and the pending register command's reply is abandoned as a
-            // result. `biased` is load-bearing: the event loop drops the
-            // swarm only AFTER observing this token, so polling the
-            // cancellation arm first guarantees `register` is never polled
-            // against an already-closed swarm command channel (an unbiased
-            // select could poll `register` first, whose very first poll
-            // sends the command and panics on the dropped reply).
-            // Cancellation landing mid-register simply drops the in-flight
-            // future (no panic on drop, only on a completed poll).
-            let register_result = tokio::select! {
-                biased;
-                _ = stop_token.cancelled() => {
-                    actor_ref.kill();
-                    return;
-                }
-                result = actor_ref.register(name.clone()) => result,
-            };
-            match register_result {
-                Ok(()) => {
+            match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                RelayRegisterAttempt::Registered => {
                     if respawns > 0 {
                         metrics::record_relay_respawn();
                         tracing::warn!(
@@ -416,7 +549,11 @@ pub fn spawn_supervised(
                         tracing::info!(%name, "clustering relay actor registered");
                     }
                 }
-                Err(error) => {
+                RelayRegisterAttempt::Cancelled => {
+                    actor_ref.kill();
+                    return;
+                }
+                RelayRegisterAttempt::Failed(error) => {
                     tracing::warn!(%name, %error, "clustering relay registration failed; retrying");
                     actor_ref.kill();
                     // Cancellation-aware backoff: graceful shutdown must not
@@ -478,14 +615,30 @@ pub fn spawn_supervised(
                         // next iteration's `stop_token.cancelled()` arm fires
                         // immediately.
                         if !stop_token.is_cancelled() {
-                            tokio::select! {
-                                biased;
-                                _ = stop_token.cancelled() => {}
-                                result = actor_ref.register(name.clone()) => {
-                                    if let Err(error) = result {
-                                        tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                            match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                                RelayRegisterAttempt::Registered => {}
+                                RelayRegisterAttempt::Cancelled => return,
+                                RelayRegisterAttempt::Failed(error) => {
+                                    tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                                }
+                            }
+                        }
+                    }
+                    trigger = trigger_rx.recv(), if !trigger_closed => {
+                        match trigger {
+                            Some(()) => {
+                                match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                                    RelayRegisterAttempt::Registered => {
+                                        tracing::debug!(%name, "clustering relay re-registered after peer connection");
+                                    }
+                                    RelayRegisterAttempt::Cancelled => return,
+                                    RelayRegisterAttempt::Failed(error) => {
+                                        tracing::debug!(%name, %error, "clustering relay peer-triggered re-registration failed");
                                     }
                                 }
+                            }
+                            None => {
+                                trigger_closed = true;
                             }
                         }
                     }
@@ -493,6 +646,7 @@ pub fn spawn_supervised(
             }
         }
     });
+    RelayRegistrationTrigger { tx: trigger_tx }
 }
 
 /// A client handle to some node's relay, caching the resolved
@@ -547,6 +701,7 @@ pub enum RelayAskError {
     #[error("relay ask failed ({failure:?}): {message}")]
     Send {
         failure: RelaySendFailure,
+        effect: RelaySendEffect,
         message: String,
     },
     /// This handle's clustering-scope stop token fired before the ask
@@ -576,6 +731,17 @@ pub enum RelaySendFailure {
     Transport,
 }
 
+/// Whether a failed remote ask could have reached the handler far enough to
+/// perform its durable/local effect before the sender observed the failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaySendEffect {
+    /// The failure happened before the handler could run.
+    NoEffect,
+    /// The handler may have run; retry/fallback may duplicate user-visible
+    /// effects.
+    MaybeCommitted,
+}
+
 fn classify<E>(error: &RemoteSendError<E>) -> RelaySendFailure {
     match error {
         RemoteSendError::ActorNotRunning
@@ -600,14 +766,41 @@ fn classify<E>(error: &RemoteSendError<E>) -> RelaySendFailure {
     }
 }
 
+fn classify_effect<E>(error: &RemoteSendError<E>) -> RelaySendEffect {
+    match error {
+        RemoteSendError::ActorNotRunning
+        | RemoteSendError::UnknownActor { .. }
+        | RemoteSendError::UnknownMessage { .. }
+        | RemoteSendError::BadActorType
+        | RemoteSendError::MailboxFull
+        | RemoteSendError::SerializeMessage(_)
+        | RemoteSendError::SwarmNotBootstrapped
+        | RemoteSendError::DialFailure
+        | RemoteSendError::UnsupportedProtocols => RelaySendEffect::NoEffect,
+        RemoteSendError::ActorStopped
+        | RemoteSendError::ReplyTimeout
+        | RemoteSendError::HandlerError(_)
+        | RemoteSendError::DeserializeMessage(_)
+        | RemoteSendError::SerializeReply(_)
+        | RemoteSendError::SerializeHandlerError(_)
+        | RemoteSendError::DeserializeHandlerError(_)
+        | RemoteSendError::NetworkTimeout
+        | RemoteSendError::ConnectionClosed
+        | RemoteSendError::Io(_) => RelaySendEffect::MaybeCommitted,
+    }
+}
+
 /// Wrap a kameo send error as a [`RelayAskError`], preserving the typed
 /// classification alongside the rendered diagnostic.
 fn send_error<E>(error: RemoteSendError<E>) -> RelayAskError
 where
     RemoteSendError<E>: std::fmt::Display,
 {
+    let failure = classify(&error);
+    let effect = classify_effect(&error);
     RelayAskError::Send {
-        failure: classify(&error),
+        failure,
+        effect,
         message: error.to_string(),
     }
 }
@@ -817,6 +1010,53 @@ impl RelayHandle {
         }
     }
 
+    /// Send one already-sequenced ordered-relay envelope to the remote relay,
+    /// with the same stop-token cancellation and stale-ref refresh/retry-once
+    /// behavior as [`Self::echo_stanza`]. Sequencing is deliberately owned
+    /// outside `RelayHandle`: callers must share one sender state per ordered
+    /// channel rather than allocate from a fresh handle per ask.
+    pub async fn deliver_ordered(
+        &mut self,
+        envelope: RemoteStanzaEnvelope,
+    ) -> Result<OrderedRelayReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.deliver_ordered_inner(envelope) => result,
+        }
+    }
+
+    async fn deliver_ordered_inner(
+        &mut self,
+        envelope: RemoteStanzaEnvelope,
+    ) -> Result<OrderedRelayReply, RelayAskError> {
+        let message = RelayDeliverOrdered { envelope };
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_ordered_relookup_retry_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                match remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                {
+                    Ok(reply) => Ok(reply),
+                    Err(error) => ordered_send_error(&message.envelope, error),
+                }
+            }
+            Err(error) => ordered_send_error(&message.envelope, error),
+        }
+    }
+
     /// Ask this relay's node to force-detach its live SM session
     /// `stream_id` on behalf of `requester_bare_jid` (ADR-0017 Phase 3
     /// Slice 6's cross-node XEP-0198 resume live-steal handshake — this
@@ -927,9 +1167,57 @@ fn is_stale_ref_error<E>(error: &RemoteSendError<E>) -> bool {
     classify(error) == RelaySendFailure::StaleRef
 }
 
+/// Ordered relay envelopes are not retried after `ActorStopped`: that error
+/// may have been enqueued before the actor stopped, so a re-send against a
+/// respawned relay could duplicate a committed side effect once production
+/// delivery is wired. `ActorNotRunning`/`UnknownActor`/`BadActorType` are
+/// still safe re-lookup cases because they prove the cached ref was unusable.
+fn is_ordered_relookup_retry_error<E>(error: &RemoteSendError<E>) -> bool {
+    matches!(
+        error,
+        RemoteSendError::ActorNotRunning
+            | RemoteSendError::UnknownActor { .. }
+            | RemoteSendError::BadActorType
+    )
+}
+
+fn is_ordered_parse_nack_error<E>(error: &RemoteSendError<E>) -> bool {
+    matches!(error, RemoteSendError::UnknownMessage { .. })
+}
+
+fn ordered_send_error<E>(
+    envelope: &RemoteStanzaEnvelope,
+    error: RemoteSendError<E>,
+) -> Result<OrderedRelayReply, RelayAskError>
+where
+    RemoteSendError<E>: std::fmt::Display,
+{
+    if is_ordered_parse_nack_error(&error) {
+        return Ok(OrderedRelayReply::Nack(OrderedRelayNack {
+            channel: envelope.channel.clone(),
+            sequence: envelope.sequence,
+            reason: OrderedRelayNackReason::ParseFailure,
+        }));
+    }
+    Err(send_error(error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clustering::claims::{NodeLeaseStore, OrphanedSmSessionClaim};
+    use crate::clustering::ordered_relay::{
+        OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDiversionReason, OrderedRelayOrigin,
+        OrderedRelayPayload, OrderedRelayRecipient, OrderedRelaySequence, OriginInboundSequence,
+    };
+    use crate::clustering::route_bridge::OrderedRelayDeliveryServices;
+    use async_trait::async_trait;
+    use libp2p::PeerId;
+    use std::collections::HashSet;
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity,
+        ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
+    };
 
     #[test]
     fn relay_name_is_node_scoped() {
@@ -941,10 +1229,303 @@ mod tests {
         assert_ne!(relay_name(&a), relay_name(&b));
     }
 
+    struct HangingClaimStore;
+
+    #[async_trait]
+    impl ClaimStore for HangingClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn acquire(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+
+        async fn ensure_claimed(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+
+        async fn steal_stale(
+            &self,
+            _entity: &Entity,
+            _observed: ClaimEpoch,
+            _staleness: StalePredicate,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+
+        async fn steal_for_resume(
+            &self,
+            _entity: &Entity,
+            _observed: ClaimEpoch,
+            _witness: ResumeIdentityProof,
+            _me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+
+        async fn current_claim(
+            &self,
+            _entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            std::future::pending().await
+        }
+
+        async fn fence(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+            _mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+
+        async fn release(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+            _mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+
+        async fn release_many(
+            &self,
+            _entities: &[Entity],
+            _me: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            unreachable!("ordered relay timeout test only calls current_claim")
+        }
+    }
+
+    struct NoopNodeLease;
+
+    #[async_trait]
+    impl NodeLeaseStore for NoopNodeLease {
+        async fn register(
+            &self,
+            _me: &NodeIdentity,
+            _pod_template_hash: Option<String>,
+        ) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn heartbeat(
+            &self,
+            _me: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<bool, ClaimError> {
+            Ok(true)
+        }
+
+        async fn expire(
+            &self,
+            _owner: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<bool, ClaimError> {
+            Ok(true)
+        }
+
+        async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn count_other_live_nodes(
+            &self,
+            _me: &NodeIdentity,
+            _lease_ttl: Duration,
+        ) -> Result<usize, ClaimError> {
+            Ok(0)
+        }
+
+        async fn reconcile(
+            &self,
+            _me: &NodeIdentity,
+            _locally_owned: &[Entity],
+        ) -> Result<Vec<Entity>, ClaimError> {
+            Ok(Vec::new())
+        }
+
+        async fn report_steal_intent(
+            &self,
+            _entity: &Entity,
+            _reporter: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn owner_steal_intents(
+            &self,
+            _me: &NodeIdentity,
+        ) -> Result<Vec<(Entity, ClaimEpoch)>, ClaimError> {
+            Ok(Vec::new())
+        }
+
+        async fn clear_steal_intent(
+            &self,
+            _entity: &Entity,
+            _me: &NodeIdentity,
+            _mine: ClaimEpoch,
+        ) -> Result<u64, ClaimError> {
+            Ok(0)
+        }
+
+        async fn list_orphaned_sm_session_claims(
+            &self,
+        ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError> {
+            Ok(Vec::new())
+        }
+
+        async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
+            Ok(None)
+        }
+    }
+
+    struct NoopAllowlist;
+
+    #[async_trait]
+    impl crate::clustering::allowlist::AllowlistStore for NoopAllowlist {
+        async fn ensure_schema(&self) -> Result<(), crate::clustering::allowlist::AllowlistError> {
+            Ok(())
+        }
+
+        async fn enrolled_peers(
+            &self,
+        ) -> Result<HashSet<PeerId>, crate::clustering::allowlist::AllowlistError> {
+            Ok(HashSet::new())
+        }
+    }
+
+    fn timeout_envelope() -> RemoteStanzaEnvelope {
+        use waddle_xmpp::pending_delivery::SmSessionId;
+        use xmpp_parsers::message::{Lang, Message};
+
+        let target: jid::FullJid = "timeout@example.test/phone"
+            .parse()
+            .expect("valid full jid");
+        let sender: jid::FullJid = "sender@example.test/laptop"
+            .parse()
+            .expect("valid full jid");
+        let origin_stream = SmSessionId::new("stream-timeout");
+        let mut message = Message::new(Some(jid::Jid::from(target.clone())));
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(Lang::new(), "timeout test".to_string());
+
+        RemoteStanzaEnvelope {
+            asserted_origin_node: NodeId::new("origin-node".to_string()),
+            channel: OrderedRelayChannel {
+                origin: OrderedRelayOrigin::SmSession(origin_stream.clone()),
+                recipient: OrderedRelayRecipient::FullJid(target.clone()),
+                target_epoch: ClaimEpoch(0),
+            },
+            sequence: OrderedRelaySequence::FIRST,
+            origin_inbound_sequence: OriginInboundSequence(1),
+            origin_claim: OrderedRelayClaim {
+                entity: Entity::new(EntityType::SmSession, origin_stream.to_string()),
+                epoch: ClaimEpoch(0),
+            },
+            sender_claim: OrderedRelayClaim {
+                entity: Entity::new(EntityType::UserActor, sender.to_bare().to_string()),
+                epoch: ClaimEpoch(0),
+            },
+            target_claim: OrderedRelayClaim {
+                entity: Entity::new(EntityType::UserActor, target.to_bare().to_string()),
+                epoch: ClaimEpoch(0),
+            },
+            payload: OrderedRelayPayload::Message {
+                recipient: jid::Jid::from(target),
+                stanza: RemoteStanza(waddle_xmpp::Stanza::Message(message)),
+            },
+            origin_proof: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_delivery_timeout_aborts_reserved_effect_before_commit() {
+        use crate::config::ClusteringMessagingConfig;
+        use kameo::actor::Spawn;
+        use waddle_xmpp::registry::{ConnectionRegistry, UserRegistryActor};
+        use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+        use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+        let config = ClusteringMessagingConfig {
+            reply_timeout: Duration::from_millis(40),
+            mailbox_timeout: Duration::from_millis(40),
+            ..ClusteringMessagingConfig::default()
+        };
+        let bridge = OrderedRelayDeliveryBridge::new(CancellationToken::new(), &config);
+        bridge.wire(Arc::new(OrderedRelayDeliveryServices {
+            claim_store: Arc::new(HangingClaimStore),
+            allowlist_store: Arc::new(NoopAllowlist),
+            node_lease: Arc::new(NoopNodeLease),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::new("receiver", "epoch")),
+            connection_registry: Arc::new(ConnectionRegistry::new()),
+            user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),
+            sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
+            blocking_storage: Arc::new(InMemoryBlockingStorage::new()),
+            web_socket_state: std::sync::Weak::new(),
+        }));
+
+        let receiver = Arc::new(Mutex::new(OrderedRelayReceiverState::default()));
+        let envelope = timeout_envelope();
+        let reservation = receiver.lock().await.reserve(envelope.clone());
+        assert!(matches!(reservation, OrderedRelayReservation::Reserved(_)));
+
+        let started = std::time::Instant::now();
+        let reply =
+            finish_ordered_reservation(Arc::clone(&receiver), Arc::clone(&bridge), reservation)
+                .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "reserved delivery timeout should bound a hung validation effect"
+        );
+        match reply {
+            OrderedRelayReply::Nack(nack) => {
+                assert_eq!(nack.sequence, OrderedRelaySequence::FIRST);
+                assert_eq!(nack.reason, OrderedRelayNackReason::MaybeCommitted);
+            }
+            OrderedRelayReply::Ack(_) => panic!("hung validation must not commit an ACK"),
+        }
+
+        let retry = {
+            let mut receiver = receiver.lock().await;
+            receiver.reserve(envelope)
+        };
+        match retry {
+            OrderedRelayReservation::Completed(OrderedRelayReply::Nack(nack)) => {
+                match nack.reason {
+                    OrderedRelayNackReason::Diverted(diversion) => {
+                        assert_eq!(
+                            diversion.reason,
+                            OrderedRelayDiversionReason::MaybeCommitted
+                        );
+                    }
+                    other => panic!("expected diverted retry after timeout, got {other:?}"),
+                }
+            }
+            other => panic!("timeout must clear pending reservation and divert channel: {other:?}"),
+        }
+    }
+
     #[test]
     fn stale_ref_errors_trigger_relookup_and_others_do_not() {
         assert!(is_stale_ref_error::<std::convert::Infallible>(
             &RemoteSendError::ActorNotRunning
+        ));
+        assert!(is_stale_ref_error::<std::convert::Infallible>(
+            &RemoteSendError::ActorStopped
         ));
         assert!(is_stale_ref_error::<std::convert::Infallible>(
             &RemoteSendError::BadActorType
@@ -955,6 +1536,81 @@ mod tests {
         assert!(!is_stale_ref_error::<std::convert::Infallible>(
             &RemoteSendError::MailboxFull
         ));
+    }
+
+    #[test]
+    fn ordered_relookup_excludes_maybe_enqueued_actor_stopped() {
+        assert!(is_ordered_relookup_retry_error::<std::convert::Infallible>(
+            &RemoteSendError::ActorNotRunning
+        ));
+        assert!(is_ordered_relookup_retry_error::<std::convert::Infallible>(
+            &RemoteSendError::BadActorType
+        ));
+        assert!(
+            !is_ordered_relookup_retry_error::<std::convert::Infallible>(
+                &RemoteSendError::ActorStopped
+            )
+        );
+        assert!(
+            !is_ordered_relookup_retry_error::<std::convert::Infallible>(
+                &RemoteSendError::ReplyTimeout
+            )
+        );
+    }
+
+    #[test]
+    fn ordered_parse_nack_excludes_reply_side_codec_errors() {
+        assert!(is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::UnknownMessage {
+                actor_remote_id: "actor".into(),
+                message_remote_id: "message".into(),
+            }
+        ));
+        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::DeserializeMessage(String::new())
+        ));
+        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::SerializeReply(String::new())
+        ));
+        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
+            &RemoteSendError::SerializeMessage(String::new())
+        ));
+    }
+
+    #[test]
+    fn ask_failures_classify_handler_effect_separately_from_failure_kind() {
+        use std::convert::Infallible;
+        use RelaySendEffect::{MaybeCommitted, NoEffect};
+
+        for (error, expected) in [
+            (RemoteSendError::ActorNotRunning, NoEffect),
+            (
+                RemoteSendError::UnknownActor {
+                    actor_remote_id: "actor".into(),
+                },
+                NoEffect,
+            ),
+            (RemoteSendError::BadActorType, NoEffect),
+            (RemoteSendError::MailboxFull, NoEffect),
+            (RemoteSendError::SerializeMessage(String::new()), NoEffect),
+            (RemoteSendError::SwarmNotBootstrapped, NoEffect),
+            (RemoteSendError::DialFailure, NoEffect),
+            (RemoteSendError::UnsupportedProtocols, NoEffect),
+            (RemoteSendError::ActorStopped, MaybeCommitted),
+            (RemoteSendError::ReplyTimeout, MaybeCommitted),
+            (
+                RemoteSendError::DeserializeMessage(String::new()),
+                MaybeCommitted,
+            ),
+            (
+                RemoteSendError::SerializeReply(String::new()),
+                MaybeCommitted,
+            ),
+            (RemoteSendError::NetworkTimeout, MaybeCommitted),
+            (RemoteSendError::ConnectionClosed, MaybeCommitted),
+        ] {
+            assert_eq!(classify_effect::<Infallible>(&error), expected, "{error:?}");
+        }
     }
 
     #[test]
@@ -1026,6 +1682,10 @@ mod tests {
             false,
             resume_bridge,
             RoomLocalClaims::new(),
+            OrderedRelayDeliveryBridge::new(
+                CancellationToken::new(),
+                &crate::config::ClusteringMessagingConfig::default(),
+            ),
         ));
 
         // Dispatch the resume-steal ask on its own task so it is genuinely

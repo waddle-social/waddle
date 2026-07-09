@@ -16,6 +16,16 @@ data:
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
   WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
   WADDLE_DRAIN_TIMEOUT_SECS: {{ .Values.config.drainTimeoutSeconds | toString | quote }}
+  WADDLE_CLUSTERING_ENABLED: {{ .Values.clustering.enabled | toString | quote }}
+  {{ if .Values.clustering.enabled }}
+  WADDLE_CLUSTERING_LISTEN_ADDRS: {{ join "," .Values.clustering.listenAddrs | quote }}
+  {{- $bootstrapPeers := .Values.clustering.bootstrapPeers | default (list) -}}
+  {{ if eq (len $bootstrapPeers) 0 }}
+  WADDLE_CLUSTERING_BOOTSTRAP_PEERS: {{ printf "%s:%d" (include "waddle-server.headlessServiceName" .) (int .Values.clustering.swarmPort) | quote }}
+  {{ else }}
+  WADDLE_CLUSTERING_BOOTSTRAP_PEERS: {{ join "," $bootstrapPeers | quote }}
+  {{ end }}
+  {{ end }}
   {{- /*
     ADR-0017 Phase 3 Slice 10: wired unconditionally, mirroring
     WADDLE_CLUSTERING_POD_TEMPLATE_HASH's identical precedent in

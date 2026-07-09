@@ -161,3 +161,8 @@ clustering = ["kameo/remote", "dep:libp2p"]
 [[bin]]
 name = "waddle-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "waddle-cluster-keypool"
+path = "src/bin/cluster_keypool.rs"
+required-features = ["clustering"]

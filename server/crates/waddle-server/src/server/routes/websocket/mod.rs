@@ -93,11 +93,14 @@ mod transport_xml;
 pub mod handlers;
 
 pub(crate) use cleanup::broadcast_unavailable_if_no_replacement;
+#[cfg(not(feature = "clustering"))]
 pub use cleanup::cleanup_muc_presence_for_jid;
+#[cfg(feature = "clustering")]
+pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
 pub use connection::router;
 pub use state::{
     ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore, PendingDmCallOffer, ProtocolServices,
-    WebSocketDeps, WebSocketState, XmppServiceDomains,
+    RemoteMucMemberships, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 
 pub(crate) use cleanup::{

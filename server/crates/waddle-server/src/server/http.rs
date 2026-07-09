@@ -439,6 +439,31 @@ async fn create_websocket_state(
             waddle_xmpp::registry::UserRegistryActor::new(),
         )
     };
+    // ADR-0017 Phase 4 Slice 1b: wire the same clustering claim
+    // store/identity pair into UserRegistry that SM sessions and rooms use.
+    // A `None` pair (clustering disabled, non-Postgres, or non-clustering
+    // build) leaves the registry on its single-node in-process default.
+    #[cfg(feature = "clustering")]
+    if let Some((claim_store, node_identity)) = state.clustering_claims.claim_pair() {
+        if let Err(error) = user_registry
+            .tell(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity,
+            })
+            .mailbox_timeout(std::time::Duration::from_secs(2))
+            .await
+        {
+            warn!(
+                %error,
+                "failed to wire clustering claims into the user registry"
+            );
+        }
+    }
+    #[cfg(feature = "clustering")]
+    if let Some(user_local_claims) = &state.clustering_claims.user_local_claims {
+        user_local_claims.wire(user_registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+    }
 
     // Read the MUC room registry and PubSub storage off the shared
     // `AppState` — both are built in `start_with_config` so admin V2
@@ -539,7 +564,6 @@ async fn create_websocket_state(
         state.db_pool.global(),
     )
     .await;
-
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -722,6 +746,9 @@ async fn create_websocket_state(
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                 call_threads: Arc::new(dashmap::DashMap::new()),
+                remote_muc_memberships: Arc::new(
+                    crate::server::routes::websocket::RemoteMucMemberships::default(),
+                ),
                 dm_call_threads: Arc::new(dashmap::DashMap::new()),
                 dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
                 dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
@@ -736,6 +763,37 @@ async fn create_websocket_state(
             shutdown: shutdown_handle,
         },
     });
+    #[cfg(feature = "clustering")]
+    if let (Some(bridge), Some((claim_store, node_identity))) = (
+        &state.clustering_claims.ordered_relay_delivery_bridge,
+        state.clustering_claims.claim_pair(),
+    ) {
+        if let Some(node_lease) = &state.clustering_claims.node_lease {
+            bridge.wire(Arc::new(
+                crate::clustering::route_bridge::OrderedRelayDeliveryServices {
+                    claim_store,
+                    allowlist_store: Arc::new(
+                        crate::clustering::allowlist::PostgresAllowlistStore::new(
+                            state.db_pool.global().clone(),
+                        ),
+                    ),
+                    node_lease: Arc::clone(node_lease),
+                    node_identity,
+                    connection_registry: Arc::clone(
+                        &websocket_state.deps.protocol.connection_registry,
+                    ),
+                    user_registry: websocket_state.deps.protocol.user_registry.clone(),
+                    sm_session_registry: Arc::clone(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                    ),
+                    blocking_storage: Arc::clone(&websocket_state.deps.protocol.blocking_storage),
+                    web_socket_state: Arc::downgrade(&websocket_state),
+                },
+            ));
+        } else {
+            warn!("ordered relay delivery bridge not wired: clustering node lease handle missing");
+        }
+    }
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));

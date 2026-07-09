@@ -9,11 +9,10 @@
 //! peer's swarm access to one refresh interval.
 //!
 //! Enrollment authority is separate from the runtime by design: rows are
-//! provisioned only by the deployment pipeline (an admin-role migration/Helm
-//! hook job — Phase 4 ships the grants making the runtime role `SELECT`-only
-//! on this table). The runtime never inserts or deletes allowlist rows; it
-//! only reads them. Tests seed rows directly, playing the enrollment
-//! authority's part.
+//! provisioned only by the deployment pipeline (Phase 4 ships the grants
+//! making the runtime role `SELECT`-only on this table). The runtime never
+//! creates, inserts, or deletes allowlist rows; it only reads them. Tests seed
+//! rows directly, playing the enrollment authority's part.
 //!
 //! Two operational rules fall out of enforcement being symmetric (each side
 //! checks the **remote** peer against its own copy of the same table):
@@ -60,11 +59,9 @@ pub trait AllowlistStore: Send + Sync {
     /// Create the backing table if it does not exist (idempotent; inserts
     /// nothing — enrollment stays with the pipeline authority).
     ///
-    /// Phase-4 note: `CREATE TABLE IF NOT EXISTS` still requires `CREATE` on
-    /// the schema even when the table already exists (Postgres checks the ACL
-    /// before the existence short-circuit), so when the SELECT-only runtime
-    /// grants land, the pipeline must provision this table and this call must
-    /// be dropped or gated — otherwise startup fails on the hardened role.
+    /// This is for provisioning/harness callers only. Runtime swarm startup
+    /// intentionally does not call it so the production application role can
+    /// be `SELECT`-only on `clustering_peer_allowlist`.
     async fn ensure_schema(&self) -> Result<(), AllowlistError>;
 
     /// The currently enrolled peer IDs. Rows that fail to parse as a libp2p

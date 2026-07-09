@@ -22,6 +22,7 @@ pub(super) async fn handle_regular_presence_update(
     sender_jid: &FullJid,
     owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     presence: xmpp_parsers::presence::Presence,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) {
     // Defense in depth behind `parse_subscription_presence`: only the normal
     // available/unavailable forms may update state and be relayed. The
@@ -145,7 +146,7 @@ pub(super) async fn handle_regular_presence_update(
             "Skipping unavailable-presence registry writes: connection does not own its registry slot"
         );
     }
-    broadcast_presence_to_subscribers(state, sender_jid, &presence).await;
+    broadcast_presence_to_subscribers(state, sender_jid, &presence, ordered_relay_origin).await;
 }
 
 /// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering
@@ -237,6 +238,7 @@ async fn broadcast_presence_to_subscribers(
     state: &WebSocketState,
     sender_jid: &FullJid,
     presence: &xmpp_parsers::presence::Presence,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) {
     let Some(storage) = roster_storage(state).await else {
         return;
@@ -265,6 +267,16 @@ async fn broadcast_presence_to_subscribers(
         relayed.from = Some(Jid::from(sender_jid.clone()));
         relayed.to = Some(Jid::from(subscriber_bare.clone()));
         let stanza = Stanza::Presence(relayed);
+        if super::subscription::try_route_presence_to_bare_remote(
+            state,
+            &subscriber_bare,
+            &stanza,
+            ordered_relay_origin,
+        )
+        .await
+        {
+            continue;
+        }
         let mut delivered_resources = Vec::new();
         for resource in state
             .deps

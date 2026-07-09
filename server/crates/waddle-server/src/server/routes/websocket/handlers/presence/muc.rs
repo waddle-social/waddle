@@ -17,6 +17,7 @@ use xml::{
 };
 pub(super) use xml::{build_muc_join_presence_xml, MucJoinPresence};
 
+#[cfg(any(test, feature = "clustering"))]
 pub async fn handle_muc_join(
     state: &WebSocketState,
     domain: &str,
@@ -26,16 +27,58 @@ pub async fn handle_muc_join(
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
-    info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC join request");
+    handle_muc_join_with_ordered_relay(
+        state,
+        MucJoinRequest {
+            domain,
+            room_jid,
+            sender_jid,
+            nick,
+            presence_show,
+            authenticated_session,
+            ordered_relay_origin: None,
+        },
+    )
+    .await
+}
+
+pub struct MucJoinRequest<'a> {
+    pub domain: &'a str,
+    pub room_jid: &'a BareJid,
+    pub sender_jid: &'a FullJid,
+    pub nick: &'a str,
+    pub presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    pub authenticated_session: &'a Option<Session>,
+    pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+}
+
+struct MucJoinWork<'a> {
+    domain: String,
+    room_jid: &'a BareJid,
+    sender_jid: &'a FullJid,
+    nick: String,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    authenticated_session: &'a Option<Session>,
+    ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+}
+
+pub async fn handle_muc_join_with_ordered_relay(
+    state: &WebSocketState,
+    request: MucJoinRequest<'_>,
+) -> Vec<String> {
+    info!(room = %request.room_jid, nick = %request.nick, sender = %request.sender_jid, "MUC join request");
 
     handle_muc_join_unlocked(
         state,
-        domain.to_string(),
-        room_jid,
-        sender_jid,
-        nick.to_string(),
-        presence_show,
-        authenticated_session,
+        MucJoinWork {
+            domain: request.domain.to_string(),
+            room_jid: request.room_jid,
+            sender_jid: request.sender_jid,
+            nick: request.nick.to_string(),
+            presence_show: request.presence_show,
+            authenticated_session: request.authenticated_session,
+            ordered_relay_origin: request.ordered_relay_origin,
+        },
     )
     .await
 }
@@ -91,15 +134,76 @@ async fn sync_resolver_affiliation_on_rejection(
     }
 }
 
-async fn handle_muc_join_unlocked(
+pub(crate) async fn route_room_presence_to_occupant(
     state: &WebSocketState,
-    domain: String,
     room_jid: &BareJid,
-    sender_jid: &FullJid,
-    nick: String,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-    authenticated_session: &Option<Session>,
-) -> Vec<String> {
+    recipient: &FullJid,
+    stanza: Stanza,
+) {
+    match state
+        .deps
+        .protocol
+        .connection_registry
+        .try_send_to(recipient, stanza.clone())
+    {
+        waddle_xmpp::registry::BroadcastOutcome::Delivered
+        | waddle_xmpp::registry::BroadcastOutcome::DroppedFull => return,
+        waddle_xmpp::registry::BroadcastOutcome::NotConnected
+        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {}
+    }
+    #[cfg(not(feature = "clustering"))]
+    let _ = room_jid;
+    #[cfg(feature = "clustering")]
+    let deps = {
+        let deps =
+            crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+        let entity = waddle_xmpp::ownership::Entity::new(
+            waddle_xmpp::ownership::EntityType::RoomActor,
+            room_jid.to_string(),
+        );
+        deps.with_ordered_relay_origin(Some(
+            crate::server::routes::interpret::OrderedRelayRouteOrigin {
+                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                    entity.clone(),
+                ),
+                sender_entity: entity,
+                inbound_sequence: 0,
+                handoff: None,
+            },
+        ))
+    };
+    #[cfg(feature = "clustering")]
+    let replies = crate::server::routes::interpret::route_to_connection(
+        &deps,
+        jid::Jid::from(recipient.clone()),
+        Box::new(stanza),
+        0,
+    )
+    .await;
+    #[cfg(feature = "clustering")]
+    if !replies.is_empty() {
+        warn!(
+            room = %room_jid,
+            recipient = %recipient,
+            reply_count = replies.len(),
+            "MUC presence fan-out produced unexpected route fallback replies"
+        );
+    }
+}
+
+async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'_>) -> Vec<String> {
+    let MucJoinWork {
+        domain,
+        room_jid,
+        sender_jid,
+        nick,
+        presence_show,
+        authenticated_session,
+        ordered_relay_origin,
+    } = request;
+    #[cfg(not(feature = "clustering"))]
+    let _ = &ordered_relay_origin;
+
     // Resolver-derived first joins bump the admission revision, so a
     // burst of concurrent first-time joiners can hit several stale
     // revisions in a row — allow a few re-snapshots before giving up
@@ -364,11 +468,65 @@ async fn handle_muc_join_unlocked(
                     Ok(acquisition) => acquisition,
                     // ADR-0017 Phase 3 Slice 7 FIX 6 (council-adjudicated):
                     // another node genuinely, currently owns this room's
-                    // claim — this phase does not wire cross-node MUC
-                    // proxying (Phase 4), so the conformant response is a
-                    // recoverable, retry-able XEP-0045 join bounce, never a
-                    // silent drop.
+                    // claim. Phase 4 first tries the ordered relay MUC proxy
+                    // so the owning RoomActor remains the single writer.
                     Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+                        #[cfg(feature = "clustering")]
+                        if let Some(origin) = ordered_relay_origin.as_ref() {
+                            if let Some(bridge) = state
+                                .deps
+                                .app_state
+                                .clustering_claims
+                                .ordered_relay_delivery_bridge
+                                .as_ref()
+                            {
+                                let mut presence = xmpp_parsers::presence::Presence::new(
+                                    xmpp_parsers::presence::Type::None,
+                                );
+                                presence.from = Some(jid::Jid::from(sender_jid.clone()));
+                                presence.to = room_jid
+                                    .clone()
+                                    .with_resource_str(&nick)
+                                    .ok()
+                                    .map(jid::Jid::from);
+                                if let Some(show) = presence_show {
+                                    presence.show = Some(show.to_xep0045());
+                                }
+                                let stanza = Stanza::Presence(presence);
+                                match bridge
+                                    .try_proxy_muc_remote(
+                                        room_jid,
+                                        &stanza,
+                                        crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
+                                        origin,
+                                    )
+                                    .await
+                                {
+                                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
+                                        state
+                                            .deps
+                                            .protocol
+                                            .remote_muc_memberships
+                                            .record_join(sender_jid, room_jid, &nick);
+                                        return replies
+                                            .into_iter()
+                                            .map(|reply| stanza_to_xml(&reply))
+                                            .collect();
+                                    }
+                                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+                                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+                                        state
+                                            .deps
+                                            .protocol
+                                            .remote_muc_memberships
+                                            .record_join(sender_jid, room_jid, &nick);
+                                    }
+                                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+                                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
+                                    | None => {}
+                                }
+                            }
+                        }
                         return vec![build_muc_presence_error_xml(
                             room_jid,
                             &nick,
@@ -759,11 +917,7 @@ async fn handle_muc_join_unlocked(
                     in_call: waddle_xmpp::xep::InCallPresenceState::default(),
                 });
                 let stanza = Stanza::Presence(presence_stanza);
-                let _outcome = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(&existing.jid, stanza);
+                route_room_presence_to_occupant(state, room_jid, &existing.jid, stanza).await;
             }
         }
 
@@ -836,8 +990,11 @@ pub async fn handle_muc_leave(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
+    #[cfg(not(feature = "clustering"))]
+    let _ = ordered_relay_origin;
 
     // Notification activity ingest (slice 2b): a XEP-0045 leave
     // (explicit `<presence type='unavailable'/>`) is still an
@@ -854,6 +1011,90 @@ pub async fn handle_muc_leave(
     .await;
 
     let Some(room_actor) = get_room_actor(state, room_jid).await else {
+        let known_remote_membership = state
+            .deps
+            .protocol
+            .remote_muc_memberships
+            .contains(sender_jid, room_jid);
+        #[cfg(feature = "clustering")]
+        if let Some(origin) = ordered_relay_origin {
+            if let Some(bridge) = state
+                .deps
+                .app_state
+                .clustering_claims
+                .ordered_relay_delivery_bridge
+                .as_ref()
+            {
+                let mut presence = xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::Unavailable,
+                );
+                presence.from = Some(jid::Jid::from(sender_jid.clone()));
+                presence.to = room_jid
+                    .clone()
+                    .with_resource_str(nick)
+                    .ok()
+                    .map(jid::Jid::from);
+                let stanza = Stanza::Presence(presence);
+                match bridge
+                    .try_proxy_muc_remote(
+                        room_jid,
+                        &stanza,
+                        crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                        origin,
+                    )
+                    .await
+                {
+                    Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
+                        replies,
+                    )) => {
+                        state
+                            .deps
+                            .protocol
+                            .remote_muc_memberships
+                            .record_leave(sender_jid, room_jid);
+                        return replies
+                            .into_iter()
+                            .map(|reply| stanza_to_xml(&reply))
+                            .collect();
+                    }
+                    Some(
+                        crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
+                    )
+                    | Some(
+                        crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                    )
+                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
+                    | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
+                        return vec![build_muc_presence_error_xml(
+                            room_jid,
+                            nick,
+                            sender_jid,
+                            StanzaError::new(
+                                ErrorType::Wait,
+                                DefinedCondition::ResourceConstraint,
+                                "en",
+                                "This room's ownership is currently unreachable; please retry.",
+                            ),
+                        )];
+                    }
+                    None => {}
+                }
+            }
+        }
+        if known_remote_membership {
+            return vec![build_muc_presence_error_xml(
+                room_jid,
+                nick,
+                sender_jid,
+                StanzaError::new(
+                    ErrorType::Wait,
+                    DefinedCondition::ResourceConstraint,
+                    "en",
+                    "This room's ownership is currently unreachable; please retry.",
+                ),
+            )];
+        }
+
         debug!(room = %room_jid, "Room not found for leave");
         // Idempotent on the SFU side — the user could have an SFU
         // participant even when the room actor is gone (process
@@ -910,10 +1151,12 @@ pub async fn handle_muc_leave(
     // same wire shape.
     super::super::super::cleanup::broadcast_muc_leave_to_remaining(
         state, room_jid, sender_jid, &outcome,
-    );
+    )
+    .await;
     super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining(
         state, room_jid, sender_jid, &outcome,
-    );
+    )
+    .await;
 
     let response = vec![build_muc_self_unavailable_xml(
         state,

@@ -4,6 +4,7 @@ pub(super) async fn update_subscription_roster_state(
     state: &WebSocketState,
     storage: &DatabaseRosterStorage,
     request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> Result<Option<SubscriptionRosterUpdate>, crate::db::roster::RosterStorageError> {
     let existing_from_item = load_existing_roster_item(storage, &request.from, &request.to).await?;
     let mut store_from_item = true;
@@ -27,6 +28,7 @@ pub(super) async fn update_subscription_roster_state(
                     &request.from,
                     request.status.as_deref(),
                     &request.payloads,
+                    ordered_relay_origin,
                 )
                 .await;
                 return Ok(None);
@@ -54,6 +56,15 @@ pub(super) async fn update_subscription_roster_state(
                 SubscriptionStateMachine::apply_outbound_subscribed(&mut from_item);
                 from_item.approved = false;
                 SubscriptionStateMachine::apply_inbound_subscribed(to_item);
+            } else if to_item.as_ref().is_some_and(|item| {
+                item.ask.is_none()
+                    && matches!(item.subscription, Subscription::To | Subscription::Both)
+                    && matches!(
+                        from_item.subscription,
+                        Subscription::From | Subscription::Both
+                    )
+            }) {
+                forward_subscription_stanza = true;
             } else {
                 if from_item.subscription == Subscription::Remove {
                     from_item.subscription = Subscription::None;
@@ -141,6 +152,21 @@ pub(super) struct SubscriptionRosterUpdate {
     pub(super) send_unavailable_before_unsubscribed: bool,
     pub(super) auto_approve_subscribe: bool,
     pub(super) forward_subscription_stanza: bool,
+}
+
+#[cfg(feature = "clustering")]
+pub(super) async fn send_current_roster_push_to_local_resources(
+    state: &WebSocketState,
+    storage: &DatabaseRosterStorage,
+    user_jid: &BareJid,
+    contact_jid: &BareJid,
+) -> Result<(), RosterStorageError> {
+    let Some(item) = load_existing_roster_item(storage, user_jid, contact_jid).await? else {
+        return Ok(());
+    };
+    let version = storage.get_or_create_roster_version(user_jid).await?;
+    send_roster_push_to_resources(state, user_jid, &item, &version).await;
+    Ok(())
 }
 
 async fn send_roster_push_to_resources(

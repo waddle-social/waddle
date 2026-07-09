@@ -446,12 +446,10 @@ impl kameo::message::Message<ResourceCount> for UserActor {
 /// reaches this message — the caller observes a timeout, not a reply,
 /// which is exactly the signal [`health_check_or_wedge_kill`] acts on.
 ///
-/// No production caller wires this yet: `UserActor` claims do not exist
-/// until Slice 5 wires the fenced `SmPersistenceStorage` (the only
-/// production `LocallyClaimedEntities` implementor today is
-/// `waddle_server::clustering::self_fence::NoLocallyClaimedEntities`, whose
-/// `owned()` is always empty). A future `LocallyClaimedEntities` impl's
-/// `health_check` is the intended caller of [`health_check_or_wedge_kill`].
+/// Phase 4 Slice 1b wires production `UserActor` claim acquisition/release in
+/// `UserRegistryActor`; the server-side `UserLocalClaims` implementation asks
+/// this probe during deposed-owner veto and routes failures through
+/// [`health_check_or_wedge_kill`].
 pub struct HealthCheck;
 
 impl kameo::message::Message<HealthCheck> for UserActor {
@@ -508,8 +506,7 @@ impl kameo::message::Message<ConflictCloseAllResources> for UserActor {
 ///
 /// Returns `true` if the actor answered healthily (no action taken), `false`
 /// if it was wedge-killed (resources best-effort torn down, then the actor
-/// stopped outright). No production caller exists this slice — see
-/// [`HealthCheck`]'s doc comment.
+/// stopped outright).
 pub async fn health_check_or_wedge_kill(
     actor_ref: &kameo::actor::ActorRef<UserActor>,
     timeout: std::time::Duration,

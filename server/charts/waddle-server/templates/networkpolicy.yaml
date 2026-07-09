@@ -1,0 +1,25 @@
+{{- if and .Values.clustering.enabled .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "waddle-server.fullname" . }}-swarm
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "waddle-server.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.ports.http }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "waddle-server.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.clustering.swarmPort }}
+{{- end }}

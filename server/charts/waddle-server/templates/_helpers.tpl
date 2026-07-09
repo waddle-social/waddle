@@ -80,6 +80,13 @@ ConfigMap name.
 {{- end -}}
 
 {{/*
+Headless Service name for clustering swarm DNS bootstrap.
+*/}}
+{{- define "waddle-server.headlessServiceName" -}}
+{{- printf "%s-headless" (include "waddle-server.fullname" .) -}}
+{{- end -}}
+
+{{/*
 Secret name (operator-supplied values).
 */}}
 {{- define "waddle-server.secretName" -}}

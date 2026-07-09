@@ -16,24 +16,26 @@
 //! for the brief startup window before the registry exists), and
 //! [`SmSessionLocalClaims::wire`] completes it once the registry is built.
 //!
-//! **Scope note**: `owned()` only ever reports `EntityType::SmSession`
-//! entities. `UserActor`/`RoomActor` claim acquisition is out of this
-//! slice's Files list (the phase plan frames it as "Slices 5-7"), so this
-//! impl does not — and must not — fabricate wiring for either. This keeps
-//! the steal-intent veto scan (`self_fence::run_node_lease`) exactly as
-//! vacuous in production as it was under `NoLocallyClaimedEntities`:
-//! steal-intents never apply to `SmSession` claims at all (Slice 3 rule 1),
-//! so `owner_steal_intents` never returns one of the entities this impl's
-//! `owned()` reports, regardless.
+//! **Scope note**: this module reports SM-session, RoomActor, and UserActor
+//! claims to the generic node-lease/self-fence machinery. UserActor local
+//! claims use the same fill-in-later cell pattern as SM sessions: the
+//! registry is created later in `server/http.rs`, then wired into the handle
+//! that `start_if_enabled` already handed to `run_node_lease`.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use jid::BareJid;
+use jid::{BareJid, FullJid};
+use kameo::actor::ActorRef;
 use waddle_xmpp::muc::room_actor::HealthCheck;
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::ownership::{Entity, EntityType};
+use waddle_xmpp::registry::user_actor::HealthCheck as UserHealthCheck;
+use waddle_xmpp::registry::{
+    ConnectionRegistry, DemoteUserActor, ForceDetachOutcome, ForceDetachRequest, GetResources,
+    GetUserForLocalClaim, ListUsers, UserRegistryActor,
+};
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
 use super::self_fence::LocallyClaimedEntities;
@@ -44,6 +46,8 @@ use super::self_fence::LocallyClaimedEntities;
 /// TTL / heartbeat interval so a genuinely wedged room is detected and
 /// hard-killed within one veto-scan tick, never straddling two.
 const ROOM_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const USER_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const USER_FORCE_DETACH_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// See the module doc for the construction-order rationale.
 pub struct SmSessionLocalClaims {
@@ -342,22 +346,350 @@ impl LocallyClaimedEntities for RoomLocalClaims {
     }
 }
 
-/// Dispatches [`LocallyClaimedEntities`] calls across `SmSession` and
-/// `RoomActor` claims by `entity.entity_type` (ADR-0017 Phase 3 Slice 7):
+/// Real `LocallyClaimedEntities` backed by the UserActor registry (ADR-0017
+/// Phase 4 Slice 1b). Mirrors [`SmSessionLocalClaims`]'s fill-in-later-cell
+/// shape because the user registry is spawned later, while building
+/// `WebSocketState`.
+pub struct UserLocalClaims {
+    registry: OnceLock<ActorRef<UserRegistryActor>>,
+    connection_registry: OnceLock<Arc<ConnectionRegistry>>,
+}
+
+impl UserLocalClaims {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            registry: OnceLock::new(),
+            connection_registry: OnceLock::new(),
+        })
+    }
+
+    pub fn wire(&self, registry: ActorRef<UserRegistryActor>) {
+        if self.registry.set(registry).is_err() {
+            tracing::error!(
+                "UserLocalClaims::wire called more than once; the user registry \
+                 handle was already wired (ignoring this call)"
+            );
+        }
+    }
+
+    pub fn wire_connection_registry(&self, registry: Arc<ConnectionRegistry>) {
+        if self.connection_registry.set(registry).is_err() {
+            tracing::error!(
+                "UserLocalClaims::wire_connection_registry called more than once; the \
+                 connection registry handle was already wired (ignoring this call)"
+            );
+        }
+    }
+
+    fn user_jid(entity: &Entity) -> Option<BareJid> {
+        if entity.entity_type != EntityType::UserActor {
+            return None;
+        }
+        match entity.id.parse::<BareJid>() {
+            Ok(jid) => Some(jid),
+            Err(error) => {
+                tracing::warn!(
+                    id = %entity.id,
+                    %error,
+                    "UserLocalClaims: entity id is not a valid user bare JID"
+                );
+                None
+            }
+        }
+    }
+
+    async fn actor_resources(
+        registry: &ActorRef<UserRegistryActor>,
+        bare_jid: &BareJid,
+    ) -> Vec<FullJid> {
+        let actor_ref = match registry
+            .ask(GetUserForLocalClaim {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(Some(actor_ref)) => actor_ref,
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "UserLocalClaims::demote: user registry lookup failed before force-detach"
+                );
+                return Vec::new();
+            }
+        };
+        match actor_ref
+            .ask(GetResources)
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(resources) => resources,
+            Err(error) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "UserLocalClaims::demote: UserActor resource enumeration failed before force-detach"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn connection_registry_resources(
+        connection_registry: &ConnectionRegistry,
+        bare_jid: &BareJid,
+    ) -> Vec<FullJid> {
+        connection_registry
+            .list_connections()
+            .into_iter()
+            .filter(|jid| jid.to_bare() == *bare_jid)
+            .collect()
+    }
+
+    fn merge_resources(resources: &mut Vec<FullJid>, extra: Vec<FullJid>) {
+        for jid in extra {
+            if !resources.contains(&jid) {
+                resources.push(jid);
+            }
+        }
+    }
+
+    async fn force_detach_resources(&self, bare_jid: &BareJid, resources: Vec<FullJid>) {
+        if resources.is_empty() {
+            return;
+        }
+        let Some(connection_registry) = self.connection_registry.get() else {
+            tracing::warn!(
+                jid = %bare_jid,
+                resource_count = resources.len(),
+                "UserLocalClaims::demote: no ConnectionRegistry wired; cannot force-detach live resources"
+            );
+            return;
+        };
+        for jid in resources {
+            let Some(entry) = connection_registry.get_entry(&jid) else {
+                continue;
+            };
+            let owner = entry.carbons_handle();
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            let request = ForceDetachRequest {
+                requester_bare_jid: bare_jid.clone(),
+                ack,
+            };
+            let mut remove_after_wait = false;
+            match entry.force_detach_sender().try_send(request) {
+                Ok(()) => match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
+                    Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {
+                        remove_after_wait = true;
+                        tracing::debug!(
+                            jid = %jid,
+                            "UserLocalClaims::demote: connection task acknowledged force-detach"
+                        );
+                    }
+                    Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
+                        remove_after_wait = false;
+                        tracing::warn!(
+                            jid = %jid,
+                            requester = %bare_jid,
+                            "UserLocalClaims::demote: force-detach identity mismatch; leaving registry entry untouched"
+                        );
+                    }
+                    Ok(Err(_closed)) => {
+                        tracing::warn!(
+                            jid = %jid,
+                            "UserLocalClaims::demote: force-detach ack channel closed before response; leaving registry entry for connection-owned cleanup"
+                        );
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            jid = %jid,
+                            timeout_ms = USER_FORCE_DETACH_ACK_TIMEOUT.as_millis() as u64,
+                            "UserLocalClaims::demote: force-detach timed out; leaving registry entry so the connection task does not misclassify cleanup as superseded"
+                        );
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        jid = %jid,
+                        ?error,
+                        "UserLocalClaims::demote: force-detach request could not be queued; leaving registry entry for connection-owned cleanup"
+                    );
+                }
+            }
+            if remove_after_wait
+                && connection_registry
+                    .unregister_if_owner(&jid, &owner)
+                    .is_some()
+            {
+                tracing::warn!(
+                    jid = %jid,
+                    "UserLocalClaims::demote: removed deposed resource from ConnectionRegistry"
+                );
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LocallyClaimedEntities for UserLocalClaims {
+    async fn owned(&self) -> Vec<Entity> {
+        let mut owned = Vec::new();
+        if let Some(registry) = self.registry.get() {
+            match registry
+                .ask(ListUsers)
+                .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+                .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+                .await
+            {
+                Ok(jids) => {
+                    owned.extend(
+                        jids.into_iter()
+                            .map(|jid| Entity::new(EntityType::UserActor, jid.to_string())),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "UserLocalClaims::owned: user registry list_users failed; \
+                         falling back to ConnectionRegistry resource enumeration"
+                    );
+                }
+            }
+        }
+        if let Some(connection_registry) = self.connection_registry.get() {
+            for jid in connection_registry.list_connections() {
+                let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
+                if !owned.contains(&entity) {
+                    owned.push(entity);
+                }
+            }
+        }
+        owned
+    }
+
+    async fn demote(&self, entity: &Entity) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        let Some(bare_jid) = Self::user_jid(entity) else {
+            return;
+        };
+        let mut resources = Self::actor_resources(registry, &bare_jid).await;
+        if let Some(connection_registry) = self.connection_registry.get() {
+            Self::merge_resources(
+                &mut resources,
+                Self::connection_registry_resources(connection_registry, &bare_jid),
+            );
+        }
+        match registry
+            .ask(DemoteUserActor {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(true) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    "demoted (hard-killed) a locally-claimed UserActor: Postgres \
+                     no longer attributes this user claim to this node"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "UserLocalClaims::demote: user registry demotion failed"
+                );
+            }
+        }
+        self.force_detach_resources(&bare_jid, resources).await;
+    }
+
+    async fn health_check(&self, entity: &Entity) -> bool {
+        let Some(registry) = self.registry.get() else {
+            return false;
+        };
+        let Some(bare_jid) = Self::user_jid(entity) else {
+            return false;
+        };
+        let actor_ref = match registry
+            .ask(GetUserForLocalClaim {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(Some(actor_ref)) => actor_ref,
+            Ok(None) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    "UserLocalClaims::health_check: this node's claim has no live \
+                     local UserActor; reporting UNHEALTHY"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "UserLocalClaims::health_check: user registry lookup failed; \
+                     reporting UNHEALTHY"
+                );
+                return false;
+            }
+        };
+        actor_ref
+            .ask(UserHealthCheck)
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+            .is_ok()
+    }
+
+    async fn seal_before_release(&self, entity: &Entity) -> bool {
+        if entity.entity_type == EntityType::UserActor {
+            tracing::warn!(
+                %entity,
+                "UserLocalClaims::seal_before_release: UserActor has no final durable \
+                 seal barrier; leaving claim held for fenced reclaim"
+            );
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// Dispatches [`LocallyClaimedEntities`] calls across `SmSession`,
+/// `RoomActor`, and `UserActor` claims by `entity.entity_type`:
 /// `run_node_lease` takes exactly one `Arc<dyn LocallyClaimedEntities>`
 /// handle, but Slices 5 and 7 each contribute their own concrete
 /// implementation over a different owned-entity universe. Combining them
-/// here, rather than widening either concrete type to know about the
-/// other's entities, keeps `SmSessionLocalClaims`/`RoomLocalClaims`
+/// here, rather than widening any concrete type to know about the
+/// other's entities, keeps `SmSessionLocalClaims`/`RoomLocalClaims`/
+/// `UserLocalClaims`
 /// independently testable (as both already are).
 pub struct CombinedLocalClaims {
     sm: Arc<SmSessionLocalClaims>,
     room: Arc<RoomLocalClaims>,
+    user: Arc<UserLocalClaims>,
 }
 
 impl CombinedLocalClaims {
-    pub fn new(sm: Arc<SmSessionLocalClaims>, room: Arc<RoomLocalClaims>) -> Arc<Self> {
-        Arc::new(Self { sm, room })
+    pub fn new(
+        sm: Arc<SmSessionLocalClaims>,
+        room: Arc<RoomLocalClaims>,
+        user: Arc<UserLocalClaims>,
+    ) -> Arc<Self> {
+        Arc::new(Self { sm, room, user })
     }
 }
 
@@ -366,6 +698,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
     async fn owned(&self) -> Vec<Entity> {
         let mut owned = self.sm.owned().await;
         owned.extend(self.room.owned().await);
+        owned.extend(self.user.owned().await);
         owned
     }
 
@@ -373,11 +706,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         match entity.entity_type {
             EntityType::SmSession => self.sm.demote(entity).await,
             EntityType::RoomActor => self.room.demote(entity).await,
-            // No `UserActor`-backed `LocallyClaimedEntities` implementor
-            // exists yet (deviation 21/34's Phase-4 carry-forward) — a
-            // `UserActor` entity never appears in `owned()`, so this arm
-            // is defensive only.
-            EntityType::UserActor => {}
+            EntityType::UserActor => self.user.demote(entity).await,
         }
     }
 
@@ -385,7 +714,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         match entity.entity_type {
             EntityType::SmSession => self.sm.health_check(entity).await,
             EntityType::RoomActor => self.room.health_check(entity).await,
-            EntityType::UserActor => true,
+            EntityType::UserActor => self.user.health_check(entity).await,
         }
     }
 
@@ -397,13 +726,10 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         if !sm_entities.is_empty() {
             self.sm.hydrate_reclaimed(&sm_entities).await;
         }
-        // `RoomLocalClaims`/`UserActor` have no reclaim-hydration
-        // consumer yet (no production caller acquires a `RoomActor`
-        // claim via the reclaim-sweep path this slice — only via
-        // `GetOrCreateRoom`'s own `ensure_claimed`/`steal_stale`, which
-        // already restores through `RestoreDurableRoomState`), so `rest`
-        // is intentionally not forwarded anywhere; named here so a
-        // future contributor adding that consumer has an obvious seam.
+        // `RoomLocalClaims`/`UserLocalClaims` have no reclaim-hydration
+        // consumer yet (they are created through their registries' own
+        // `ensure_claimed`/`steal_stale` paths), so `rest` is intentionally
+        // not forwarded anywhere.
         let _ = rest;
     }
 
@@ -416,14 +742,15 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
     /// generic seal is never consulted for `SmSession` at all
     /// (`clustering::drain::run_shutdown_drain` only ever batches
     /// `RoomActor` entities). `RoomActor` routes to
-    /// [`RoomLocalClaims::seal_before_release`]'s real barrier.
-    /// `UserActor` keeps the default `true` too — defensive only, no
-    /// production `UserActor` claim-acquisition call site exists yet
-    /// (deviation 21/34).
+    /// [`RoomLocalClaims::seal_before_release`]'s real barrier. `UserActor`
+    /// routes to [`UserLocalClaims::seal_before_release`], which currently
+    /// fails closed because UserActor has no durable final-write barrier to
+    /// prove before a generic drain release.
     async fn seal_before_release(&self, entity: &Entity) -> bool {
         match entity.entity_type {
-            EntityType::SmSession | EntityType::UserActor => true,
+            EntityType::SmSession => true,
             EntityType::RoomActor => self.room.seal_before_release(entity).await,
+            EntityType::UserActor => self.user.seal_before_release(entity).await,
         }
     }
 }
@@ -431,6 +758,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kameo::actor::Spawn;
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};
 
     fn test_session(stream_id: &str, jid: &str) -> DetachedSession {
@@ -513,6 +841,254 @@ mod tests {
         let local_claims = SmSessionLocalClaims::new();
         let entity = Entity::new(EntityType::SmSession, "whatever".to_string());
         assert!(local_claims.health_check(&entity).await);
+    }
+
+    fn user_jid(localpart: &str) -> BareJid {
+        format!("{localpart}@example.com")
+            .parse()
+            .expect("valid user bare JID")
+    }
+
+    fn spawn_user_registry() -> ActorRef<UserRegistryActor> {
+        UserRegistryActor::spawn(UserRegistryActor::new())
+    }
+
+    #[tokio::test]
+    async fn user_owned_reflects_the_wired_registry_users() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry.clone());
+
+        let jid = user_jid("owned-user");
+        registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: jid.clone(),
+            })
+            .await
+            .expect("create user actor");
+
+        let owned = user_local_claims.owned().await;
+        assert_eq!(
+            owned,
+            vec![Entity::new(EntityType::UserActor, jid.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn user_owned_falls_back_to_connection_registry_resources() {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "fallback-owned@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        connection_registry.register(jid.clone(), outbound_tx);
+
+        assert_eq!(
+            user_local_claims.owned().await,
+            vec![Entity::new(EntityType::UserActor, jid.to_bare().to_string())],
+            "terminal self-fence must still see live user resources when the user registry cannot be enumerated"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_health_check_is_unhealthy_when_no_live_actor_exists() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry);
+
+        let entity = Entity::new(EntityType::UserActor, user_jid("ghost").to_string());
+        assert!(
+            !user_local_claims.health_check(&entity).await,
+            "no live local UserActor must not veto a steal intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_health_check_is_healthy_for_a_live_user_actor() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry.clone());
+
+        let jid = user_jid("healthy-user");
+        registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: jid.clone(),
+            })
+            .await
+            .expect("create user actor");
+
+        let entity = Entity::new(EntityType::UserActor, jid.to_string());
+        assert!(
+            user_local_claims.health_check(&entity).await,
+            "a live UserActor must answer the health ask"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_user_health_then_demote_does_not_release_the_claim() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry.clone());
+
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let node_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(
+            waddle_xmpp::ownership::NodeIdentity::local(),
+        );
+        registry
+            .ask(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity,
+            })
+            .await
+            .expect("wire claims");
+
+        let jid = user_jid("health-failed");
+        let actor_ref = registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: jid.clone(),
+            })
+            .await
+            .expect("create user actor");
+        let entity = Entity::new(EntityType::UserActor, jid.to_string());
+        actor_ref.kill();
+        actor_ref.wait_for_shutdown().await;
+
+        assert!(
+            !user_local_claims.health_check(&entity).await,
+            "dead actor must report unhealthy without releasing the durable claim"
+        );
+        user_local_claims.demote(&entity).await;
+
+        assert!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("current claim")
+                .is_some(),
+            "health-fail followed by demotion must not release a claim that may already have moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_demote_hard_kills_and_forgets_the_local_actor() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry.clone());
+
+        let jid = user_jid("deposed-user");
+        let actor_ref = registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: jid.clone(),
+            })
+            .await
+            .expect("create user actor");
+        assert!(actor_ref.is_alive());
+
+        let entity = Entity::new(EntityType::UserActor, jid.to_string());
+        user_local_claims.demote(&entity).await;
+        actor_ref.wait_for_shutdown().await;
+
+        assert!(
+            user_local_claims.owned().await.is_empty(),
+            "demote must remove the local UserActor from ownership enumeration"
+        );
+        assert!(
+            !user_local_claims.health_check(&entity).await,
+            "a demoted UserActor must no longer report healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_demote_force_detaches_connection_registry_resources() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "force-close@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = jid.to_bare();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection task owns force-detach receiver");
+        let force_detach_task = tokio::spawn({
+            let expected_bare = bare_jid.clone();
+            async move {
+                let request = force_detach_rx.recv().await.expect("force-detach request");
+                assert_eq!(request.requester_bare_jid, expected_bare);
+                let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+            }
+        });
+
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry,
+            })
+            .await
+            .expect("register user resource");
+        assert!(connection_registry.is_connected(&jid));
+
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        user_local_claims.demote(&entity).await;
+        force_detach_task.await.expect("force-detach task");
+
+        assert!(
+            !connection_registry.is_connected(&jid),
+            "demotion must remove the real ConnectionRegistry resource, not only the UserActor clone"
+        );
+        assert!(
+            registry
+                .ask(waddle_xmpp::registry::GetUser {
+                    bare_jid: bare_jid.clone()
+                })
+                .await
+                .expect("get user")
+                .is_none(),
+            "demotion must forget the local UserActor entry too"
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_local_claims_routes_user_actor_operations() {
+        let sm_local_claims = SmSessionLocalClaims::new();
+        let room_local_claims = RoomLocalClaims::new();
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        user_local_claims.wire(registry.clone());
+
+        let jid = user_jid("combined-user");
+        let actor_ref = registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: jid.clone(),
+            })
+            .await
+            .expect("create user actor");
+        let entity = Entity::new(EntityType::UserActor, jid.to_string());
+        let combined =
+            CombinedLocalClaims::new(sm_local_claims, room_local_claims, user_local_claims);
+
+        assert!(combined.owned().await.contains(&entity));
+        assert!(combined.health_check(&entity).await);
+        assert!(
+            !combined.seal_before_release(&entity).await,
+            "UserActor has no generic drain seal barrier yet"
+        );
+
+        combined.demote(&entity).await;
+        actor_ref.wait_for_shutdown().await;
+        assert!(!combined.health_check(&entity).await);
     }
 
     // -----------------------------------------------------------------

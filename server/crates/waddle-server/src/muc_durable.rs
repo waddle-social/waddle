@@ -514,6 +514,18 @@ mod tests {
         )
     }
 
+    async fn live_stealer(db: &crate::db::Database) -> NodeIdentity {
+        let stealer = node_identity();
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "INSERT INTO clustering_nodes (node_id, node_epoch, expired) VALUES (?, ?, false)",
+            crate::db_params![stealer.node_id.clone(), stealer.node_epoch.clone()],
+        )
+        .await
+        .expect("seed live stealer node");
+        stealer
+    }
+
     fn room_jid(name: &str) -> BareJid {
         format!("{name}@muc.example.com")
             .parse()
@@ -675,7 +687,7 @@ mod tests {
     #[tokio::test]
     async fn check_fenced_fanout_returns_false_immediately_after_a_steal_commits() {
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Some((store, claim_store, _db)) = clean_store().await else {
+        let Some((store, claim_store, db)) = clean_store().await else {
             return;
         };
         let jid = room_jid("deposed");
@@ -696,11 +708,10 @@ mod tests {
         );
 
         // Simulate another node stealing via steal_stale(OwnerStale): `me`
-        // never registered a `clustering_nodes` liveness row (this test
-        // never calls `NodeLeaseStore::register`), so the OwnerStale
-        // predicate's `NOT EXISTS` correlated subquery is vacuously true —
-        // exactly modeling "the owner's node lease is gone."
-        let stealer = node_identity();
+        // has no `clustering_nodes` liveness row, so the owner-stale
+        // predicate is true, while the stealer has a fresh live row as
+        // required by Slice 1a's hardened steal CAS.
+        let stealer = live_stealer(&db).await;
         claim_store
             .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &stealer)
             .await
@@ -783,10 +794,10 @@ mod tests {
             .expect("row exists");
         assert_eq!(stored.body.as_deref(), Some("hello, fenced world"));
 
-        // Steal the claim exactly like `check_fenced_fanout`'s own test —
-        // `me` never registered a `clustering_nodes` liveness row, so
-        // `OwnerStale` is vacuously true.
-        let stealer = node_identity();
+        // Steal the claim exactly like `check_fenced_fanout`'s own test:
+        // the old owner is missing from `clustering_nodes`, and the stealer
+        // is explicitly live.
+        let stealer = live_stealer(&db).await;
         claim_store
             .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &stealer)
             .await

@@ -86,11 +86,12 @@ pub(super) fn extract_in_call_presence_state(presence: &Presence) -> InCallPrese
         .unwrap_or_default()
 }
 
-fn is_muc_join_presence(presence: &Presence) -> bool {
-    presence
-        .payloads
-        .iter()
-        .any(|elem| elem.name() == "x" && elem.ns() == NS_MUC)
+pub(crate) fn is_muc_join_presence(presence: &Presence) -> bool {
+    presence.type_ == xmpp_parsers::presence::Type::None
+        && presence
+            .payloads
+            .iter()
+            .any(|elem| elem.name() == "x" && elem.ns() == NS_MUC)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,13 +143,17 @@ fn reflected_muji_entries<'a>(
 /// out-of-band via the connection registry. Returns `None` when
 /// the sender is NOT yet an occupant of this room; the caller
 /// falls back to `handle_muc_join` to actually let the user in.
-pub(super) async fn try_handle_muc_presence_update(
+pub(crate) async fn try_handle_muc_presence_update(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
     incoming: &Presence,
 ) -> Option<Vec<String>> {
+    if incoming.type_ != xmpp_parsers::presence::Type::None {
+        return None;
+    }
+
     let actor = get_room_actor(state, room_jid).await?;
     let muji = extract_muji(incoming);
     // XEP-0045 join/rejoin presence carries `<x xmlns='.../muc'/>`.
@@ -362,11 +367,8 @@ pub(super) async fn try_handle_muc_presence_update(
                 responses.push(stanza_to_xml(&Stanza::Presence(presence)));
             } else {
                 let stanza = Stanza::Presence(presence);
-                let _ = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(recipient, stanza);
+                super::muc::route_room_presence_to_occupant(state, room_jid, recipient, stanza)
+                    .await;
             }
         }
     }

@@ -271,6 +271,7 @@ impl ExtensionHostAdapter {
             blocking_storage: Some(&self.state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&self.state.deps.protocol.dispatcher),
             pending_delivery_storage: Some(&self.state.deps.protocol.pending_delivery_storage),
+            ordered_relay_origin: None,
         }
     }
 

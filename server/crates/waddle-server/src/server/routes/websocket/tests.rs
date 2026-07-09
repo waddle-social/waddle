@@ -465,6 +465,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                     pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                     call_threads: Arc::new(dashmap::DashMap::new()),
+                    remote_muc_memberships: Arc::new(super::RemoteMucMemberships::default()),
                     dm_call_threads: Arc::new(dashmap::DashMap::new()),
                     dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
                     dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
@@ -710,7 +711,7 @@ async fn handle_message_for_test(
     sm.transition_to_ready(sender_jid.clone(), false);
     sm.set_blocklist(Blocklist::empty());
     let phase = ConnectionPhase::ready(sender_jid.clone(), false);
-    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session).await
+    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session, None).await
 }
 
 fn authenticated_phase_for_session(session: &Session, domain: &str) -> ConnectionPhase {

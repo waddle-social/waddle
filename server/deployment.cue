@@ -100,7 +100,7 @@ package cuenv
 		modules: []
 		...
 	}
-	extraSecretRefs: ["waddle-runtime-secrets", "waddle-livekit-config"]
+	extraSecretRefs: ["waddle-runtime-secrets", "waddle-clustering-keypool", "waddle-livekit-config"]
 	secret: {
 		runtimeSecretName: "waddle-runtime-secrets"
 		...

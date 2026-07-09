@@ -340,8 +340,15 @@ pub async fn handle_iq_with_conn_state(
     if !payload_mediates_peer_routing {
         if let Some(target) = iq.to().and_then(|jid| jid.clone().try_into_full().ok()) {
             if target.domain().as_str() == domain {
-                return route_full_jid_iq(iq, state, phase.bound_jid(), target, response_from)
-                    .await;
+                return route_full_jid_iq(
+                    iq,
+                    state,
+                    phase.bound_jid(),
+                    target,
+                    response_from,
+                    conn_state.ordered_relay_origin.clone(),
+                )
+                .await;
             }
         }
     }

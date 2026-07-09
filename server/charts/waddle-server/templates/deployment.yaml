@@ -74,6 +74,11 @@ spec:
             - name: http
               containerPort: {{ .Values.service.ports.http }}
               protocol: TCP
+            {{- if .Values.clustering.enabled }}
+            - name: swarm
+              containerPort: {{ .Values.clustering.swarmPort }}
+              protocol: TCP
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "waddle-server.configMapName" . }}
@@ -183,9 +188,19 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- if .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- else if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: {{ int .Values.podAntiAffinity.weight }}
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "waddle-server.selectorLabels" . | nindent 20 }}
+                topologyKey: {{ .Values.podAntiAffinity.topologyKey | quote }}
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:

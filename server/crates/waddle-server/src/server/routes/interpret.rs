@@ -160,6 +160,7 @@ mod displayed_marker;
 mod groupchat_archive;
 mod groupchat_inbox;
 mod groupchat_validation;
+mod handoff;
 mod notification_activity_ingest;
 mod offline_delivery;
 mod room_dispatch;
@@ -191,18 +192,23 @@ use groupchat_validation::{
     bad_request_error, build_message_error_reply, remove_framework_envelopes,
     resource_constraint_error, service_unavailable_error, validate_groupchat_rich_targets,
 };
+#[cfg(feature = "clustering")]
+pub use handoff::OrderedRelayHandoffHandle;
+pub use handoff::{
+    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
+};
 use offline_delivery::queue_offline_delivery;
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
 use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
-use route_to_connection::route_to_connection;
-use routing::{
-    deliver_direct_to_full, deliver_peer_to_full, run_fanout_recipient_pass,
-    run_headless_recipient_pass, FanoutPassResult, FullJidDeliveryOutcome,
-};
+pub(crate) use route_to_connection::{fallback_reply_for_undeliverable_iq, route_to_connection};
+pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
+use routing::{run_fanout_recipient_pass, run_headless_recipient_pass, FanoutPassResult};
 
-pub use deps::{Deps, InterpretOutcome, TimerCommand};
+#[cfg(feature = "clustering")]
+pub use deps::OrderedRelayRouteOriginKind;
+pub use deps::{Deps, InterpretOutcome, OrderedRelayRouteOrigin, TimerCommand};
 pub(crate) use groupchat_archive::push_inbox_update;
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
@@ -214,6 +220,15 @@ pub(crate) async fn broadcast_room_system_message(
     message: Box<Message>,
 ) -> Option<String> {
     room_system_message::broadcast_room_system_message_event(deps, room, message, 0).await
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) async fn dispatch_muc_to_room_for_relay(
+    deps: &Deps<'_>,
+    room: BareJid,
+    message: Message,
+) -> InterpretOutcome {
+    dispatch_to_room(deps, room, message, 0).await
 }
 
 /// Execute the side effects described by `events`.

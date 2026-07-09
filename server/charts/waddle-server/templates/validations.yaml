@@ -51,24 +51,37 @@
 {{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + clustering.claimReleaseBudgetSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $claimReleaseBudget $killMargin $shutdownFloor) -}}
 {{- end -}}
 
-{{- /*
-  ADR-0017: multi-replica is refused until clustering ships (Phase 4). The
-  cross-node routing/ownership fabric does not exist yet, so replicaCount > 1
-  would split routing, presence, and MUC rooms across replicas that cannot
-  reach each other.
-
-  Two guards, belt-and-suspenders (Copilot review on PR #1177): the
-  clustering.enabled flag is itself refused because the fabric is not built —
-  so nobody can flip it to unlock scale-up before it works — AND replicaCount
-  > 1 is refused independently. Phase 4 removes the first guard when clustering
-  actually ships; until then both replicaCount > 1 and clustering.enabled=true
-  fail to render.
-*/ -}}
-{{- if .Values.clustering.enabled -}}
-{{- fail "clustering.enabled=true is not supported yet — the cross-node routing/ownership fabric ships in ADR-0017 Phase 4. Leave clustering.enabled=false." -}}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.clustering.enabled) -}}
+{{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true so cross-node routing, claims, MUC, SM, and ISR state use the ordered relay/Postgres fabric." (int .Values.replicaCount)) -}}
 {{- end -}}
-{{- if gt (int .Values.replicaCount) 1 -}}
-{{- fail (printf "replicaCount (%d) > 1 is not supported yet — cross-node routing ships in ADR-0017 Phase 4. A second replica would split routing/presence/MUC state across pods that cannot reach each other." (int .Values.replicaCount)) -}}
+
+{{- if .Values.clustering.enabled -}}
+{{- if ne .Values.database.driver "postgres" -}}
+{{- fail "clustering.enabled=true requires database.driver=postgres" -}}
+{{- end -}}
+{{- $hasS3 := and .Values.config.s3Endpoint .Values.config.s3Bucket -}}
+{{- $hasRwx := has "ReadWriteMany" .Values.persistence.accessModes -}}
+{{- if not (or $hasS3 $hasRwx) -}}
+{{- fail "clustering.enabled=true requires config.s3Endpoint+config.s3Bucket or persistence.accessModes containing ReadWriteMany; per-pod/local uploads are unsafe across replicas." -}}
+{{- end -}}
+{{- if eq (len .Values.clustering.listenAddrs) 0 -}}
+{{- fail "clustering.enabled=true requires at least one clustering.listenAddrs entry" -}}
+{{- end -}}
+{{- $rollingUpdate := default (dict) .Values.updateStrategy.rollingUpdate -}}
+{{- $maxSurge := int (default 1 $rollingUpdate.maxSurge) -}}
+{{- $requiredKeys := add (int .Values.replicaCount) $maxSurge (int .Values.clustering.keypairHeadroom) -}}
+{{- $keyPool := default "" .Values.secret.clusteringKeypairPool -}}
+{{- $keyPoolFromExternalSecret := or (ne .Values.secret.existingSecret "") (gt (len .Values.extraSecretRefs) 0) -}}
+{{- if $keyPool -}}
+{{- $keyCount := len (compact (splitList "," $keyPool)) -}}
+{{- if lt $keyCount $requiredKeys -}}
+{{- fail (printf "secret.clusteringKeypairPool has %d keys; clustering requires at least replicaCount (%d) + maxSurge (%d) + keypairHeadroom (%d) = %d" $keyCount (int .Values.replicaCount) $maxSurge (int .Values.clustering.keypairHeadroom) $requiredKeys) -}}
+{{- end -}}
+{{- else if not $keyPoolFromExternalSecret -}}
+{{- fail "clustering.enabled=true requires WADDLE_CLUSTERING_KEYPAIR_POOL from secret.clusteringKeypairPool, secret.existingSecret, or extraSecretRefs" -}}
+{{- else if lt (int .Values.clustering.enrolledKeyCount) $requiredKeys -}}
+{{- fail (printf "clustering.enrolledKeyCount (%d) must be at least replicaCount (%d) + maxSurge (%d) + keypairHeadroom (%d) = %d when WADDLE_CLUSTERING_KEYPAIR_POOL comes from an external Secret" (int .Values.clustering.enrolledKeyCount) (int .Values.replicaCount) $maxSurge (int .Values.clustering.keypairHeadroom) $requiredKeys) -}}
+{{- end -}}
 {{- end -}}
 
 {{- if and (eq .Values.updateStrategy.type "RollingUpdate") .Values.persistence.enabled (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}

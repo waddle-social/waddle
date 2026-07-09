@@ -111,6 +111,33 @@ pub fn record_relay_respawn() {
     .add(1, &[]);
 }
 
+/// Count ordered relay ACKs produced by the Slice 2 receiver substrate.
+pub fn record_ordered_relay_ack() {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.ordered_relay_acks")
+            .with_description("Internal ordered-relay ACK replies")
+            .with_unit("reply")
+            .build()
+    })
+    .add(1, &[]);
+}
+
+/// Count ordered relay NACKs produced by the Slice 2 receiver substrate.
+/// `reason` is a stable low-cardinality label.
+pub fn record_ordered_relay_nack(reason: &'static str) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.ordered_relay_nacks")
+            .with_description("Internal ordered-relay NACK replies")
+            .with_unit("reply")
+            .build()
+    })
+    .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
+}
+
 /// Set the current age (in milliseconds) since this node's last
 /// successfully committed node-lease heartbeat (ADR-0017 Phase 3 Slice 2,
 /// element 12: "a heartbeat-write-latency histogram + alert watches the

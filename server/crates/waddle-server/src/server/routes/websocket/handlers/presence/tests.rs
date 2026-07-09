@@ -46,6 +46,7 @@ async fn superseded_connection_presence_does_not_touch_replacement_registry_stat
         &jid,
         Some(&stale_owner),
         stale_presence,
+        None,
     )
     .await;
 

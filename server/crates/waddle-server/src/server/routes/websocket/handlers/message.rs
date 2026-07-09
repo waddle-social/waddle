@@ -57,6 +57,7 @@ pub async fn handle_message(
     phase: &ConnectionPhase,
     state_machine: Option<&mut XmppStateMachine>,
     authenticated_session: Option<&Session>,
+    ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
     let Some(bound_jid) = phase.bound_jid().cloned() else {
         warn!("Message received without authenticated session");
@@ -132,7 +133,8 @@ pub async fn handle_message(
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
         Stanza::Message(incoming),
     ))));
-    let deps = build_interpret_deps(state, authenticated_session);
+    let deps = build_interpret_deps(state, authenticated_session)
+        .with_ordered_relay_origin(ordered_relay_origin);
     // Stanza dispatch never emits keepalive/timer effects (those come
     // only from TransportReady/Tick in the connection loop), and
     // `close` was already ignored on this path — only frames matter.

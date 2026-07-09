@@ -10,7 +10,7 @@ spec:
   chart:
     spec:
       chart: waddle-server
-      version: 0.3.x
+      version: 0.4.x
       sourceRef:
         kind: HelmRepository
         name: waddle-server
@@ -23,6 +23,15 @@ spec:
       targetPath: extraSecretChecksum
       optional: false
   values:
+    replicaCount: 2
+    clustering:
+      enabled: true
+      enrolledKeyCount: 4
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
@@ -51,6 +60,7 @@ spec:
       insecure: true
     extraSecretRefs:
       - waddle-runtime-secrets
+      - waddle-clustering-keypool
       # LiveKit signing key + TURN shared secret + LiveKit/TURN URLs.
       # Mounted as env vars; consumed by `waddle-sfu::SfuConfig::from_env`
       # at server boot. If this Secret is absent or unpopulated the
@@ -113,6 +123,7 @@ spec:
       tls:
         secretName: waddle-xmpp-tls
     persistence:
+      enabled: false
       storageClassName: openebs-mayastor
     service:
       type: ClusterIP

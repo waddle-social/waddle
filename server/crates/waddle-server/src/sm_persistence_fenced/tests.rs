@@ -81,6 +81,12 @@ async fn seed_node(db: &Database, identity: &NodeIdentity, expired: bool) {
     .expect("seed node");
 }
 
+async fn live_stealer(db: &Database) -> NodeIdentity {
+    let stealer = node_identity();
+    seed_node(db, &stealer, false).await;
+    stealer
+}
+
 struct Fixture {
     fenced: PostgresFencedSmPersistence,
     /// A second `ClaimStore` handle onto the same underlying Postgres
@@ -434,7 +440,7 @@ async fn delete_session_aborts_before_any_write_once_the_claim_is_stolen() {
     // different node — the fenced impl's cached epoch (0) is now invalid.
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-stolen".to_string());
-    let stealer = node_identity();
+    let stealer = live_stealer(&f.claims_db).await;
     f.claims
         .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
         .await
@@ -468,7 +474,7 @@ async fn record_promotion_failure_aborts_before_any_write_once_the_claim_is_stol
 
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-promo-stolen".to_string());
-    let stealer = node_identity();
+    let stealer = live_stealer(&f.claims_db).await;
     f.claims
         .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
         .await
@@ -538,7 +544,7 @@ async fn concurrent_steal_vs_delete_session_never_produces_torn_state() {
     seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-race".to_string());
-    let stealer = node_identity();
+    let stealer = live_stealer(&f.claims_db).await;
 
     let delete_result = f.fenced.delete_session(&stream_id);
     let steal_result =
@@ -602,7 +608,7 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
 
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-stolen".to_string());
-    let stealer = node_identity();
+    let stealer = live_stealer(&f.claims_db).await;
     f.claims
         .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
         .await
@@ -661,7 +667,7 @@ async fn concurrent_steal_vs_store_session_atomic_never_produces_torn_state() {
     seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-race".to_string());
-    let stealer = node_identity();
+    let stealer = live_stealer(&f.claims_db).await;
 
     let mut new_session = fixture_session("stream-atomic-race");
     new_session.inbound_count = 999;
@@ -722,7 +728,7 @@ async fn concurrent_steal_vs_record_promotion_failure_never_produces_torn_state(
     seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-promo-race".to_string());
-    let stealer = node_identity();
+    let stealer = live_stealer(&f.claims_db).await;
 
     let promo_result = f.fenced.record_promotion_failure(&stream_id);
     let steal_result =

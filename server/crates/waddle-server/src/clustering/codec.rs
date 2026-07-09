@@ -172,6 +172,14 @@ fn check_attribute_cap(start: &quick_xml::events::BytesStart<'_>) -> Result<(), 
 #[derive(Debug, Clone)]
 pub struct RemoteStanza(pub Stanza);
 
+impl PartialEq for RemoteStanza {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_element() == other.0.to_element()
+    }
+}
+
+impl Eq for RemoteStanza {}
+
 impl Serialize for RemoteStanza {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let xml = encode_stanza(&self.0).map_err(|error| {
