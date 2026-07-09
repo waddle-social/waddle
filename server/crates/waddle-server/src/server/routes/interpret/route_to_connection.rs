@@ -390,11 +390,7 @@ pub(crate) async fn route_to_connection(
                     for full in live_targets {
                         let disposition =
                             deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
-                        if matches!(
-                            disposition,
-                            FullJidDeliveryOutcome::Delivered
-                                | FullJidDeliveryOutcome::QueuedDetached
-                        ) {
+                        if disposition.suppresses_fallback() {
                             any_landed = true;
                         }
                     }

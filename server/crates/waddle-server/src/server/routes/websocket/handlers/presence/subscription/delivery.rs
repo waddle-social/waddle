@@ -537,13 +537,7 @@ pub(in crate::server::routes::websocket::handlers::presence::subscription) async
 fn remote_presence_outcome_consumed(
     outcome: Option<crate::server::routes::interpret::FullJidDeliveryOutcome>,
 ) -> bool {
-    matches!(
-        outcome,
-        Some(
-            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
-        )
-    )
+    outcome.is_some_and(|outcome| outcome.suppresses_fallback())
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -558,6 +552,10 @@ mod tests {
         )));
         assert!(remote_presence_outcome_consumed(Some(
             FullJidDeliveryOutcome::QueuedDetached
+        )));
+        #[cfg(feature = "clustering")]
+        assert!(remote_presence_outcome_consumed(Some(
+            FullJidDeliveryOutcome::MaybeCommitted
         )));
         assert!(!remote_presence_outcome_consumed(Some(
             FullJidDeliveryOutcome::Unavailable

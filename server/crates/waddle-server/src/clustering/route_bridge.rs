@@ -252,6 +252,14 @@ pub enum RemoteResourceRouteTarget {
     },
 }
 
+fn route_target_stanza_is_iq(target: &RemoteResourceRouteTarget) -> bool {
+    match target {
+        RemoteResourceRouteTarget::FullJid { stanza, .. }
+        | RemoteResourceRouteTarget::BareJid { stanza, .. }
+        | RemoteResourceRouteTarget::MucProxy { stanza, .. } => matches!(stanza.0, Stanza::Iq(_)),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RemoteResourceRouteOutcome {
     Delivered,
@@ -259,6 +267,8 @@ pub enum RemoteResourceRouteOutcome {
     Unavailable,
     Dropped,
     StaleRegistration,
+    MaybeCommitted,
+    JoinMaybeCommitted,
 }
 
 impl From<FullJidDeliveryOutcome> for RemoteResourceRouteOutcome {
@@ -268,6 +278,7 @@ impl From<FullJidDeliveryOutcome> for RemoteResourceRouteOutcome {
             FullJidDeliveryOutcome::QueuedDetached => Self::QueuedDetached,
             FullJidDeliveryOutcome::Unavailable => Self::Unavailable,
             FullJidDeliveryOutcome::Dropped => Self::Dropped,
+            FullJidDeliveryOutcome::MaybeCommitted => Self::MaybeCommitted,
         }
     }
 }
@@ -280,6 +291,8 @@ impl From<RemoteResourceRouteOutcome> for FullJidDeliveryOutcome {
             RemoteResourceRouteOutcome::Unavailable
             | RemoteResourceRouteOutcome::StaleRegistration => Self::Unavailable,
             RemoteResourceRouteOutcome::Dropped => Self::Dropped,
+            RemoteResourceRouteOutcome::MaybeCommitted
+            | RemoteResourceRouteOutcome::JoinMaybeCommitted => Self::MaybeCommitted,
         }
     }
 }
@@ -288,6 +301,13 @@ impl From<RemoteResourceRouteOutcome> for FullJidDeliveryOutcome {
 pub(crate) enum RemoteResourceRegisterOutcome {
     Registered,
     NotRemote,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteResourceOriginRefresh {
+    Remote(RemoteResourceOriginSnapshot),
+    LocalOwner,
     Failed,
 }
 
@@ -346,6 +366,14 @@ struct RemoteDeliveryOutcome {
     client_replies: Vec<Stanza>,
     maybe_committed: bool,
     join_repair_allowed: bool,
+}
+
+fn caller_delivery_outcome(outcome: RemoteDeliveryOutcome) -> FullJidDeliveryOutcome {
+    if outcome.maybe_committed {
+        FullJidDeliveryOutcome::MaybeCommitted
+    } else {
+        outcome.delivery
+    }
 }
 
 struct RemoteDeliverySeed {
@@ -467,15 +495,13 @@ impl OrderedRelayDeliveryBridge {
             let registrations = self.remote_owner_resources.lock().await;
             registrations.get(target).cloned()
         }?;
-        Some(
-            self.deliver_registered_remote_resource_with_registration(
-                target,
-                stanza,
-                kind,
-                &registration,
-            )
-            .await,
+        self.deliver_registered_remote_resource_with_registration(
+            target,
+            stanza,
+            kind,
+            &registration,
         )
+        .await
     }
 
     /// Return `Some` only when this exact full-JID target is currently owned
@@ -567,7 +593,10 @@ impl OrderedRelayDeliveryBridge {
                             .deliver_seeded_remote(seed, true)
                             .await
                             .map(|outcome| {
-                                replies_for_origin_handoff(&origin_stanza, outcome.delivery)
+                                replies_for_origin_handoff(
+                                    &origin_stanza,
+                                    caller_delivery_outcome(outcome),
+                                )
                             })
                             .unwrap_or_default();
                         handoff.complete(replies);
@@ -576,12 +605,9 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
 
-            Some(
-                Arc::clone(self)
-                    .deliver_seeded_remote(seed, true)
-                    .await?
-                    .delivery,
-            )
+            Some(caller_delivery_outcome(
+                Arc::clone(self).deliver_seeded_remote(seed, true).await?,
+            ))
         })
     }
 
@@ -674,7 +700,10 @@ impl OrderedRelayDeliveryBridge {
                             .deliver_seeded_remote(seed, true)
                             .await
                             .map(|outcome| {
-                                replies_for_origin_handoff(&origin_stanza, outcome.delivery)
+                                replies_for_origin_handoff(
+                                    &origin_stanza,
+                                    caller_delivery_outcome(outcome),
+                                )
                             })
                             .unwrap_or_default();
                         handoff.complete(replies);
@@ -683,12 +712,9 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
 
-            Some(
-                Arc::clone(self)
-                    .deliver_seeded_remote(seed, true)
-                    .await?
-                    .delivery,
-            )
+            Some(caller_delivery_outcome(
+                Arc::clone(self).deliver_seeded_remote(seed, true).await?,
+            ))
         })
     }
 
@@ -717,6 +743,17 @@ impl OrderedRelayDeliveryBridge {
                 )
                 .await;
         }
+        self.try_proxy_muc_remote_from_local_origin(room_jid, stanza, kind, origin)
+            .await
+    }
+
+    async fn try_proxy_muc_remote_from_local_origin(
+        self: &Arc<Self>,
+        room_jid: &jid::BareJid,
+        stanza: &Stanza,
+        kind: OrderedRelayMucProxyKind,
+        origin: &OrderedRelayRouteOrigin,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
         let services = self.services.get()?.clone();
         let target_entity = room_entity(room_jid);
         let target_snapshot = current_claim(&services, &target_entity).await?;
@@ -811,7 +848,9 @@ impl OrderedRelayDeliveryBridge {
                                 retry.client_replies,
                             ));
                         }
-                        FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {}
+                        FullJidDeliveryOutcome::Unavailable
+                        | FullJidDeliveryOutcome::Dropped
+                        | FullJidDeliveryOutcome::MaybeCommitted => {}
                     }
                 }
                 if let Some(repair) = Arc::clone(self)
@@ -827,7 +866,8 @@ impl OrderedRelayDeliveryBridge {
                                 ));
                             }
                             FullJidDeliveryOutcome::Unavailable
-                            | FullJidDeliveryOutcome::Dropped => {}
+                            | FullJidDeliveryOutcome::Dropped
+                            | FullJidDeliveryOutcome::MaybeCommitted => {}
                         }
                     }
                 }
@@ -842,6 +882,13 @@ impl OrderedRelayDeliveryBridge {
             }
             FullJidDeliveryOutcome::Unavailable => OrderedRelayMucProxyOutcome::Unavailable,
             FullJidDeliveryOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
+            FullJidDeliveryOutcome::MaybeCommitted => {
+                if kind == OrderedRelayMucProxyKind::JoinPresence {
+                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted
+                } else {
+                    OrderedRelayMucProxyOutcome::MaybeCommitted
+                }
+            }
         })
     }
 
@@ -1257,6 +1304,39 @@ impl OrderedRelayDeliveryBridge {
                 return RelayRemoteResourceRegistrationReply {
                     status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
                 };
+            } else if displaced.socket_node != msg.socket_node {
+                match remote_owner_registration_is_current(&services, &msg.jid, &displaced).await {
+                    Ok(()) => {
+                        if !self
+                            .retire_remote_owner_registration(&services, &msg.jid, &displaced)
+                            .await
+                        {
+                            return RelayRemoteResourceRegistrationReply {
+                                status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                            };
+                        }
+                        let mut registrations = self.remote_owner_resources.lock().await;
+                        match registrations.get(&msg.jid) {
+                            Some(current)
+                                if remote_owner_registration_matches(current, &displaced) =>
+                            {
+                                registrations.remove(&msg.jid);
+                            }
+                            Some(_) => {
+                                return RelayRemoteResourceRegistrationReply {
+                                    status:
+                                        RelayRemoteResourceRegistrationStatus::StaleRegistration,
+                                };
+                            }
+                            None => {}
+                        }
+                    }
+                    Err(RelayRemoteResourceRegistrationStatus::StaleRegistration) => {
+                        self.remove_remote_owner_registration_if_current(&msg.jid, &displaced)
+                            .await;
+                    }
+                    Err(status) => return RelayRemoteResourceRegistrationReply { status },
+                }
             } else {
                 if !self
                     .retire_remote_owner_registration(&services, &msg.jid, &displaced)
@@ -1643,9 +1723,11 @@ impl OrderedRelayDeliveryBridge {
                 exclude,
             } => match message.0 {
                 Stanza::Message(message) => {
+                    let web_socket_state = services.web_socket_state.upgrade();
                     crate::server::routes::interpret::carbons::send_carbons_to_registry(
                         &services.connection_registry,
                         Some(&services.sm_session_registry),
+                        web_socket_state.as_deref(),
                         owner,
                         Box::new(message),
                         kind.into(),
@@ -1723,29 +1805,73 @@ impl OrderedRelayDeliveryBridge {
     }
 
     async fn route_remote_resource_origin_once(
-        &self,
+        self: &Arc<Self>,
         remote_origin: RemoteResourceOriginSnapshot,
         target: RemoteResourceRouteTarget,
     ) -> Option<FullJidDeliveryOutcome> {
-        let mut handle =
-            RelayHandle::new(remote_origin.user_owner.clone(), self.stop_token.clone())
-                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
-        let reply = handle
-            .route_remote_resource_stanza(RelayRouteRemoteResourceStanza {
-                source_jid: remote_origin.jid,
-                registration_id: remote_origin.registration_id,
-                socket_generation: remote_origin.socket_generation,
-                target,
-            })
+        let target_is_iq = route_target_stanza_is_iq(&target);
+        let reply = self
+            .ask_remote_resource_origin(&remote_origin, target.clone())
             .await;
         match reply {
+            Ok(reply) if reply.outcome == RemoteResourceRouteOutcome::StaleRegistration => {
+                match self.refresh_remote_resource_origin(&remote_origin).await {
+                    RemoteResourceOriginRefresh::Remote(refreshed) => {
+                        match self.ask_remote_resource_origin(&refreshed, target).await {
+                            Ok(reply) => Some(reply.outcome.into()),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "clustered remote-resource origin route retry failed"
+                                );
+                                outcome_for_ask_error(&error, target_is_iq)
+                                    .or(Some(FullJidDeliveryOutcome::Dropped))
+                            }
+                        }
+                    }
+                    RemoteResourceOriginRefresh::LocalOwner => {
+                        self.route_remote_resource_target_from_local_origin(&remote_origin, target)
+                            .await
+                    }
+                    RemoteResourceOriginRefresh::Failed => {
+                        Some(FullJidDeliveryOutcome::Unavailable)
+                    }
+                }
+            }
             Ok(reply) => Some(reply.outcome.into()),
             Err(error) => {
                 tracing::warn!(
                     %error,
                     "clustered remote-resource origin route ask failed"
                 );
-                Some(FullJidDeliveryOutcome::Dropped)
+                if ask_error_allows_target_refresh(&error) {
+                    match self.refresh_remote_resource_origin(&remote_origin).await {
+                        RemoteResourceOriginRefresh::Remote(refreshed) => {
+                            return match self.ask_remote_resource_origin(&refreshed, target).await {
+                                Ok(reply) => Some(reply.outcome.into()),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "clustered remote-resource origin route retry failed"
+                                    );
+                                    outcome_for_ask_error(&error, target_is_iq)
+                                        .or(Some(FullJidDeliveryOutcome::Dropped))
+                                }
+                            };
+                        }
+                        RemoteResourceOriginRefresh::LocalOwner => {
+                            return self
+                                .route_remote_resource_target_from_local_origin(
+                                    &remote_origin,
+                                    target,
+                                )
+                                .await;
+                        }
+                        RemoteResourceOriginRefresh::Failed => {}
+                    }
+                }
+                outcome_for_ask_error(&error, target_is_iq)
+                    .or(Some(FullJidDeliveryOutcome::Dropped))
             }
         }
     }
@@ -1754,73 +1880,261 @@ impl OrderedRelayDeliveryBridge {
         self: Arc<Self>,
         remote_origin: RemoteResourceOriginSnapshot,
         target: RemoteResourceRouteTarget,
-        origin_stanza: &Stanza,
-        origin: &OrderedRelayRouteOrigin,
+        _origin_stanza: &Stanza,
+        _origin: &OrderedRelayRouteOrigin,
     ) -> Option<OrderedRelayMucProxyOutcome> {
-        if let Some(handoff) = origin.handoff.clone() {
-            if handoff.mark_deferred() {
-                let bridge = Arc::clone(&self);
-                let origin_stanza = origin_stanza.clone();
-                tokio::spawn(async move {
-                    let outcome = bridge
-                        .route_remote_resource_origin_muc_once(remote_origin, target)
-                        .await
-                        .unwrap_or(OrderedRelayMucProxyOutcome::Dropped);
-                    let replies = match outcome {
-                        OrderedRelayMucProxyOutcome::Delivered(replies) => replies,
-                        OrderedRelayMucProxyOutcome::Unavailable => {
-                            fallback_reply_for_remote_muc_handoff(&origin_stanza)
-                        }
-                        OrderedRelayMucProxyOutcome::Dropped
-                        | OrderedRelayMucProxyOutcome::MaybeCommitted
-                        | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => Vec::new(),
-                    };
-                    handoff.complete(replies);
-                });
-                return Some(OrderedRelayMucProxyOutcome::Delivered(Vec::new()));
-            }
-        }
+        // MUC joins mutate local membership state after this call returns, so
+        // the socket node must observe the owner node's real result instead of
+        // deferring through the SM handoff and reporting provisional success.
         self.route_remote_resource_origin_muc_once(remote_origin, target)
             .await
     }
 
     async fn route_remote_resource_origin_muc_once(
-        &self,
+        self: &Arc<Self>,
         remote_origin: RemoteResourceOriginSnapshot,
         target: RemoteResourceRouteTarget,
     ) -> Option<OrderedRelayMucProxyOutcome> {
-        let mut handle =
-            RelayHandle::new(remote_origin.user_owner.clone(), self.stop_token.clone())
-                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
-        match handle
-            .route_remote_resource_stanza(RelayRouteRemoteResourceStanza {
-                source_jid: remote_origin.jid,
-                registration_id: remote_origin.registration_id,
-                socket_generation: remote_origin.socket_generation,
-                target,
-            })
-            .await
-        {
-            Ok(reply) => Some(match reply.outcome {
-                RemoteResourceRouteOutcome::Delivered
-                | RemoteResourceRouteOutcome::QueuedDetached => {
-                    OrderedRelayMucProxyOutcome::Delivered(
-                        reply.replies.into_iter().map(|reply| reply.0).collect(),
-                    )
+        let reply = self
+            .ask_remote_resource_origin(&remote_origin, target.clone())
+            .await;
+        match reply {
+            Ok(reply) if reply.outcome == RemoteResourceRouteOutcome::StaleRegistration => {
+                match self.refresh_remote_resource_origin(&remote_origin).await {
+                    RemoteResourceOriginRefresh::Remote(refreshed) => {
+                        match self
+                            .ask_remote_resource_origin(&refreshed, target.clone())
+                            .await
+                        {
+                            Ok(reply) => Some(remote_resource_muc_outcome(reply)),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "clustered remote-resource MUC origin route retry failed"
+                                );
+                                Some(remote_resource_muc_ask_error_outcome(&target, &error))
+                            }
+                        }
+                    }
+                    RemoteResourceOriginRefresh::LocalOwner => {
+                        self.route_remote_resource_muc_target_from_local_origin(
+                            &remote_origin,
+                            target,
+                        )
+                        .await
+                    }
+                    RemoteResourceOriginRefresh::Failed => {
+                        Some(OrderedRelayMucProxyOutcome::Unavailable)
+                    }
                 }
-                RemoteResourceRouteOutcome::Unavailable
-                | RemoteResourceRouteOutcome::StaleRegistration => {
-                    OrderedRelayMucProxyOutcome::Unavailable
-                }
-                RemoteResourceRouteOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
-            }),
+            }
+            Ok(reply) => Some(remote_resource_muc_outcome(reply)),
             Err(error) => {
                 tracing::warn!(
                     %error,
                     "clustered remote-resource MUC origin route ask failed"
                 );
-                Some(OrderedRelayMucProxyOutcome::Dropped)
+                if ask_error_allows_target_refresh(&error) {
+                    match self.refresh_remote_resource_origin(&remote_origin).await {
+                        RemoteResourceOriginRefresh::Remote(refreshed) => {
+                            return match self
+                                .ask_remote_resource_origin(&refreshed, target.clone())
+                                .await
+                            {
+                                Ok(reply) => Some(remote_resource_muc_outcome(reply)),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "clustered remote-resource MUC origin route retry failed"
+                                    );
+                                    Some(remote_resource_muc_ask_error_outcome(&target, &error))
+                                }
+                            };
+                        }
+                        RemoteResourceOriginRefresh::LocalOwner => {
+                            return self
+                                .route_remote_resource_muc_target_from_local_origin(
+                                    &remote_origin,
+                                    target,
+                                )
+                                .await;
+                        }
+                        RemoteResourceOriginRefresh::Failed => {}
+                    }
+                }
+                Some(remote_resource_muc_ask_error_outcome(&target, &error))
             }
+        }
+    }
+
+    async fn ask_remote_resource_origin(
+        &self,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Result<RelayRouteRemoteResourceStanzaReply, RelayAskError> {
+        let mut handle =
+            RelayHandle::new(remote_origin.user_owner.clone(), self.stop_token.clone())
+                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        handle
+            .route_remote_resource_stanza(RelayRouteRemoteResourceStanza {
+                source_jid: remote_origin.jid.clone(),
+                registration_id: remote_origin.registration_id,
+                socket_generation: remote_origin.socket_generation,
+                target,
+            })
+            .await
+    }
+
+    async fn route_remote_resource_target_from_local_origin(
+        self: &Arc<Self>,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<FullJidDeliveryOutcome> {
+        let services = self.services.get().cloned()?;
+        let origin = local_origin_for_remote_resource(remote_origin);
+        match target {
+            RemoteResourceRouteTarget::FullJid { target, stanza } => {
+                if let Some(remote) = self
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin)
+                    .await
+                {
+                    Some(remote)
+                } else {
+                    Some(
+                        deliver_local_full_jid_after_target_refresh(&services, &target, &stanza.0)
+                            .await,
+                    )
+                }
+            }
+            RemoteResourceRouteTarget::BareJid { target, stanza } => {
+                match route_local_bare_jid_with_timeout(&services, &target, &stanza.0, Some(origin))
+                    .await
+                {
+                    Ok(replies) if replies.is_empty() => Some(FullJidDeliveryOutcome::Delivered),
+                    Ok(_) => Some(FullJidDeliveryOutcome::Unavailable),
+                    Err(OrderedRelayNackReason::TargetUnavailable) => {
+                        Some(FullJidDeliveryOutcome::Unavailable)
+                    }
+                    Err(_) => Some(FullJidDeliveryOutcome::Dropped),
+                }
+            }
+            RemoteResourceRouteTarget::MucProxy { .. } => Some(FullJidDeliveryOutcome::Dropped),
+        }
+    }
+
+    async fn route_remote_resource_muc_target_from_local_origin(
+        self: &Arc<Self>,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
+        let services = self.services.get().cloned()?;
+        let RemoteResourceRouteTarget::MucProxy {
+            room_jid,
+            kind,
+            stanza,
+        } = target
+        else {
+            return Some(OrderedRelayMucProxyOutcome::Dropped);
+        };
+        let origin = local_origin_for_remote_resource(remote_origin);
+        if let Some(remote) = self
+            .try_proxy_muc_remote_from_local_origin(&room_jid, &stanza.0, kind, &origin)
+            .await
+        {
+            Some(remote)
+        } else {
+            Some(muc_proxy_result_to_ordered_outcome(
+                kind,
+                Box::pin(deliver_reserved_muc_proxy(
+                    &services, &room_jid, kind, &stanza.0,
+                ))
+                .await,
+            ))
+        }
+    }
+
+    async fn refresh_remote_resource_origin(
+        self: &Arc<Self>,
+        remote_origin: &RemoteResourceOriginSnapshot,
+    ) -> RemoteResourceOriginRefresh {
+        let Some(services) = self.services.get().cloned() else {
+            return RemoteResourceOriginRefresh::Failed;
+        };
+        let owner = {
+            let registrations = self.remote_socket_resources.lock().await;
+            let Some(owner) = registrations
+                .get(&remote_origin.jid)
+                .filter(|registration| {
+                    registration.registration_id == remote_origin.registration_id
+                        && registration.socket_generation == remote_origin.socket_generation
+                })
+                .map(|registration| registration.owner.clone())
+            else {
+                return RemoteResourceOriginRefresh::Failed;
+            };
+            owner
+        };
+        let Some(entry) = services
+            .connection_registry
+            .entry_if_owner(&remote_origin.jid, &owner)
+        else {
+            return RemoteResourceOriginRefresh::Failed;
+        };
+        let target_entity = user_entity(&remote_origin.jid.to_bare());
+        let Some(snapshot) = current_claim(&services, &target_entity).await else {
+            return RemoteResourceOriginRefresh::Failed;
+        };
+        let me = services.node_identity.current();
+        if snapshot.owner_lease_fresh && snapshot.owner == me {
+            match crate::server::dual_registration::mirror_register_outcome(
+                &services.user_registry,
+                remote_origin.jid.clone(),
+                entry,
+            )
+            .await
+            {
+                crate::server::dual_registration::MirrorRegisterOutcome::Registered => {}
+                crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner
+                | crate::server::dual_registration::MirrorRegisterOutcome::Failed => {
+                    return RemoteResourceOriginRefresh::Failed;
+                }
+            }
+            self.remove_remote_socket_registration_if_snapshot(remote_origin, &owner)
+                .await;
+            return RemoteResourceOriginRefresh::LocalOwner;
+        }
+        if !snapshot.owner_lease_fresh {
+            return RemoteResourceOriginRefresh::Failed;
+        }
+        match self
+            .try_register_remote_user_resource(&remote_origin.jid, entry, owner.clone())
+            .await
+        {
+            RemoteResourceRegisterOutcome::Registered => self
+                .remote_resource_origin_if_owner(&remote_origin.jid, &owner)
+                .await
+                .map(RemoteResourceOriginRefresh::Remote)
+                .unwrap_or(RemoteResourceOriginRefresh::Failed),
+            RemoteResourceRegisterOutcome::NotRemote => RemoteResourceOriginRefresh::Failed,
+            RemoteResourceRegisterOutcome::Failed => RemoteResourceOriginRefresh::Failed,
+        }
+    }
+
+    async fn remove_remote_socket_registration_if_snapshot(
+        &self,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        owner: &Arc<AtomicBool>,
+    ) {
+        let mut registrations = self.remote_socket_resources.lock().await;
+        if registrations
+            .get(&remote_origin.jid)
+            .is_some_and(|registration| {
+                registration.registration_id == remote_origin.registration_id
+                    && registration.socket_generation == remote_origin.socket_generation
+                    && Arc::ptr_eq(&registration.owner, owner)
+            })
+        {
+            registrations.remove(&remote_origin.jid);
         }
     }
 
@@ -1938,6 +2252,7 @@ impl OrderedRelayDeliveryBridge {
                     remote
                 } else {
                     muc_proxy_result_to_ordered_outcome(
+                        kind,
                         deliver_reserved_muc_proxy(&services, &room_jid, kind, &stanza.0).await,
                     )
                 };
@@ -1951,10 +2266,14 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayMucProxyOutcome::Unavailable => {
                         remote_resource_route_reply(RemoteResourceRouteOutcome::Unavailable)
                     }
-                    OrderedRelayMucProxyOutcome::Dropped
-                    | OrderedRelayMucProxyOutcome::MaybeCommitted
-                    | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                    OrderedRelayMucProxyOutcome::Dropped => {
                         remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped)
+                    }
+                    OrderedRelayMucProxyOutcome::MaybeCommitted => {
+                        remote_resource_route_reply(RemoteResourceRouteOutcome::MaybeCommitted)
+                    }
+                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                        remote_resource_route_reply(RemoteResourceRouteOutcome::JoinMaybeCommitted)
                     }
                 }
             }
@@ -2009,7 +2328,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &Stanza,
         kind: DeliveryKind,
         registration: &RemoteOwnerRegistration,
-    ) -> FullJidDeliveryOutcome {
+    ) -> Option<FullJidDeliveryOutcome> {
         let mut handle =
             RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
@@ -2026,10 +2345,10 @@ impl OrderedRelayDeliveryBridge {
         {
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Delivered,
-            }) => FullJidDeliveryOutcome::Delivered,
+            }) => Some(FullJidDeliveryOutcome::Delivered),
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Backpressure,
-            }) => FullJidDeliveryOutcome::Dropped,
+            }) => Some(FullJidDeliveryOutcome::Dropped),
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Unavailable,
             }) => {
@@ -2038,7 +2357,7 @@ impl OrderedRelayDeliveryBridge {
                     registration.registration_id,
                 )
                 .await;
-                FullJidDeliveryOutcome::Unavailable
+                None
             }
             Err(error) => {
                 tracing::warn!(
@@ -2046,7 +2365,16 @@ impl OrderedRelayDeliveryBridge {
                     %error,
                     "clustered remote-resource acked delivery relay ask failed"
                 );
-                FullJidDeliveryOutcome::Dropped
+                if ask_error_proves_remote_resource_ref_stale(&error) {
+                    self.cleanup_remote_owner_resource_if_registration(
+                        target,
+                        registration.registration_id,
+                    )
+                    .await;
+                    None
+                } else {
+                    Some(FullJidDeliveryOutcome::MaybeCommitted)
+                }
             }
         }
     }
@@ -2162,8 +2490,41 @@ impl OrderedRelayDeliveryBridge {
                 requester_bare_jid: jid.to_bare(),
             })
             .await;
-        let Ok(reply) = detach else {
-            return false;
+        self.finish_remote_owner_registration_retire(services, jid, registration, detach)
+            .await
+    }
+
+    async fn finish_remote_owner_registration_retire(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        jid: &jid::FullJid,
+        registration: &RemoteOwnerRegistration,
+        detach: Result<RelayForceDetachRemoteUserResourceReply, RelayAskError>,
+    ) -> bool {
+        let reply = match detach {
+            Ok(reply) => reply,
+            Err(error) if ask_error_proves_remote_resource_ref_stale(&error) => {
+                tracing::info!(
+                    jid = %jid,
+                    ?error,
+                    "clustered remote-resource replacement cleaning stale old-socket mirror"
+                );
+                if !unregister_remote_owner_actor_entry(services, jid, &registration.owner).await {
+                    return false;
+                }
+                services
+                    .connection_registry
+                    .unregister_if_owner(jid, &registration.owner);
+                return true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %jid,
+                    ?error,
+                    "clustered remote-resource replacement refused uncertain old-socket detach"
+                );
+                return false;
+            }
         };
         if !matches!(
             reply.status,
@@ -2982,6 +3343,11 @@ async fn forward_remote_resource_outbound(
                 %error,
                 "clustered remote-resource forwarder relay ask failed"
             );
+            if ask_error_proves_remote_resource_ref_stale(&error) {
+                bridge
+                    .cleanup_remote_owner_resource_if_registration(jid, registration_id)
+                    .await;
+            }
         }
     }
 }
@@ -3032,6 +3398,9 @@ impl OrderedRelayDeliveryBridge {
                     Ok(())
                 }
                 FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+                FullJidDeliveryOutcome::MaybeCommitted => {
+                    Err(OrderedRelayNackReason::MaybeCommitted)
+                }
                 FullJidDeliveryOutcome::Unavailable => {
                     Err(OrderedRelayNackReason::TargetUnavailable)
                 }
@@ -3050,6 +3419,7 @@ impl OrderedRelayDeliveryBridge {
         {
             FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
             FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+            FullJidDeliveryOutcome::MaybeCommitted => Err(OrderedRelayNackReason::MaybeCommitted),
             FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
         }
     }
@@ -3160,6 +3530,9 @@ async fn deliver_reserved_bare_presence_direct(
                 landed = true;
             }
             FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {}
+            FullJidDeliveryOutcome::MaybeCommitted => {
+                landed = true;
+            }
         }
     }
 
@@ -3377,6 +3750,45 @@ fn remote_resource_route_reply(
     }
 }
 
+fn remote_resource_muc_outcome(
+    reply: RelayRouteRemoteResourceStanzaReply,
+) -> OrderedRelayMucProxyOutcome {
+    match reply.outcome {
+        RemoteResourceRouteOutcome::Delivered | RemoteResourceRouteOutcome::QueuedDetached => {
+            OrderedRelayMucProxyOutcome::Delivered(
+                reply.replies.into_iter().map(|reply| reply.0).collect(),
+            )
+        }
+        RemoteResourceRouteOutcome::Unavailable | RemoteResourceRouteOutcome::StaleRegistration => {
+            OrderedRelayMucProxyOutcome::Unavailable
+        }
+        RemoteResourceRouteOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
+        RemoteResourceRouteOutcome::MaybeCommitted => OrderedRelayMucProxyOutcome::MaybeCommitted,
+        RemoteResourceRouteOutcome::JoinMaybeCommitted => {
+            OrderedRelayMucProxyOutcome::JoinMaybeCommitted
+        }
+    }
+}
+
+fn remote_resource_muc_ask_error_outcome(
+    target: &RemoteResourceRouteTarget,
+    error: &RelayAskError,
+) -> OrderedRelayMucProxyOutcome {
+    if !ask_error_maybe_committed(error) {
+        return OrderedRelayMucProxyOutcome::Dropped;
+    }
+    match target {
+        RemoteResourceRouteTarget::MucProxy {
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            ..
+        } => OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+        RemoteResourceRouteTarget::MucProxy { .. } => OrderedRelayMucProxyOutcome::MaybeCommitted,
+        RemoteResourceRouteTarget::FullJid { .. } | RemoteResourceRouteTarget::BareJid { .. } => {
+            OrderedRelayMucProxyOutcome::Dropped
+        }
+    }
+}
+
 fn no_client_reply_outcome_with_commit_state(
     delivery: FullJidDeliveryOutcome,
     maybe_committed: bool,
@@ -3423,6 +3835,18 @@ fn remote_resource_origin(
     match &origin.kind {
         OrderedRelayRouteOriginKind::RemoteResource(remote) => Some(remote.clone()),
         OrderedRelayRouteOriginKind::SmSession(_) | OrderedRelayRouteOriginKind::Entity(_) => None,
+    }
+}
+
+fn local_origin_for_remote_resource(
+    remote_origin: &RemoteResourceOriginSnapshot,
+) -> OrderedRelayRouteOrigin {
+    let sender_entity = user_entity(&remote_origin.jid.to_bare());
+    OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+        sender_entity,
+        inbound_sequence: 0,
+        handoff: None,
     }
 }
 
@@ -3788,6 +4212,7 @@ fn muc_proxy_result_to_outcome(
 }
 
 fn muc_proxy_result_to_ordered_outcome(
+    kind: OrderedRelayMucProxyKind,
     result: Result<Vec<RemoteStanza>, OrderedRelayNackReason>,
 ) -> OrderedRelayMucProxyOutcome {
     match result {
@@ -3795,6 +4220,12 @@ fn muc_proxy_result_to_ordered_outcome(
             replies.into_iter().map(|reply| reply.0).collect(),
         ),
         Err(OrderedRelayNackReason::TargetUnavailable) => OrderedRelayMucProxyOutcome::Unavailable,
+        Err(OrderedRelayNackReason::MaybeCommitted)
+            if kind == OrderedRelayMucProxyKind::JoinPresence =>
+        {
+            OrderedRelayMucProxyOutcome::JoinMaybeCommitted
+        }
+        Err(OrderedRelayNackReason::MaybeCommitted) => OrderedRelayMucProxyOutcome::MaybeCommitted,
         Err(_) => OrderedRelayMucProxyOutcome::Dropped,
     }
 }
@@ -4150,12 +4581,9 @@ fn replies_for_origin_handoff(stanza: &Stanza, outcome: FullJidDeliveryOutcome) 
         }
         FullJidDeliveryOutcome::Delivered
         | FullJidDeliveryOutcome::QueuedDetached
-        | FullJidDeliveryOutcome::Dropped => Vec::new(),
+        | FullJidDeliveryOutcome::Dropped
+        | FullJidDeliveryOutcome::MaybeCommitted => Vec::new(),
     }
-}
-
-fn fallback_reply_for_remote_muc_handoff(stanza: &Stanza) -> Vec<Stanza> {
-    replies_for_origin_handoff(stanza, FullJidDeliveryOutcome::Unavailable)
 }
 
 fn diversion_reason_for_nack(nack: &OrderedRelayNack) -> OrderedRelayDiversionReason {
@@ -4202,6 +4630,18 @@ fn ask_error_allows_target_refresh(error: &RelayAskError) -> bool {
     }
 }
 
+fn ask_error_proves_remote_resource_ref_stale(error: &RelayAskError) -> bool {
+    matches!(
+        error,
+        RelayAskError::NotFound { .. }
+            | RelayAskError::Send {
+                failure: RelaySendFailure::StaleRef,
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+    )
+}
+
 fn outcome_for_ask_error(error: &RelayAskError, is_iq: bool) -> Option<FullJidDeliveryOutcome> {
     tracing::warn!(
         ?error,
@@ -4212,7 +4652,7 @@ fn outcome_for_ask_error(error: &RelayAskError, is_iq: bool) -> Option<FullJidDe
         RelayAskError::Cancelled => Some(FullJidDeliveryOutcome::Dropped),
         RelayAskError::Send { effect, .. } => Some(match effect {
             RelaySendEffect::NoEffect => definite_no_effect_outcome(is_iq),
-            RelaySendEffect::MaybeCommitted => FullJidDeliveryOutcome::Dropped,
+            RelaySendEffect::MaybeCommitted => FullJidDeliveryOutcome::MaybeCommitted,
         }),
     }
 }
@@ -4759,6 +5199,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallback() {
+        let services = Arc::new(
+            services_with_claims(
+                origin_identity(),
+                receiver_identity(),
+                receiver_identity(),
+                test_peer_id(),
+            )
+            .await,
+        );
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::clone(&services));
+
+        let target = target_full();
+        let (tx, _rx) = mpsc::channel(1);
+        let entry = ConnectionEntry::new(tx);
+        let owner = entry.carbons_handle();
+        services
+            .connection_registry
+            .register_entry(target.clone(), entry.clone());
+        services
+            .user_registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: target.clone(),
+                entry,
+            })
+            .await
+            .expect("register remote mirror in user actor");
+
+        let registration_id = RemoteResourceRegistrationId::fresh();
+        bridge.remote_owner_resources.lock().await.insert(
+            target.clone(),
+            RemoteOwnerRegistration {
+                registration_id,
+                socket_node: NodeId::new("missing-socket-node".to_string()),
+                socket_generation: RemoteResourceSocketGeneration::next(None),
+                owner: Arc::clone(&owner),
+            },
+        );
+
+        let outcome = bridge
+            .try_deliver_registered_remote_resource(
+                &target,
+                &Stanza::Message(Message::new(Some(jid::Jid::from(target.clone())))),
+                DeliveryKind::PeerStanza,
+            )
+            .await;
+
+        assert_eq!(outcome, None);
+        assert!(
+            !bridge
+                .remote_owner_resources
+                .lock()
+                .await
+                .contains_key(&target),
+            "stale remote owner map entry must be removed"
+        );
+        assert!(
+            services
+                .connection_registry
+                .entry_if_owner(&target, &owner)
+                .is_none(),
+            "stale remote connection mirror must be removed so local fallback can run"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_force_detach_error_cleans_old_socket_mirror() {
+        let services = Arc::new(
+            services_with_claims(
+                origin_identity(),
+                receiver_identity(),
+                receiver_identity(),
+                test_peer_id(),
+            )
+            .await,
+        );
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::clone(&services));
+
+        let target = target_full();
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let old_entry = ConnectionEntry::new(old_tx);
+        let old_owner = old_entry.carbons_handle();
+        services
+            .connection_registry
+            .register_entry(target.clone(), old_entry.clone());
+        services
+            .user_registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: target.clone(),
+                entry: old_entry,
+            })
+            .await
+            .expect("register old remote mirror in user actor");
+
+        let old_generation = RemoteResourceSocketGeneration::next(None);
+        let registration = RemoteOwnerRegistration {
+            registration_id: RemoteResourceRegistrationId::fresh(),
+            socket_node: NodeId::new("missing-old-socket-node".to_string()),
+            socket_generation: old_generation,
+            owner: Arc::clone(&old_owner),
+        };
+
+        assert!(
+            bridge
+                .finish_remote_owner_registration_retire(
+                    &services,
+                    &target,
+                    &registration,
+                    Err(RelayAskError::NotFound {
+                        node_id: registration.socket_node.clone(),
+                    }),
+                )
+                .await,
+            "a missing old socket node proves no detach was committed and should permit cleanup"
+        );
+        assert!(
+            services
+                .connection_registry
+                .entry_if_owner(&target, &old_owner)
+                .is_none(),
+            "stale old owner mirror must be removed before replacement"
+        );
+        if let Some(actor) = services
+            .user_registry
+            .ask(waddle_xmpp::registry::GetUser {
+                bare_jid: target.to_bare(),
+            })
+            .await
+            .expect("get user actor")
+        {
+            assert!(
+                actor
+                    .ask(waddle_xmpp::registry::GetConnectionEntry {
+                        jid: target.clone(),
+                    })
+                    .await
+                    .expect("get old actor mirror")
+                    .is_none(),
+                "stale old user-actor mirror must be removed before replacement"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn receiver_nacks_dropped_peer_delivery_instead_of_acknowledging_loss() {
         let keypair = Keypair::generate_ed25519();
         let services = services_with_claims(
@@ -4877,6 +5469,17 @@ mod tests {
         assert_eq!(
             action,
             NackChannelAction::Divert(OrderedRelayDiversionReason::MaybeCommitted)
+        );
+    }
+
+    #[test]
+    fn maybe_committed_remote_delivery_maps_to_fallback_suppressing_outcome() {
+        let outcome =
+            no_client_reply_outcome_with_commit_state(FullJidDeliveryOutcome::Dropped, true);
+
+        assert_eq!(
+            caller_delivery_outcome(outcome),
+            FullJidDeliveryOutcome::MaybeCommitted
         );
     }
 
@@ -5244,6 +5847,42 @@ mod tests {
     }
 
     #[test]
+    fn muc_join_maybe_committed_keeps_join_specific_outcome() {
+        assert!(matches!(
+            muc_proxy_result_to_ordered_outcome(
+                OrderedRelayMucProxyKind::JoinPresence,
+                Err(OrderedRelayNackReason::MaybeCommitted)
+            ),
+            OrderedRelayMucProxyOutcome::JoinMaybeCommitted
+        ));
+        assert!(matches!(
+            muc_proxy_result_to_ordered_outcome(
+                OrderedRelayMucProxyKind::OccupantPresence,
+                Err(OrderedRelayNackReason::MaybeCommitted)
+            ),
+            OrderedRelayMucProxyOutcome::MaybeCommitted
+        ));
+
+        let room_jid: jid::BareJid = "room@muc.example.test".parse().expect("room jid");
+        let target = RemoteResourceRouteTarget::MucProxy {
+            room_jid,
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            stanza: RemoteStanza(Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                xmpp_parsers::presence::Type::None,
+            ))),
+        };
+        let maybe_committed = RelayAskError::Send {
+            failure: RelaySendFailure::ReplyTimeout,
+            effect: RelaySendEffect::MaybeCommitted,
+            message: "reply timeout after enqueue".to_string(),
+        };
+        assert!(matches!(
+            remote_resource_muc_ask_error_outcome(&target, &maybe_committed),
+            OrderedRelayMucProxyOutcome::JoinMaybeCommitted
+        ));
+    }
+
+    #[test]
     fn iq_ask_error_classifier_falls_back_only_for_definite_no_effect_failures() {
         let not_found = RelayAskError::NotFound {
             node_id: NodeId::new("missing-node".to_string()),
@@ -5283,7 +5922,7 @@ mod tests {
         assert!(!ask_error_allows_target_refresh(&reply_timeout));
         assert_eq!(
             outcome_for_ask_error(&reply_timeout, true),
-            Some(FullJidDeliveryOutcome::Dropped)
+            Some(FullJidDeliveryOutcome::MaybeCommitted)
         );
         let codec_after_handler = RelayAskError::Send {
             failure: RelaySendFailure::Codec,
@@ -5293,7 +5932,7 @@ mod tests {
         assert!(!ask_error_allows_target_refresh(&codec_after_handler));
         assert_eq!(
             outcome_for_ask_error(&codec_after_handler, true),
-            Some(FullJidDeliveryOutcome::Dropped)
+            Some(FullJidDeliveryOutcome::MaybeCommitted)
         );
         assert!(!ask_error_allows_target_refresh(&RelayAskError::Cancelled));
         assert_eq!(

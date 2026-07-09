@@ -87,6 +87,10 @@ async fn send_roster_remove_subscription_stanza(
         .get_roster_interested_resources_for_user(to);
     let mut delivered_resources = Vec::new();
     for resource in &live_resources {
+        if try_deliver_registered_remote_resource(state, resource, &stanza).await {
+            delivered_resources.push(resource.clone());
+            continue;
+        }
         if state
             .deps
             .protocol
@@ -125,11 +129,19 @@ async fn send_roster_remove_subscription_stanza(
         {
             Ok(true) => {}
             Ok(false) => {
-                let _ = state
+                if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
+                    delivered_resources.push(resource.clone());
+                    continue;
+                }
+                if state
                     .deps
                     .protocol
                     .connection_registry
-                    .try_send_to(&resource, stanza.clone());
+                    .try_send_to(&resource, stanza.clone())
+                    == BroadcastOutcome::Delivered
+                {
+                    delivered_resources.push(resource.clone());
+                }
             }
             Err(error) => {
                 warn!(error = %error, resource = %resource, "Failed to record roster removal subscription side effect");
@@ -158,11 +170,16 @@ async fn send_roster_push_to_all_resources(
             item,
             Some(version),
         );
+        let stanza = Stanza::Iq(Box::new(push));
+        if try_deliver_registered_remote_resource(state, resource, &stanza).await {
+            delivered_resources.push(resource.clone());
+            continue;
+        }
         if state
             .deps
             .protocol
             .connection_registry
-            .try_send_to(resource, Stanza::Iq(Box::new(push)))
+            .try_send_to(resource, stanza)
             == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
@@ -203,6 +220,10 @@ async fn send_roster_push_to_all_resources(
         {
             Ok(true) => delivered_resources.push(resource.clone()),
             Ok(false) => {
+                if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
+                    delivered_resources.push(resource.clone());
+                    continue;
+                }
                 if state
                     .deps
                     .protocol
@@ -233,11 +254,47 @@ async fn send_roster_push_to_all_resources(
             item,
             Some(version),
         );
+        let stanza = Stanza::Iq(Box::new(push));
+        if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
+            continue;
+        }
         let _ = state
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Iq(Box::new(push)));
+            .try_send_to(&resource, stanza);
+    }
+}
+
+async fn try_deliver_registered_remote_resource(
+    state: &WebSocketState,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> bool {
+    #[cfg(feature = "clustering")]
+    {
+        let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        else {
+            return false;
+        };
+        bridge
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            )
+            .await
+            .is_some()
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (state, target, stanza);
+        false
     }
 }
 
@@ -265,11 +322,16 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
             item,
             Some(version),
         );
+        let stanza = Stanza::Iq(Box::new(push));
+        if try_deliver_registered_remote_resource(state, resource, &stanza).await {
+            delivered_resources.push(resource.clone());
+            continue;
+        }
         if state
             .deps
             .protocol
             .connection_registry
-            .try_send_to(resource, Stanza::Iq(Box::new(push)))
+            .try_send_to(resource, stanza)
             == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
@@ -316,15 +378,20 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
                     .protocol
                     .connection_registry
                     .is_roster_interested(&resource);
-                if is_interested
-                    && state
+                if is_interested {
+                    if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
+                        delivered_resources.push(resource.clone());
+                        continue;
+                    }
+                    if state
                         .deps
                         .protocol
                         .connection_registry
                         .try_send_to(&resource, stanza)
                         == BroadcastOutcome::Delivered
-                {
-                    delivered_resources.push(resource.clone());
+                    {
+                        delivered_resources.push(resource.clone());
+                    }
                 }
             }
             Err(error) => {
@@ -348,10 +415,14 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
             item,
             Some(version),
         );
+        let stanza = Stanza::Iq(Box::new(push));
+        if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
+            continue;
+        }
         let _ = state
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Iq(Box::new(push)));
+            .try_send_to(&resource, stanza);
     }
 }
