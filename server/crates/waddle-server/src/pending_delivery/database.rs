@@ -642,9 +642,14 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // IS NULL filter ensures we don't trample another session's
         // ongoing claim).
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, \
+                                          claimed_at_ms = ? \
              WHERE recipient_jid = ? AND flushed_in_session IS NULL",
-            crate::db_params![session.as_str().to_string(), recipient.to_string()],
+            crate::db_params![
+                session.as_str().to_string(),
+                chrono::Utc::now().timestamp_millis(),
+                recipient.to_string()
+            ],
         )
         .await?;
         // Return ONLY the rows this claim just tagged, identified by
@@ -722,7 +727,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let mut rows = match after {
             Some(after) => {
                 self.query(
-                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, \
+                                                 claimed_at_ms = ? \
                      WHERE flushed_in_session IS NULL AND row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL AND row_id > ? \
@@ -733,6 +739,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                                flushed_in_session, outbound_sequence",
                     crate::db_params![
                         session.as_str().to_string(),
+                        chrono::Utc::now().timestamp_millis(),
                         recipient.to_string(),
                         after.as_str().to_string(),
                         limit as i64,
@@ -742,7 +749,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             }
             None => {
                 self.query(
-                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, \
+                                                 claimed_at_ms = ? \
                      WHERE flushed_in_session IS NULL AND row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL \
@@ -753,6 +761,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                                flushed_in_session, outbound_sequence",
                     crate::db_params![
                         session.as_str().to_string(),
+                        chrono::Utc::now().timestamp_millis(),
                         recipient.to_string(),
                         limit as i64,
                     ],
@@ -799,7 +808,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // row. (Qodo review on PR #358.)
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = NULL, \
-                                          outbound_sequence = NULL \
+                                          outbound_sequence = NULL, \
+                                          claimed_at_ms = NULL \
              WHERE flushed_in_session = ?",
             crate::db_params![session.as_str().to_string()],
         )
@@ -809,7 +819,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = NULL, \
-                                          outbound_sequence = NULL \
+                                          outbound_sequence = NULL, \
+                                          claimed_at_ms = NULL \
              WHERE row_id = ?",
             crate::db_params![id.as_str().to_string()],
         )
@@ -826,7 +837,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // be stale if a fresh bind re-claims the row before release.
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = NULL, \
-                                          outbound_sequence = NULL \
+                                          outbound_sequence = NULL, \
+                                          claimed_at_ms = NULL \
              WHERE row_id = ? AND flushed_in_session = ?",
             crate::db_params![
                 id.as_str().to_string(),
@@ -885,6 +897,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     async fn list_orphaned_claims(
         &self,
         live_sessions: &[SmSessionId],
+        claimed_before_ms: i64,
     ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
         // SELECT every claimed row, then filter in-memory against the
         // live-set. This avoids generating a `WHERE flushed_in_session
@@ -892,11 +905,22 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // unbounded for production deployments. The expected orphan
         // population is small (low hundreds) compared to live-session
         // count, so the filter cost is negligible.
+        //
+        // #1124 recency floor: claims stamped after `claimed_before_ms`
+        // belong to in-flight flushes (a `transient:` non-SM flush is
+        // never in the live-set) and are skipped in SQL. Rows with NO
+        // stamp are skipped too — "recency unknown" (a pre-#1124
+        // binary during a rolling deploy) must not be treated as old,
+        // or the mid-flight release re-opens exactly during the
+        // deploy. The janitor adopts unstamped claims first via
+        // `stamp_unstamped_claims`, so they age into eligibility.
         let mut rows = self
             .query(
                 "SELECT row_id, flushed_in_session FROM pending_delivery \
-                 WHERE flushed_in_session IS NOT NULL",
-                (),
+                 WHERE flushed_in_session IS NOT NULL \
+                   AND claimed_at_ms IS NOT NULL \
+                   AND claimed_at_ms <= ?",
+                crate::db_params![claimed_before_ms],
             )
             .await?;
         let live: std::collections::HashSet<&str> =
@@ -918,6 +942,15 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             }
         }
         Ok(out)
+    }
+
+    async fn stamp_unstamped_claims(&self, now_ms: i64) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET claimed_at_ms = ? \
+             WHERE flushed_in_session IS NOT NULL AND claimed_at_ms IS NULL",
+            crate::db_params![now_ms],
+        )
+        .await
     }
 
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {

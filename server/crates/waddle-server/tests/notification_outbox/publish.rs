@@ -418,6 +418,302 @@ async fn stale_claim_does_not_enqueue_push_service_publish_job() {
     assert_eq!(pending[0].claim_token(), fresh_claim.claim_token());
 }
 
+/// Full first-party Push Service setup (node, device, first-party +
+/// XEP-0357 registrations) for tests that drive `publish_claimed_job`
+/// end-to-end. Returns the push service store, the subscription
+/// store, and an outbox target aimed at the provisioned node.
+async fn first_party_push_setup(
+    recipient: &jid::BareJid,
+) -> (
+    waddle_server::push_service::DatabasePushServiceStore,
+    waddle_xmpp::push::InMemoryPushStore,
+    NotificationOutboxTarget,
+) {
+    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+        Database::in_memory("push-service").await.unwrap(),
+        b"waddle-push-service-test-secret-key",
+    )
+    .await
+    .expect("push service");
+    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
+        .await
+        .expect("push registration schema");
+    let push_node = push_service
+        .ensure_node(recipient, "web")
+        .await
+        .expect("push node");
+    push_service
+        .upsert_device(
+            recipient,
+            waddle_server::push_service::PushDeviceRegistration::new(
+                "web-1",
+                push_node.node(),
+                waddle_server::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    push_service
+        .register_first_party_node_for_owner(recipient, "push.example.com", push_node.node(), None)
+        .await
+        .expect("first-party registration");
+    let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+    push_store
+        .register(waddle_xmpp::push::PushSubscription {
+            user_jid: recipient.to_string(),
+            service_jid: "push.example.com".to_string(),
+            node: Some(push_node.node().to_string()),
+            publish_options: None,
+            endpoint: None,
+            p256dh: None,
+            auth_key: None,
+        })
+        .await
+        .expect("xep0357 registration");
+    let target = NotificationOutboxTarget::new(
+        bare("push.example.com"),
+        PushServiceNodeName::new(push_node.node()).expect("push node target"),
+    );
+    (push_service, push_store, target)
+}
+
+/// Inbox with one entry for `conversation` whose unread count is 0 —
+/// the positive "recipient read it" signal (#1126 suppression
+/// requires the entry to EXIST; absence means "no information").
+async fn inbox_with_read_entry(
+    recipient: &jid::BareJid,
+    conversation: &jid::BareJid,
+    kind: waddle_xmpp::inbox::ConversationKind,
+) -> waddle_xmpp::inbox::storage::InMemoryInboxStorage {
+    use waddle_xmpp::inbox::storage::InboxStorage as _;
+    let inbox = waddle_xmpp::inbox::storage::InMemoryInboxStorage::new();
+    inbox
+        .upsert(
+            recipient,
+            waddle_xmpp::inbox::InboxEntry::new(
+                conversation.clone(),
+                kind,
+                "archive-read".to_string(),
+                1,
+            ),
+            false,
+        )
+        .await
+        .expect("upsert read entry");
+    inbox
+}
+
+// #1126: a user who reconnects and reads the message inside the
+// notification window must not get an OS push for it. At publish
+// time the conversation's inbox entry exists with unread 0 →
+// suppress, terminally.
+#[tokio::test]
+async fn unread_zero_job_is_suppressed_not_published() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target]).await;
+    let claimed = store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("claim")
+        .into_iter()
+        .next()
+        .expect("claimed job");
+    // Recipient read everything before the outbox drained: the entry
+    // exists and its unread count was cleared to 0.
+    let inbox = inbox_with_read_entry(
+        &recipient,
+        &bare("bob@example.com"),
+        waddle_xmpp::inbox::ConversationKind::Direct,
+    )
+    .await;
+
+    let outcome = store
+        .publish_claimed_job(
+            &claimed,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("publish");
+
+    assert!(
+        matches!(outcome, NotificationOutboxPublishOutcome::Suppressed { .. }),
+        "#1126: unread-count 0 at publish time must suppress, got {outcome:?}"
+    );
+    assert!(
+        push_service
+            .queued_publish_jobs()
+            .await
+            .expect("queued push jobs")
+            .is_empty(),
+        "a suppressed job must not enqueue a durable Push Service publish job"
+    );
+    assert!(
+        store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty(),
+        "suppression is terminal — the job must not stay queued or retry"
+    );
+}
+
+// #1126 safety valve: an ABSENT inbox entry is "no information", not
+// "read". The inbox projection is written on a separate path whose
+// failures are swallowed, so suppressing on absence would turn a
+// transient projection failure into total notification loss. Absent
+// entries keep the pre-#1126 behavior: publish (with count 0).
+#[tokio::test]
+async fn missing_inbox_entry_still_publishes() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target]).await;
+    let claimed = store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("claim")
+        .into_iter()
+        .next()
+        .expect("claimed job");
+    // No inbox entry at all for the conversation (projection lagged
+    // or its write failed).
+    let inbox = waddle_xmpp::inbox::storage::InMemoryInboxStorage::new();
+
+    let outcome = store
+        .publish_claimed_job(
+            &claimed,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("publish");
+
+    assert!(
+        matches!(outcome, NotificationOutboxPublishOutcome::Published { .. }),
+        "an absent inbox entry must NOT suppress the push, got {outcome:?}"
+    );
+    assert_eq!(
+        push_service
+            .queued_publish_jobs()
+            .await
+            .expect("queued push jobs")
+            .len(),
+        1
+    );
+}
+
+// #1126 groupchat coverage: mention classes resolve their unread via
+// the MUC room's inbox entry — a read room entry (unread 0) must
+// suppress just like the DM path.
+#[tokio::test]
+async fn read_channel_mention_job_is_suppressed() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let room = bare("room@conference.example.com");
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    let candidate = groupchat_candidate_for(
+        &recipient,
+        &room,
+        "room@conference.example.com/bob".parse().expect("occupant"),
+        "archive-mention-1",
+        NotificationClass::PersonalMention,
+    );
+    enqueue_jobs_for_test(&store, &candidate, &[target]).await;
+    let claimed = store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("claim")
+        .into_iter()
+        .next()
+        .expect("claimed job");
+    let inbox = inbox_with_read_entry(
+        &recipient,
+        &room,
+        waddle_xmpp::inbox::ConversationKind::MucRoom,
+    )
+    .await;
+
+    let outcome = store
+        .publish_claimed_job(
+            &claimed,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("publish");
+
+    assert!(
+        matches!(outcome, NotificationOutboxPublishOutcome::Suppressed { .. }),
+        "#1126: a read MUC room entry must suppress a mention push, got {outcome:?}"
+    );
+    assert!(push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queued push jobs")
+        .is_empty());
+}
+
+// #1126 companion: a genuinely offline recipient (unread >= 1) still
+// gets the push — suppression only applies to already-read messages.
+#[tokio::test]
+async fn unread_nonzero_job_still_publishes() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target]).await;
+    let claimed = store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("claim")
+        .into_iter()
+        .next()
+        .expect("claimed job");
+    let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 2).await;
+
+    let outcome = store
+        .publish_claimed_job(
+            &claimed,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("publish");
+
+    assert!(
+        matches!(outcome, NotificationOutboxPublishOutcome::Published { .. }),
+        "legitimate offline pushes must still fire, got {outcome:?}"
+    );
+    assert_eq!(
+        push_service
+            .queued_publish_jobs()
+            .await
+            .expect("queued push jobs")
+            .len(),
+        1,
+        "an unread conversation must enqueue the durable Push Service publish job"
+    );
+}
+
 #[tokio::test]
 async fn new_candidate_after_claim_creates_fresh_queued_job() {
     let store = store().await;

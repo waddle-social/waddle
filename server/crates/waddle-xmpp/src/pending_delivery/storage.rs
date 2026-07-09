@@ -297,7 +297,8 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ) -> Result<u64, PendingStorageError>;
 
     /// List rows whose `flushed_in_session` references a session
-    /// that is NOT in `live_sessions`. Used by the claim-expiry
+    /// that is NOT in `live_sessions` AND whose claim was stamped at
+    /// or before `claimed_before_ms`. Used by the claim-expiry
     /// janitor (issue #209 PR #360) to find orphaned claims left
     /// behind by sessions that closed without going through the SM
     /// janitor / shutdown drain (e.g. non-SM sessions, or SM
@@ -305,15 +306,47 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// then calls [`Self::release_row`] on each entry to make the
     /// rows eligible for re-flush.
     ///
+    /// `claimed_before_ms` is the recency floor (#1124): non-SM
+    /// flushes claim rows under a synthetic `transient:` session id
+    /// that is never in the live-set, so without the floor any
+    /// janitor pass overlapping an in-flight flush would release its
+    /// claims mid-flight and let a second resource re-push the same
+    /// offline messages. Claims stamped after the floor are
+    /// considered in-flight and skipped. A claim with NO stamp is
+    /// also skipped — an unstamped claim means "recency unknown"
+    /// (e.g. written by a pre-#1124 binary during a rolling deploy),
+    /// and treating unknown as old would re-open the mid-flight
+    /// release. Callers first adopt unstamped claims via
+    /// [`Self::stamp_unstamped_claims`], which starts their floor
+    /// clock, so they become release-eligible one floor-window later.
+    ///
     /// Implementations MUST scan only rows with
     /// `flushed_in_session IS NOT NULL`. The caller passes a
     /// snapshot of currently-live SM session ids; an empty
-    /// `live_sessions` slice returns every claimed row (useful for
-    /// startup recovery when the SM registry is empty).
+    /// `live_sessions` slice matches every claimed row older than
+    /// the floor (useful for startup recovery when the SM registry
+    /// is empty).
     async fn list_orphaned_claims(
         &self,
         live_sessions: &[SmSessionId],
+        claimed_before_ms: i64,
     ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError>;
+
+    /// Stamp `now_ms` onto every claimed row that has no claim-recency
+    /// stamp, returning the number of rows stamped. The claim-expiry
+    /// janitor calls this before [`Self::list_orphaned_claims`] so a
+    /// claim written without a stamp (a pre-#1124 binary during a
+    /// rolling deploy) is adopted into the recency floor instead of
+    /// being either released mid-flight (unknown treated as old) or
+    /// leaked forever (unknown treated as always-fresh). Adopted
+    /// claims become release-eligible one floor-window after adoption.
+    ///
+    /// Default impl is a no-op: backends that always stamp on claim
+    /// (every in-process backend) have nothing to adopt.
+    async fn stamp_unstamped_claims(&self, now_ms: i64) -> Result<u64, PendingStorageError> {
+        let _ = now_ms;
+        Ok(0)
+    }
 
     /// Current row count for `recipient` (used by the quota check;
     /// also exposed for metrics).
@@ -414,6 +447,14 @@ pub fn sequence_in_ack_window(seq: u32, from_exclusive: u32, to_inclusive: u32) 
 pub struct InMemoryPendingDeliveryStorage {
     inner: Mutex<HashMap<BareJid, VecDeque<PendingRow>>>,
     notification_outboxed: Mutex<HashSet<PendingRowId>>,
+    /// Claim recency stamps (#1124): row id → `timestamp_millis()` of
+    /// the claim that set `flushed_in_session`. Kept beside the rows
+    /// (not on [`PendingRow`]) because no consumer of the row needs
+    /// it — only [`PendingDeliveryStorage::list_orphaned_claims`]
+    /// reads it, to skip in-flight claims. Cleared on release; a
+    /// missing entry means "no recency information" and the claim is
+    /// always release-eligible.
+    claimed_at_ms: Mutex<HashMap<PendingRowId, i64>>,
     quota: QuotaPolicy,
 }
 
@@ -423,8 +464,38 @@ impl InMemoryPendingDeliveryStorage {
         Self {
             inner: Mutex::new(HashMap::new()),
             notification_outboxed: Mutex::new(HashSet::new()),
+            claimed_at_ms: Mutex::new(HashMap::new()),
             quota,
         }
+    }
+
+    fn stamp_claimed_at(&self, ids: &[PendingRowId]) -> Result<(), PendingStorageError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut stamps = self
+            .claimed_at_ms
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for id in ids {
+            stamps.insert(id.clone(), now_ms);
+        }
+        Ok(())
+    }
+
+    fn clear_claimed_at(&self, ids: &[PendingRowId]) -> Result<(), PendingStorageError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut stamps = self
+            .claimed_at_ms
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for id in ids {
+            stamps.remove(id);
+        }
+        Ok(())
     }
 
     /// Build with the default count cap (locked Q9e default).
@@ -599,6 +670,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 claimed.push(row.clone());
             }
         }
+        drop(guard);
+        let claimed_ids: Vec<PendingRowId> = claimed.iter().map(|row| row.id.clone()).collect();
+        self.stamp_claimed_at(&claimed_ids)?;
         Ok(claimed)
     }
 
@@ -642,6 +716,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             row.outbound_sequence = None;
             claimed.push(row.clone());
         }
+        drop(guard);
+        let claimed_ids: Vec<PendingRowId> = claimed.iter().map(|row| row.id.clone()).collect();
+        self.stamp_claimed_at(&claimed_ids)?;
         Ok(claimed)
     }
 
@@ -667,6 +744,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         guard.retain(|_, q| !q.is_empty());
         drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
+        self.clear_claimed_at(&removed_ids)?;
         Ok(removed)
     }
 
@@ -685,6 +763,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         drop(guard);
         if removed > 0 {
             self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
+            self.clear_claimed_at(std::slice::from_ref(id))?;
         }
         Ok(removed)
     }
@@ -699,15 +778,19 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut released = 0u64;
+        let mut released_ids = Vec::new();
         for queue in guard.values_mut() {
             for row in queue.iter_mut() {
                 if row.flushed_in_session.as_ref() == Some(session) {
                     row.flushed_in_session = None;
                     row.outbound_sequence = None;
+                    released_ids.push(row.id.clone());
                     released += 1;
                 }
             }
         }
+        drop(guard);
+        self.clear_claimed_at(&released_ids)?;
         Ok(released)
     }
 
@@ -721,6 +804,8 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 if &row.id == id {
                     row.flushed_in_session = None;
                     row.outbound_sequence = None;
+                    drop(guard);
+                    self.clear_claimed_at(std::slice::from_ref(id))?;
                     return Ok(1);
                 }
             }
@@ -745,6 +830,8 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                     }
                     row.flushed_in_session = None;
                     row.outbound_sequence = None;
+                    drop(guard);
+                    self.clear_claimed_at(std::slice::from_ref(id))?;
                     return Ok(1);
                 }
             }
@@ -804,12 +891,14 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         guard.retain(|_, q| !q.is_empty());
         drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
+        self.clear_claimed_at(&removed_ids)?;
         Ok(removed)
     }
 
     async fn list_orphaned_claims(
         &self,
         live_sessions: &[SmSessionId],
+        claimed_before_ms: i64,
     ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
         // O(rows) lookup via a HashSet of `&SmSessionId` references —
         // avoids the O(rows × live_sessions) `Vec::contains` scan.
@@ -819,17 +908,53 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let stamps = self
+            .claimed_at_ms
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut out = Vec::new();
         for queue in guard.values() {
             for row in queue.iter() {
                 if let Some(session) = row.flushed_in_session.as_ref() {
-                    if !live.contains(session) {
+                    // #1124 recency floor: a claim stamped after the
+                    // floor is an in-flight flush (e.g. a `transient:`
+                    // non-SM flush the live-set can never contain) —
+                    // skip it. A missing stamp means "recency unknown"
+                    // and is also skipped; the janitor adopts such
+                    // claims via `stamp_unstamped_claims` first, so
+                    // they age into eligibility instead of being
+                    // released while possibly mid-flight.
+                    let release_eligible = stamps
+                        .get(&row.id)
+                        .is_some_and(|claimed_at| *claimed_at <= claimed_before_ms);
+                    if !live.contains(session) && release_eligible {
                         out.push((row.id.clone(), session.clone()));
                     }
                 }
             }
         }
         Ok(out)
+    }
+
+    async fn stamp_unstamped_claims(&self, now_ms: i64) -> Result<u64, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut stamps = self
+            .claimed_at_ms
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut adopted = 0u64;
+        for queue in guard.values() {
+            for row in queue.iter() {
+                if row.flushed_in_session.is_some() && !stamps.contains_key(&row.id) {
+                    stamps.insert(row.id.clone(), now_ms);
+                    adopted += 1;
+                }
+            }
+        }
+        Ok(adopted)
     }
 
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
@@ -865,6 +990,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         guard.retain(|_, q| !q.is_empty());
         drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
+        self.clear_claimed_at(&removed_ids)?;
         Ok(removed)
     }
 
@@ -893,6 +1019,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         guard.retain(|_, q| !q.is_empty());
         drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
+        self.clear_claimed_at(&removed_ids)?;
         Ok(removed)
     }
 }

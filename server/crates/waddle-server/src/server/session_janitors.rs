@@ -1186,6 +1186,12 @@ mod orphan_reaper_sweep_tests {
     }
 }
 
+/// #1124: how many janitor intervals a claim must age before the
+/// claim-expiry janitor may release it. Three intervals (180s at the
+/// default 60s cadence) comfortably outlasts an in-flight flush batch
+/// while keeping post-crash orphan recovery prompt.
+const PENDING_CLAIM_RELEASE_FLOOR_INTERVALS: i64 = 3;
+
 pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSocketState>) {
     // pending_delivery claim-expiry janitor (issue #209 slice (d)
     // phase 6 / PR #360): catches claims whose session no longer exists.
@@ -1232,11 +1238,49 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
                 .active_sm_stream_ids();
             let mut live_sessions = detached_live;
             live_sessions.extend(active_live);
+            // #1124 claim recency floor: only release claims older
+            // than several janitor intervals. Non-SM flushes claim
+            // rows under a synthetic `transient:` session id that is
+            // never in the live-set; without the floor, a janitor
+            // pass overlapping an in-flight flush releases its claims
+            // mid-flight and a second resource re-pushes the same
+            // offline messages. Fresh claims are skipped this pass and
+            // re-examined on later sweeps, so genuinely orphaned
+            // (post-crash) claims are still released — just a few
+            // intervals later.
+            let claim_release_floor_ms = i64::try_from(interval_secs)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000)
+                .saturating_mul(PENDING_CLAIM_RELEASE_FLOOR_INTERVALS);
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let claimed_before_ms = now_ms.saturating_sub(claim_release_floor_ms);
+            // Adopt claims written without a recency stamp (a
+            // pre-#1124 binary during a rolling deploy) so they age
+            // into release-eligibility instead of being skipped
+            // forever — `list_orphaned_claims` ignores unstamped rows.
             match state
                 .deps
                 .protocol
                 .pending_delivery_storage
-                .list_orphaned_claims(&live_sessions)
+                .stamp_unstamped_claims(now_ms)
+                .await
+            {
+                Ok(adopted) if adopted > 0 => {
+                    debug!(
+                        adopted,
+                        "claim-expiry janitor: adopted unstamped pending_delivery claims"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(error = %error, "claim-expiry janitor: stamp_unstamped_claims failed");
+                }
+            }
+            match state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list_orphaned_claims(&live_sessions, claimed_before_ms)
                 .await
             {
                 Ok(orphans) if !orphans.is_empty() => {

@@ -263,6 +263,7 @@ pub(crate) const PUSH_SUPPRESSED_REASONS: &[&str] = &[
     "provider_rejected",
     "provider_token_expired",
     "xep0357_push_service_degraded",
+    "unread_zero_at_publish",
 ];
 
 const PUSH_SUPPRESSED_COUNTERS_LEN: usize = PUSH_SUPPRESSED_REASONS.len();
@@ -274,6 +275,7 @@ static PUSH_SUPPRESSED_COUNTERS: [AtomicU64; PUSH_SUPPRESSED_COUNTERS_LEN] = {
     // below, so a future reason addition that forgets a slot fails to
     // compile.
     [
+        AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),

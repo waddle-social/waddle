@@ -237,6 +237,11 @@ impl NotificationOutboxStore {
                 NotificationOutboxPublishOutcome::Failed { .. } => {
                     waddle_xmpp::prometheus::increment_push_outbox_dead_lettered();
                 }
+                NotificationOutboxPublishOutcome::Suppressed { .. } => {
+                    waddle_xmpp::prometheus::increment_push_suppressed(
+                        SuppressedReason::UnreadZeroAtPublish.as_db_value(),
+                    );
+                }
             }
             outcomes.push(outcome);
         }
@@ -329,7 +334,31 @@ impl NotificationOutboxStore {
             });
         }
 
-        let message_count = current_unread_count_for_job(job, inbox_storage).await?;
+        let unread = current_unread_count_for_job(job, inbox_storage).await?;
+        // #1126: the recipient reconnected and read the conversation
+        // inside the notification window — an OS push now would be
+        // for a message they already saw. Drop the job terminally.
+        //
+        // Suppress ONLY when a matching inbox entry EXISTS with
+        // unread 0 (a positive "read it" signal). An ABSENT entry is
+        // NOT the same thing: the inbox projection is written on a
+        // separate, non-atomic path whose failures are swallowed
+        // (`direct_inbox.rs` logs and drops), so "no entry" can mean
+        // "projection lagged or failed", and suppressing there would
+        // compound a partial failure into total notification loss.
+        // Absent entries keep the pre-#1126 behavior: publish with
+        // count 0.
+        if unread == Some(0) {
+            if self.suppress_claimed_job(job).await? {
+                return Ok(NotificationOutboxPublishOutcome::Suppressed {
+                    job_id: job.job_id.clone(),
+                });
+            }
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            });
+        }
+        let message_count = unread.unwrap_or(0);
         let item = job.to_xep0357_pubsub_item_with_count(message_count);
         let push_service_jid = job.push_service_jid.to_string();
         match push_service
@@ -477,6 +506,36 @@ impl NotificationOutboxStore {
         Ok(affected > 0)
     }
 
+    /// #1126 terminal suppression: delete the claimed job outright.
+    /// Suppression is not a publish (nothing was sent) and not a
+    /// failure (nothing went wrong) — the job simply became moot, so
+    /// no terminal row is kept. The audit trail is the labeled
+    /// `unread_zero_at_publish` prometheus counter incremented by the
+    /// drain loop. The `claim_token` predicate keeps the delete
+    /// at-most-once: a stale claim deletes nothing and reports
+    /// `false`, leaving the final state to the current claim-holder.
+    async fn suppress_claimed_job(
+        &self,
+        job: &NotificationOutboxJob,
+    ) -> Result<bool, NotificationOutboxError> {
+        let affected = self
+            .execute(
+                r#"
+            DELETE FROM notification_outbox
+            WHERE job_id = ?
+              AND status = ?
+              AND claim_token = ?
+            "#,
+                crate::db_params![
+                    job.job_id.as_str(),
+                    STATUS_IN_PROGRESS,
+                    job.claim_token.as_deref(),
+                ],
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
     async fn mark_job_failed(
         &self,
         job: &NotificationOutboxJob,
@@ -561,10 +620,16 @@ impl NotificationOutboxStore {
     }
 }
 
+/// Current unread count for the job's conversation, or `None` when no
+/// matching inbox entry exists. The distinction is load-bearing for
+/// #1126: `Some(0)` is a positive "recipient read it" signal (the
+/// entry exists, unread was cleared) and suppresses the push; `None`
+/// means "no information" (inbox projection lagged or its write
+/// failed) and must NOT suppress.
 pub(super) async fn current_unread_count_for_job(
     job: &NotificationOutboxJob,
     inbox_storage: &dyn InboxStorage,
-) -> Result<u32, NotificationOutboxError> {
+) -> Result<Option<u32>, NotificationOutboxError> {
     let entries = if job.thread_id.as_str().is_empty() {
         inbox_storage
             .list(job.recipient_bare_jid())
@@ -582,28 +647,79 @@ pub(super) async fn current_unread_count_for_job(
             entry.partner == *job.conversation_jid()
                 && entry.thread_id.as_deref().unwrap_or("") == job.thread_id.as_str()
         })
-        .map(|entry| entry.unread)
-        .unwrap_or(0))
+        .map(|entry| entry.unread))
 }
 
 pub(super) fn retry_delay_ms(attempt_count: i64) -> i64 {
     let exponent = (attempt_count - 1).clamp(0, 10) as u32;
-    BASE_RETRY_DELAY_MS
-        .saturating_mul(2_i64.saturating_pow(exponent))
-        .min(MAX_RETRY_DELAY_MS)
+    apply_retry_jitter(
+        BASE_RETRY_DELAY_MS
+            .saturating_mul(2_i64.saturating_pow(exponent))
+            .min(MAX_RETRY_DELAY_MS),
+    )
 }
 
 pub(super) fn policy_retry_delay_ms(policy_error_count: i64) -> i64 {
     let exponent = (policy_error_count - 1).clamp(0, 10) as u32;
-    BASE_POLICY_RETRY_DELAY_MS
-        .saturating_mul(2_i64.saturating_pow(exponent))
-        .min(MAX_RETRY_DELAY_MS)
+    apply_retry_jitter(
+        BASE_POLICY_RETRY_DELAY_MS
+            .saturating_mul(2_i64.saturating_pow(exponent))
+            .min(MAX_RETRY_DELAY_MS),
+    )
+}
+
+/// #1126: randomize a retry delay by ±25% so a fleet of jobs failed
+/// by one outage does not drain in synchronized waves — deterministic
+/// backoff re-aligns every retry onto the same instant, re-creating
+/// the thundering herd on each cycle.
+pub(super) fn apply_retry_jitter(delay_ms: i64) -> i64 {
+    use rand::RngExt as _;
+    let factor: f64 = rand::rng().random_range(0.75..=1.25);
+    // `as` clamps on overflow and the factor keeps the product within
+    // 1.25x of an i64 that started life as a bounded delay constant.
+    ((delay_ms as f64) * factor) as i64
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::notification_outbox::test_support::*;
+
+    // #1126: exponential backoff carries ±25% jitter so retries after
+    // an outage do not drain in synchronized waves.
+    #[test]
+    fn retry_delays_are_jittered_within_bounds() {
+        let mut distinct = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let delay = retry_delay_ms(1);
+            assert!(
+                (3_750..=6_250).contains(&delay),
+                "attempt-1 jittered delay {delay} outside ±25% of {BASE_RETRY_DELAY_MS}"
+            );
+            distinct.insert(delay);
+
+            let policy_delay = policy_retry_delay_ms(1);
+            assert!(
+                (45_000..=75_000).contains(&policy_delay),
+                "policy jittered delay {policy_delay} outside ±25% of {BASE_POLICY_RETRY_DELAY_MS}"
+            );
+        }
+        assert!(
+            distinct.len() > 1,
+            "200 samples produced a single delay — backoff is not jittered"
+        );
+    }
+
+    // The jitter factor must respect the MAX cap direction too: a
+    // capped delay may exceed the cap by at most +25%.
+    #[test]
+    fn jittered_delay_never_exceeds_cap_plus_jitter() {
+        for attempt in 1..=12 {
+            let delay = retry_delay_ms(attempt);
+            assert!(delay <= (MAX_RETRY_DELAY_MS as f64 * 1.25) as i64);
+            assert!(delay >= (BASE_RETRY_DELAY_MS as f64 * 0.75) as i64);
+        }
+    }
 
     #[tokio::test]
     async fn xep0357_publish_count_is_derived_from_current_inbox_unread() {
@@ -623,7 +739,8 @@ mod tests {
 
         let current_count = current_unread_count_for_job(&claimed, &inbox)
             .await
-            .expect("current unread");
+            .expect("current unread")
+            .expect("inbox entry present");
         let item = claimed.to_xep0357_pubsub_item_with_count(current_count);
         let payload = item.payload.expect("payload");
         let summary = payload

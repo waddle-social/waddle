@@ -14,12 +14,13 @@ use super::devices::{active_devices_with_subscription_for_node_tx, mark_device_d
 use super::dispatch;
 use super::nodes::get_node_tx;
 use super::publish_jobs::{
-    claim_publish_job_tx, get_publish_job_payload_xml_tx, get_publish_job_tx,
-    mark_publish_job_failed_tx, prune_delivery_attempts_tx, prune_publish_jobs_tx,
-    read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx, retry_at_ms,
-    MAX_DELIVERY_ATTEMPTS_PER_NODE, MAX_PUBLISH_JOBS_PER_NODE, PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES,
-    PUBLISH_JOB_MAX_RETRY_AFTER_MS, PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED,
-    PUBLISH_JOB_STATUS_IN_PROGRESS, PUBLISH_JOB_STATUS_PUBLISHED, PUBLISH_JOB_STATUS_QUEUED,
+    claim_publish_job_tx, delivered_device_ids_for_item_tx, get_publish_job_payload_xml_tx,
+    get_publish_job_tx, mark_publish_job_failed_tx, prune_delivery_attempts_tx,
+    prune_publish_jobs_tx, read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx,
+    retry_at_ms, MAX_DELIVERY_ATTEMPTS_PER_NODE, MAX_PUBLISH_JOBS_PER_NODE,
+    PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES, PUBLISH_JOB_MAX_RETRY_AFTER_MS,
+    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED, PUBLISH_JOB_STATUS_IN_PROGRESS,
+    PUBLISH_JOB_STATUS_PUBLISHED, PUBLISH_JOB_STATUS_QUEUED,
 };
 use super::registration::ensure_active_registration_tx;
 use super::secrets::PushSecretCipher;
@@ -74,6 +75,13 @@ struct PublishWorkPhase1 {
     job: PushPublishJob,
     sealed_devices: Vec<dispatch::SealedActiveDevice>,
     payload_xml: String,
+    /// How many active devices were filtered out of this pass because
+    /// an earlier pass already delivered the item to them (#1123).
+    /// Finalize uses this to disable the "all devices returned an
+    /// encoder-bug status" FAILED classification: with a prior
+    /// success, a uniform failure among the REMAINING devices is not
+    /// "all devices" and the job must still complete.
+    prior_delivered_devices: usize,
 }
 
 /// Phase 1 can either continue into phase 2/3 with a [`PublishWorkPhase1`]
@@ -407,6 +415,7 @@ impl DatabasePushServiceStore {
             job,
             sealed_devices,
             payload_xml,
+            prior_delivered_devices,
         } = phase1;
 
         // ---- Phase 2: outside any tx — encrypt, sign, and send.
@@ -446,8 +455,14 @@ impl DatabasePushServiceStore {
 
         // ---- Phase 3: tx2 — record attempts and finalize the job.
         let attempted_devices = attempts.len();
-        self.finalize_publish_job(&job, &attempts, retention_limit, now_ms)
-            .await?;
+        self.finalize_publish_job(
+            &job,
+            &attempts,
+            prior_delivered_devices,
+            retention_limit,
+            now_ms,
+        )
+        .await?;
         Ok(Some(PushFanoutResult {
             item_id: job.item_id().to_string(),
             attempted_devices,
@@ -582,6 +597,58 @@ impl DatabasePushServiceStore {
                 attempted_devices: 0,
             })));
         }
+        // #1123 per-device idempotency: a requeued job (one sibling
+        // failed transiently) must not fan out again to devices whose
+        // attempt for this same item already succeeded. Filter the
+        // dispatch set against the terminal-success attempts recorded
+        // by earlier passes.
+        let already_delivered =
+            delivered_device_ids_for_item_tx(&mut tx, job.node(), job.item_id()).await?;
+        let device_count_before_filter = sealed_devices.len();
+        let sealed_devices: Vec<_> = sealed_devices
+            .into_iter()
+            .filter(|device| !already_delivered.contains(&device.device_id))
+            .collect();
+        let prior_delivered_devices = device_count_before_filter - sealed_devices.len();
+        if sealed_devices.is_empty() {
+            // Every remaining active device already received this
+            // item (the failing sibling was disabled or unregistered
+            // between retries). The job is complete — finalize as
+            // PUBLISHED instead of spinning in the no-active-devices
+            // requeue loop. The `claim_token` predicate keeps the
+            // transition at-most-once (see `finalize_publish_job`).
+            tx.execute(
+                r#"
+                UPDATE push_publish_jobs
+                SET status = ?,
+                    attempt_count = attempt_count + 1,
+                    last_error = NULL,
+                    next_retry_at_ms = NULL,
+                    claimed_at_ms = NULL,
+                    claim_token = NULL,
+                    updated_at_ms = ?,
+                    published_at_ms = ?
+                WHERE job_id = ? AND status = ? AND claim_token = ?
+                "#,
+                crate::db_params![
+                    PUBLISH_JOB_STATUS_PUBLISHED,
+                    now_ms,
+                    now_ms,
+                    job.job_id().to_string(),
+                    PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    job.claim_token().to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            return Ok(Phase1Outcome::ShortCircuit(Some(PushFanoutResult {
+                item_id: job.item_id().to_string(),
+                attempted_devices: 0,
+            })));
+        }
         let payload_xml = get_publish_job_payload_xml_tx(&mut tx, job.job_id())
             .await?
             .ok_or_else(|| {
@@ -597,6 +664,7 @@ impl DatabasePushServiceStore {
             job,
             sealed_devices,
             payload_xml,
+            prior_delivered_devices,
         }))
     }
 
@@ -703,6 +771,7 @@ impl DatabasePushServiceStore {
         &self,
         job: &PushPublishJob,
         attempts: &[DispatchedAttempt],
+        prior_delivered_devices: usize,
         retention_limit: i64,
         now_ms: i64,
     ) -> Result<(), XmppError> {
@@ -895,7 +964,16 @@ impl DatabasePushServiceStore {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             }
-        } else if let Some(uniform_status) = all_attempts_with_encoder_bug_signature(attempts) {
+        } else if let Some(uniform_status) = all_attempts_with_encoder_bug_signature(attempts)
+            .filter(|_| prior_delivered_devices == 0)
+        {
+            // The `prior_delivered_devices == 0` guard (#1123, Codex
+            // review): on a retry whose fan-out excluded devices that
+            // already received the item, a uniform encoder-bug status
+            // among the REMAINING devices is not "all devices" — the
+            // payload demonstrably encoded and delivered for a
+            // sibling, so the job completes as PUBLISHED (same
+            // outcome a single mixed-result pass would produce).
             // Every device returned the same encoder-bug status —
             // either all `web-bad-request` (the relay rejected our
             // payload shape) or all `web-payload-too-large` (every

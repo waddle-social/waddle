@@ -31,7 +31,8 @@ pub(super) async fn initialize(
             transient_xml TEXT,
             flushed_in_session TEXT,
             outbound_sequence INTEGER,
-            notification_outboxed_at_ms {bigint}
+            notification_outboxed_at_ms {bigint},
+            claimed_at_ms {bigint}
         )
         "#
             ),
@@ -103,6 +104,27 @@ pub(super) async fn initialize(
         let msg = error.to_string().to_lowercase();
         if msg.contains("duplicate column") || msg.contains("already exists") {
             debug!("pending_delivery.notification_outboxed_at_ms column already present");
+        } else {
+            return Err(error);
+        }
+    }
+    // #1124: claim recency stamp. `claim_for_session` /
+    // `claim_batch_for_session` set it alongside `flushed_in_session`;
+    // the release paths clear both together. The claim-expiry janitor
+    // only releases claims older than its recency floor, so an
+    // in-flight non-SM (`transient:`) flush — whose synthetic session
+    // id is never in the live-set — cannot have its claims stolen
+    // mid-flush by an overlapping janitor pass.
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS claimed_at_ms BIGINT"
+        }
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN claimed_at_ms INTEGER",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let msg = error.to_string().to_lowercase();
+        if msg.contains("duplicate column") || msg.contains("already exists") {
+            debug!("pending_delivery.claimed_at_ms column already present");
         } else {
             return Err(error);
         }

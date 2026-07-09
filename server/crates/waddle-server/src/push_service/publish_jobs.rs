@@ -177,6 +177,47 @@ pub(super) async fn get_publish_job_payload_xml_tx(
     Ok(Some(payload_xml))
 }
 
+/// Device ids that already recorded a terminal-success attempt for
+/// this `(node, item_id)` — `web-delivered` for real Web Push sends,
+/// `fake-sent` for the stubbed APNS/FCM platforms. A retried publish
+/// job filters its fan-out against this set so one transiently
+/// failing sibling does not turn into duplicate OS notifications on
+/// every device that already received the item (#1123).
+pub(super) async fn delivered_device_ids_for_item_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    node: &str,
+    item_id: &str,
+) -> Result<std::collections::HashSet<String>, XmppError> {
+    let mut rows = tx
+        .query(
+            r#"
+            SELECT DISTINCT device_id
+            FROM push_delivery_attempts
+            WHERE node = ? AND item_id = ? AND status IN (?, ?)
+            "#,
+            crate::db_params![
+                node,
+                item_id,
+                super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+                super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            ],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let mut delivered = std::collections::HashSet::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    {
+        let device_id: String = row
+            .get(0)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        delivered.insert(device_id);
+    }
+    Ok(delivered)
+}
+
 /// Read the row's current `claim_token` so phase 3 can verify the
 /// claim is still ours before persisting any side effects. Returns
 /// `None` when the row was recovered (token cleared) or deleted.
@@ -258,6 +299,15 @@ pub(super) async fn prune_delivery_attempts_tx(
     node: &str,
     limit: i64,
 ) -> Result<(), XmppError> {
+    // Terminal-success attempts of a still-retryable job are exempt
+    // from the retention tail (#1123, Greptile review): the per-device
+    // idempotency filter reads `web-delivered`/`fake-sent` rows for
+    // the job's `(node, item_id)` on every retry, so evicting one
+    // mid-retry would re-push the item to a device that already
+    // received it. Only that narrow slice is protected — failure/
+    // transient attempts (pure audit) and attempts of terminal jobs
+    // (published/failed/deleted — no re-dispatch to protect) prune
+    // normally.
     tx.execute(
         r#"
         DELETE FROM push_delivery_attempts
@@ -269,8 +319,26 @@ pub(super) async fn prune_delivery_attempts_tx(
               ORDER BY created_at_ms DESC, attempt_id DESC
               LIMIT ?
           )
+          AND NOT (
+              status IN (?, ?)
+              AND item_id IN (
+                  SELECT item_id
+                  FROM push_publish_jobs
+                  WHERE node = ?
+                    AND status IN (?, ?)
+              )
+          )
         "#,
-        crate::db_params![node, node, limit],
+        crate::db_params![
+            node,
+            node,
+            limit,
+            super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+            super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            node,
+            PUBLISH_JOB_STATUS_QUEUED,
+            PUBLISH_JOB_STATUS_IN_PROGRESS,
+        ],
     )
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -327,7 +395,14 @@ pub(super) async fn delete_retryable_publish_jobs_for_node_tx(
 }
 
 pub(super) fn retry_at_ms(now_ms: i64) -> i64 {
-    now_ms.saturating_add(PUBLISH_JOB_RETRY_DELAY_MS)
+    // #1126: ±25% jitter so publish jobs requeued by one relay outage
+    // do not all retry on the same 60s beat.
+    let jitter = {
+        use rand::RngExt as _;
+        let factor: f64 = rand::rng().random_range(0.75..=1.25);
+        ((PUBLISH_JOB_RETRY_DELAY_MS as f64) * factor) as i64
+    };
+    now_ms.saturating_add(jitter)
 }
 
 fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError> {
@@ -719,6 +794,27 @@ mod tests {
     use crate::push_service::test_support::{notification_item, owner, scalar_i64, store};
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
 
+    // #1126: the requeue delay carries ±25% jitter so a relay outage
+    // does not produce synchronized retry waves on the 60s beat.
+    #[test]
+    fn retry_at_ms_is_jittered_within_bounds() {
+        let now_ms = 1_000_000;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let retry_at = retry_at_ms(now_ms);
+            let delay = retry_at - now_ms;
+            assert!(
+                (45_000..=75_000).contains(&delay),
+                "jittered delay {delay} outside ±25% of {PUBLISH_JOB_RETRY_DELAY_MS}"
+            );
+            seen.insert(delay);
+        }
+        assert!(
+            seen.len() > 1,
+            "200 samples produced a single delay — backoff is not jittered"
+        );
+    }
+
     #[tokio::test]
     async fn publish_job_claim_is_exclusive_after_first_claim_commits() {
         let store = store().await;
@@ -854,5 +950,94 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(item_ids, vec!["item-2", "item-3", "item-4"]);
+    }
+
+    // #1123 (Greptile review): retention pruning must not evict the
+    // delivered-attempt record of a job that is still retryable — the
+    // per-device idempotency filter reads it on the next retry, and
+    // losing it would re-push the item to an already-delivered device.
+    #[tokio::test]
+    async fn delivery_attempt_pruning_exempts_still_retryable_jobs() {
+        let store = store().await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("push node");
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+            )
+            .await
+            .expect("device");
+        // A QUEUED (retryable) publish job for the oldest item.
+        store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item("retrying-item"),
+                &owner,
+            )
+            .await
+            .expect("enqueue retryable job");
+        // Oldest attempt belongs to the retryable job; the rest are
+        // newer attempts for terminal (no-job) items.
+        for (idx, item_id) in ["retrying-item", "done-1", "done-2", "done-3", "done-4"]
+            .iter()
+            .enumerate()
+        {
+            store
+                .execute(
+                    r#"
+                    INSERT INTO push_delivery_attempts (
+                        attempt_id,
+                        node,
+                        device_id,
+                        platform,
+                        item_id,
+                        status,
+                        last_error,
+                        created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                    "#,
+                    crate::db_params![
+                        format!("attempt-{idx}"),
+                        node.node(),
+                        "web-1",
+                        PushDevicePlatform::Web.to_string(),
+                        item_id.to_string(),
+                        dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+                        idx as i64,
+                    ],
+                )
+                .await
+                .expect("attempt row");
+        }
+
+        let db = store.database();
+        let mut tx = db.begin().await.expect("transaction");
+        prune_delivery_attempts_tx(&mut tx, node.node(), 2)
+            .await
+            .expect("prune attempts");
+        tx.commit().await.expect("commit prune");
+
+        let attempts = store
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts");
+        let item_ids = attempts
+            .iter()
+            .map(|attempt| attempt.item_id())
+            .collect::<Vec<_>>();
+
+        assert!(
+            item_ids.contains(&"retrying-item"),
+            "the retryable job's delivered attempt must survive pruning, got {item_ids:?}"
+        );
+        assert!(
+            item_ids.contains(&"done-3") && item_ids.contains(&"done-4"),
+            "the newest terminal attempts stay within the retention tail"
+        );
+        assert!(
+            !item_ids.contains(&"done-1"),
+            "terminal items past the tail still prune"
+        );
     }
 }

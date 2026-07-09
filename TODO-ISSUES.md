@@ -48,7 +48,7 @@ Bundles marked `[one PR]` touch the same files and should land together.
 _Residual (tracked, not #945-gating): survivor-check TOCTOU needs per-call locking → #1148/#1195._
 
 ### Lane C — Push server reliability + conformance
-1. #1123 + #1124 + #1126 `[one PR]` — duplicate/spurious push trio: partial-success retry re-sends delivered devices; janitor sweeps live transient flush claims; suppress at unread=0 + retry jitter. (#1124 also touches `pending_delivery` — coordinate with Lane H work.)
+1. ✅ **#1123 + #1124 + #1126 `[one PR]` — duplicate/spurious push trio: per-device idempotent retry (delivered-device filter + all-delivered→published), janitor claim-recency floor (`claimed_at_ms` + 3-interval floor), unread-0 suppression (typed `Suppressed` outcome + `unread_zero_at_publish` audit reason) + ±25% retry jitter on all three backoff paths. DONE (PR #1236).**
 2. #779 + #780 `[one PR]` — preserve XEP-0359 stanza-id through XEP-0357 publish (SW dedupe is dead by construction); suppress push for XEP-0444 reaction-only messages.
 3. #774 + #772 + #773 + #776 + #777 `[one PR]` — XEP-0357/0050 polish: strict publish-options FORM_TYPE validation, emit SessionExpired, session-lifecycle robustness, single-tx register-device, typed composer errors.
 4. #775 — finish §6 forward cleanup on 410 GONE (device half done; user-server invalidation + client notify remain).

@@ -1202,8 +1202,14 @@ async fn list_orphaned_claims_returns_only_dead_session_rows() {
         row.flushed_in_session = session_opt.cloned();
         storage.insert(row).await.unwrap();
     }
+    // Janitor sequence: adopt unstamped claims (these rows were
+    // inserted with the claim pre-set, so no stamp exists), then list.
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage
-        .list_orphaned_claims(std::slice::from_ref(&session_live))
+        .list_orphaned_claims(std::slice::from_ref(&session_live), i64::MAX)
         .await
         .unwrap();
     assert_eq!(orphans.len(), 1, "only the dead-session row is orphaned");
@@ -1214,7 +1220,7 @@ async fn list_orphaned_claims_returns_only_dead_session_rows() {
     // Releasing the orphan via `release_row` clears the claim.
     storage.release_row(&orphans[0].0).await.unwrap();
     let after = storage
-        .list_orphaned_claims(std::slice::from_ref(&session_live))
+        .list_orphaned_claims(std::slice::from_ref(&session_live), i64::MAX)
         .await
         .unwrap();
     assert!(after.is_empty(), "no orphans after release");
@@ -1234,8 +1240,54 @@ async fn list_orphaned_claims_with_empty_live_set_returns_all_claims() {
         row.flushed_in_session = Some(SmSessionId::new("sm-stream-pre-restart"));
         storage.insert(row).await.unwrap();
     }
-    let orphans = storage.list_orphaned_claims(&[]).await.unwrap();
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
     assert_eq!(orphans.len(), 2);
+}
+
+// #1124 mixed-version guard (Greptile review): a claim with NO
+// recency stamp — written by a pre-#1124 binary during a rolling
+// deploy — means "recency unknown" and must NOT be release-eligible
+// until the janitor adopts it, even with an empty live-set and a
+// wide-open floor. Otherwise the mid-flight release re-opens exactly
+// during the deploy window.
+#[tokio::test]
+async fn unstamped_claim_is_skipped_until_adopted() {
+    let storage = InMemoryPendingDeliveryStorage::unlimited();
+    let mut row = transient_row("alice@example.com", "legacy-claimed");
+    row.flushed_in_session = Some(SmSessionId::new("transient:web:legacy"));
+    storage.insert(row).await.unwrap();
+
+    let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
+    assert!(
+        orphans.is_empty(),
+        "an unstamped claim must be invisible until adopted"
+    );
+
+    let adopted = storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    assert_eq!(adopted, 1);
+    // Adoption starts the floor clock: still fresh under the
+    // production floor, eligible once aged past it.
+    let floor_in_past = chrono::Utc::now().timestamp_millis() - 180_000;
+    assert!(storage
+        .list_orphaned_claims(&[], floor_in_past)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        storage
+            .list_orphaned_claims(&[], i64::MAX)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1484,8 +1536,12 @@ async fn list_orphaned_claims_excludes_active_session_rows() {
     storage.insert(row).await.unwrap();
 
     // Sweep with active_session in the live set: NOT an orphan.
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage
-        .list_orphaned_claims(std::slice::from_ref(&active_session))
+        .list_orphaned_claims(std::slice::from_ref(&active_session), i64::MAX)
         .await
         .unwrap();
     assert!(
@@ -1499,7 +1555,7 @@ async fn list_orphaned_claims_excludes_active_session_rows() {
     // which would have produced this incorrect result.
     let dead_session = SmSessionId::new("sm-stream-something-else");
     let orphans = storage
-        .list_orphaned_claims(std::slice::from_ref(&dead_session))
+        .list_orphaned_claims(std::slice::from_ref(&dead_session), i64::MAX)
         .await
         .unwrap();
     assert_eq!(
@@ -1547,9 +1603,14 @@ async fn janitor_releases_rows_with_dead_sessions() {
     }
     assert_eq!(storage.count(&alice).await.unwrap(), 4);
 
-    // Janitor sweep step 1: ask for orphans given the live set.
+    // Janitor sweep step 1: adopt unstamped claims, then ask for
+    // orphans given the live set.
+    storage
+        .stamp_unstamped_claims(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
     let orphans = storage
-        .list_orphaned_claims(std::slice::from_ref(&live_session))
+        .list_orphaned_claims(std::slice::from_ref(&live_session), i64::MAX)
         .await
         .unwrap();
     assert_eq!(orphans.len(), 2, "two dead-session rows are orphaned");
@@ -1595,6 +1656,172 @@ async fn janitor_releases_rows_with_dead_sessions() {
     assert!(dead_b.flushed_in_session.is_none());
     let unclaimed = by_body.get("unclaimed").expect("unclaimed present");
     assert!(unclaimed.flushed_in_session.is_none());
+}
+
+// #1124: an in-flight non-SM flush claims rows under a synthetic
+// `transient:` session id that is never in the janitor's live-set.
+// The claim recency floor must keep the janitor's hands off those
+// claims while the flush is running, and still release them once
+// they age past the floor (post-crash orphan recovery).
+#[tokio::test]
+async fn janitor_floor_protects_in_flight_transient_claims() {
+    let storage = InMemoryPendingDeliveryStorage::unlimited();
+    let alice = bare("alice@example.com");
+    for body in ["a", "b"] {
+        storage
+            .insert(transient_row("alice@example.com", body))
+            .await
+            .unwrap();
+    }
+    let transient_session = SmSessionId::new("transient:web-resource:0197fe2a");
+    let claimed = storage
+        .claim_batch_for_session(&alice, &transient_session, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 2);
+
+    // Janitor pass with a floor 3 intervals in the past (the
+    // production shape): the just-claimed rows are fresh → skipped,
+    // even though `transient:` is not in the (empty) live-set.
+    let floor_in_past = chrono::Utc::now().timestamp_millis() - 180_000;
+    let orphans = storage
+        .list_orphaned_claims(&[], floor_in_past)
+        .await
+        .unwrap();
+    assert!(
+        orphans.is_empty(),
+        "#1124: an overlapping janitor pass must not release in-flight transient claims"
+    );
+
+    // Once the claim ages past the floor (post-crash scenario,
+    // simulated with a floor in the future), it is release-eligible.
+    let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
+    assert_eq!(
+        orphans.len(),
+        2,
+        "genuinely orphaned claims must still be released after the floor"
+    );
+}
+
+// #1124 DB-backend mirror of the floor contract, including the
+// release path clearing the recency stamp so a released-then-
+// re-claimed row gets a fresh stamp.
+#[tokio::test]
+async fn db_storage_orphan_listing_respects_claim_recency_floor() {
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .unwrap();
+    let alice = bare("alice@example.com");
+    for body in ["a", "b"] {
+        storage
+            .insert(transient_row("alice@example.com", body))
+            .await
+            .unwrap();
+    }
+    let transient_session = SmSessionId::new("transient:web-resource:0197fe2a");
+    let claimed = storage
+        .claim_batch_for_session(&alice, &transient_session, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 2);
+
+    let floor_in_past = chrono::Utc::now().timestamp_millis() - 180_000;
+    let orphans = storage
+        .list_orphaned_claims(&[], floor_in_past)
+        .await
+        .unwrap();
+    assert!(
+        orphans.is_empty(),
+        "#1124: fresh transient claims must be invisible to the janitor"
+    );
+
+    let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
+    assert_eq!(orphans.len(), 2, "aged claims are release-eligible");
+    for (row_id, session) in &orphans {
+        assert_eq!(
+            storage
+                .release_row_if_session(row_id, session)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    // Released rows carry no claim (and no stale recency stamp): a
+    // repeat janitor pass sees nothing.
+    let orphans = storage.list_orphaned_claims(&[], i64::MAX).await.unwrap();
+    assert!(orphans.is_empty(), "release clears the claim + stamp");
+    // And the rows are re-claimable by a recovering resource.
+    let reclaimed = storage
+        .claim_batch_for_session(&alice, &SmSessionId::new("sm-stream-fresh"), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed.len(), 2);
+}
+
+// #1124 mixed-version guard, DB backend: a claim row written by a
+// pre-#1124 binary (flushed_in_session set, claimed_at_ms NULL) must
+// be invisible to the janitor until adopted, then age normally.
+#[tokio::test]
+async fn db_storage_unstamped_claim_is_skipped_until_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("pending_delivery-unstamped.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let url = format!("sqlite://{path}");
+    let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+        .await
+        .unwrap();
+    let raw = crate::db::Database::from_config(
+        "pending_delivery_unstamped_raw",
+        &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+    )
+    .await
+    .expect("raw db handle");
+    storage
+        .insert(transient_row("alice@example.com", "legacy"))
+        .await
+        .unwrap();
+    // Simulate the old binary's claim: session tag without a stamp
+    // (claim_batch always stamps in this binary, so write it raw).
+    let conn = raw.guard().await.expect("db guard");
+    conn.execute(
+        "UPDATE pending_delivery SET flushed_in_session = 'transient:web:legacy'",
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    assert!(
+        storage
+            .list_orphaned_claims(&[], i64::MAX)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unstamped claim must be invisible until adopted"
+    );
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    assert_eq!(storage.stamp_unstamped_claims(now_ms).await.unwrap(), 1);
+    assert!(
+        storage
+            .list_orphaned_claims(&[], now_ms - 180_000)
+            .await
+            .unwrap()
+            .is_empty(),
+        "adopted claim is fresh under the production floor"
+    );
+    assert_eq!(
+        storage
+            .list_orphaned_claims(&[], i64::MAX)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "adopted claim ages into release-eligibility"
+    );
 }
 
 #[tokio::test]
@@ -1681,11 +1908,14 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         async fn list_orphaned_claims(
             &self,
             live: &[waddle_xmpp::pending_delivery::SmSessionId],
+            claimed_before_ms: i64,
         ) -> Result<
             Vec<(PendingRowId, waddle_xmpp::pending_delivery::SmSessionId)>,
             PendingStorageError,
         > {
-            self.inner.list_orphaned_claims(live).await
+            self.inner
+                .list_orphaned_claims(live, claimed_before_ms)
+                .await
         }
         async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
             self.inner.count(recipient).await
