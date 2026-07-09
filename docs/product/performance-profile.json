@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "switchable-500-v1",
+  "dataset": {
+    "generatorSeed": 20260709,
+    "members": 500,
+    "rooms": 100,
+    "messages": 1000000,
+    "threads": 10000,
+    "files": 5000
+  },
+  "network": {
+    "downMbps": 10,
+    "upMbps": 2,
+    "roundTripMs": 80
+  },
+  "clients": {
+    "desktop-web": { "hardware": "Mac mini M1 2020", "ramGiB": 8, "resolvedRuntimeRequired": true },
+    "android-pwa": { "hardware": "Google Pixel 7", "ramGiB": 8, "resolvedRuntimeRequired": true },
+    "ios": { "hardware": "Apple iPhone 13", "ramGiB": 4, "resolvedRuntimeRequired": true },
+    "macos": { "hardware": "Mac mini M1 2020", "ramGiB": 8, "resolvedRuntimeRequired": true }
+  }
+}
