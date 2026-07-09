@@ -145,6 +145,18 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
     > {
         Ok(vec![])
     }
+    async fn claim_batch_for_session(
+        &self,
+        _recipient: &BareJid,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
+        _after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        _limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        Ok(vec![])
+    }
     async fn delete_claimed(
         &self,
         _session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -1804,6 +1816,20 @@ impl PendingDeliveryStorage for RetractDuringInsertPending {
     > {
         self.inner.claim_for_session(recipient, session).await
     }
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
+    }
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -2003,6 +2029,20 @@ impl PendingDeliveryStorage for FlakyPending {
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
         self.inner.claim_for_session(recipient, session).await
+    }
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
     }
     async fn delete_claimed(
         &self,

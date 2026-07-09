@@ -19,6 +19,7 @@ use super::{
 };
 use axum::response::IntoResponse;
 use futures::stream::{SplitSink, SplitStream};
+use waddle_xmpp::stream_management::SmRequest;
 
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
@@ -56,6 +57,15 @@ async fn xmpp_websocket_handler(
 
 /// Size of the outbound message channel buffer
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
+
+/// Deadline for a loop-level XEP-0198 send-window pause (issue #1219).
+/// While `sm_state.needs_send_pause()` latches, the connection loop stops
+/// draining the outbound mpsc so its producers backpressure; client acks
+/// keep flowing via `ws_receiver` and normally release the pause within an
+/// RTT. If none arrives within this window the peer is dead — the loop
+/// breaks into the same detach-for-resume path a keepalive close uses.
+/// Matches the batch writer's inline pause deadline.
+const SEND_WINDOW_LOOP_PAUSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Budget for writing the system-shutdown stream error + close frames
 /// to one peer during graceful shutdown (issue #1091). Deliberately
@@ -163,6 +173,37 @@ async fn handle_xmpp_websocket(
     let mut superseded = false;
 
     loop {
+        // Loop-level XEP-0198 send-window gate (issue #1219). When the
+        // outstanding unacked count has latched the pause, stop draining the
+        // outbound mpsc (its `recv()` arm is guarded below): producers then
+        // backpressure on the 256-slot channel instead of piling more into
+        // the SM unacked queue, while `ws_receiver` keeps delivering the
+        // `<a/>` acks that shrink the window. On the rising edge send one
+        // forced `<r/>` (the wasm client acks only when asked) and arm a
+        // deadline; on recovery, disarm. No await lives inside a select arm
+        // for this — acks flow freely and the gate is deadlock-free by
+        // construction.
+        let send_window_paused = conn.sm_state.needs_send_pause();
+        if send_window_paused {
+            if conn.send_window_pause_deadline.is_none() {
+                conn.send_window_pause_deadline =
+                    Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
+                waddle_xmpp::prometheus::increment_sm_send_window_pause();
+                if !send_ws_message(
+                    &mut ws_sender,
+                    Message::Text(SmRequest::to_xml().into()),
+                    "Failed to send SM <r/> at send-window loop pause",
+                )
+                .await
+                {
+                    break;
+                }
+            }
+        } else {
+            conn.send_window_pause_deadline = None;
+        }
+        let send_window_pause_deadline = conn.send_window_pause_deadline;
+
         // Frames the mid-batch ack drain (issue #1089) pulled off the
         // socket ahead of the dispatcher must be processed in arrival
         // order BEFORE the socket is polled again — so the socket arm
@@ -253,8 +294,13 @@ async fn handle_xmpp_websocket(
                 }
             }
 
-            // Handle outbound messages routed from other connections
-            outbound = outbound_rx.recv() => {
+            // Handle outbound messages routed from other connections.
+            // Gated by the send-window pause (issue #1219): while paused we
+            // do not pull new outbound work, so its producers backpressure on
+            // the mpsc rather than overflowing the SM unacked queue. The
+            // `ws_receiver` arm above stays active, so client acks keep
+            // arriving and releasing the pause.
+            outbound = outbound_rx.recv(), if !send_window_paused => {
                 match outbound {
                     Some(outbound_stanza) => {
                         if !handle_outbound_stanza(
@@ -474,6 +520,28 @@ async fn handle_xmpp_websocket(
                     .await;
                     break;
                 }
+            }
+
+            // Loop-level send-window pause deadline (issue #1219). Fires
+            // only while paused; if the client never acks the window down in
+            // time it is dead, so break WITHOUT transitioning to Closing —
+            // the cleanup fork below detaches an SM session for resume, and
+            // the retained queue is bounded (pacing kept it ≤ cap) so that
+            // resume stays clean.
+            _ = async {
+                match send_window_pause_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            }, if send_window_paused => {
+                waddle_xmpp::prometheus::increment_sm_send_window_pause_timeout();
+                warn!(
+                    jid = ?conn.phase.bound_jid(),
+                    deadline_secs = SEND_WINDOW_LOOP_PAUSE_DEADLINE.as_secs(),
+                    "SM send-window loop pause timed out with no recovering ack; \
+                     closing into detach-for-resume"
+                );
+                break;
             }
         }
     }

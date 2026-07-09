@@ -204,6 +204,14 @@ impl UnackedQueue {
         self.stanzas.is_empty()
     }
 
+    /// Whether the queue is at capacity — the next push would evict the
+    /// oldest entry (and mark a replay gap). Used by the no-wire
+    /// replay-recording paths to cap recording at the queue size instead of
+    /// evicting (issue #1219).
+    pub fn is_full(&self) -> bool {
+        self.stanzas.len() >= self.max_size
+    }
+
     /// Clear the queue.
     pub fn clear(&mut self) {
         self.stanzas.clear();

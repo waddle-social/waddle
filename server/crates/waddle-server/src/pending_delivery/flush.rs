@@ -1,10 +1,19 @@
 use super::*;
 
+/// Bound on rows claimed and pushed per `claim_batch_for_session` iteration
+/// inside [`flush_for_resource`] (issue #1220). Deliberately « the 256-slot
+/// recipient outbound mpsc (`OUTBOUND_CHANNEL_SIZE`) so a single batch never
+/// fills the channel on its own; the batch loop backpressures on the mpsc
+/// between batches instead of materializing the whole offline backlog at once.
+pub const FLUSH_BATCH_SIZE: usize = 64;
+
 /// Outcome of a flush attempt for one resource.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct FlushOutcome {
     /// Number of rows claimed from `pending_delivery`.
     pub claimed: u32,
+    /// Number of `claim_batch_for_session` batches drained (issue #1220).
+    pub batches: u32,
     /// Number of replayed stanzas successfully pushed to the resource.
     pub pushed: u32,
     /// Number of rows the resolver definitively could not materialize
@@ -118,190 +127,222 @@ where
             &transient_session_id
         }
     };
-    let claimed = match storage
-        .claim_for_session(recipient, session_id_for_claim)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            warn!(error = %error, "claim_for_session failed; skipping flush");
-            return FlushOutcome::default();
-        }
-    };
-    let mut outcome = FlushOutcome {
-        claimed: claimed.len() as u32,
-        ..FlushOutcome::default()
-    };
-    if claimed.is_empty() {
-        return outcome;
-    }
-
-    let mut rows = claimed.into_iter();
-    while let Some(row) = rows.next() {
-        let payload = match materialize(&row, archive_resolver).await {
-            Ok(Some(payload)) => payload,
-            Ok(None) => {
-                // Archived row whose MAM lookup definitively found
-                // nothing usable (row missing, tombstoned, or its
-                // preserved XML is unparseable) — the original stanza
-                // is unrecoverable. Drop the row instead of releasing
-                // it so we don't loop forever on a poison pill. The
-                // message is permanently lost from the recipient's
-                // perspective; we surface it loudly so production
-                // logs can flag MAM corruption / unexpected
-                // tombstones.
-                outcome.unresolved += 1;
-                waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
-                if let Err(error) = storage.delete_row(&row.id).await {
-                    warn!(
-                        row_id = %row.id,
-                        error = %error,
-                        "pending_delivery delete_row (unresolved poison pill) failed"
-                    );
-                }
-                continue;
-            }
+    let mut outcome = FlushOutcome::default();
+    // Drain the backlog in bounded FIFO batches (issue #1220) instead of one
+    // unbounded `claim_for_session`. `FLUSH_BATCH_SIZE` is deliberately « the
+    // 256-slot recipient outbound mpsc so a single batch cannot fill the
+    // channel; combined with the off-task spawn in `regular.rs`, the flush
+    // producer backpressures on the mpsc while the recipient's connection task
+    // keeps draining it — the >256-row self-send deadlock is gone. `cursor` is
+    // the FIFO row-id boundary that isolates each batch from the last (see
+    // `PendingDeliveryStorage::claim_batch_for_session`).
+    let mut cursor: Option<PendingRowId> = None;
+    'batches: loop {
+        let batch = match storage
+            .claim_batch_for_session(
+                recipient,
+                session_id_for_claim,
+                cursor.as_ref(),
+                FLUSH_BATCH_SIZE,
+            )
+            .await
+        {
+            Ok(rows) => rows,
             Err(error) => {
-                // Issue #1122: the MAM lookup ERRORED — a transient
-                // storage failure, not a missing row. Deleting here
-                // would let a momentary MAM outage destroy queued
-                // offline mail. The failure is BATCH-FATAL:
-                // pending_delivery is FIFO (XEP-0160 §3 order of
-                // receipt), so delivering later rows while releasing
-                // this one would reorder the recipient's offline
-                // mail, and a hard MAM outage would otherwise cost
-                // one failing lookup per remaining archived row,
-                // awaited inline in the presence handler. Release
-                // this row and every remaining claimed row, then
-                // abort the flush. Retry fires on the client's next
-                // presence update — `maybe_flush_pending_delivery`
-                // resets the connection's offline-flush CAS when
-                // `deferred_transient > 0` — or via another
-                // recovering resource.
-                outcome.deferred_transient += 1;
-                waddle_xmpp::prometheus::increment_pending_delivery_archive_lookup_transient_failure();
-                warn!(
-                    row_id = %row.id,
-                    error = %error,
-                    "pending_delivery archive lookup failed transiently; \
-                     aborting flush batch and releasing this row and all \
-                     remaining claimed rows for retry"
-                );
-                release_row_or_warn(storage, &row.id, "transient archive failure").await;
-                for deferred in rows.by_ref() {
-                    outcome.deferred_transient += 1;
-                    release_row_or_warn(
-                        storage,
-                        &deferred.id,
-                        "transient archive failure (batch abort)",
-                    )
-                    .await;
-                }
-                break;
+                warn!(error = %error, "claim_batch_for_session failed; ending flush");
+                break 'batches;
             }
         };
-        // XEP-0191 §2 step 4 flush-time block re-evaluation
-        // (issue #209 PR #360): if the recipient blocked the sender
-        // after the row was queued, drop it. Block is final until
-        // the recipient lifts it — `delete_row` not `release_row`.
-        if let Some(blocked) = blocklist.as_ref() {
-            let sender_jid = sender_jid_for_payload(&payload);
-            if let Some(sender) = sender_jid {
-                if blocked.contains_jid(sender) {
-                    debug!(
-                        row_id = %row.id,
-                        recipient = %recipient,
-                        sender = %sender,
-                        "pending_delivery flush dropping row: recipient blocked sender post-intake (XEP-0191 §2 step 4)"
-                    );
-                    outcome.dropped_blocked += 1;
+        if batch.is_empty() {
+            break 'batches;
+        }
+        let batch_len = batch.len();
+        outcome.claimed += batch_len as u32;
+        outcome.batches += 1;
+        // Advance the cursor to the last claimed row so the next batch starts
+        // strictly after it — even rows released below (blocked / undelivered)
+        // are not retried within this pass; they re-arm on the next flush
+        // trigger, exactly as the pre-batch single claim behaved.
+        cursor = batch.last().map(|row| row.id.clone());
+
+        let mut rows = batch.into_iter();
+        while let Some(row) = rows.next() {
+            let payload = match materialize(&row, archive_resolver).await {
+                Ok(Some(payload)) => payload,
+                Ok(None) => {
+                    // Archived row whose MAM lookup definitively found
+                    // nothing usable (row missing, tombstoned, or its
+                    // preserved XML is unparseable) — the original stanza
+                    // is unrecoverable. Drop the row instead of releasing
+                    // it so we don't loop forever on a poison pill. The
+                    // message is permanently lost from the recipient's
+                    // perspective; we surface it loudly so production
+                    // logs can flag MAM corruption / unexpected
+                    // tombstones.
+                    outcome.unresolved += 1;
+                    waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
                     if let Err(error) = storage.delete_row(&row.id).await {
-                        // Copilot review on PR #360: without a release
-                        // here, the row would stay tagged with the
-                        // current (still-live) SM session id.
-                        // Consequence: the SM-expiry janitor wouldn't
-                        // see it as orphaned (its session is alive),
-                        // the SM ack wouldn't delete it
-                        // (`outbound_sequence` is NULL — never pushed),
-                        // and the next flush wouldn't re-claim it
-                        // (`flushed_in_session` not NULL). The row
-                        // would wedge permanently and consume quota.
-                        // Fall back to `release_row` so the next
-                        // recovering resource (or this same session
-                        // on a later presence transition) can re-claim
-                        // it and re-check the blocklist.
                         warn!(
                             row_id = %row.id,
                             error = %error,
-                            "pending_delivery delete_row (blocked at flush) failed; \
-                             releasing claim so the next flush can re-check the blocklist"
+                            "pending_delivery delete_row (unresolved poison pill) failed"
                         );
-                        if let Err(release_error) = storage.release_row(&row.id).await {
-                            warn!(
-                                row_id = %row.id,
-                                error = %release_error,
-                                "pending_delivery release_row (blocked-at-flush fallback) \
-                                 also failed; row may remain wedged until claim-expiry janitor \
-                                 sees the session expire"
-                            );
-                        }
                     }
                     continue;
                 }
-            }
-        }
-        let replay = build_replay_stanza(
-            payload,
-            server_domain,
-            row.original_receipt_at,
-            ReplayReason::OfflineStorage,
-        );
-        let stanza = Stanza::Message(replay);
-        // SM-enabled path: tag outbound with row id so the recipient's
-        // main loop can stamp `outbound_sequence` post-`record_outbound`.
-        // The row stays claimed for the SM-ack lifecycle.
-        // Non-SM path: same outbound tag (cheap), but we delete on Sent
-        // because there's no SM session to ack against.
-        let push_result = if sm_session.is_some() {
-            registry
-                .send_pending_flush(resource, stanza, row.id.clone(), row.original_receipt_at)
-                .await
-        } else {
-            registry.send_to(resource, stanza).await
-        };
-        match push_result {
-            SendResult::Sent => {
-                outcome.pushed += 1;
-                if sm_session.is_none() {
-                    // Non-SM fallback: delete on push since no `<a h>`
-                    // will ever fire (Codex review on PR #358).
-                    if let Err(error) = storage.delete_row(&row.id).await {
-                        warn!(
-                            row_id = %row.id,
-                            error = %error,
-                            "pending_delivery delete_row (non-SM push) failed; \
-                             row may re-deliver on next presence"
-                        );
-                    }
-                }
-                // SM-enabled: row stays claimed by `sm_session` with
-                // `outbound_sequence = NULL` until the recipient's
-                // main loop stamps it via `record_pushed_at`. If the
-                // session dies before push, `release_claim` clears
-                // the claim for re-flush (Q7c).
-            }
-            other => {
-                debug!(?other, row_id = %row.id, "send to recovering resource failed mid-flush");
-                // Per-row release so an undelivered row stays eligible
-                // for re-claim on the next flush trigger.
-                if let Err(error) = storage.release_row(&row.id).await {
+                Err(error) => {
+                    // Issue #1122: the MAM lookup ERRORED — a transient
+                    // storage failure, not a missing row. Deleting here
+                    // would let a momentary MAM outage destroy queued
+                    // offline mail. The failure is BATCH-FATAL:
+                    // pending_delivery is FIFO (XEP-0160 §3 order of
+                    // receipt), so delivering later rows while releasing
+                    // this one would reorder the recipient's offline
+                    // mail, and a hard MAM outage would otherwise cost
+                    // one failing lookup per remaining archived row,
+                    // awaited inline in the presence handler. Release
+                    // this row and every remaining claimed row, then
+                    // abort the flush. Retry fires on the client's next
+                    // presence update — `maybe_flush_pending_delivery`
+                    // resets the connection's offline-flush CAS when
+                    // `deferred_transient > 0` — or via another
+                    // recovering resource.
+                    outcome.deferred_transient += 1;
+                    waddle_xmpp::prometheus::increment_pending_delivery_archive_lookup_transient_failure();
                     warn!(
                         row_id = %row.id,
                         error = %error,
-                        "pending_delivery release_row (undelivered) failed"
+                        "pending_delivery archive lookup failed transiently; \
+                         aborting flush batch and releasing this row and all \
+                         remaining claimed rows for retry"
                     );
+                    release_row_or_warn(storage, &row.id, "transient archive failure").await;
+                    for deferred in rows.by_ref() {
+                        outcome.deferred_transient += 1;
+                        release_row_or_warn(
+                            storage,
+                            &deferred.id,
+                            "transient archive failure (batch abort)",
+                        )
+                        .await;
+                    }
+                    // Batch-fatal AND flush-fatal: claim no further batches.
+                    break 'batches;
+                }
+            };
+            // XEP-0191 §2 step 4 flush-time block re-evaluation
+            // (issue #209 PR #360): if the recipient blocked the sender
+            // after the row was queued, drop it. Block is final until
+            // the recipient lifts it — `delete_row` not `release_row`.
+            if let Some(blocked) = blocklist.as_ref() {
+                let sender_jid = sender_jid_for_payload(&payload);
+                if let Some(sender) = sender_jid {
+                    if blocked.contains_jid(sender) {
+                        debug!(
+                            row_id = %row.id,
+                            recipient = %recipient,
+                            sender = %sender,
+                            "pending_delivery flush dropping row: recipient blocked sender post-intake (XEP-0191 §2 step 4)"
+                        );
+                        outcome.dropped_blocked += 1;
+                        if let Err(error) = storage.delete_row(&row.id).await {
+                            // Copilot review on PR #360: without a release
+                            // here, the row would stay tagged with the
+                            // current (still-live) SM session id.
+                            // Consequence: the SM-expiry janitor wouldn't
+                            // see it as orphaned (its session is alive),
+                            // the SM ack wouldn't delete it
+                            // (`outbound_sequence` is NULL — never pushed),
+                            // and the next flush wouldn't re-claim it
+                            // (`flushed_in_session` not NULL). The row
+                            // would wedge permanently and consume quota.
+                            // Fall back to `release_row` so the next
+                            // recovering resource (or this same session
+                            // on a later presence transition) can re-claim
+                            // it and re-check the blocklist.
+                            warn!(
+                                row_id = %row.id,
+                                error = %error,
+                                "pending_delivery delete_row (blocked at flush) failed; \
+                                 releasing claim so the next flush can re-check the blocklist"
+                            );
+                            if let Err(release_error) = storage.release_row(&row.id).await {
+                                warn!(
+                                    row_id = %row.id,
+                                    error = %release_error,
+                                    "pending_delivery release_row (blocked-at-flush fallback) \
+                                     also failed; row may remain wedged until claim-expiry janitor \
+                                     sees the session expire"
+                                );
+                            }
+                        }
+                        continue;
+                    }
                 }
             }
+            let replay = build_replay_stanza(
+                payload,
+                server_domain,
+                row.original_receipt_at,
+                ReplayReason::OfflineStorage,
+            );
+            let stanza = Stanza::Message(replay);
+            // SM-enabled path: tag outbound with row id so the recipient's
+            // main loop can stamp `outbound_sequence` post-`record_outbound`.
+            // The row stays claimed for the SM-ack lifecycle.
+            // Non-SM path: same outbound tag (cheap), but we delete on Sent
+            // because there's no SM session to ack against.
+            let push_result = if sm_session.is_some() {
+                registry
+                    .send_pending_flush(resource, stanza, row.id.clone(), row.original_receipt_at)
+                    .await
+            } else {
+                registry.send_to(resource, stanza).await
+            };
+            match push_result {
+                SendResult::Sent => {
+                    outcome.pushed += 1;
+                    if sm_session.is_none() {
+                        // Non-SM fallback: delete on push since no `<a h>`
+                        // will ever fire (Codex review on PR #358).
+                        if let Err(error) = storage.delete_row(&row.id).await {
+                            warn!(
+                                row_id = %row.id,
+                                error = %error,
+                                "pending_delivery delete_row (non-SM push) failed; \
+                                 row may re-deliver on next presence"
+                            );
+                        }
+                    }
+                    // SM-enabled: row stays claimed by `sm_session` with
+                    // `outbound_sequence = NULL` until the recipient's
+                    // main loop stamps it via `record_pushed_at`. If the
+                    // session dies before push, `release_claim` clears
+                    // the claim for re-flush (Q7c).
+                }
+                other => {
+                    debug!(?other, row_id = %row.id, "send to recovering resource failed mid-flush");
+                    // The recipient's channel is gone (NotConnected / ChannelClosed
+                    // are the only non-Sent outcomes of the blocking send). Every
+                    // remaining row would fail identically, so release this row and
+                    // the rest of the batch and stop the flush — the rows re-arm on
+                    // the next flush trigger. Do NOT claim further batches.
+                    release_row_or_warn(storage, &row.id, "undelivered (channel gone)").await;
+                    for undelivered in rows.by_ref() {
+                        release_row_or_warn(
+                            storage,
+                            &undelivered.id,
+                            "undelivered (channel gone, batch abort)",
+                        )
+                        .await;
+                    }
+                    break 'batches;
+                }
+            }
+        }
+        // A short batch means the unclaimed backlog is drained.
+        if batch_len < FLUSH_BATCH_SIZE {
+            break 'batches;
         }
     }
 

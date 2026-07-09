@@ -69,6 +69,32 @@ pub(super) enum BatchWriteOutcome {
 /// so this is a graceful-degradation bound, not a misbehavior gate.
 const DEFERRED_INBOUND_CAP: usize = 64;
 
+/// Deadline for a single XEP-0198 send-window pause (issue #1219). A
+/// healthy client acks within one RTT; a pause that outlives this means
+/// the peer stopped reading. The connection then records the batch tail
+/// (capped at queue capacity) and closes into the normal
+/// detach-for-resume path — a clean resume beats a poisoned one. Chosen
+/// well under the 60 s `SEND_STALL_TIMEOUT` so a stalled pace is
+/// resolved long before the send stall would fire.
+const SEND_WINDOW_PAUSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Why a send-window pause loop returned (issue #1219).
+enum SendWindowOutcome {
+    /// The client acked enough that the window fell to the low watermark;
+    /// resume writing.
+    Recovered,
+    /// The deferred-inbound buffer filled with non-ack frames while paused,
+    /// so the awaited `<a/>` cannot be read in order. Degrade to the
+    /// pre-#1219 evict-oldest behaviour for the rest of the batch (this
+    /// stream only) and keep writing.
+    DeferredCapReached,
+    /// No recovering ack arrived before the deadline — the peer is dead or
+    /// stalled. Caller records the tail (capped) and closes for resume.
+    TimedOut,
+    /// The transport went away while paused.
+    TransportClosed,
+}
+
 /// Write a response batch to the WebSocket, recording countable
 /// stanzas into the XEP-0198 unacked queue one frame at a time and
 /// interleaving an `<r/>` ack request after every `ack_threshold`th
@@ -92,6 +118,11 @@ where
     RE: std::fmt::Display,
 {
     let mut frames = frames.into_iter();
+    // Once the deferred buffer fills while paused we cannot read the awaited
+    // ack in order, so pacing is abandoned for the rest of THIS batch and we
+    // fall back to the pre-#1219 evict-oldest behaviour. Latched so we don't
+    // re-enter the pause (and re-send `<r/>`) on every remaining frame.
+    let mut send_window_degraded = false;
     while let Some(frame) = frames.next() {
         let request_ack = if should_record(conn, &frame, policy) {
             conn.sm_state.record_outbound(frame.clone()).request_ack
@@ -130,8 +161,160 @@ where
                 return BatchWriteOutcome::TransportClosed;
             }
         }
+        // Send-window pacing (issue #1219): if recording this frame pushed
+        // the outstanding unacked count over the high watermark, stop
+        // feeding the queue and block until the client acks it back down —
+        // so a MAM catch-up / fan-out burst can never overflow the 1000-slot
+        // queue and poison resume. XEP-0198 §4: the server may request an
+        // ack at any time and is under no obligation to transmit queued
+        // stanzas immediately (xep-0198.xml:307/357).
+        if !send_window_degraded && conn.sm_state.needs_send_pause() {
+            match await_send_window_recovery(sender, reader, state, conn).await {
+                SendWindowOutcome::Recovered => {}
+                SendWindowOutcome::DeferredCapReached => {
+                    // Cannot read the awaited ack in order behind 64 parked
+                    // frames; degrade to evict-oldest for the batch tail
+                    // (this stream only). record_outbound above will evict
+                    // and mark the replay gap exactly as pre-#1219.
+                    send_window_degraded = true;
+                }
+                SendWindowOutcome::TransportClosed => {
+                    record_remaining_for_replay(conn, frames, policy);
+                    return BatchWriteOutcome::TransportClosed;
+                }
+                SendWindowOutcome::TimedOut => {
+                    // Dead/stalled peer: record the untransmitted tail up to
+                    // the remaining queue capacity (dropping any overflow so
+                    // the queue stays ≤ cap and resume stays clean), then
+                    // close into detach-for-resume via the loop break.
+                    record_remaining_for_replay(conn, frames, policy);
+                    return BatchWriteOutcome::TransportClosed;
+                }
+            }
+        }
     }
     BatchWriteOutcome::Continue
+}
+
+/// Block until the XEP-0198 send window recovers to the low watermark,
+/// applying `<a/>` acks inline and parking every other inbound frame in
+/// the deferred buffer (issue #1219). One off-cadence `<r/>` is sent on
+/// entry and re-sent after each ack that does not yet recover the window,
+/// because the wasm client acks only in response to a request. Bounded by
+/// [`SEND_WINDOW_PAUSE_DEADLINE`] and [`DEFERRED_INBOUND_CAP`]; other
+/// select concerns (shutdown, keepalive) are not serviced while parked, so
+/// the deadline is the safety valve.
+async fn await_send_window_recovery<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+) -> SendWindowOutcome
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    waddle_xmpp::prometheus::increment_sm_send_window_pause();
+    let deadline = tokio::time::Instant::now() + SEND_WINDOW_PAUSE_DEADLINE;
+    // Elicit an ack immediately — nothing more is being written until the
+    // window recovers, so the client must be prompted.
+    if !send_ws_message(
+        sender,
+        Message::Text(SmRequest::to_xml().into()),
+        "Failed to send SM <r/> at send-window pause",
+    )
+    .await
+    {
+        return SendWindowOutcome::TransportClosed;
+    }
+    loop {
+        if conn.sm_state.send_window_recovered() {
+            return SendWindowOutcome::Recovered;
+        }
+        if conn.deferred_inbound.len() >= DEFERRED_INBOUND_CAP {
+            return SendWindowOutcome::DeferredCapReached;
+        }
+        let next = match tokio::time::timeout_at(deadline, reader.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                waddle_xmpp::prometheus::increment_sm_send_window_pause_timeout();
+                warn!(
+                    deadline_secs = SEND_WINDOW_PAUSE_DEADLINE.as_secs(),
+                    "SM send-window pause timed out with no recovering ack; \
+                     closing into detach-for-resume"
+                );
+                return SendWindowOutcome::TimedOut;
+            }
+        };
+        match next {
+            Some(Ok(Message::Text(text))) => {
+                conn.note_transport_activity();
+                if text.len() > MAX_FRAME_SIZE {
+                    warn!(
+                        len = text.len(),
+                        max = MAX_FRAME_SIZE,
+                        "Dropping oversized inbound frame during send-window pause"
+                    );
+                } else if let Some(h) = parse_sm_ack_h(text.as_str()) {
+                    let responses =
+                        apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    for response in responses {
+                        if !send_ws_message(
+                            sender,
+                            Message::Text(response.into()),
+                            "Failed to send SM ack stream error",
+                        )
+                        .await
+                        {
+                            return SendWindowOutcome::TransportClosed;
+                        }
+                    }
+                    if conn.phase.is_closing() {
+                        return SendWindowOutcome::TransportClosed;
+                    }
+                    // The ack shrank the window (via acknowledge → the pause
+                    // latch clears once it reaches the low watermark). If it
+                    // is not recovered yet, re-request so the client keeps
+                    // acking — it does not ack unprompted.
+                    if !conn.sm_state.send_window_recovered()
+                        && !send_ws_message(
+                            sender,
+                            Message::Text(SmRequest::to_xml().into()),
+                            "Failed to re-send SM <r/> during send-window pause",
+                        )
+                        .await
+                    {
+                        return SendWindowOutcome::TransportClosed;
+                    }
+                } else {
+                    conn.deferred_inbound.push_back(text);
+                }
+            }
+            Some(Ok(Message::Ping(data))) => {
+                conn.note_transport_activity();
+                if !send_ws_message(sender, Message::Pong(data), "Failed to send pong").await {
+                    return SendWindowOutcome::TransportClosed;
+                }
+            }
+            Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) => {
+                conn.note_transport_activity();
+            }
+            Some(Ok(Message::Close(_))) => {
+                info!("WebSocket close requested during send-window pause");
+                return SendWindowOutcome::TransportClosed;
+            }
+            Some(Err(error)) => {
+                error!(error = %error, "WebSocket error during send-window pause");
+                return SendWindowOutcome::TransportClosed;
+            }
+            None => {
+                debug!("WebSocket stream ended during send-window pause");
+                return SendWindowOutcome::TransportClosed;
+            }
+        }
+    }
 }
 
 fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool {
@@ -150,10 +333,28 @@ pub(super) fn record_remaining_for_replay(
     frames: impl Iterator<Item = String>,
     policy: BatchSmPolicy,
 ) {
+    // Cap at the queue capacity instead of evicting (issue #1219). These
+    // frames were never written to the wire, so the departed client's `h`
+    // cannot cover them; recording past the cap would evict already-recorded
+    // stanzas and poison resume. Keeping the queue ≤ cap and dropping the
+    // untransmitted tail leaves resume clean — strictly better, since the
+    // dropped frames are ones a dead peer would never have acked anyway.
+    let mut dropped = 0u64;
     for frame in frames {
         if should_record(conn, &frame, policy) {
+            if conn.sm_state.unacked_queue_full() {
+                dropped += 1;
+                continue;
+            }
             let _ = conn.sm_state.record_outbound(frame);
         }
+    }
+    if dropped > 0 {
+        warn!(
+            dropped,
+            "dropped untransmitted frames beyond SM unacked-queue capacity to keep resume clean"
+        );
+        waddle_xmpp::prometheus::add_sm_send_window_frames_dropped(dropped);
     }
 }
 

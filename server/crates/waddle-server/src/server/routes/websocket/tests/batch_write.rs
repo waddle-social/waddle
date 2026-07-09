@@ -624,3 +624,160 @@ fn sm_evicted_total() -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
 }
+
+// ── XEP-0198 send-window pacing (issue #1219) ───────────────────────────
+
+/// The core fix: a burst far larger than the unacked-queue cap paces on
+/// the send window instead of overflowing it. With a cap of 10 (high
+/// watermark 8, low watermark 5) and a 40-frame batch, the writer pauses
+/// each time the outstanding count reaches 8, sends an off-cadence `<r/>`,
+/// and blocks until the scripted client ack brings the window back down —
+/// so the queue never evicts and no replay gap is ever marked.
+#[tokio::test]
+async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    // cap=10 → high=8, low=5. ack_threshold=100 so the per-N cadence never
+    // fires and the only `<r/>` on the wire are the send-window ones.
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state.enable("paced".to_string(), true, Some(300));
+
+    let mut sink = CollectSink::default();
+    // The client fully acks at each pause: pauses land at outstanding 8, i.e.
+    // outbound counts 8, 16, 24, 32, 40.
+    let mut reader = reader_with(vec![
+        ack_frame(8),
+        ack_frame(16),
+        ack_frame(24),
+        ack_frame(32),
+        ack_frame(40),
+    ]);
+    let frames: Vec<String> = (1..=40).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(conn.sm_state.outbound_count, 40, "every frame was written");
+    assert_eq!(conn.sm_state.last_acked, 40, "final ack landed");
+    assert_eq!(
+        conn.sm_state.replay_gap_through(),
+        None,
+        "a paced burst must never evict, so no replay gap is marked"
+    );
+    assert!(
+        conn.sm_state.queue_len() <= 10,
+        "the retained queue never exceeds the cap under pacing"
+    );
+    let r_xml = SmRequest::to_xml();
+    let texts = sink_texts(&sink);
+    assert_eq!(
+        texts.iter().filter(|t| **t == r_xml).count(),
+        5,
+        "exactly one off-cadence <r/> per pause (at 8/16/24/32/40)"
+    );
+    assert_eq!(texts.len(), 45, "40 stanzas + 5 pacing <r/>");
+}
+
+/// A dead/stalled peer never acks the window down. The pause deadline
+/// fires, the untransmitted tail is recorded only up to the remaining
+/// queue capacity (the overflow dropped, NOT evicted), and the batch
+/// closes into detach-for-resume. Keeping the queue ≤ cap leaves resume
+/// clean — strictly better than the evict-and-poison this replaces.
+#[tokio::test]
+async fn send_window_pause_timeout_records_capped_tail_and_closes() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state.enable("dead".to_string(), true, Some(300));
+
+    let mut sink = CollectSink::default();
+    // No acks ever — the reader is Pending forever.
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<String> = (1..=30).map(countable_message).collect();
+
+    // Paused clock: the 15 s pause deadline auto-advances once the runtime
+    // is idle on the timeout future, so the test is instant.
+    tokio::time::pause();
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        10,
+        "the tail was recorded only up to the queue cap"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 10,
+        "only the capped prefix advanced the counter; the overflow was dropped"
+    );
+    assert_eq!(
+        conn.sm_state.replay_gap_through(),
+        None,
+        "capping (not evicting) keeps resume clean for the dead peer's session"
+    );
+}
+
+/// When the client floods the socket with non-ack frames while the writer
+/// is paused, the awaited `<a/>` cannot be read in order once 64 frames are
+/// parked. The writer then degrades to the pre-#1219 evict-oldest behaviour
+/// for the rest of the batch (this stream only) rather than wedging.
+#[tokio::test]
+async fn send_window_deferred_cap_degrades_to_eviction() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state.enable("degrade".to_string(), true, Some(300));
+
+    let mut sink = CollectSink::default();
+    // 64 non-ack frames (the DEFERRED_INBOUND_CAP) buffered ahead of any
+    // ack, so the pause fills the deferred buffer and cannot make progress.
+    let noise: Vec<Message> = (0..64)
+        .map(|i| Message::Text(message_with_id(&format!("noise{i}")).into()))
+        .collect();
+    let mut reader = reader_with(noise);
+    let frames: Vec<String> = (1..=20).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, BatchWriteOutcome::Continue),
+        "the batch still completes under degrade"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 20,
+        "all frames were still written"
+    );
+    assert!(
+        conn.sm_state.replay_gap_through().is_some(),
+        "degrade falls back to evict-oldest, which marks the replay gap"
+    );
+    assert_eq!(
+        conn.deferred_inbound.len(),
+        64,
+        "the parked non-ack frames stay for the main loop to process in order"
+    );
+}

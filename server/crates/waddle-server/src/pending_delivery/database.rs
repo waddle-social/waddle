@@ -681,6 +681,110 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         Ok(out)
     }
 
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Claim ONLY the FIFO prefix: at most `limit` currently-unclaimed rows
+        // whose row_id sorts after the cursor. The inner SELECT + LIMIT picks
+        // the prefix; the outer UPDATE tags exactly those. Both the UPDATE and
+        // the select-back carry `row_id > ?` so each batch is isolated from
+        // the previous batch's not-yet-`record_pushed_at`-stamped rows
+        // (stamping is async on the recipient connection task) — see the trait
+        // doc for why a bare `outbound_sequence IS NULL` select-back would
+        // double-deliver across batches (issue #1220).
+        match after {
+            Some(after) => {
+                self.execute(
+                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+                     WHERE row_id IN ( \
+                         SELECT row_id FROM pending_delivery \
+                         WHERE recipient_jid = ? AND flushed_in_session IS NULL AND row_id > ? \
+                         ORDER BY row_id ASC LIMIT ? \
+                     )",
+                    crate::db_params![
+                        session.as_str().to_string(),
+                        recipient.to_string(),
+                        after.as_str().to_string(),
+                        limit as i64,
+                    ],
+                )
+                .await?;
+            }
+            None => {
+                self.execute(
+                    "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+                     WHERE row_id IN ( \
+                         SELECT row_id FROM pending_delivery \
+                         WHERE recipient_jid = ? AND flushed_in_session IS NULL \
+                         ORDER BY row_id ASC LIMIT ? \
+                     )",
+                    crate::db_params![
+                        session.as_str().to_string(),
+                        recipient.to_string(),
+                        limit as i64,
+                    ],
+                )
+                .await?;
+            }
+        }
+        // Select back exactly this batch: claimed by this session, not yet
+        // pushed (`outbound_sequence IS NULL` excludes rows a prior flush pass
+        // on the same session already stamped), strictly after the cursor.
+        let mut rows = match after {
+            Some(after) => {
+                self.query(
+                    "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                            archive_stanza_by, archive_stanza_id, transient_xml, \
+                            flushed_in_session, outbound_sequence \
+                     FROM pending_delivery \
+                     WHERE recipient_jid = ? AND flushed_in_session = ? \
+                       AND outbound_sequence IS NULL AND row_id > ? \
+                     ORDER BY row_id ASC LIMIT ?",
+                    crate::db_params![
+                        recipient.to_string(),
+                        session.as_str().to_string(),
+                        after.as_str().to_string(),
+                        limit as i64,
+                    ],
+                )
+                .await?
+            }
+            None => {
+                self.query(
+                    "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                            archive_stanza_by, archive_stanza_id, transient_xml, \
+                            flushed_in_session, outbound_sequence \
+                     FROM pending_delivery \
+                     WHERE recipient_jid = ? AND flushed_in_session = ? \
+                       AND outbound_sequence IS NULL \
+                     ORDER BY row_id ASC LIMIT ?",
+                    crate::db_params![
+                        recipient.to_string(),
+                        session.as_str().to_string(),
+                        limit as i64,
+                    ],
+                )
+                .await?
+            }
+        };
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
     async fn delete_claimed(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
         self.execute(
             "DELETE FROM pending_delivery WHERE flushed_in_session = ?",

@@ -408,6 +408,76 @@ async fn flush_releases_rows_when_no_push_succeeds() {
     assert!(rows[0].flushed_in_session.is_none());
 }
 
+#[tokio::test]
+async fn flush_drains_large_backlog_in_bounded_batches_with_concurrent_consumer() {
+    // Issue #1220 regression: a backlog far larger than the recipient's
+    // outbound mpsc capacity must flush completely without wedging. The flush
+    // now claims and pushes in `FLUSH_BATCH_SIZE` chunks and backpressures on
+    // the channel while a concurrent consumer (standing in for the recipient's
+    // connection task) drains it. Before the fix the unbounded claim + tight
+    // push loop ran inline ON that same connection task, so a backlog past the
+    // 256-slot channel self-deadlocked. Here the consumer runs on its own task,
+    // and the assertion that matters is that all rows arrive AND more than one
+    // batch was drained.
+    const ROWS: usize = 300;
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    for n in 0..ROWS {
+        storage
+            .insert(transient_row("alice@example.com", &format!("msg-{n}")))
+            .await
+            .unwrap();
+    }
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    // Channel smaller than the backlog so an undrained flush would block.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    registry.register(resource.clone(), tx);
+
+    // Consumer drains concurrently, mirroring the recipient's connection task.
+    let consumer = tokio::spawn(async move {
+        let mut received = 0usize;
+        while (rx.recv().await).is_some() {
+            received += 1;
+            if received == ROWS {
+                break;
+            }
+        }
+        received
+    });
+
+    let sm_session = SmSessionId::new("sm-stream-uuid-large");
+    let outcome = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+
+    let received = consumer.await.unwrap();
+    assert_eq!(outcome.claimed, ROWS as u32);
+    assert_eq!(outcome.pushed, ROWS as u32);
+    assert_eq!(received, ROWS);
+    assert_eq!(
+        outcome.batches,
+        (ROWS as u32).div_ceil(FLUSH_BATCH_SIZE as u32),
+        "large backlog drained in bounded FIFO batches"
+    );
+    assert_eq!(
+        storage.count(&bare("alice@example.com")).await.unwrap(),
+        ROWS as u32,
+        "SM rows stay claimed until the recovering session acks"
+    );
+}
+
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
 
 #[tokio::test]
@@ -1354,6 +1424,17 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
             session: &waddle_xmpp::pending_delivery::SmSessionId,
         ) -> Result<Vec<PendingRow>, PendingStorageError> {
             self.inner.claim_for_session(recipient, session).await
+        }
+        async fn claim_batch_for_session(
+            &self,
+            recipient: &BareJid,
+            session: &waddle_xmpp::pending_delivery::SmSessionId,
+            after: Option<&PendingRowId>,
+            limit: usize,
+        ) -> Result<Vec<PendingRow>, PendingStorageError> {
+            self.inner
+                .claim_batch_for_session(recipient, session, after, limit)
+                .await
         }
         async fn delete_claimed(
             &self,
