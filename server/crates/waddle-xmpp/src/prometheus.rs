@@ -105,6 +105,36 @@ static SM_DRAIN_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 // tight for the client population.
 static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
 
+// XEP-0198 send-window pacing (issue #1219). The consumer-side pace
+// gate stops feeding the SM unacked queue once the outstanding count
+// crosses the high watermark and awaits client acks instead, so the
+// 1000-slot queue never overflows and poisons resume.
+//
+// `sm_send_window_pauses`: times a wire-write path engaged the pause.
+// Healthy non-zero under burst (MAM catch-up, fan-out); it is the
+// signal pacing is doing its job INSTEAD of evicting.
+static SM_SEND_WINDOW_PAUSES: AtomicU64 = AtomicU64::new(0);
+// `sm_send_window_pause_timeouts`: a pause outlived its deadline with
+// no recovering ack — the client is dead/stalled. The connection closes
+// into the normal detach-for-resume path with a capped replay queue.
+// Sustained non-zero hints at a widespread client-ack or network fault.
+static SM_SEND_WINDOW_PAUSE_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+// `sm_detached_unacked_evicted`: entries evicted from a DETACHED
+// session's unacked queue when it hit capacity while the stream was
+// awaiting resume. Previously silent (`session.rs`); a non-zero value
+// means a resume with an older `h` for that session must fail rather
+// than replay an incomplete window — the detached sibling of
+// `sm_unacked_evicted`.
+static SM_DETACHED_UNACKED_EVICTED: AtomicU64 = AtomicU64::new(0);
+
+// XEP-0160 batched pending-delivery flush (issue #1220).
+// `pending_flush_batches`: `claim_batch_for_session` batches drained
+// across all flushes. `pending_flush_rows_pushed`: replay stanzas
+// pushed to recovering resources. Together they make the off-task
+// batched flush observable (rows/batches ≈ mean batch fill).
+static PENDING_FLUSH_BATCHES: AtomicU64 = AtomicU64::new(0);
+static PENDING_FLUSH_ROWS_PUSHED: AtomicU64 = AtomicU64::new(0);
+
 // XEP-0357 push pipeline pass-through counters (#531). Provider-side
 // metrics (`provider_sent`, `provider_rejected`, `expired_token`)
 // land alongside #528/#529/#530; this slice covers the durable-
@@ -423,6 +453,37 @@ pub fn increment_sm_resume_window_clamped() {
     SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Increment `waddle_sm_send_window_pauses_total` — a wire-write path
+/// engaged the XEP-0198 send-window pause (issue #1219).
+pub fn increment_sm_send_window_pause() {
+    SM_SEND_WINDOW_PAUSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment `waddle_sm_send_window_pause_timeouts_total` — a send-window
+/// pause outlived its deadline with no recovering ack (issue #1219).
+pub fn increment_sm_send_window_pause_timeout() {
+    SM_SEND_WINDOW_PAUSE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment `waddle_sm_detached_unacked_evicted_total` — a detached
+/// session's unacked queue evicted an entry at capacity while awaiting
+/// resume (issue #1219; previously silent).
+pub fn increment_sm_detached_unacked_evicted() {
+    SM_DETACHED_UNACKED_EVICTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Add to `waddle_pending_flush_batches_total` — batches drained by the
+/// batched offline flush (issue #1220).
+pub fn add_pending_flush_batches(n: u64) {
+    PENDING_FLUSH_BATCHES.fetch_add(n, Ordering::Relaxed);
+}
+
+/// Add to `waddle_pending_flush_rows_pushed_total` — replay stanzas pushed
+/// to recovering resources by the offline flush (issue #1220).
+pub fn add_pending_flush_rows_pushed(n: u64) {
+    PENDING_FLUSH_ROWS_PUSHED.fetch_add(n, Ordering::Relaxed);
+}
+
 /// Increment the `waddle_push_candidate_created_total` counter. Call
 /// from the `Inserted` arm of `notification_outbox::insert_candidate`.
 pub fn increment_push_candidate_created() {
@@ -548,6 +609,11 @@ pub fn reset_metrics_for_test() {
     SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
     SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
     SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
+    SM_SEND_WINDOW_PAUSES.store(0, Ordering::Release);
+    SM_SEND_WINDOW_PAUSE_TIMEOUTS.store(0, Ordering::Release);
+    SM_DETACHED_UNACKED_EVICTED.store(0, Ordering::Release);
+    PENDING_FLUSH_BATCHES.store(0, Ordering::Release);
+    PENDING_FLUSH_ROWS_PUSHED.store(0, Ordering::Release);
     for counter in PUSH_SUPPRESSED_COUNTERS.iter() {
         counter.store(0, Ordering::Release);
     }
@@ -587,6 +653,11 @@ pub fn render_metrics() -> String {
     let sm_promotion_dead_lettered = SM_PROMOTION_DEAD_LETTERED.load(Ordering::Relaxed);
     let sm_drain_timeout = SM_DRAIN_TIMEOUT.load(Ordering::Relaxed);
     let sm_resume_window_clamped = SM_RESUME_WINDOW_CLAMPED.load(Ordering::Relaxed);
+    let sm_send_window_pauses = SM_SEND_WINDOW_PAUSES.load(Ordering::Relaxed);
+    let sm_send_window_pause_timeouts = SM_SEND_WINDOW_PAUSE_TIMEOUTS.load(Ordering::Relaxed);
+    let sm_detached_unacked_evicted = SM_DETACHED_UNACKED_EVICTED.load(Ordering::Relaxed);
+    let pending_flush_batches = PENDING_FLUSH_BATCHES.load(Ordering::Relaxed);
+    let pending_flush_rows_pushed = PENDING_FLUSH_ROWS_PUSHED.load(Ordering::Relaxed);
     let push_candidate_created = PUSH_CANDIDATE_CREATED.load(Ordering::Relaxed);
     let push_candidate_coalesced = PUSH_CANDIDATE_COALESCED.load(Ordering::Relaxed);
     let push_outbox_published = PUSH_OUTBOX_PUBLISHED.load(Ordering::Relaxed);
@@ -662,6 +733,21 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_resume_window_clamped_total Client-requested XEP-0198 resume window exceeded WADDLE_SM_MAX_RESUME_SECS and was silently lowered.\n",
             "# TYPE waddle_sm_resume_window_clamped_total counter\n",
             "waddle_sm_resume_window_clamped_total {sm_resume_window_clamped}\n",
+            "# HELP waddle_sm_send_window_pauses_total XEP-0198 send-window pauses engaged by a wire-write path to avoid overflowing the unacked queue (issue #1219). Healthy non-zero under burst — pacing INSTEAD of evicting.\n",
+            "# TYPE waddle_sm_send_window_pauses_total counter\n",
+            "waddle_sm_send_window_pauses_total {sm_send_window_pauses}\n",
+            "# HELP waddle_sm_send_window_pause_timeouts_total Send-window pauses that outlived their deadline with no recovering ack; the connection closed into detach-for-resume with a capped replay queue (issue #1219).\n",
+            "# TYPE waddle_sm_send_window_pause_timeouts_total counter\n",
+            "waddle_sm_send_window_pause_timeouts_total {sm_send_window_pause_timeouts}\n",
+            "# HELP waddle_sm_detached_unacked_evicted_total Entries evicted from a DETACHED session's unacked queue at capacity while awaiting resume; a resume with an older h for that session must fail rather than replay an incomplete window (issue #1219).\n",
+            "# TYPE waddle_sm_detached_unacked_evicted_total counter\n",
+            "waddle_sm_detached_unacked_evicted_total {sm_detached_unacked_evicted}\n",
+            "# HELP waddle_pending_flush_batches_total XEP-0160 offline-flush claim_batch_for_session batches drained across all flushes (issue #1220).\n",
+            "# TYPE waddle_pending_flush_batches_total counter\n",
+            "waddle_pending_flush_batches_total {pending_flush_batches}\n",
+            "# HELP waddle_pending_flush_rows_pushed_total XEP-0160 offline-flush replay stanzas pushed to recovering resources (issue #1220).\n",
+            "# TYPE waddle_pending_flush_rows_pushed_total counter\n",
+            "waddle_pending_flush_rows_pushed_total {pending_flush_rows_pushed}\n",
             "# HELP waddle_push_candidate_created_total XEP-0357 notification candidate rows inserted into `notification_candidates` (the `Inserted` arm of `insert_candidate`). T0-suppressed candidates never reach insert_candidate, so they do NOT bump this counter — only `waddle_push_suppressed_total{{reason}}`. T1-suppressed candidates (the race-window guard re-evaluation in `drain_pending_candidates_into_outbox`) DO bump this counter at T0 AND `waddle_push_suppressed_total` at T1. Reconcile against published_total + suppressed_total over a window.\n",
             "# TYPE waddle_push_candidate_created_total counter\n",
             "waddle_push_candidate_created_total {push_candidate_created}\n",
@@ -704,6 +790,11 @@ pub fn render_metrics() -> String {
         sm_promotion_dead_lettered = sm_promotion_dead_lettered,
         sm_drain_timeout = sm_drain_timeout,
         sm_resume_window_clamped = sm_resume_window_clamped,
+        sm_send_window_pauses = sm_send_window_pauses,
+        sm_send_window_pause_timeouts = sm_send_window_pause_timeouts,
+        sm_detached_unacked_evicted = sm_detached_unacked_evicted,
+        pending_flush_batches = pending_flush_batches,
+        pending_flush_rows_pushed = pending_flush_rows_pushed,
         push_candidate_created = push_candidate_created,
         push_candidate_coalesced = push_candidate_coalesced,
         push_outbox_published = push_outbox_published,
@@ -865,6 +956,45 @@ mod tests {
         assert!(rendered.contains("waddle_sm_promotion_storage_failed_total 2"));
         assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 1"));
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
+    }
+
+    #[tokio::test]
+    async fn test_send_window_and_pending_flush_counters_render() {
+        // Issue #1219 / #1220 observability families.
+        let _guard = metrics_test_lock().lock().await;
+        reset_metrics_for_test();
+
+        increment_sm_send_window_pause();
+        increment_sm_send_window_pause();
+        increment_sm_send_window_pause_timeout();
+        increment_sm_detached_unacked_evicted();
+        add_pending_flush_batches(3);
+        add_pending_flush_rows_pushed(42);
+
+        let rendered = render_metrics();
+        for family in [
+            "waddle_sm_send_window_pauses_total",
+            "waddle_sm_send_window_pause_timeouts_total",
+            "waddle_sm_detached_unacked_evicted_total",
+            "waddle_pending_flush_batches_total",
+            "waddle_pending_flush_rows_pushed_total",
+        ] {
+            assert!(
+                rendered.contains(&format!("# TYPE {family} counter")),
+                "missing TYPE line for {family}"
+            );
+        }
+        assert!(rendered.contains("waddle_sm_send_window_pauses_total 2"));
+        assert!(rendered.contains("waddle_sm_send_window_pause_timeouts_total 1"));
+        assert!(rendered.contains("waddle_sm_detached_unacked_evicted_total 1"));
+        assert!(rendered.contains("waddle_pending_flush_batches_total 3"));
+        assert!(rendered.contains("waddle_pending_flush_rows_pushed_total 42"));
+
+        // reset clears them.
+        reset_metrics_for_test();
+        let cleared = render_metrics();
+        assert!(cleared.contains("waddle_sm_send_window_pauses_total 0"));
+        assert!(cleared.contains("waddle_pending_flush_rows_pushed_total 0"));
     }
 
     #[tokio::test]

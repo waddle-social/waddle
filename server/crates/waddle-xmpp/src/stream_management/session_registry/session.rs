@@ -188,6 +188,7 @@ impl DetachedSession {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
+            self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
@@ -213,6 +214,7 @@ impl DetachedSession {
         }
         if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
+            self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
@@ -221,6 +223,22 @@ impl DetachedSession {
             original_receipt_at,
         });
         self.unacked_stanzas.sort_by_key(|entry| entry.sequence);
+    }
+
+    /// Surface a detached-queue eviction that was previously silent (issue
+    /// #1219): bump the dedicated counter and warn. A resume with an older
+    /// `h` for this session must now fail rather than replay an incomplete
+    /// window. Detached recording volume is far lower than the live burst
+    /// path (it comes from presence relay / Q6 recording, not MAM
+    /// catch-up), so this is not coalesced.
+    fn note_detached_eviction(&self, evicted_sequence: u32) {
+        crate::prometheus::increment_sm_detached_unacked_evicted();
+        tracing::warn!(
+            stream_id = %self.stream_id,
+            evicted_sequence,
+            "detached SM session unacked queue full; evicted oldest stanza — \
+             older resume h values will be rejected"
+        );
     }
 
     fn mark_replay_gap_through(&mut self, sequence: u32) {

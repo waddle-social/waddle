@@ -135,6 +135,7 @@ async fn flush_with_no_rows_is_noop() {
             server_domain: "example.com",
             sm_session: None,
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -286,6 +287,7 @@ async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -353,6 +355,7 @@ async fn flush_non_sm_session_deletes_on_push() {
             server_domain: "example.com",
             sm_session: None, // ← no SM session: delete-on-push fallback
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -395,6 +398,7 @@ async fn flush_releases_rows_when_no_push_succeeds() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -408,7 +412,273 @@ async fn flush_releases_rows_when_no_push_succeeds() {
     assert!(rows[0].flushed_in_session.is_none());
 }
 
+#[tokio::test]
+async fn flush_drains_large_backlog_in_bounded_batches_with_concurrent_consumer() {
+    // Issue #1220 regression: a backlog far larger than the recipient's
+    // outbound mpsc capacity must flush completely without wedging. The flush
+    // now claims and pushes in `FLUSH_BATCH_SIZE` chunks and backpressures on
+    // the channel while a concurrent consumer (standing in for the recipient's
+    // connection task) drains it. Before the fix the unbounded claim + tight
+    // push loop ran inline ON that same connection task, so a backlog past the
+    // 256-slot channel self-deadlocked. Here the consumer runs on its own task,
+    // and the assertion that matters is that all rows arrive AND more than one
+    // batch was drained.
+    const ROWS: usize = 300;
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    for n in 0..ROWS {
+        storage
+            .insert(transient_row("alice@example.com", &format!("msg-{n}")))
+            .await
+            .unwrap();
+    }
+
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    // Channel smaller than the backlog so an undrained flush would block.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    registry.register(resource.clone(), tx);
+
+    // Consumer drains concurrently, mirroring the recipient's connection task.
+    let consumer = tokio::spawn(async move {
+        let mut received = 0usize;
+        while (rx.recv().await).is_some() {
+            received += 1;
+            if received == ROWS {
+                break;
+            }
+        }
+        received
+    });
+
+    let sm_session = SmSessionId::new("sm-stream-uuid-large");
+    let outcome = flush_for_resource(
+        &storage,
+        &registry,
+        &bare("alice@example.com"),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            owner: None,
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+
+    let received = consumer.await.unwrap();
+    assert_eq!(outcome.claimed, ROWS as u32);
+    assert_eq!(outcome.pushed, ROWS as u32);
+    assert_eq!(received, ROWS);
+    assert_eq!(
+        outcome.batches,
+        (ROWS as u32).div_ceil(FLUSH_BATCH_SIZE as u32),
+        "large backlog drained in bounded FIFO batches"
+    );
+    assert_eq!(
+        storage.count(&bare("alice@example.com")).await.unwrap(),
+        ROWS as u32,
+        "SM rows stay claimed until the recovering session acks"
+    );
+}
+
+#[tokio::test]
+async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
+    // Issue #1220 review: the SM flush push is owner-gated so a same-full-JID
+    // replacement racing in mid-flush cannot receive rows claimed under the
+    // original session's stream id. A flush carrying a NON-matching owner
+    // token must deliver nothing and release the row for the replacement's own
+    // flush; the SAME flush with the live owner token delivers.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    storage
+        .insert(transient_row("alice@example.com", "hi"))
+        .await
+        .unwrap();
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/web");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let live_owner = registry.register(resource.clone(), tx); // the entry's real owner token
+    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // a DIFFERENT token
+    let sm_session = SmSessionId::new("sm-owner");
+    let recipient = bare("alice@example.com");
+
+    let gated = flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            owner: Some(&stale_owner),
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+    assert_eq!(gated.claimed, 1);
+    assert_eq!(gated.pushed, 0, "mismatched-owner SM push is gated out");
+    assert!(
+        rx.try_recv().is_err(),
+        "nothing delivered when the owner token does not match"
+    );
+    let rows = storage.list(&recipient).await.unwrap();
+    assert!(
+        rows[0].flushed_in_session.is_none(),
+        "gated-out row is released for the replacement's own flush"
+    );
+
+    // Same flush, live owner token: delivers.
+    let delivered = flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&sm_session),
+            blocking_storage: None,
+            owner: Some(&live_owner),
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+    assert_eq!(delivered.pushed, 1, "matching owner token delivers");
+    assert!(rx.try_recv().is_ok());
+}
+
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
+
+#[tokio::test]
+async fn db_storage_claim_batch_first_caller_wins_across_sessions() {
+    // Issue #1220 review: the SQL claim's outer `flushed_in_session IS NULL`
+    // guard makes it first-caller-wins even under concurrent claims of the
+    // same recipient (re-checked at commit time, so a READ COMMITTED loser's
+    // UPDATE becomes a no-op). This sequential test pins the contract; the
+    // serialized in-memory libSQL harness cannot reproduce the concurrent
+    // interleave, so the concurrency rationale lives in the SQL comment.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let recipient = bare("alice@example.com");
+    for n in 0..3 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("m{n}")))
+            .await
+            .unwrap();
+    }
+    let s1 = SmSessionId::new("s1");
+    let s2 = SmSessionId::new("s2");
+    let b1 = storage
+        .claim_batch_for_session(&recipient, &s1, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(b1.len(), 3);
+    let b2 = storage
+        .claim_batch_for_session(&recipient, &s2, None, 8)
+        .await
+        .unwrap();
+    assert!(
+        b2.is_empty(),
+        "first caller wins: the second session claims nothing"
+    );
+}
+
+#[tokio::test]
+async fn db_storage_claim_batch_does_not_redeliver_unstamped_prior_pass_rows() {
+    // Issue #1220 review regression (SQL backend). A flush pass claims rows and
+    // pushes them, but the recipient's connection task stamps `outbound_sequence`
+    // asynchronously — so between passes the rows linger as
+    // flushed_in_session=session, outbound_sequence=NULL. A re-flush pass
+    // (cursor=None, same session, triggered by reset_offline_flush after a
+    // transient MAM error) must NOT re-return those already-claimed unstamped
+    // rows, or they double-deliver. The SQL backend upholds this via
+    // UPDATE ... RETURNING (returns only rows it transitioned), matching the
+    // in-memory backend's flushed_in_session.is_none() filter.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let recipient = bare("alice@example.com");
+    for n in 0..3 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("m{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("sm-reflush");
+
+    // Pass 1 claims all three; they remain flushed=session, outbound_sequence
+    // NULL (pushed but not yet stamped).
+    let pass1 = storage
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(pass1.len(), 3);
+
+    // Pass 2 (reset retry): cursor=None, same session, nothing newly unclaimed.
+    let pass2 = storage
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert!(
+        pass2.is_empty(),
+        "already-claimed unstamped rows must not be re-returned on a re-flush pass"
+    );
+
+    // A genuinely new row IS picked up by the retry (the retry still works).
+    storage
+        .insert(transient_row("alice@example.com", "m3"))
+        .await
+        .unwrap();
+    let pass3 = storage
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(
+        pass3.len(),
+        1,
+        "a freshly inserted unclaimed row is still claimed"
+    );
+}
+
+#[tokio::test]
+async fn db_storage_claim_batch_returns_fifo_prefix_and_continues_by_cursor() {
+    // Cross-check the SQL batch path against the storage-level in-memory tests:
+    // bounded FIFO prefix + cursor continuation.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let recipient = bare("alice@example.com");
+    for n in 0..5 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("m{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("sm-fifo");
+
+    let b1 = storage
+        .claim_batch_for_session(&recipient, &session, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(b1.len(), 2);
+    let cursor = b1.last().unwrap().id.clone();
+    let b2 = storage
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert_eq!(b2.len(), 2);
+    // Batches are disjoint and strictly increasing by row_id (FIFO).
+    assert!(b1.last().unwrap().id.as_str() < b2.first().unwrap().id.as_str());
+    let cursor = b2.last().unwrap().id.clone();
+    let b3 = storage
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert_eq!(b3.len(), 1, "final short batch drains the backlog");
+}
 
 #[tokio::test]
 async fn db_storage_round_trips_archived_and_transient_rows() {
@@ -711,6 +981,7 @@ async fn pending_row_deleted_only_after_sm_ack() {
             server_domain: "example.com",
             sm_session: Some(&session_id),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -784,6 +1055,7 @@ async fn pending_row_released_on_pre_ack_session_death() {
             server_domain: "example.com",
             sm_session: Some(&session_a),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -822,6 +1094,7 @@ async fn pending_row_released_on_pre_ack_session_death() {
             server_domain: "example.com",
             sm_session: Some(&session_b),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -998,6 +1271,7 @@ async fn flush_drops_pending_row_when_sender_blocked_after_intake() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1056,6 +1330,7 @@ async fn flush_aborts_on_blocking_storage_failure_fail_closed() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1355,6 +1630,17 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         ) -> Result<Vec<PendingRow>, PendingStorageError> {
             self.inner.claim_for_session(recipient, session).await
         }
+        async fn claim_batch_for_session(
+            &self,
+            recipient: &BareJid,
+            session: &waddle_xmpp::pending_delivery::SmSessionId,
+            after: Option<&PendingRowId>,
+            limit: usize,
+        ) -> Result<Vec<PendingRow>, PendingStorageError> {
+            self.inner
+                .claim_batch_for_session(recipient, session, after, limit)
+                .await
+        }
         async fn delete_claimed(
             &self,
             session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -1443,6 +1729,7 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -1516,6 +1803,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
             server_domain: "example.com",
             sm_session: Some(&sm_session_id),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &NullArchiveResolver,
         },
     )
@@ -2093,6 +2381,7 @@ async fn flush_archived_row_transient_resolver_error_releases_row_for_retry() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2150,6 +2439,7 @@ async fn flush_archived_row_genuine_mam_miss_is_poison_pill_deleted() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2206,6 +2496,7 @@ async fn flush_archived_row_unparseable_stanza_xml_is_poison_pill() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2263,6 +2554,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2282,6 +2574,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2376,6 +2669,7 @@ async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserve
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2424,6 +2718,7 @@ async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserve
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2484,6 +2779,7 @@ async fn flush_archived_row_serialization_error_is_poison_pill_not_transient() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2593,6 +2889,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )
@@ -2616,6 +2913,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
+            owner: None,
             archive_resolver: &resolver,
         },
     )

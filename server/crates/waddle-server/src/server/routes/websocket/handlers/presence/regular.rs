@@ -4,6 +4,7 @@ use super::subscription::{
 };
 use super::*;
 use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
+use tracing::Instrument as _;
 use waddle_xmpp::Stanza;
 
 /// Handle a broadcast (undirected) presence update from a live connection.
@@ -68,11 +69,16 @@ pub(super) async fn handle_regular_presence_update(
             resolve_caps_for_presence(state, sender_jid, &presence).await;
             // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
             // priority presence of a fresh session, drain pending_delivery
-            // for the recipient. `claim_offline_flush` ensures this fires at
-            // most once per session even across priority transitions.
-            if priority >= 0 {
-                maybe_flush_pending_delivery(state, sender_jid, owner).await;
-            }
+            // for the recipient. `claim_offline_flush` (a once-per-session
+            // CAS) is consumed HERE, on the connection task, so the
+            // claim-race semantics are unchanged; the actual row pushing is
+            // handed to a spawned task below so a backlog larger than the
+            // outbound mpsc can't self-deadlock this connection (issue #1220).
+            let flush_plan = if priority >= 0 {
+                plan_offline_flush(state, sender_jid, owner)
+            } else {
+                None
+            };
             let presence_state_written = state
                 .deps
                 .protocol
@@ -115,21 +121,26 @@ pub(super) async fn handle_regular_presence_update(
                 .connection_registry
                 .entry_if_owner(sender_jid, owner)
                 .is_some_and(|entry| entry.claim_pending_subscribes_flush());
-            if first_available {
-                for stanza in state
+            let subscribe_stanzas = if first_available {
+                state
                     .deps
                     .protocol
                     .connection_registry
                     .pending_subscription_stanzas(&sender_jid.to_bare())
-                {
-                    let _ = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .send_to(sender_jid, stanza)
-                        .await;
-                }
-            }
+            } else {
+                Vec::new()
+            };
+            // The pending-subscribe delivery is the same self-send deadlock
+            // class as the offline flush (it pushes into this connection's own
+            // outbound mpsc), so it moves off-task too. Both CASes above were
+            // consumed on the connection task; only the pushing is deferred.
+            spawn_session_recovery_delivery(
+                state,
+                sender_jid,
+                owner,
+                flush_plan,
+                subscribe_stanzas,
+            );
         } else {
             debug!(
                 jid = %sender_jid,
@@ -229,89 +240,164 @@ fn remote_presence_state_from_presence(
 ) {
 }
 
-/// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering
-/// session's first non-negative-priority presence, drain
-/// `pending_delivery` for the user's bare JID and push each row to
-/// this resource.
+/// Captured intent to run the XEP-0160 offline flush for a recovering
+/// session, produced on the connection task and consumed by the spawned
+/// [`spawn_session_recovery_delivery`] task (issue #1220).
+struct OfflineFlushPlan {
+    /// The recovering connection's XEP-0198 stream id (locked Q7b SM-ack
+    /// lifecycle). `None` → the flush uses the non-SM delete-on-push path.
+    sm_session: Option<waddle_xmpp::pending_delivery::SmSessionId>,
+}
+
+/// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: consume the recovering
+/// session's once-per-session offline-flush CAS on the CONNECTION task and
+/// capture the intent to flush.
 ///
-/// `ConnectionEntry::claim_offline_flush()` is a CAS that returns
-/// `true` exactly once per fresh session — repeated presence updates
-/// (priority transitions, status text changes) do not re-flush an
-/// already-drained queue. Exception (issue #1122 follow-up): when the
-/// flush defers rows on a transient MAM failure
-/// (`deferred_transient > 0`), the CAS is reset so the next presence
-/// update retries instead of stranding the rows until reconnect.
+/// `ConnectionEntry::claim_offline_flush()` is a CAS that returns `true`
+/// exactly once per fresh session — repeated presence updates (priority
+/// transitions, status text changes) do not re-flush an already-drained
+/// queue. Consuming it here (not in the spawned task) keeps the claim-race
+/// semantics identical to the pre-#1220 inline flush.
 ///
 /// Owner-gated (issue #1208): the entry lookup uses `entry_if_owner` so a
 /// superseded same-JID connection cannot consume the replacement's
 /// once-per-session `claim_offline_flush` CAS.
-async fn maybe_flush_pending_delivery(
+fn plan_offline_flush(
     state: &WebSocketState,
     sender_jid: &FullJid,
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    let entry = match state
+) -> Option<OfflineFlushPlan> {
+    let entry = state
         .deps
         .protocol
         .connection_registry
-        .entry_if_owner(sender_jid, owner)
-    {
-        Some(entry) => entry,
-        None => return,
-    };
+        .entry_if_owner(sender_jid, owner)?;
     if !entry.claim_offline_flush() {
+        return None;
+    }
+    Some(OfflineFlushPlan {
+        sm_session: entry.sm_stream_id(),
+    })
+}
+
+/// Push a recovering session's offline backlog and queued subscription
+/// requests to its resource, OFF the connection task (issue #1220).
+///
+/// Both the XEP-0160 flush and the RFC 6121 §3.1.3 pending-subscribe
+/// delivery `.await`-push into the recipient's own 256-slot outbound mpsc,
+/// whose only consumer is the connection task. Running them inline (the
+/// pre-#1220 behaviour) self-deadlocks that task the moment the backlog
+/// exceeds the channel capacity. Spawning with owned handles lets the
+/// connection task keep draining its mpsc while this task backpressures on
+/// it — and it composes with the #1219 send-window gate, which pauses that
+/// drain under load without ever wedging the producer.
+///
+/// The CASes gating both actions were already consumed on the connection
+/// task; only the pushing is deferred here. Flush precedes subscribe
+/// delivery, preserving the pre-#1220 ordering.
+fn spawn_session_recovery_delivery(
+    state: &WebSocketState,
+    resource: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    flush_plan: Option<OfflineFlushPlan>,
+    subscribe_stanzas: Vec<Stanza>,
+) {
+    if flush_plan.is_none() && subscribe_stanzas.is_empty() {
         return;
     }
-    let recipient_bare = sender_jid.to_bare();
-    let resolver = crate::pending_delivery::MamArchiveResolver {
-        mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
-    };
-    // Locked Q7b SM-ack lifecycle (issue #209): when the recovering
-    // connection has an active XEP-0198 session, key claims by its
-    // stream id so a subsequent `<a h>` from the same session deletes
-    // exactly its acked rows. Without SM, the flush function falls
-    // back to delete-on-push (no ack will ever fire).
-    let sm_session_id = entry.sm_stream_id();
-    let outcome = crate::pending_delivery::flush_for_resource(
-        &state.deps.protocol.pending_delivery_storage,
-        &state.deps.protocol.connection_registry,
-        &recipient_bare,
-        sender_jid,
-        crate::pending_delivery::FlushContext {
-            server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-            sm_session: sm_session_id.as_ref(),
-            // XEP-0191 §2 step 4 flush-time block re-evaluation
-            // (PR #360): pass live blocking storage so a recipient
-            // who blocked a sender AFTER intake doesn't see queued
-            // messages from that sender on reconnect.
-            blocking_storage: Some(&state.deps.protocol.blocking_storage),
-            archive_resolver: &resolver,
-        },
-    )
-    .await;
-    if outcome.deferred_transient > 0 {
-        // Issue #1122 follow-up (R2): the flush hit a transient MAM
-        // failure and released the failing row plus the rest of the
-        // batch. `claim_offline_flush` is a once-per-connection CAS,
-        // so without a reset those rows would wait for a full
-        // reconnect — potentially forever on a long-lived session.
-        // Re-open the CAS so this client's next presence update
-        // re-attempts the flush (rate-limited by presence traffic —
-        // no hot retry loop). Safe: this runs on the same connection
-        // task that won the claim above, so no concurrent claimant
-        // can race the reset.
-        entry.reset_offline_flush();
-    }
-    if outcome.claimed > 0 {
-        debug!(
-            jid = %sender_jid,
-            claimed = outcome.claimed,
-            pushed = outcome.pushed,
-            unresolved = outcome.unresolved,
-            deferred_transient = outcome.deferred_transient,
-            "XEP-0160 pending_delivery flush completed"
-        );
-    }
+    let storage = std::sync::Arc::clone(&state.deps.protocol.pending_delivery_storage);
+    let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
+    let blocking_storage = std::sync::Arc::clone(&state.deps.protocol.blocking_storage);
+    let mam_storage = std::sync::Arc::clone(&state.deps.protocol.mam_storage);
+    let server_domain = state.deps.auth_state.xmpp_domain.clone();
+    let recipient = resource.to_bare();
+    let resource = resource.clone();
+    let owner = std::sync::Arc::clone(owner);
+    // Carry the current tracing span into the spawned task (issue #1220): the
+    // flush is logically part of this presence-handling flow, but `tokio::spawn`
+    // resets the task-local span context, which would orphan the flush's own
+    // `#[instrument]` span (and its OTLP logs/trace) from the connection's
+    // trace. Instrumenting the spawned future with `Span::current()` re-parents
+    // it — the same idiom `server::http` uses for off-task request work.
+    let flush_span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            // If this session was superseded (same full JID re-registered) before
+            // the task ran, skip the flush: the replacement runs its OWN flush via
+            // its own once-per-session CAS, and pushing SM-claimed rows to a
+            // replacement whose stream id differs would leave them claimed by the
+            // now-dead session (self-healed later by the claim-expiry janitor, but
+            // redundant and a duplicate-delivery risk). The rows stay unclaimed
+            // for the replacement. This narrows the window the off-task spawn
+            // opened; a replacement racing in mid-flush is still janitor-healed.
+            let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
+            if let Some(plan) = flush_plan.filter(|_| still_owner) {
+                let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
+                let outcome = crate::pending_delivery::flush_for_resource(
+                    &storage,
+                    &registry,
+                    &recipient,
+                    &resource,
+                    crate::pending_delivery::FlushContext {
+                        server_domain: &server_domain,
+                        sm_session: plan.sm_session.as_ref(),
+                        // XEP-0191 §2 step 4 flush-time block re-evaluation
+                        // (PR #360): pass live blocking storage so a recipient who
+                        // blocked a sender AFTER intake doesn't see queued
+                        // messages from that sender on reconnect.
+                        blocking_storage: Some(&blocking_storage),
+                        // Owner-gate SM pushes so a same-full-JID replacement
+                        // racing in mid-flush can't receive this session's
+                        // SM-claimed rows (issue #1220 review).
+                        owner: Some(&owner),
+                        archive_resolver: &resolver,
+                    },
+                )
+                .await;
+                if outcome.batches > 0 {
+                    waddle_xmpp::prometheus::add_pending_flush_batches(u64::from(outcome.batches));
+                }
+                if outcome.pushed > 0 {
+                    waddle_xmpp::prometheus::add_pending_flush_rows_pushed(u64::from(
+                        outcome.pushed,
+                    ));
+                }
+                if outcome.deferred_transient > 0 {
+                    // Issue #1122 follow-up (R2): the flush hit a transient MAM
+                    // failure and released the failing row plus the rest of the
+                    // batch. `claim_offline_flush` is a once-per-connection CAS,
+                    // so without a reset those rows would wait for a full
+                    // reconnect. Re-open the CAS (re-acquiring the entry, which
+                    // may be gone if the session was superseded) so the client's
+                    // next presence update re-attempts the flush.
+                    if let Some(entry) = registry.entry_if_owner(&resource, &owner) {
+                        entry.reset_offline_flush();
+                    }
+                }
+                if outcome.claimed > 0 {
+                    info!(
+                        jid = %resource,
+                        claimed = outcome.claimed,
+                        batches = outcome.batches,
+                        pushed = outcome.pushed,
+                        unresolved = outcome.unresolved,
+                        deferred_transient = outcome.deferred_transient,
+                        "XEP-0160 pending_delivery flush completed"
+                    );
+                }
+            }
+            // RFC 6121 §3.1.3 queued inbound subscription requests, delivered on
+            // this resource's initial available presence. Owner-gated (Qodo
+            // review on PR #1234): `pending_subscription_stanzas` is
+            // non-draining, so if this session was superseded the
+            // replacement's own once-per-session flush delivers them —
+            // rerouting them to the replacement here would double-deliver.
+            for stanza in subscribe_stanzas {
+                let _ = registry.send_to_if_owner(&resource, &owner, stanza).await;
+            }
+        }
+        .instrument(flush_span),
+    );
 }
 
 async fn broadcast_presence_to_subscribers(

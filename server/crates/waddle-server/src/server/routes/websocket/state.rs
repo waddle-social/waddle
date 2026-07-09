@@ -653,6 +653,22 @@ pub(super) struct WsConnState {
     /// the main frame dispatcher in arrival order, so the connection
     /// loop processes this queue before polling the socket again.
     pub(super) deferred_inbound: std::collections::VecDeque<axum::extract::ws::Utf8Bytes>,
+    /// Loop-level XEP-0198 send-window pause deadline (issue #1219).
+    /// `Some(deadline)` while the connection loop is holding off draining
+    /// the outbound mpsc because `sm_state.needs_send_pause()` latched:
+    /// set on the rising edge (alongside a forced `<r/>`), cleared once the
+    /// window recovers, and fired as a select arm that closes the
+    /// connection into detach-for-resume if a dead peer never acks it down.
+    /// Uses `tokio::time::Instant` so the arm can `sleep_until` it.
+    pub(super) send_window_pause_deadline: Option<tokio::time::Instant>,
+    /// `sm_state.last_acked` at the moment the loop last emitted a
+    /// send-window `<r/>` (issue #1219 review). The wasm client acks only
+    /// when prompted, so while paused the loop re-requests each time the
+    /// client has acked since its last prompt but not yet recovered the
+    /// window — otherwise a partial ack (XEP-0198 §5 `h` = stanzas *handled*
+    /// ≤ received) would leave the stream stalled in the hysteresis band
+    /// until the pause deadline, disconnecting a merely-slow client.
+    pub(super) send_window_last_request_acked: u32,
     /// Per-connection sans-I/O state machine.
     ///
     /// Initialized in the `Unauthenticated` phase at WS upgrade by
@@ -704,6 +720,8 @@ impl WsConnState {
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             deferred_inbound: std::collections::VecDeque::new(),
+            send_window_pause_deadline: None,
+            send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }

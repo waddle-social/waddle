@@ -72,8 +72,50 @@ pub struct StreamManagementState {
     unacked_queue: UnackedQueue,
     /// Ack request threshold (request ack after this many unacked stanzas)
     ack_threshold: u32,
+    /// Send-window high watermark (issue #1219): once the outstanding
+    /// unacked count reaches this, [`Self::needs_send_pause`] latches
+    /// `true` so the wire-write paths stop feeding the queue and elicit
+    /// an ack instead. Derived from the queue cap (≈80%) so pacing
+    /// engages *before* the queue would evict and poison resume.
+    send_window_high: usize,
+    /// Send-window low watermark (issue #1219): the latch only clears
+    /// once the outstanding count falls back to this (≈50% of the cap).
+    /// The gap between high and low is deliberate hysteresis — resuming
+    /// at the high mark would flap one `<r/>` per stanza.
+    send_window_low: usize,
+    /// Send-window pause latch (issue #1219). Maintained with hysteresis
+    /// inside [`Self::record_outbound_with_receipt_at`] (grows the window)
+    /// and [`Self::acknowledge`] (shrinks it): set once outstanding ≥
+    /// `send_window_high`, cleared once outstanding ≤ `send_window_low`.
+    /// Only ever `true` for resumable streams — a non-SM / non-resumable
+    /// stream never acks, so gating it would wedge it forever.
+    send_window_paused: bool,
+    /// Throttle state for the unacked-queue eviction warning (issue #1219):
+    /// the metric bumps per event, but the log line is coalesced to at most
+    /// one per [`EVICTION_WARN_WINDOW`] so a degrade-path burst can't produce
+    /// a 325-lines-in-0.4s log storm like the 2026-07-07 incident.
+    evicted_since_warn: u64,
+    last_eviction_warn: Option<Instant>,
     /// When this SM state was created
     created_at: Instant,
+}
+
+/// Coalescing window for the unacked-queue eviction warning (issue #1219).
+const EVICTION_WARN_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Send-window high watermark for a queue of `max_queue_size`: pause at
+/// ≈80% of the cap so pacing engages before the queue evicts (issue
+/// #1219). Never zero.
+fn send_window_high_for(max_queue_size: usize) -> usize {
+    (max_queue_size * 4 / 5).max(1)
+}
+
+/// Send-window low watermark for a queue of `max_queue_size`: ≈50% of the
+/// cap, clamped strictly below the high watermark so the hysteresis band
+/// is non-empty even for tiny (test-sized) caps (issue #1219).
+fn send_window_low_for(max_queue_size: usize) -> usize {
+    let high = send_window_high_for(max_queue_size);
+    (max_queue_size / 2).min(high.saturating_sub(1))
 }
 
 /// Side-channel signal returned from [`StreamManagementState::record_outbound`]
@@ -114,6 +156,11 @@ impl StreamManagementState {
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
             ack_threshold: DEFAULT_ACK_REQUEST_THRESHOLD,
+            send_window_high: send_window_high_for(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
+            send_window_low: send_window_low_for(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
+            send_window_paused: false,
+            evicted_since_warn: 0,
+            last_eviction_warn: None,
             created_at: Instant::now(),
         }
     }
@@ -132,6 +179,11 @@ impl StreamManagementState {
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(max_queue_size),
             ack_threshold,
+            send_window_high: send_window_high_for(max_queue_size),
+            send_window_low: send_window_low_for(max_queue_size),
+            send_window_paused: false,
+            evicted_since_warn: 0,
+            last_eviction_warn: None,
             created_at: Instant::now(),
         }
     }
@@ -194,14 +246,12 @@ impl StreamManagementState {
             UnackedPushResult::Evicted(evicted) => {
                 self.mark_replay_gap_through(evicted.sequence);
                 prometheus::increment_sm_unacked_evicted();
-                warn!(
-                    stream_id = self.stream_id.as_deref().unwrap_or("<unset>"),
-                    evicted_sequence = evicted.sequence,
-                    queue_len = self.unacked_queue.len(),
-                    "SM unacked queue full; evicted oldest stanza — older resume h values will be rejected"
-                );
+                self.note_eviction_for_throttled_warn(evicted.sequence);
             }
         }
+        // The window just grew — engage the send-window pause latch if it
+        // crossed the high watermark (issue #1219).
+        self.refresh_send_window_pause();
         self.ack_request_cadence()
     }
 
@@ -236,6 +286,9 @@ impl StreamManagementState {
         {
             self.replay_gap_through = None;
         }
+        // The window just shrank — release the send-window pause latch if it
+        // fell back to the low watermark (issue #1219).
+        self.refresh_send_window_pause();
     }
 
     /// Whether a client `<a h='N'/>` claims more stanzas handled than
@@ -300,6 +353,44 @@ impl StreamManagementState {
         self.unacked_queue.len()
     }
 
+    /// XEP-0198 send-window pause signal (issue #1219): `true` while the
+    /// outstanding unacked count sits in the paced band (it crossed the high
+    /// watermark and has not yet fallen back to the low watermark). The
+    /// wire-write choke points stop feeding the SM queue while this holds and
+    /// elicit an `<a/>` instead, so the queue never overflows and poisons
+    /// resume. Always `false` for non-resumable streams — they never ack, so
+    /// gating them would wedge the connection.
+    pub fn needs_send_pause(&self) -> bool {
+        self.send_window_paused
+    }
+
+    /// Inverse of [`Self::needs_send_pause`]: the send window has recovered
+    /// (or was never paced). The pacing loops await this becoming true.
+    pub fn send_window_recovered(&self) -> bool {
+        !self.send_window_paused
+    }
+
+    /// Recompute the send-window pause latch with hysteresis (issue #1219).
+    /// Set once the outstanding unacked count reaches the high watermark;
+    /// cleared once it falls back to the low watermark. Non-resumable streams
+    /// are never paused. Called from every path that grows the window
+    /// (`record_outbound_with_receipt_at`) or shrinks it (`acknowledge`,
+    /// `restore_from_session`).
+    fn refresh_send_window_pause(&mut self) {
+        if !self.is_resumable() {
+            self.send_window_paused = false;
+            return;
+        }
+        let outstanding = self.unacked_count() as usize;
+        if self.send_window_paused {
+            if outstanding <= self.send_window_low {
+                self.send_window_paused = false;
+            }
+        } else if outstanding >= self.send_window_high {
+            self.send_window_paused = true;
+        }
+    }
+
     /// Check if the stream is resumable (enabled + resumable flag + has stream_id).
     pub fn is_resumable(&self) -> bool {
         self.enabled && self.resumable && self.stream_id.is_some()
@@ -308,6 +399,30 @@ impl StreamManagementState {
     /// Get the age of this SM state.
     pub fn age(&self) -> std::time::Duration {
         self.created_at.elapsed()
+    }
+
+    /// Record an eviction and emit at most one coalesced `warn!` per
+    /// [`EVICTION_WARN_WINDOW`] (issue #1219). The metric already bumped
+    /// per event at the call site; this is purely log-storm suppression —
+    /// 325 identical lines in 0.4 s (the 2026-07-07 incident) drown out
+    /// every other signal on the pod.
+    fn note_eviction_for_throttled_warn(&mut self, evicted_sequence: u32) {
+        self.evicted_since_warn = self.evicted_since_warn.saturating_add(1);
+        let due = self
+            .last_eviction_warn
+            .is_none_or(|at| at.elapsed() >= EVICTION_WARN_WINDOW);
+        if !due {
+            return;
+        }
+        warn!(
+            stream_id = self.stream_id.as_deref().unwrap_or("<unset>"),
+            evicted_in_window = self.evicted_since_warn,
+            latest_evicted_sequence = evicted_sequence,
+            queue_len = self.unacked_queue.len(),
+            "SM unacked queue full; evicted oldest stanza — older resume h values will be rejected"
+        );
+        self.last_eviction_warn = Some(Instant::now());
+        self.evicted_since_warn = 0;
     }
 
     fn mark_replay_gap_through(&mut self, sequence: u32) {
@@ -376,6 +491,10 @@ impl StreamManagementState {
 
         // Restore unacked queue
         self.unacked_queue.restore(&session.unacked_stanzas);
+        // A resumed stream inherits the pre-detach backlog; if it is already
+        // above the high watermark the connection must pace new sends until
+        // the client acks the replay (issue #1219).
+        self.refresh_send_window_pause();
     }
 }
 
@@ -720,5 +839,62 @@ mod tests {
                 .record_outbound("<m id='post-3'/>".to_string())
                 .request_ack
         );
+    }
+
+    /// Issue #1219: the send-window pause latch engages at the high
+    /// watermark (≈80% of the cap) and only releases once the client has
+    /// acked back down to the low watermark (≈50%) — hysteresis so a paced
+    /// stream does not flap one `<r/>` per stanza.
+    #[test]
+    fn send_window_pauses_at_high_and_recovers_at_low() {
+        // cap=10 → high=8, low=5. ack_threshold set high so the cadence
+        // signal never confounds the send-window assertions.
+        let mut state = StreamManagementState::with_config(10, 100);
+        state.enable("sw".to_string(), true, Some(300));
+
+        for n in 0..7 {
+            let _ = state.record_outbound(format!("<m id='{n}'/>"));
+            assert!(
+                !state.needs_send_pause(),
+                "below the high watermark the window is open (n={n})"
+            );
+        }
+        // 8th outbound: outstanding == 8 == high watermark → pause.
+        let _ = state.record_outbound("<m id='7'/>".to_string());
+        assert!(state.needs_send_pause(), "high watermark engages the pause");
+        assert!(!state.send_window_recovered());
+
+        // A partial ack that leaves outstanding in the hysteresis band
+        // (6, between low=5 and high=8) must NOT release the latch.
+        state.acknowledge(2); // outstanding = 8 - 2 = 6
+        assert!(
+            state.needs_send_pause(),
+            "still paused inside the hysteresis band"
+        );
+
+        // Acking down to the low watermark (outstanding = 5) recovers.
+        state.acknowledge(3); // outstanding = 8 - 3 = 5
+        assert!(
+            state.send_window_recovered(),
+            "low watermark releases the pause"
+        );
+        assert!(!state.needs_send_pause());
+    }
+
+    /// Non-resumable (or non-SM) streams never ack on an `<r/>` cadence the
+    /// same way, and have no resume to protect, so they MUST NOT be gated —
+    /// gating one would wedge it forever (issue #1219).
+    #[test]
+    fn send_window_never_pauses_for_non_resumable_stream() {
+        let mut state = StreamManagementState::with_config(10, 100);
+        // enable WITHOUT resume.
+        state.enable("no-resume".to_string(), false, None);
+        for n in 0..30 {
+            let _ = state.record_outbound(format!("<m id='{n}'/>"));
+            assert!(
+                !state.needs_send_pause(),
+                "a non-resumable stream is never send-window paced (n={n})"
+            );
+        }
     }
 }

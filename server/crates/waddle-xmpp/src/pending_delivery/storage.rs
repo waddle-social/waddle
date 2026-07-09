@@ -169,6 +169,42 @@ pub trait PendingDeliveryStorage: Send + Sync {
         session: &SmSessionId,
     ) -> Result<Vec<PendingRow>, PendingStorageError>;
 
+    /// Atomically claim only the next FIFO **prefix** of currently-unclaimed
+    /// rows for `recipient` — at most `limit` rows whose `row_id` sorts
+    /// strictly after `after` — tagging each with `session`. Returns the
+    /// claimed rows in FIFO (`row_id ASC`) order; row ids are UUID v7, so
+    /// that order reproduces order of receipt.
+    ///
+    /// This is the bounded sibling of [`Self::claim_for_session`], used by the
+    /// batched offline flush (issue #1220) so a large backlog drains in
+    /// `FLUSH_BATCH_SIZE` chunks that stay well under the recipient's outbound
+    /// mpsc capacity, instead of the whole queue landing wholesale in the SM
+    /// unacked queue.
+    ///
+    /// `after` is a FIFO cursor advancing batch-to-batch progress: pass `None`
+    /// for the first batch, then the last claimed row's id for each subsequent
+    /// batch so the next batch starts strictly after it.
+    ///
+    /// CORRECTNESS INVARIANT: an implementation MUST return ONLY the rows it
+    /// just transitioned from unclaimed — never a row already claimed by an
+    /// earlier call. This matters because the SM flush stamps
+    /// `outbound_sequence` asynchronously, on the recipient's connection task
+    /// (see [`Self::record_pushed_at`]), so a prior flush pass's rows can
+    /// linger as `flushed_in_session = session, outbound_sequence = NULL`; a
+    /// query keyed only on `(session, outbound_sequence IS NULL)` would
+    /// re-return and double-deliver them on a `reset_offline_flush` retry.
+    /// The in-memory backend upholds this by only claiming rows whose
+    /// `flushed_in_session.is_none()`; the SQL backend uses
+    /// `UPDATE … RETURNING`, which yields exactly the transitioned rows.
+    /// `limit == 0` claims nothing.
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError>;
+
     /// Delete every row previously claimed by `session`. Used by paths
     /// that succeed or fail as a unit — e.g. SM-ack of the entire
     /// flush batch (locked Q7b).
@@ -562,6 +598,49 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 row.outbound_sequence = None;
                 claimed.push(row.clone());
             }
+        }
+        Ok(claimed)
+    }
+
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let queue = match guard.get_mut(recipient) {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let after = after.map(PendingRowId::as_str);
+        // Take the FIFO prefix of unclaimed rows strictly after the cursor,
+        // ordered by `row_id` to match the SQL backend's canonical
+        // `ORDER BY row_id ASC` (UUID v7 → time-sortable). Ordering by id
+        // rather than by `VecDeque` insertion position keeps in-memory and
+        // SQL agreeing even for rows minted within the same millisecond.
+        let mut candidates: Vec<usize> = queue
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.flushed_in_session.is_none())
+            .filter(|(_, row)| after.is_none_or(|cursor| row.id.as_str() > cursor))
+            .map(|(idx, _)| idx)
+            .collect();
+        candidates.sort_by(|&a, &b| queue[a].id.as_str().cmp(queue[b].id.as_str()));
+        candidates.truncate(limit);
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for idx in candidates {
+            let row = &mut queue[idx];
+            row.flushed_in_session = Some(session.clone());
+            row.outbound_sequence = None;
+            claimed.push(row.clone());
         }
         Ok(claimed)
     }

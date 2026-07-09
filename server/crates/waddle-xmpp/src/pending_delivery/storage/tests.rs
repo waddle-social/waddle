@@ -531,3 +531,116 @@ async fn scrub_for_tombstone_removes_matching_archived_pointer_row() {
         1
     );
 }
+
+// --- claim_batch_for_session (issue #1220) -------------------------------
+
+fn archive_id(row: &PendingRow) -> &str {
+    match &row.payload {
+        PendingPayload::Archived(r) => r.id.as_str(),
+        PendingPayload::Transient(_) => panic!("expected Archived row"),
+    }
+}
+
+#[tokio::test]
+async fn claim_batch_returns_fifo_prefix_up_to_limit() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..5 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .unwrap();
+    }
+    let session = SmSessionId::new("s1");
+
+    // First batch: the FIFO prefix, at most `limit` rows.
+    let batch1 = store
+        .claim_batch_for_session(&recipient, &session, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(batch1.len(), 2);
+    assert_eq!(archive_id(&batch1[0]), "id-0");
+    assert_eq!(archive_id(&batch1[1]), "id-1");
+
+    // Second batch continues strictly after the last claimed row.
+    let cursor = batch1.last().unwrap().id.clone();
+    let batch2 = store
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert_eq!(batch2.len(), 2);
+    assert_eq!(archive_id(&batch2[0]), "id-2");
+    assert_eq!(archive_id(&batch2[1]), "id-3");
+
+    // Final short batch signals the queue is drained.
+    let cursor = batch2.last().unwrap().id.clone();
+    let batch3 = store
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert_eq!(batch3.len(), 1);
+    assert_eq!(archive_id(&batch3[0]), "id-4");
+
+    // Nothing left after the cursor.
+    let cursor = batch3.last().unwrap().id.clone();
+    let batch4 = store
+        .claim_batch_for_session(&recipient, &session, Some(&cursor), 2)
+        .await
+        .unwrap();
+    assert!(batch4.is_empty());
+}
+
+#[tokio::test]
+async fn claim_batch_zero_limit_claims_nothing() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    store
+        .insert(archived_row("alice@example.com", "id-0"))
+        .await
+        .unwrap();
+    let session = SmSessionId::new("s1");
+    let batch = store
+        .claim_batch_for_session(&recipient, &session, None, 0)
+        .await
+        .unwrap();
+    assert!(batch.is_empty());
+    // The row is still unclaimed and available to a real claim.
+    let full = store
+        .claim_batch_for_session(&recipient, &session, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(full.len(), 1);
+}
+
+#[tokio::test]
+async fn claim_batch_second_session_sees_only_unclaimed_tail() {
+    // A concurrent second session's batch claim must not re-claim rows the
+    // first session already tagged — cross-session isolation, mirroring
+    // `claim_marks_rows_for_session_first_caller_wins` for the batch path.
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for n in 0..5 {
+        store
+            .insert(archived_row("alice@example.com", &format!("id-{n}")))
+            .await
+            .unwrap();
+    }
+    let session1 = SmSessionId::new("s1");
+    let session2 = SmSessionId::new("s2");
+
+    let batch1 = store
+        .claim_batch_for_session(&recipient, &session1, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(batch1.len(), 2);
+
+    // Second session starts from the top (its own cursor is None) but the
+    // rows session1 claimed are excluded, so it only sees the tail.
+    let batch2 = store
+        .claim_batch_for_session(&recipient, &session2, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(batch2.len(), 3);
+    assert_eq!(archive_id(&batch2[0]), "id-2");
+    assert_eq!(archive_id(&batch2[2]), "id-4");
+}
