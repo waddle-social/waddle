@@ -80,7 +80,7 @@ pub trait AppState: Send + Sync + 'static {
     /// The session lookup derives the JID from the token/session.
     fn validate_session_token(
         &self,
-        token: &str,
+        token: &crate::auth::oauthbearer::OAuthBearerToken,
     ) -> impl std::future::Future<Output = Result<Session, XmppError>> + Send;
 
     /// Check if a user has permission to perform an action.
@@ -93,12 +93,6 @@ pub trait AppState: Send + Sync + 'static {
 
     /// Get the domain for this XMPP server.
     fn domain(&self) -> &str;
-
-    /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).
-    ///
-    /// This URL is sent to clients that request OAuth discovery.
-    /// Should point to the RFC 8414 OAuth authorization server metadata endpoint.
-    fn oauth_discovery_url(&self) -> String;
 
     /// List all relations a subject has on an object.
     ///

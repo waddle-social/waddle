@@ -1,8 +1,32 @@
 use super::*;
 
+#[test]
+fn oauthbearer_is_advertised_only_for_secure_public_transport() {
+    let secure = Element::from_str(&build_stream_features_xml(false, false, true))
+        .expect("secure features xml");
+    let insecure = Element::from_str(&build_stream_features_xml(false, false, false))
+        .expect("insecure features xml");
+
+    let advertises_oauthbearer = |features: &Element| {
+        features
+            .get_child("mechanisms", waddle_xmpp::ns::SASL)
+            .into_iter()
+            .flat_map(Element::children)
+            .any(|mechanism| mechanism.name() == "mechanism" && mechanism.text() == "OAUTHBEARER")
+    };
+    assert!(advertises_oauthbearer(&secure));
+    assert!(!advertises_oauthbearer(&insecure));
+
+    assert!(oauthbearer_available_for_base_url("https://xmpp.example"));
+    assert!(oauthbearer_available_for_base_url("http://localhost:3000"));
+    assert!(oauthbearer_available_for_base_url("http://127.0.0.1:3000"));
+    assert!(!oauthbearer_available_for_base_url("http://xmpp.example"));
+    assert!(!oauthbearer_available_for_base_url("not a URL"));
+}
+
 #[tokio::test]
 async fn xep0237_features_advertise_roster_versioning() {
-    let features = build_stream_features_xml(true, false);
+    let features = build_stream_features_xml(true, false, true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children()
@@ -13,7 +37,7 @@ async fn xep0237_features_advertise_roster_versioning() {
 
 #[tokio::test]
 async fn rfc6121_features_advertise_subscription_preapproval() {
-    let features = build_stream_features_xml(true, false);
+    let features = build_stream_features_xml(true, false, true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children().any(|child| {
@@ -30,7 +54,7 @@ async fn rfc6121_features_advertise_subscription_preapproval() {
 /// "always off".
 #[tokio::test]
 async fn isr_feature_present_when_available() {
-    let features = build_stream_features_xml(true, true);
+    let features = build_stream_features_xml(true, true, true);
     let el = Element::from_str(&features).expect("features xml");
     let isr = el
         .children()
@@ -46,7 +70,7 @@ async fn isr_feature_present_when_available() {
 
 #[tokio::test]
 async fn isr_feature_absent_when_unavailable() {
-    let features = build_stream_features_xml(true, false);
+    let features = build_stream_features_xml(true, false, true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         !el.children()
@@ -60,7 +84,7 @@ async fn isr_feature_absent_when_unauthenticated_even_if_available() {
     // The pre-auth mechanisms list is a separate concern (SASL1 login
     // mechanisms); ISR's own feature only ever appears alongside <bind/>/
     // <sm/> in the post-auth feature set, matching XEP-0397's own example.
-    let features = build_stream_features_xml(false, true);
+    let features = build_stream_features_xml(false, true, true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(!el
         .children()
@@ -74,7 +98,7 @@ async fn features_do_not_advertise_legacy_isr_namespace() {
     // reappear, in either the unavailable or available (new-ISR-enabled)
     // gate state.
     for isr_available in [false, true] {
-        let features = build_stream_features_xml(true, isr_available);
+        let features = build_stream_features_xml(true, isr_available, true);
         let el = Element::from_str(&features).expect("features xml");
         assert!(
             !el.children().any(|child| child.ns() == "urn:xmpp:isr:0"),

@@ -5,10 +5,22 @@ use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
+use crate::auth::oauthbearer::OAuthBearerToken;
 use crate::muc::PinChangeRequest;
 use crate::Stanza;
 
 use super::{CallbackId, CarbonKind, GroupchatThreadProjection, MessageRef, TimerId};
+
+/// Which local archive pass produced a direct-message persistence effect.
+///
+/// Sender and recipient archives can use the same bare JID for a
+/// cross-resource self-message, so the side must remain explicit rather than
+/// being inferred from JID equality at the storage boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveSide {
+    Sender,
+    Recipient,
+}
 
 /// Every effect the state machine can cause.
 ///
@@ -133,9 +145,11 @@ pub enum OutboundEvent {
     /// the locality-aware [`super::handlers::archive::ArchiveHandler`]
     /// emits this field as the local user's bare JID, so the interpreter
     /// is dumb glue that does not need to reason about sender/recipient
-    /// pass semantics. `from` and `to` carry the canonical message tuple
-    /// for telemetry and remain on the typed `message` payload.
+    /// pass semantics. `side` preserves sender/recipient semantics even for
+    /// cross-resource self-messages whose archive, sender, and recipient bare
+    /// JIDs are equal. `from` and `to` carry the canonical message tuple.
     ArchiveDirect {
+        side: ArchiveSide,
         archive_jid: BareJid,
         from: BareJid,
         to: BareJid,
@@ -390,9 +404,10 @@ pub enum OutboundEvent {
     LoadScramCredentials { id: CallbackId, username: String },
     /// Validate an OAUTHBEARER token via `AppState::validate_session_token`.
     ///
-    /// `token` is an opaque bearer credential (per RFC 6750 §2.1) and has
-    /// no internal structure to model; it stays a `String` by design.
-    ValidateOAuthBearer { id: CallbackId, token: String },
+    ValidateOAuthBearer {
+        id: CallbackId,
+        token: OAuthBearerToken,
+    },
     /// Look up an archived message by [`MessageRef`] for rich-target
     /// validation (XEP-0308 correction, XEP-0424 retraction,
     /// XEP-0425 moderation, XEP-0461 reply). Result arrives as

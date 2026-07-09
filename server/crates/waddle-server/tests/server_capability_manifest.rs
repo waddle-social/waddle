@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 const MATURITY: &[&str] = &["production", "beta", "experimental", "unsupported"];
 const TOPOLOGIES: &[&str] = &["local", "federated"];
 const MANIFEST_SOURCE: &str = include_str!("../../../capabilities.toml");
+const DISCO_TARGET_CONTRACT_SOURCE: &str = include_str!("../../../disco-target-contract.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,9 +23,9 @@ struct Capability {
     #[serde(default = "default_availability")]
     availability: String,
     protocols: Vec<String>,
-    advertised_features: Vec<String>,
+    advertised_features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    custom_namespaces: Vec<String>,
+    custom_namespaces: BTreeMap<String, Vec<String>>,
     server_evidence: Vec<String>,
     protocol_evidence: BTreeMap<String, Vec<String>>,
     topologies: BTreeMap<String, String>,
@@ -40,6 +41,18 @@ fn server_root() -> PathBuf {
 
 fn load_manifest() -> Manifest {
     toml::from_str(MANIFEST_SOURCE).expect("parse embedded server capability manifest")
+}
+
+#[test]
+fn checked_in_disco_target_contract_matches_the_rust_source_exactly() {
+    let generated = waddle_server::server::disco_targets::target_contract_json()
+        .expect("serialize disco target contract");
+    assert_eq!(
+        DISCO_TARGET_CONTRACT_SOURCE,
+        format!("{generated}\n"),
+        "regenerate server/disco-target-contract.json with \
+         `waddle-server --disco-target-contract`"
+    );
 }
 
 #[test]
@@ -68,6 +81,42 @@ fn capability_manifest_has_complete_unique_release_claims() {
         assert!(MATURITY.contains(&capability.server_maturity.as_str()));
         assert!(["always", "configured"].contains(&capability.availability.as_str()));
         assert!(!capability.protocols.is_empty());
+        assert!(
+            !capability.advertised_features.is_empty(),
+            "{} must assign every discovery claim to its owning target",
+            capability.id
+        );
+        let mut target_claims: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (target_slug, features) in capability
+            .advertised_features
+            .iter()
+            .chain(&capability.custom_namespaces)
+        {
+            let target = waddle_server::server::disco_targets::DiscoTarget::from_slug(target_slug)
+                .unwrap_or_else(|| panic!("{} has unknown target {target_slug}", capability.id));
+            if target.availability()
+                == waddle_server::server::disco_targets::DiscoTargetAvailability::Configured
+            {
+                assert_eq!(
+                    capability.availability, "configured",
+                    "{} claims configured target {target_slug} as always available",
+                    capability.id
+                );
+            }
+            let claims = target_claims.entry(target_slug.as_str()).or_default();
+            for feature in features {
+                assert!(
+                    !feature.is_empty(),
+                    "{} has an empty feature",
+                    capability.id
+                );
+                assert!(
+                    claims.insert(feature.as_str()),
+                    "{} repeats {feature} on {target_slug}",
+                    capability.id
+                );
+            }
+        }
         assert!(!capability.server_evidence.is_empty());
         assert_eq!(
             capability.protocols.iter().collect::<BTreeSet<_>>(),
@@ -91,6 +140,17 @@ fn capability_manifest_has_complete_unique_release_claims() {
             );
         }
     }
+}
+
+fn assert_target_owns_feature(target_slug: &str, feature: &str) -> Result<(), String> {
+    let target = waddle_server::server::disco_targets::DiscoTarget::from_slug(target_slug)
+        .ok_or_else(|| format!("unknown disco target {target_slug}"))?;
+    let target_features = waddle_server::server::disco_targets::manifest_target_features(target);
+    target_features
+        .iter()
+        .any(|candidate| candidate.0 == feature)
+        .then_some(())
+        .ok_or_else(|| format!("{target_slug} does not advertise {feature}"))
 }
 
 #[test]
@@ -165,38 +225,38 @@ fn capability_manifest_references_vendored_xeps_and_existing_evidence() {
 
 #[test]
 fn advertised_feature_claims_exist_in_runtime_feature_vectors() {
-    use waddle_xmpp::disco::info::{
-        call_features, community_service_features, muc_room_features, muc_service_features,
-        pubsub_service_features, push_service_features, server_features, spaces_service_features,
-        upload_service_features,
-    };
-
-    let mut advertised = BTreeSet::new();
-    for feature in server_features()
-        .into_iter()
-        .chain(upload_service_features())
-        .chain(pubsub_service_features())
-        .chain(push_service_features())
-        .chain(spaces_service_features())
-        .chain(community_service_features())
-        .chain(muc_service_features())
-        .chain(muc_room_features(true, true, true, true, true))
-        .chain(call_features())
-    {
-        advertised.insert(feature.0);
-    }
-
     for capability in load_manifest().capability {
-        for feature in capability
+        for (target, features) in capability
             .advertised_features
             .into_iter()
             .chain(capability.custom_namespaces)
         {
             assert!(
-                advertised.contains(&feature),
-                "{} claims feature absent from assembled runtime feature vectors: {feature}",
+                !features.is_empty(),
+                "{} has an empty {target} claim",
                 capability.id
             );
+            for feature in features {
+                assert_target_owns_feature(&target, &feature).unwrap_or_else(|error| {
+                    panic!(
+                        "{} has an invalid target-local claim: {error}",
+                        capability.id
+                    )
+                });
+            }
         }
     }
+}
+
+#[test]
+fn target_validation_rejects_a_feature_found_only_in_the_global_union() {
+    let muc = "http://jabber.org/protocol/muc";
+    assert!(waddle_server::server::disco_targets::DiscoTarget::ALL
+        .into_iter()
+        .flat_map(waddle_server::server::disco_targets::manifest_target_features)
+        .any(|feature| feature.0 == muc));
+    assert_eq!(
+        assert_target_owns_feature("server", muc),
+        Err("server does not advertise http://jabber.org/protocol/muc".to_string())
+    );
 }

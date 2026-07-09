@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod build_identity;
 pub mod channel_space_links;
 pub mod clustering;
 pub mod config;

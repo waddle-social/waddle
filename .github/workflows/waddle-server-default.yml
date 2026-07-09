@@ -15,11 +15,17 @@ on:
     - .rules.cue/**
     - apps/apple/**/Tests/**
     - apps/apple/Waddle/RustClient/Generated/**
+    - chat/src/auth/session.ts
+    - chat/src/auth/session.ts/**
+    - chat/src/lib/telemetry.ts
+    - chat/src/lib/telemetry.ts/**
+    - chat/src/lib/xmpp/**
     - chat/tests/**
     - cue.mod/**
     - cuenv.lock
     - cuenv.lock/**
     - docs/evidence/**
+    - docs/observability/**
     - docs/planning/switchable-alternative.md
     - docs/planning/switchable-alternative.md/**
     - docs/product/critical-journeys.json
@@ -28,17 +34,25 @@ on:
     - docs/product/gate-evidence.json/**
     - docs/product/performance-profile.json
     - docs/product/performance-profile.json/**
+    - docs/runbooks/**
     - env.cue
     - env.cue/**
     - flake.lock
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - infrastructure/waddle.cloud/gitops/grafana-alloy/helmrelease.yaml
+    - infrastructure/waddle.cloud/gitops/grafana-alloy/helmrelease.yaml/**
     - infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml
     - infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
+    - scripts/collect-switchable-baseline.ts
+    - scripts/collect-switchable-baseline.ts/**
+    - scripts/finalize-switchable-baseline.ts
+    - scripts/finalize-switchable-baseline.ts/**
+    - scripts/switchable-baseline/**
     - server/**/env.cue
     - server/Cargo.lock
     - server/Cargo.lock/**
@@ -47,13 +61,69 @@ on:
     - server/capabilities.toml
     - server/capabilities.toml/**
     - server/charts/waddle-server/**
+    - server/charts/waddle-server/templates/deployment.yaml
+    - server/charts/waddle-server/templates/deployment.yaml/**
+    - server/charts/waddle-server/templates/validations.yaml
+    - server/charts/waddle-server/templates/validations.yaml/**
+    - server/charts/waddle-server/values.yaml
+    - server/charts/waddle-server/values.yaml/**
     - server/crates/**
     - server/crates/**/tests/**
+    - server/crates/waddle-server/src/build_identity.rs
+    - server/crates/waddle-server/src/build_identity.rs/**
+    - server/crates/waddle-server/src/main.rs
+    - server/crates/waddle-server/src/main.rs/**
+    - server/crates/waddle-server/src/server/disco_targets.rs
+    - server/crates/waddle-server/src/server/disco_targets.rs/**
+    - server/crates/waddle-server/src/server/health.rs
+    - server/crates/waddle-server/src/server/health.rs/**
+    - server/crates/waddle-server/src/server/room_registry_gauge.rs
+    - server/crates/waddle-server/src/server/room_registry_gauge.rs/**
+    - server/crates/waddle-server/src/server/routes/interpret/direct_archive.rs
+    - server/crates/waddle-server/src/server/routes/interpret/direct_archive.rs/**
+    - server/crates/waddle-server/src/server/routes/interpret/groupchat_archive.rs
+    - server/crates/waddle-server/src/server/routes/interpret/groupchat_archive.rs/**
+    - server/crates/waddle-server/src/server/routes/websocket/frame.rs
+    - server/crates/waddle-server/src/server/routes/websocket/frame.rs/**
+    - server/crates/waddle-server/src/server/routes/websocket/parse_errors.rs
+    - server/crates/waddle-server/src/server/routes/websocket/parse_errors.rs/**
+    - server/crates/waddle-server/src/server/routes/websocket/sasl.rs
+    - server/crates/waddle-server/src/server/routes/websocket/sasl.rs/**
     - server/crates/waddle-server/src/server/routes/websocket/tests/**
+    - server/crates/waddle-server/src/server/routes/websocket/transport_xml.rs
+    - server/crates/waddle-server/src/server/routes/websocket/transport_xml.rs/**
+    - server/crates/waddle-server/src/server/trace.rs
+    - server/crates/waddle-server/src/server/trace.rs/**
+    - server/crates/waddle-server/src/server/xmpp_auth_state.rs
+    - server/crates/waddle-server/src/server/xmpp_auth_state.rs/**
+    - server/crates/waddle-server/src/telemetry.rs
+    - server/crates/waddle-server/src/telemetry.rs/**
     - server/crates/waddle-server/tests/server_capability_manifest.rs
     - server/crates/waddle-server/tests/server_capability_manifest.rs/**
+    - server/crates/waddle-xmpp-client/src/bin/waddle_capability_collector.rs
+    - server/crates/waddle-xmpp-client/src/bin/waddle_capability_collector.rs/**
+    - server/crates/waddle-xmpp-client/src/capability_evidence.rs
+    - server/crates/waddle-xmpp-client/src/capability_evidence.rs/**
+    - server/crates/waddle-xmpp-client/src/capability_evidence/**
+    - server/crates/waddle-xmpp-client/src/discovery/**
+    - server/crates/waddle-xmpp/src/auth/mod.rs
+    - server/crates/waddle-xmpp/src/auth/mod.rs/**
+    - server/crates/waddle-xmpp/src/auth/oauthbearer.rs
+    - server/crates/waddle-xmpp/src/auth/oauthbearer.rs/**
+    - server/crates/waddle-xmpp/src/auth/scram.rs
+    - server/crates/waddle-xmpp/src/auth/scram.rs/**
+    - server/crates/waddle-xmpp/src/auth/scram/**
+    - server/crates/waddle-xmpp/src/prometheus.rs
+    - server/crates/waddle-xmpp/src/prometheus.rs/**
+    - server/crates/waddle-xmpp/src/prometheus/**
+    - server/crates/waddle-xmpp/src/protocol/frame.rs
+    - server/crates/waddle-xmpp/src/protocol/frame.rs/**
+    - server/crates/waddle-xmpp/src/protocol/phase.rs
+    - server/crates/waddle-xmpp/src/protocol/phase.rs/**
     - server/deployment.cue
     - server/deployment.cue/**
+    - server/disco-target-contract.json
+    - server/disco-target-contract.json/**
     - server/env.cue
     - server/env.cue/**
     - server/extensions/**
@@ -61,6 +131,18 @@ on:
     - server/rust-toolchain.toml/**
     - server/schema/**
     - server/scripts/**
+    - server/scripts/publish-container-image.sh
+    - server/scripts/publish-container-image.sh/**
+    - server/scripts/publish-container-tags.sh
+    - server/scripts/publish-container-tags.sh/**
+    - server/scripts/publish-extension-modules.sh
+    - server/scripts/publish-extension-modules.sh/**
+    - server/scripts/publish-gitops-release.sh
+    - server/scripts/publish-gitops-release.sh/**
+    - server/scripts/publish-helm-chart.sh
+    - server/scripts/publish-helm-chart.sh/**
+    - server/scripts/publish-waddle-release.sh
+    - server/scripts/publish-waddle-release.sh/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml
@@ -417,9 +499,13 @@ jobs:
     name: publishContainerImage
     runs-on: namespace-profile-linux-x86
     needs:
+    - checkRootSyncDrift
+    - checkCiDrift
+    - checkSwitchableAlternativeProgram
     - fmt
     - clippy
     - test
+    - checkXmppClientFfiBindings
     - renderDeployment
     - buildExtensionModules
     steps:

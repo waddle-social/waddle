@@ -2,16 +2,54 @@ use super::*;
 use super::{
     frame_backstop::{run_with_backstop, StanzaBackstop},
     isr_resume::handle_isr_resume_authenticate,
-    parse_errors::{is_sasl_parse_failure, parse_error_responses},
+    parse_errors::{is_sasl_auth_parse_failure, is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
-    sasl::{handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response},
+    sasl::{
+        handle_sasl_oauthbearer_error_response, handle_sasl_oauthbearer_initial,
+        handle_sasl_oauthbearer_response, handle_sasl_scram_client_first,
+        handle_sasl_scram_response,
+    },
     state::WsConnState,
     stream_management::{handle_sm_stanza, SmCtx},
+    telemetry_privacy::{connection_phase_category, parse_error_category, sasl_mechanism_category},
     transport_xml::{
         build_stream_features_for_phase, sasl_failure_xml, websocket_stream_close_xml,
-        websocket_stream_open_xml,
+        websocket_stream_open_xml, SaslFailureCondition,
     },
 };
+use waddle_xmpp::auth::SaslMechanism;
+use waddle_xmpp::prometheus::{
+    increment_auth_terminal_attempt, AuthMechanism, AuthTerminalOutcome,
+};
+
+fn pending_auth_mechanism(phase: &ConnectionPhase) -> Option<AuthMechanism> {
+    if phase.has_pending_oauthbearer_exchange() {
+        Some(AuthMechanism::OAuthBearer)
+    } else if phase.scram_pending_username().is_some() {
+        Some(AuthMechanism::ScramSha256)
+    } else {
+        None
+    }
+}
+
+fn metric_auth_mechanism(mechanism: &SaslMechanism) -> Option<AuthMechanism> {
+    match mechanism {
+        SaslMechanism::OAuthBearer => Some(AuthMechanism::OAuthBearer),
+        SaslMechanism::ScramSha256 => Some(AuthMechanism::ScramSha256),
+        SaslMechanism::Plain | SaslMechanism::Unsupported => None,
+    }
+}
+
+fn record_terminal(state: &WebSocketState, mechanism: AuthMechanism, outcome: AuthTerminalOutcome) {
+    if mechanism == AuthMechanism::OAuthBearer {
+        state
+            .deps
+            .oauth_terminal_recorder
+            .record(mechanism, outcome);
+    } else {
+        increment_auth_terminal_attempt(mechanism, outcome);
+    }
+}
 
 /// Handle an XMPP frame per RFC 7395
 pub(super) async fn handle_xmpp_frame(
@@ -89,18 +127,41 @@ async fn handle_xmpp_frame_impl(
         Err(ParseError::Empty) => return vec![],
         Err(err) => {
             if let Some(responses) = parse_error_responses(frame, &err) {
-                if phase.scram_pending_username().is_some() && is_sasl_parse_failure(frame, &err) {
-                    let _ = phase.take_scram_pending();
+                let initial_response_mechanism = match &err {
+                    ParseError::InvalidSaslInitialResponseEncoding { mechanism } => {
+                        metric_auth_mechanism(mechanism)
+                    }
+                    _ => None,
+                };
+                if phase.has_pending_sasl_exchange() && is_sasl_auth_parse_failure(frame, &err) {
+                    if let Some(mechanism) = pending_auth_mechanism(phase) {
+                        record_terminal(state, mechanism, AuthTerminalOutcome::Cancelled);
+                    }
+                    phase.reset_pending_sasl_exchange();
+                    if let Some(mechanism) = initial_response_mechanism {
+                        record_terminal(state, mechanism, AuthTerminalOutcome::Malformed);
+                    }
+                } else if phase.has_pending_sasl_exchange() && is_sasl_parse_failure(frame, &err) {
+                    if let Some(mechanism) = pending_auth_mechanism(phase) {
+                        record_terminal(state, mechanism, AuthTerminalOutcome::Malformed);
+                    }
+                    phase.reset_pending_sasl_exchange();
+                } else if let Some(mechanism) = initial_response_mechanism {
+                    record_terminal(state, mechanism, AuthTerminalOutcome::Malformed);
                 }
                 warn!(
-                    error = %err,
+                    category = parse_error_category(&err),
                     len = frame.len(),
                     responses = responses.len(),
                     "Handled XMPP parse error with protocol response"
                 );
                 return responses;
             }
-            warn!(error = %err, len = frame.len(), "Unhandled XMPP frame");
+            warn!(
+                category = parse_error_category(&err),
+                len = frame.len(),
+                "Unhandled XMPP frame"
+            );
             return vec![];
         }
     };
@@ -115,7 +176,11 @@ async fn handle_xmpp_frame_impl(
                 .clustering_claims
                 .isr_token_store()
                 .is_some();
-            let features_element = build_stream_features_for_phase(phase, isr_available);
+            let features_element = build_stream_features_for_phase(
+                phase,
+                isr_available,
+                state.deps.oauthbearer_available,
+            );
             *stream_open_sent = true;
             vec![open_element, features_element]
         }
@@ -129,25 +194,47 @@ async fn handle_xmpp_frame_impl(
             vec![websocket_stream_close_xml()]
         }
 
-        InboundFrame::Auth { mechanism, data } => {
-            if !phase.allows_sasl_auth() {
-                let reset_scram_phase = phase.scram_pending_username().is_some();
-                warn!(phase = ?phase, mechanism = %mechanism, "SASL auth received in invalid phase");
-                if reset_scram_phase {
-                    let _ = phase.take_scram_pending();
+        InboundFrame::Auth {
+            mechanism,
+            initial_response,
+        } => {
+            // RFC 6120 section 6.4.2: a subsequent <auth/> replaces an
+            // unfinished SASL handshake. Discard the old exchange first, then
+            // process this frame normally instead of rejecting it as an
+            // out-of-phase request.
+            if phase.has_pending_sasl_exchange() {
+                if let Some(pending_mechanism) = pending_auth_mechanism(phase) {
+                    record_terminal(state, pending_mechanism, AuthTerminalOutcome::Cancelled);
                 }
-                return vec![sasl_failure_xml("not-authorized")];
+                phase.reset_pending_sasl_exchange();
             }
-            let responses = match mechanism.as_str() {
-                "SCRAM-SHA-256" => {
-                    handle_sasl_scram_client_first(&data, domain, state, phase).await
+            if !phase.allows_sasl_auth() {
+                warn!(
+                    phase = connection_phase_category(phase),
+                    mechanism = sasl_mechanism_category(&mechanism),
+                    "SASL auth received in invalid phase"
+                );
+                return vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)];
+            }
+            let responses = match mechanism {
+                SaslMechanism::ScramSha256 => {
+                    handle_sasl_scram_client_first(&initial_response, domain, state, phase).await
                 }
-                "OAUTHBEARER" => {
-                    handle_sasl_oauthbearer(&data, state, authenticated_session, phase).await
+                SaslMechanism::OAuthBearer if state.deps.oauthbearer_available => {
+                    handle_sasl_oauthbearer_initial(
+                        &initial_response,
+                        state,
+                        authenticated_session,
+                        phase,
+                    )
+                    .await
                 }
                 other => {
-                    warn!(mechanism = %other, "Unsupported SASL mechanism");
-                    vec![sasl_failure_xml("invalid-mechanism")]
+                    warn!(
+                        mechanism = sasl_mechanism_category(&other),
+                        "Unsupported or unavailable SASL mechanism"
+                    );
+                    vec![sasl_failure_xml(SaslFailureCondition::InvalidMechanism)]
                 }
             };
             // RFC 6120 §6.4.6: SASL success restarts the stream. Until
@@ -170,8 +257,12 @@ async fn handle_xmpp_frame_impl(
             // has its own SASL/bind lifecycle already established — it
             // performs authentication itself, inline.
             if !phase.allows_sasl_auth() {
-                warn!(phase = ?phase, "ISR resume authenticate received in invalid phase");
-                return vec![sasl_failure_xml("not-authorized")];
+                warn!(
+                    phase = connection_phase_category(phase),
+                    "ISR resume authenticate received in invalid phase"
+                );
+                phase.reset_pending_sasl_exchange();
+                return vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)];
             }
             let ctx = SmCtx {
                 phase,
@@ -203,14 +294,22 @@ async fn handle_xmpp_frame_impl(
 
         InboundFrame::SaslResponse(data) => {
             if !phase.allows_sasl_response() {
-                warn!(phase = ?phase, "SASL response received in invalid phase");
-                return vec![sasl_failure_xml("not-authorized")];
+                warn!(
+                    phase = connection_phase_category(phase),
+                    "SASL response received in invalid phase"
+                );
+                return vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)];
             }
-            let scram = phase
-                .take_scram_pending()
-                .expect("SASL response must have pending SCRAM state");
-            let responses =
-                handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase);
+            let responses = if phase.take_oauthbearer_error_pending() {
+                handle_sasl_oauthbearer_error_response(&data, state)
+            } else if phase.take_oauthbearer_initial_response_pending() {
+                handle_sasl_oauthbearer_response(&data, state, authenticated_session, phase).await
+            } else {
+                let scram = phase
+                    .take_scram_pending()
+                    .expect("SASL response must have a typed pending exchange");
+                handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase)
+            };
             // Same stream-restart rule as the <auth/> arm above: after
             // SCRAM success no response header exists for the new
             // stream until the next <open/> is answered.
@@ -218,6 +317,22 @@ async fn handle_xmpp_frame_impl(
                 *stream_open_sent = false;
             }
             responses
+        }
+
+        InboundFrame::SaslAbort => {
+            if !phase.has_pending_sasl_exchange() {
+                warn!(
+                    phase = connection_phase_category(phase),
+                    "SASL abort received without a pending exchange"
+                );
+                return vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)];
+            }
+            let cancelled_mechanism = pending_auth_mechanism(phase);
+            phase.reset_pending_sasl_exchange();
+            if let Some(mechanism) = cancelled_mechanism {
+                record_terminal(state, mechanism, AuthTerminalOutcome::Cancelled);
+            }
+            vec![sasl_failure_xml(SaslFailureCondition::Aborted)]
         }
 
         InboundFrame::Stanza(stanza) => {
@@ -482,6 +597,35 @@ pub(super) fn ordered_relay_origin_from_sm(
 ) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
     let _ = (sm_state, bound_jid);
     None
+}
+
+#[cfg(test)]
+mod sasl_abort_metric_tests {
+    use super::*;
+
+    #[test]
+    fn pending_sasl_exchanges_map_to_their_cancelled_mechanism() {
+        let scram = ConnectionPhase::scram_pending(ScramPendingState::new(
+            ScramServer::new(),
+            vec![1],
+            vec![2],
+            "alice",
+        ));
+        assert_eq!(
+            pending_auth_mechanism(&scram),
+            Some(AuthMechanism::ScramSha256)
+        );
+        for oauth in [
+            ConnectionPhase::oauthbearer_initial_response_pending(),
+            ConnectionPhase::oauthbearer_error_pending(),
+        ] {
+            assert_eq!(
+                pending_auth_mechanism(&oauth),
+                Some(AuthMechanism::OAuthBearer)
+            );
+        }
+        assert_eq!(pending_auth_mechanism(&ConnectionPhase::new()), None);
+    }
 }
 
 #[cfg(all(test, feature = "clustering"))]

@@ -175,7 +175,7 @@ schema.#Project & {
 		test: schema.#Task & {
 			command: "bun"
 			args: ["test"]
-			dependsOn: [build]
+			dependsOn: [verifyBuildIdentity]
 			inputs: [
 				"../package.json",
 				"../bun.lock",
@@ -196,6 +196,7 @@ schema.#Project & {
 		build: schema.#Task & {
 			command: "bun"
 			args: ["run", "build"]
+			cache: mode: "never"
 			dependsOn: [buildWasm, generateTypes]
 			inputs: [
 				"../env.cue",
@@ -203,8 +204,11 @@ schema.#Project & {
 				"../bun.lock",
 				"package.json",
 				"astro.config.mjs",
+				"scripts/build-identity.mjs",
+				"scripts/generate-build-identity.mjs",
 				"scripts/generate-service-worker.mjs",
 				"scripts/resolve-commit-sha.mjs",
+				"scripts/verify-build-identity.mjs",
 				"tsconfig.json",
 				"wrangler.jsonc",
 				"src/**",
@@ -215,10 +219,26 @@ schema.#Project & {
 			]
 		}
 
+		verifyBuildIdentity: schema.#Task & {
+			command: "bun"
+			args: ["run", "verify-build-identity"]
+			cache: mode: "never"
+			dependsOn: [build]
+			inputs: [
+				"../env.cue",
+				"scripts/build-identity.mjs",
+				"scripts/resolve-commit-sha.mjs",
+				"scripts/verify-build-identity.mjs",
+				"dist/**",
+			]
+		}
+
 		stripSourcemaps: schema.#Task & {
 			command: "bun"
 			args: ["run", "sourcemaps:strip"]
-			dependsOn: [build]
+			// Both preview and deploy transitively require immutable client,
+			// service-worker, and public build identities to agree.
+			dependsOn: [verifyBuildIdentity]
 			inputs: [
 				"package.json",
 				"scripts/strip-sourcemaps.mjs",
@@ -243,12 +263,24 @@ schema.#Project & {
 
 		deploy: schema.#Task & {
 			command: "bun"
-			args: ["x", "wrangler", "deploy"]
-			dependsOn: [stripSourcemaps]
+			args: ["run", "deploy"]
+			cache: mode: "never"
 			inputs: [
 				"../env.cue",
+				"../package.json",
+				"../bun.lock",
+				"../server/Cargo.toml",
+				"../server/Cargo.lock",
+				"../server/crates/waddle-xmpp-client/**",
+				"../server/crates/waddle-xmpp-client-wasm/**",
+				"../server/crates/waddle-xmpp-core/**",
+				"package.json",
+				"astro.config.mjs",
+				"scripts/**",
+				"src/**",
+				"public/**",
+				"tsconfig.json",
 				"wrangler.jsonc",
-				"dist/**",
 			]
 			outputs: [
 				".wrangler/**",

@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::disco_targets::calls_available;
 
 enum RoomCommandTarget {
     GroupDm,
@@ -26,10 +27,9 @@ async fn classify_room_command_target(
     if let Some(room_actor) = get_room_actor(state, room_jid).await {
         let snapshot = match room_actor.ask(GetSnapshot).await {
             Ok(snapshot) => snapshot.room,
-            Err(error) => {
+            Err(_) => {
                 warn!(
-                    room = %room_jid,
-                    error = ?error,
+                    operation = "room_snapshot",
                     "Failed to load room snapshot for disco#items"
                 );
                 return RoomCommandTarget::Failed;
@@ -79,20 +79,18 @@ async fn classify_room_command_target(
                 })
                 .await
             {
-                Err(kameo::error::SendError::HandlerError(error)) => {
+                Err(kameo::error::SendError::HandlerError(_)) => {
                     warn!(
-                        room = %room_jid,
-                        error = ?error,
+                        operation = "membership_check",
                         "Failed to check persisted group-DM membership for disco#items"
                     );
                     RoomCommandTarget::Failed
                 }
                 Ok(response) if response.allowed => RoomCommandTarget::GroupDm,
                 Ok(_) => RoomCommandTarget::NotMember,
-                Err(error) => {
+                Err(_) => {
                     warn!(
-                        room = %room_jid,
-                        error = ?error,
+                        operation = "permission_check",
                         "Failed to ask permission actor for disco#items"
                     );
                     RoomCommandTarget::Failed
@@ -101,10 +99,9 @@ async fn classify_room_command_target(
         }
         Ok(Some(_)) => RoomCommandTarget::NotGroupDm,
         Ok(None) => RoomCommandTarget::Missing,
-        Err(error) => {
+        Err(_) => {
             warn!(
-                room = %room_jid,
-                error = ?error,
+                operation = "room_lookup",
                 "Failed to load persisted room for disco#items"
             );
             RoomCommandTarget::Failed
@@ -403,13 +400,16 @@ pub(super) async fn handle_disco_items_iq(
                             }
                             items
                         }
-                        Err(error) => {
-                            warn!(error = %error, "Failed to list Spaces nodes");
+                        Err(_) => {
+                            warn!(operation = "spaces_list", "Failed to list Spaces nodes");
                             vec![]
                         }
                     },
-                    Err(error) => {
-                        warn!(error = %error, "Invalid Spaces service JID");
+                    Err(_) => {
+                        warn!(
+                            operation = "spaces_target_parse",
+                            "Invalid Spaces service JID"
+                        );
                         vec![]
                     }
                 },
@@ -439,8 +439,11 @@ pub(super) async fn handle_disco_items_iq(
                             .into_iter()
                             .map(|node| DiscoItem::pubsub_node(push_domain, &node))
                             .collect(),
-                        Err(error) => {
-                            warn!(error = %error, owner = %owner_bare_jid, "Failed to list owner Push Service nodes");
+                        Err(_) => {
+                            warn!(
+                                operation = "push_node_list",
+                                "Failed to list owner Push Service nodes"
+                            );
                             Vec::new()
                         }
                     }
@@ -469,8 +472,8 @@ pub(super) async fn handle_disco_items_iq(
                                 })
                                 .map(|node| DiscoItem::pubsub_node(&target_bare.to_string(), &node))
                                 .collect::<Vec<_>>(),
-                            Err(error) => {
-                                warn!(target = %target_bare, error = %error, "Failed to list PEP nodes");
+                            Err(_) => {
+                                warn!(operation = "pep_node_list", "Failed to list PEP nodes");
                                 vec![]
                             }
                         };
@@ -483,15 +486,20 @@ pub(super) async fn handle_disco_items_iq(
 
         debug!("Disco items query on server");
         let calls_mixer_domain = format!("calls.{domain}");
-        let items = vec![
+        let mut items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(upload_domain, Some("HTTP File Upload")),
             DiscoItem::spaces_service(spaces_domain, Some("Spaces")),
             DiscoItem::community_service(community_domain, Some("Community")),
             DiscoItem::pubsub_service(extensions_domain, Some("Extensions")),
             DiscoItem::pubsub_service(push_domain, Some("Push Service")),
-            DiscoItem::calls_mixer(&calls_mixer_domain, Some("Group Call Mixer")),
         ];
+        if calls_available(state) {
+            items.push(DiscoItem::calls_mixer(
+                &calls_mixer_domain,
+                Some("Group Call Mixer"),
+            ));
+        }
         let response = build_disco_items_response(request_iq, &items, None);
         return vec![iq_to_xml(response)];
     }
@@ -525,7 +533,10 @@ async fn canonical_channel_disco_items(
     {
         Ok(channels) => Ok(channels_to_disco_items(channels, muc_domain)),
         Err(error) => {
-            warn!(error = %error, "Failed to list canonical channels for MUC discovery");
+            warn!(
+                operation = "channel_list",
+                "Failed to list canonical channels for MUC discovery"
+            );
             Err(error)
         }
     }

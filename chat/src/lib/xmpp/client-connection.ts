@@ -25,7 +25,11 @@ import {
 import { barePeerJid } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import type { ResumePersistence } from "./resume-persistence";
-import type { SendDirectMessageOptions, SendGroupMessageOptions } from "./send-types";
+import type {
+  SendDirectMessageOptions,
+  SendGroupMessageOptions,
+  SendQueueReason,
+} from "./send-types";
 import type { XmppStatusSnapshot } from "./types";
 import type { WasmSendMessageOutcome } from "./wasm-types";
 
@@ -357,7 +361,7 @@ type OfflineSendQueueDeps = {
   canUseConnectedSession: () => boolean;
   roomIsReady: (roomJid: string) => boolean;
   /** Why a send is being queued right now ("offline", "reconnecting", …). */
-  enqueueReason: () => string;
+  enqueueReason: () => SendQueueReason;
   emitStatus: (snapshot: XmppStatusSnapshot) => void;
   /** Known nick → bare-JID mentions for a room, merged into queued room sends. */
   roomMemberJids: (roomJid: string) => Record<string, string>;

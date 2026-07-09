@@ -667,6 +667,30 @@ async fn test_metrics_endpoint() {
 }
 
 #[tokio::test]
+async fn incomplete_xep0493_oauth_routes_are_not_mounted() {
+    let app = test_app().await;
+
+    for (method, uri) in [
+        ("GET", "/.well-known/oauth-authorization-server"),
+        ("GET", "/api/auth/xmpp/authorize"),
+        ("POST", "/api/auth/xmpp/token"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
 async fn test_explicit_cors_allows_credentials() {
     let app = Router::new()
         .route("/health", get(|| async { StatusCode::OK }))

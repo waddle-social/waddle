@@ -1,10 +1,13 @@
+use std::str::FromStr;
+
 use jid::BareJid;
 
 use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 
 use super::iq::{
-    build_disco_info_iq, build_disco_items_iq, build_pubsub_items_iq, build_upload_slot_iq,
+    build_disco_info_iq, build_disco_info_iq_for, build_disco_items_iq, build_pubsub_items_iq,
+    build_upload_slot_iq,
 };
 use super::parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
@@ -28,10 +31,28 @@ fn parse_error() -> ClientError {
     })
 }
 
+#[cfg(feature = "native")]
+fn validate_typed_disco_responder(
+    result: &minidom::Element,
+    expected: &BareJid,
+) -> ClientResult<()> {
+    let actual = result
+        .attr("from")
+        .and_then(|value| BareJid::from_str(value).ok())
+        .ok_or_else(parse_error)?;
+    (actual == *expected).then_some(()).ok_or_else(parse_error)
+}
+
 // ── Extension trait ──────────────────────────────────────────────────────────
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait DiscoveryExt {
+    /// Query `disco#info` using a typed bare JID.
+    fn discover_info_for<'a>(
+        &'a self,
+        jid: &'a BareJid,
+    ) -> impl std::future::Future<Output = ClientResult<DiscoInfoResult>> + Send + 'a;
+
     /// Query `disco#info` for a JID, optionally scoped to a node.
     fn discover_info<'a>(
         &'a self,
@@ -130,6 +151,18 @@ pub trait DiscoveryExt {
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl DiscoveryExt for ClientHandle {
+    async fn discover_info_for(&self, jid: &BareJid) -> ClientResult<DiscoInfoResult> {
+        let iq = build_disco_info_iq_for(jid);
+        let result = self.send_iq(iq).await?;
+        validate_typed_disco_responder(&result, jid)?;
+        let parsed = parse_disco_info_result(&result, jid.as_str()).ok_or_else(parse_error)?;
+        parsed
+            .node
+            .is_none()
+            .then_some(parsed)
+            .ok_or_else(parse_error)
+    }
+
     async fn discover_info(&self, jid: &str, node: Option<&str>) -> ClientResult<DiscoInfoResult> {
         let iq = build_disco_info_iq(jid, node);
         let result = self.send_iq(iq).await?;

@@ -7,15 +7,13 @@ spec:
   driftDetection:
     mode: enabled
   interval: 30m
-  chart:
-    spec:
-      chart: waddle-server
-      version: 0.4.x
-      sourceRef:
-        kind: HelmRepository
-        name: waddle-server
-        namespace: waddle
-      interval: 12h
+  # The referenced OCIRepository is rewritten to the verified chart manifest
+  # digest in the published GitOps artifact. The controller never resolves a
+  # mutable chart version while reconciling a production release.
+  chartRef:
+    kind: OCIRepository
+    name: waddle-server-chart
+    namespace: waddle
   valuesFrom:
     - kind: Secret
       name: waddle-runtime-secrets
@@ -83,10 +81,14 @@ spec:
     # (default endpoint was `localhost:4317`, which silently dropped
     # everything before this was wired up). Chart-modelled keys go in
     # `telemetry`; `containerExtraEnv` is reserved for settings the
-    # chart doesn't model (currently just the OTLP protocol).
+    # chart doesn't model. The source revision is chart-modelled and updated
+    # atomically with the digest by the release task.
     telemetry:
       otlpEndpoint: "http://grafana-alloy.grafana-alloy.svc.cluster.local:4317"
       serviceName: "waddle-server"
+      commit: ""
+      environment: "production"
+      cluster: "waddle-cloud"
     containerExtraEnv:
       - name: OTEL_EXPORTER_OTLP_PROTOCOL
         value: "grpc"

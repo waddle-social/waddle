@@ -303,20 +303,20 @@ fn is_slot_expired(expires_at: &str) -> bool {
 /// - Have status 'pending'
 /// - Not be expired
 /// - Match the Content-Length header with expected size
-#[instrument(skip(state, headers, body))]
+#[instrument(skip_all)]
 pub async fn upload_handler(
     State(state): State<Arc<UploadState>>,
     Path(slot_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    info!("Processing upload for slot: {}", slot_id);
+    info!("Processing upload");
 
     // Get upload slot from database
     let slot = match get_upload_slot(state.global_actor(), &slot_id).await {
         Ok(Some(slot)) => slot,
         Ok(None) => {
-            warn!("Upload slot not found: {}", slot_id);
+            warn!("Upload slot not found");
             return upload_error_to_response(UploadError::SlotNotFound(format!(
                 "Upload slot '{}' not found",
                 slot_id
@@ -324,14 +324,14 @@ pub async fn upload_handler(
             .into_response();
         }
         Err(err) => {
-            error!("Database error fetching slot: {}", err);
+            error!("Database error fetching upload slot");
             return upload_error_to_response(UploadError::Database(err)).into_response();
         }
     };
 
     // Check slot status
     if slot.status == "uploaded" {
-        warn!("Slot already used: {}", slot_id);
+        warn!("Upload slot already used");
         return upload_error_to_response(UploadError::SlotAlreadyUsed(format!(
             "Upload slot '{}' has already been used",
             slot_id
@@ -340,7 +340,7 @@ pub async fn upload_handler(
     }
 
     if slot.status != "pending" {
-        warn!("Invalid slot status: {} for slot {}", slot.status, slot_id);
+        warn!("Upload slot is not pending");
         return upload_error_to_response(UploadError::SlotNotFound(format!(
             "Upload slot '{}' is not in pending state",
             slot_id
@@ -350,7 +350,7 @@ pub async fn upload_handler(
 
     // Check expiry
     if is_slot_expired(&slot.expires_at) {
-        warn!("Slot expired: {}", slot_id);
+        warn!("Upload slot expired");
         return upload_error_to_response(UploadError::SlotExpired(format!(
             "Upload slot '{}' has expired",
             slot_id
@@ -370,8 +370,9 @@ pub async fn upload_handler(
         // Validate Content-Length header matches expected size
         if content_length != slot.size_bytes {
             warn!(
-                "Content-Length mismatch for slot {}: expected {}, got {}",
-                slot_id, slot.size_bytes, content_length
+                expected_bytes = slot.size_bytes,
+                actual_bytes = content_length,
+                "Upload Content-Length mismatch"
             );
             return upload_error_to_response(UploadError::SizeMismatch {
                 expected: slot.size_bytes,
@@ -384,8 +385,9 @@ pub async fn upload_handler(
     // Validate actual body size matches expected
     if body_size != slot.size_bytes {
         warn!(
-            "Size mismatch for slot {}: expected {}, got {}",
-            slot_id, slot.size_bytes, body_size
+            expected_bytes = slot.size_bytes,
+            actual_bytes = body_size,
+            "Upload body size mismatch"
         );
         return upload_error_to_response(UploadError::SizeMismatch {
             expected: slot.size_bytes,
@@ -404,10 +406,7 @@ pub async fn upload_handler(
             && content_type != slot.content_type
             && !content_type.starts_with(&slot.content_type)
         {
-            debug!(
-                "Content-Type mismatch for slot {}: expected '{}', got '{}'",
-                slot_id, slot.content_type, content_type
-            );
+            debug!("Upload Content-Type mismatch");
             // Don't fail on content-type mismatch, just log it
         }
     }
@@ -421,7 +420,7 @@ pub async fn upload_handler(
         .put(&storage_key, body.clone(), &slot.content_type)
         .await
     {
-        error!("Failed to store blob: {}", err);
+        error!("Failed to store upload blob");
         return upload_error_to_response(UploadError::Storage(format!(
             "Failed to store file: {}",
             err
@@ -430,15 +429,15 @@ pub async fn upload_handler(
     }
 
     // Update slot status in database
-    if let Err(err) = mark_slot_uploaded(state.global_actor(), &slot_id, &storage_key).await {
-        error!("Failed to update slot status: {}", err);
+    if mark_slot_uploaded(state.global_actor(), &slot_id, &storage_key)
+        .await
+        .is_err()
+    {
+        error!("Failed to update upload slot status");
         warn!("File uploaded but database status update failed");
     }
 
-    info!(
-        "Upload complete: {} bytes stored at {}",
-        body_size, storage_key
-    );
+    info!(bytes = body_size, "Upload complete");
 
     StatusCode::CREATED.into_response()
 }

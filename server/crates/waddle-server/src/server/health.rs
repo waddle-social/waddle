@@ -216,14 +216,77 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
 
 /// Prometheus metrics endpoint.
 pub(crate) async fn metrics_handler() -> impl IntoResponse {
+    let mut metrics = waddle_xmpp::prometheus::render_metrics();
+    render_build_info_metric(
+        &mut metrics,
+        crate::build_identity::embedded_git_sha(),
+        |name| std::env::var(name).ok(),
+    );
     (
         StatusCode::OK,
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        waddle_xmpp::prometheus::render_metrics(),
+        metrics,
     )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DeploymentIdentity {
+    commit: String,
+    environment: String,
+    cluster: String,
+}
+
+fn deployment_identity(
+    embedded_commit: Option<&str>,
+    get: impl Fn(&str) -> Option<String>,
+) -> DeploymentIdentity {
+    let bounded_label = |name: &str| {
+        get(name)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 64
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let commit = embedded_commit
+        .filter(|value| {
+            value.len() == 40
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    DeploymentIdentity {
+        commit,
+        environment: bounded_label("DEPLOYMENT_ENVIRONMENT_NAME"),
+        cluster: bounded_label("DEPLOYMENT_CLUSTER_NAME"),
+    }
+}
+
+fn render_build_info_metric(
+    out: &mut String,
+    embedded_commit: Option<&str>,
+    get: impl Fn(&str) -> Option<String>,
+) {
+    let identity = deployment_identity(embedded_commit, get);
+    out.push_str(
+        "# HELP waddle_build_info Deployment identity for evidence scoping; value is always one.\n",
+    );
+    out.push_str("# TYPE waddle_build_info gauge\n");
+    out.push_str("waddle_build_info{commit=\"");
+    out.push_str(&identity.commit);
+    out.push_str("\",deployment_environment=\"");
+    out.push_str(&identity.environment);
+    out.push_str("\",cluster=\"");
+    out.push_str(&identity.cluster);
+    out.push_str("\"} 1\n");
 }
 
 /// Detailed health check endpoint (for monitoring)
@@ -272,5 +335,65 @@ pub(crate) async fn detailed_health_handler(
                 }),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn build_info_metric_binds_validated_deployment_identity() {
+        let values = BTreeMap::from([
+            ("DEPLOYMENT_ENVIRONMENT_NAME", "production"),
+            ("DEPLOYMENT_CLUSTER_NAME", "waddle-cloud"),
+        ]);
+        let mut rendered = String::new();
+        render_build_info_metric(
+            &mut rendered,
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            |name| values.get(name).map(ToString::to_string),
+        );
+
+        assert!(rendered.contains(
+            "waddle_build_info{commit=\"0123456789abcdef0123456789abcdef01234567\",deployment_environment=\"production\",cluster=\"waddle-cloud\"} 1"
+        ));
+    }
+
+    #[test]
+    fn build_info_metric_rejects_unbounded_or_unsafe_labels() {
+        let values = BTreeMap::from([
+            ("WADDLE_GIT_SHA", "not-a-commit"),
+            ("DEPLOYMENT_ENVIRONMENT_NAME", "production\nsecret"),
+            ("DEPLOYMENT_CLUSTER_NAME", "cluster/secret"),
+        ]);
+        let mut rendered = String::new();
+        render_build_info_metric(&mut rendered, Some("not-a-commit"), |name| {
+            values.get(name).map(ToString::to_string)
+        });
+
+        assert!(rendered.contains(
+            "waddle_build_info{commit=\"unknown\",deployment_environment=\"unknown\",cluster=\"unknown\"} 1"
+        ));
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn build_info_metric_cannot_be_spoofed_by_runtime_release_metadata() {
+        let values = BTreeMap::from([
+            ("WADDLE_GIT_SHA", "ffffffffffffffffffffffffffffffffffffffff"),
+            ("DEPLOYMENT_ENVIRONMENT_NAME", "production"),
+            ("DEPLOYMENT_CLUSTER_NAME", "waddle-cloud"),
+        ]);
+        let mut rendered = String::new();
+        render_build_info_metric(
+            &mut rendered,
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            |name| values.get(name).map(ToString::to_string),
+        );
+
+        assert!(rendered.contains("commit=\"0123456789abcdef0123456789abcdef01234567\""));
+        assert!(!rendered.contains("ffffffffffffffffffffffffffffffffffffffff"));
     }
 }

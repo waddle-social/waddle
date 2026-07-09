@@ -89,7 +89,7 @@ impl SessionManager {
         AuthError::DatabaseError(e.to_string())
     }
 
-    #[instrument(skip(self, session))]
+    #[instrument(skip_all)]
     pub async fn create_session(&self, session: &Session) -> Result<(), AuthError> {
         let token_hash = self.token_hash(&session.id);
         let expires_at = session.expires_at.map(|v| v.to_rfc3339());
@@ -110,7 +110,7 @@ impl SessionManager {
             .await
             .map_err(Self::ask_err)?;
 
-        debug!(session_id = %session.id, user_jid = %session.user_jid, "Session created");
+        debug!("Session created");
         Ok(())
     }
 
@@ -184,7 +184,7 @@ impl SessionManager {
         })
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
         let sql = r#"
             SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
@@ -211,7 +211,7 @@ impl SessionManager {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn touch_session(&self, session_id: &str) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
 
@@ -228,7 +228,7 @@ impl SessionManager {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         self.actor
             .ask(DbExecute {
@@ -240,7 +240,7 @@ impl SessionManager {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn validate_session(&self, session_id: &str) -> Result<Session, AuthError> {
         let session = self
             .get_session(session_id)
@@ -248,7 +248,7 @@ impl SessionManager {
             .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
 
         if session.is_expired() {
-            warn!(session_id = %session_id, "Session expired");
+            warn!("Session expired");
             return Err(AuthError::SessionExpired);
         }
 

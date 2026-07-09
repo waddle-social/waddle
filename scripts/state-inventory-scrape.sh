@@ -65,7 +65,7 @@ mkdir -p "$(dirname "$JSONL")"
 
 if [[ ! -s "$TSV" ]]; then
     cat > "$TSV" <<'EOF'
-ts	pending_auth	device_auth	xmpp_auth_codes	dynamic_oidc_clients	avatar_source_locks	profile_publish_in_flight	provider_dispatch_in_flight	sm_live_sessions	resumable_sessions	caps_cache	caps_pending	full_jid_conns	pending_subs	presence_states	last_activity	rooms_total	rooms_dormant
+ts	pending_auth	device_auth	dynamic_oidc_clients	avatar_source_locks	profile_publish_in_flight	provider_dispatch_in_flight	sm_live_sessions	resumable_sessions	caps_cache	caps_pending	full_jid_conns	pending_subs	presence_states	last_activity	rooms_total	rooms_dormant
 EOF
 fi
 
@@ -79,7 +79,6 @@ while true; do
             [
               .auth.pending_auth,
               .auth.device_auth,
-              .auth.xmpp_auth_codes,
               .auth.dynamic_oidc_clients,
               .profile.avatar_source_locks,
               .profile.profile_publish_tracker_in_flight,

@@ -74,20 +74,26 @@ Span naming follows OpenTelemetry semantic conventions where applicable.
 
 | Span Name | Attributes | Description |
 |-----------|------------|-------------|
-| `xmpp.connection.lifecycle` | `jid`, `client_ip`, `transport` | Connection open to close |
-| `xmpp.stream.authenticate` | `jid`, `mechanism`, `success` | SASL authentication attempt |
-| `xmpp.stanza.process` | `stanza_type`, `from`, `to` | Individual stanza processing |
-| `xmpp.muc.join` | `room_jid`, `user_jid`, `affiliation` | MUC room join |
-| `xmpp.muc.message` | `room_jid`, `from`, `message_id` | MUC message routing |
-| `xmpp.presence.update` | `from`, `show`, `priority` | Presence stanza processing |
+| `xmpp.connection.lifecycle` | `transport`, `outcome`, `resumed` | Connection open to close |
+| `xmpp.stream.authenticate` | `mechanism`, `outcome` | SASL authentication attempt |
+| `xmpp.stanza.process` | `stanza_type`, `outcome` | Individual stanza processing |
+| `xmpp.muc.join` | `outcome`, `affiliation` | MUC room join |
+| `xmpp.muc.message` | `outcome` | MUC message routing |
+| `xmpp.presence.update` | `availability`, `show` | Presence stanza processing |
 
 #### HTTP Server Spans
 
 | Span Name | Attributes | Description |
 |-----------|------------|-------------|
-| `http.request` | `method`, `path`, `status_code` | REST API request (tower-http) |
-| `http.auth.validate` | `did`, `token_type` | Token validation |
-| `db.query` | `query`, `table`, `waddle_id` | Database operations |
+| `http.request` | `method`, `route_template`, `status_code` | HTTP request (tower-http) |
+| `http.auth.validate` | `mechanism`, `outcome` | Token validation |
+| `db.query` | `operation`, `table` | Database operations |
+
+All attributes are closed-set operational categories. JIDs, IP addresses,
+room or message identifiers, stanza addresses, request URLs and query strings,
+tokens, account identifiers, and database values are prohibited in spans,
+metrics, and exported log fields. Routes use reviewed templates, never raw
+paths.
 
 ### Key Metrics
 
@@ -96,8 +102,8 @@ Span naming follows OpenTelemetry semantic conventions where applicable.
 | Metric | Labels | Description |
 |--------|--------|-------------|
 | `xmpp.connections.active` | `transport` | Current open connections |
-| `xmpp.muc.rooms.active` | `waddle_id` | Active MUC rooms |
-| `xmpp.muc.occupants` | `room_jid` | Users in each room |
+| `xmpp.muc.rooms.active` | none | Active MUC rooms |
+| `xmpp.muc.occupants` | none | Aggregate room occupants |
 
 #### Counters (Cumulative)
 
@@ -105,19 +111,22 @@ Span naming follows OpenTelemetry semantic conventions where applicable.
 |--------|--------|-------------|
 | `xmpp.stanzas.processed` | `type`, `direction` | Total stanzas (message/presence/iq) |
 | `xmpp.auth.attempts` | `mechanism`, `result` | Auth attempts (success/failure) |
-| `xmpp.muc.messages` | `waddle_id` | Messages sent to MUC rooms |
+| `xmpp.muc.messages` | none | Messages sent to MUC rooms |
 
 #### Histograms (Latency)
 
 | Metric | Labels | Buckets (ms) | Description |
 |--------|--------|--------------|-------------|
 | `xmpp.stanza.latency` | `type` | 1, 5, 10, 25, 50, 100, 250, 500 | Stanza processing time |
-| `http.request.duration` | `method`, `path` | 1, 5, 10, 25, 50, 100, 250, 500, 1000 | HTTP request duration |
+| `http.request.duration` | `method`, `route_template` | 1, 5, 10, 25, 50, 100, 250, 500, 1000 | HTTP request duration |
 | `db.query.duration` | `operation` | 1, 5, 10, 25, 50, 100 | Database query time |
 
 ### Configuration
 
 Environment variables for OTel configuration:
+
+`service.version` is the immutable Git commit embedded by the package build;
+it cannot be overridden at runtime.
 
 ```bash
 # Exporter endpoint
@@ -125,7 +134,6 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 
 # Service identification
 OTEL_SERVICE_NAME=waddle-server
-OTEL_SERVICE_VERSION=0.1.0
 
 # Sampling (1.0 = 100%, 0.1 = 10%)
 OTEL_TRACES_SAMPLER=parentbased_traceidratio

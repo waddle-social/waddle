@@ -6,5 +6,9 @@ metadata:
 spec:
   interval: 5m
   url: oci://ghcr.io/waddle-social/waddle/gitops-waddle-server
+  # Bootstrap discovery remains tag-based. Release automation promotes only a
+  # previously pulled-and-compared full-SHA artifact digest to this tag, but
+  # the live source itself is not digest-pinned until ownership moves out of
+  # the root GitOps bundle and into a dedicated bootstrap update path.
   ref:
     tag: latest

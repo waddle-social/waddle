@@ -7,8 +7,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(test, feature = "test-utils"))]
 use std::sync::OnceLock;
 
+mod archive_attempts;
+mod auth_attempts;
+mod process_start;
+
+pub use archive_attempts::{
+    increment_message_archive_attempt, MessageArchiveKind, MessageArchiveOutcome,
+};
+pub use auth_attempts::{increment_auth_terminal_attempt, AuthMechanism, AuthTerminalOutcome};
+
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
 static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
+static ROOM_REGISTRY_SAMPLE_LAST_SUCCESS_UNIXTIME_SECONDS: AtomicU64 = AtomicU64::new(0);
 static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static CURRENT_SECOND: AtomicU64 = AtomicU64::new(0);
 static CURRENT_SECOND_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -380,6 +390,16 @@ pub fn decrement_room_count() {
     });
 }
 
+pub fn set_room_count(count: usize) {
+    ROOM_COUNT.store(count as u64, Ordering::Release);
+}
+
+/// Record that the production room-registry count sampler completed.
+pub fn record_room_registry_sample_success() {
+    ROOM_REGISTRY_SAMPLE_LAST_SUCCESS_UNIXTIME_SECONDS
+        .store(unix_timestamp_secs(), Ordering::Release);
+}
+
 pub fn record_message_processed() {
     let now = unix_timestamp_secs();
     rotate_second_bucket(now);
@@ -593,10 +613,13 @@ fn render_push_suppressed_lines(out: &mut String) {
 pub fn reset_metrics_for_test() {
     CONNECTED_USERS.store(0, Ordering::Release);
     ROOM_COUNT.store(0, Ordering::Release);
+    ROOM_REGISTRY_SAMPLE_LAST_SUCCESS_UNIXTIME_SECONDS.store(0, Ordering::Release);
     MESSAGES_TOTAL.store(0, Ordering::Release);
     CURRENT_SECOND.store(0, Ordering::Release);
     CURRENT_SECOND_MESSAGES.store(0, Ordering::Release);
     LAST_SECOND_MESSAGES.store(0, Ordering::Release);
+    archive_attempts::reset();
+    auth_attempts::reset();
     BROADCAST_DELIVERED.store(0, Ordering::Release);
     BROADCAST_NOT_CONNECTED.store(0, Ordering::Release);
     BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
@@ -638,6 +661,8 @@ pub fn render_metrics() -> String {
 
     let connected_users = CONNECTED_USERS.load(Ordering::Acquire);
     let room_count = ROOM_COUNT.load(Ordering::Acquire);
+    let room_registry_sample_last_success_unixtime_seconds =
+        ROOM_REGISTRY_SAMPLE_LAST_SUCCESS_UNIXTIME_SECONDS.load(Ordering::Acquire);
     let messages_total = MESSAGES_TOTAL.load(Ordering::Acquire);
     let messages_per_second = LAST_SECOND_MESSAGES.load(Ordering::Acquire);
     let broadcast_delivered = BROADCAST_DELIVERED.load(Ordering::Relaxed);
@@ -673,18 +698,24 @@ pub fn render_metrics() -> String {
 
     format!(
         concat!(
-            "# HELP waddle_connected_users Currently connected users.\n",
+            "# HELP waddle_connected_users Current connection-registry entries in this process; clustered relay mirrors may add entries.\n",
             "# TYPE waddle_connected_users gauge\n",
             "waddle_connected_users {connected_users}\n",
-            "# HELP waddle_room_count Active MUC room count.\n",
+            "# HELP waddle_room_count Current room-registry entries sampled in this process; entries may be stale until actor cleanup.\n",
             "# TYPE waddle_room_count gauge\n",
             "waddle_room_count {room_count}\n",
+            "# HELP waddle_room_registry_sample_last_success_unixtime_seconds Unix timestamp of the last successful production room-registry count sample.\n",
+            "# TYPE waddle_room_registry_sample_last_success_unixtime_seconds gauge\n",
+            "waddle_room_registry_sample_last_success_unixtime_seconds {room_registry_sample_last_success_unixtime_seconds}\n",
+            "{process_start_time_lines}",
             "# HELP waddle_messages_total Total processed message stanzas.\n",
             "# TYPE waddle_messages_total counter\n",
             "waddle_messages_total {messages_total}\n",
             "# HELP waddle_messages_per_second Processed message stanzas in the last full second.\n",
             "# TYPE waddle_messages_per_second gauge\n",
             "waddle_messages_per_second {messages_per_second}\n",
+            "{message_archive_attempt_lines}",
+            "{auth_terminal_attempt_lines}",
             "# HELP waddle_broadcast_delivered_total Non-blocking broadcast attempts that enqueued on the recipient's outbound channel.\n",
             "# TYPE waddle_broadcast_delivered_total counter\n",
             "waddle_broadcast_delivered_total {broadcast_delivered}\n",
@@ -776,8 +807,24 @@ pub fn render_metrics() -> String {
         ),
         connected_users = connected_users,
         room_count = room_count,
+        room_registry_sample_last_success_unixtime_seconds = room_registry_sample_last_success_unixtime_seconds,
+        process_start_time_lines = {
+            let mut buf = String::new();
+            process_start::render(&mut buf);
+            buf
+        },
         messages_total = messages_total,
         messages_per_second = messages_per_second,
+        message_archive_attempt_lines = {
+            let mut buf = String::new();
+            archive_attempts::render(&mut buf);
+            buf
+        },
+        auth_terminal_attempt_lines = {
+            let mut buf = String::new();
+            auth_attempts::render(&mut buf);
+            buf
+        },
         broadcast_delivered = broadcast_delivered,
         broadcast_not_connected = broadcast_not_connected,
         broadcast_dropped_full = broadcast_dropped_full,
@@ -818,6 +865,23 @@ pub fn render_metrics() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn room_registry_sample_success_timestamp_is_exported() {
+        let _guard = metrics_test_lock().lock().await;
+        reset_metrics_for_test();
+
+        record_room_registry_sample_success();
+        let timestamp = ROOM_REGISTRY_SAMPLE_LAST_SUCCESS_UNIXTIME_SECONDS.load(Ordering::Acquire);
+        assert!(timestamp > 0);
+
+        let rendered = render_metrics();
+        assert!(rendered
+            .contains("# TYPE waddle_room_registry_sample_last_success_unixtime_seconds gauge"));
+        assert!(rendered.contains(&format!(
+            "waddle_room_registry_sample_last_success_unixtime_seconds {timestamp}"
+        )));
+    }
 
     #[tokio::test]
     async fn test_decrement_saturates_at_zero() {
@@ -884,6 +948,30 @@ mod tests {
         assert!(rendered.contains("waddle_connected_users 1"));
         assert!(rendered.contains("waddle_room_count 1"));
         assert!(rendered.contains("waddle_messages_total 1"));
+    }
+
+    #[tokio::test]
+    async fn archive_chain_invalid_counter_increments_renders_and_resets() {
+        let _guard = metrics_test_lock().lock().await;
+        reset_metrics_for_test();
+
+        increment_message_archive_attempt(
+            MessageArchiveKind::Room,
+            MessageArchiveOutcome::ChainInvalid,
+        );
+        let rendered = render_metrics();
+        assert!(rendered.contains(
+            "waddle_message_archive_attempts_total{kind=\"room\",outcome=\"chain_invalid\"} 1"
+        ));
+        assert!(rendered.contains("# TYPE waddle_message_archive_chain_invalid_total counter"));
+        assert!(rendered.contains("waddle_message_archive_chain_invalid_total 1"));
+
+        reset_metrics_for_test();
+        let cleared = render_metrics();
+        assert!(cleared.contains(
+            "waddle_message_archive_attempts_total{kind=\"room\",outcome=\"chain_invalid\"} 0"
+        ));
+        assert!(cleared.contains("waddle_message_archive_chain_invalid_total 0"));
     }
 
     #[tokio::test]

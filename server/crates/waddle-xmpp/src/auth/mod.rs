@@ -2,40 +2,55 @@
 //!
 //! Implements SASL authentication for XMPP connections, including:
 //! - SASL PLAIN (username/password or JID/token)
-//! - SASL OAUTHBEARER (RFC 7628, XEP-0493)
+//! - SASL OAUTHBEARER (RFC 7628)
 //! - SASL SCRAM-SHA-256 (RFC 5802, RFC 7677)
 
+pub mod oauthbearer;
 pub mod scram;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use jid::BareJid;
+use thiserror::Error;
 
+pub use oauthbearer::{
+    parse_oauthbearer, OAuthBearerCredentials, OAuthBearerParseError, OAuthBearerResult,
+};
 pub use scram::{
-    encode_sasl_name, generate_salt, generate_scram_keys, ScramServer, ScramState,
+    encode_sasl_name, generate_salt, generate_scram_keys, ScramFinalError, ScramServer, ScramState,
     ServerFinalMessage, ServerFirstMessage, DEFAULT_ITERATIONS,
 };
 
 use crate::XmppError;
 
 /// SASL authentication mechanism.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaslMechanism {
     /// PLAIN mechanism (RFC 4616)
     Plain,
-    /// OAUTHBEARER mechanism (RFC 7628, XEP-0493)
+    /// OAUTHBEARER mechanism (RFC 7628)
     OAuthBearer,
     /// SCRAM-SHA-256 mechanism (RFC 5802, RFC 7677)
     ScramSha256,
+    /// A syntactically valid but unsupported mechanism, with the attacker
+    /// supplied wire name discarded at the XML boundary.
+    Unsupported,
 }
 
 impl SaslMechanism {
     /// Parse a mechanism name string into a SaslMechanism.
     pub fn parse(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
+        match s {
             "PLAIN" => Some(SaslMechanism::Plain),
             "OAUTHBEARER" => Some(SaslMechanism::OAuthBearer),
             "SCRAM-SHA-256" => Some(SaslMechanism::ScramSha256),
             _ => None,
         }
+    }
+
+    /// Classify a mechanism name received from the wire without allowing the
+    /// untyped string to flow beyond the XML parser boundary.
+    pub fn from_wire_name(name: &str) -> Self {
+        Self::parse(name).unwrap_or(Self::Unsupported)
     }
 }
 
@@ -45,7 +60,78 @@ impl std::fmt::Display for SaslMechanism {
             SaslMechanism::Plain => write!(f, "PLAIN"),
             SaslMechanism::OAuthBearer => write!(f, "OAUTHBEARER"),
             SaslMechanism::ScramSha256 => write!(f, "SCRAM-SHA-256"),
+            SaslMechanism::Unsupported => f.write_str("UNSUPPORTED"),
         }
+    }
+}
+
+/// Invalid base64 at the SASL XML boundary.
+#[derive(Debug, Error)]
+#[error("invalid SASL base64 payload")]
+pub struct InvalidSaslPayload(#[source] base64::DecodeError);
+
+fn decode_sasl_payload(encoded: &str) -> Result<Vec<u8>, InvalidSaslPayload> {
+    let encoded = encoded.trim();
+    if encoded.is_empty() || encoded == "=" {
+        return Ok(Vec::new());
+    }
+    BASE64_STANDARD.decode(encoded).map_err(InvalidSaslPayload)
+}
+
+/// Decoded SASL initial response carried by `<auth/>` or SASL2
+/// `<initial-response/>`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SaslInitialResponse(Vec<u8>);
+
+impl std::fmt::Debug for SaslInitialResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SaslInitialResponse")
+            .field("len", &self.0.len())
+            .field("payload", &"<redacted>")
+            .finish()
+    }
+}
+
+impl SaslInitialResponse {
+    pub const fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn decode(encoded: &str) -> Result<Self, InvalidSaslPayload> {
+        decode_sasl_payload(encoded).map(Self)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Decoded SASL continuation response carried by `<response/>`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SaslResponsePayload(Vec<u8>);
+
+impl std::fmt::Debug for SaslResponsePayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SaslResponsePayload")
+            .field("len", &self.0.len())
+            .field("payload", &"<redacted>")
+            .finish()
+    }
+}
+
+impl SaslResponsePayload {
+    pub fn decode(encoded: &str) -> Result<Self, InvalidSaslPayload> {
+        decode_sasl_payload(encoded).map(Self)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -96,111 +182,6 @@ pub fn parse_plain(data: &[u8]) -> Result<SaslCredentials, XmppError> {
     })
 }
 
-/// Parsed OAUTHBEARER credentials.
-#[derive(Debug, Clone)]
-pub struct OAuthBearerCredentials {
-    /// The OAuth bearer token
-    pub token: String,
-    /// Optional authorization identity (authzid)
-    pub authzid: Option<String>,
-}
-
-/// Result of parsing OAUTHBEARER SASL data.
-#[derive(Debug, Clone)]
-pub enum OAuthBearerResult {
-    /// Client sent an empty/discovery request
-    /// Per XEP-0493 §3.2, server should respond with discovery URL
-    DiscoveryRequest,
-    /// Client sent valid credentials with a token
-    Credentials(OAuthBearerCredentials),
-}
-
-/// Parse OAUTHBEARER SASL data (RFC 7628).
-///
-/// OAUTHBEARER format (RFC 7628 Section 3.1):
-/// ```text
-/// kvsep = %x01
-/// gs2-header = "n,," / ("n," authzid ",")
-/// authzid = "a=" saslname
-/// client-initial-response = gs2-header kvsep "auth=Bearer " token kvsep kvsep
-/// ```
-///
-/// Example with token: `n,,\x01auth=Bearer TOKEN\x01\x01`
-/// Empty request for discovery: `n,,\x01\x01` (or just empty data)
-///
-/// Per XEP-0493:
-/// - Empty or minimal data triggers OAuth discovery response
-/// - Token data is validated against the session store
-pub fn parse_oauthbearer(data: &[u8]) -> Result<OAuthBearerResult, XmppError> {
-    // Empty data or just "n,," means discovery request
-    if data.is_empty() {
-        return Ok(OAuthBearerResult::DiscoveryRequest);
-    }
-
-    let data_str = String::from_utf8_lossy(data);
-
-    // Check for minimal/discovery request patterns
-    // XEP-0493 specifies sending empty OAUTHBEARER or just GS2 header for discovery
-    // Common patterns: "", "n,,\x01\x01", "n,,"
-    if data_str.trim().is_empty()
-        || data_str == "n,,"
-        || data_str == "n,,\x01\x01"
-        || data_str == "n,,\x01"
-    {
-        return Ok(OAuthBearerResult::DiscoveryRequest);
-    }
-
-    // Parse GS2 header to extract optional authzid
-    let mut authzid = None;
-    let mut rest = data_str.as_ref();
-
-    // GS2 header starts with "n," optionally followed by "a=authzid"
-    if let Some(stripped) = rest.strip_prefix("n,") {
-        rest = stripped;
-
-        // Check for authzid (a=...)
-        if let Some(stripped) = rest.strip_prefix("a=") {
-            // Find the end of authzid (comma)
-            if let Some(comma_pos) = stripped.find(',') {
-                authzid = Some(stripped[..comma_pos].to_string());
-                rest = &stripped[comma_pos + 1..];
-            }
-        } else if let Some(stripped) = rest.strip_prefix(',') {
-            // Empty authzid case: "n,,"
-            rest = stripped;
-        }
-    }
-
-    // Now parse the key-value pairs separated by \x01
-    let parts: Vec<&str> = rest.split('\x01').collect();
-
-    // Look for auth=Bearer token
-    for part in parts {
-        if let Some(token_part) = part.strip_prefix("auth=Bearer ") {
-            let token = token_part.trim().to_string();
-            if !token.is_empty() {
-                return Ok(OAuthBearerResult::Credentials(OAuthBearerCredentials {
-                    token,
-                    authzid,
-                }));
-            }
-        }
-        // Also handle "auth=Bearer" without space (some clients)
-        if let Some(token_part) = part.strip_prefix("auth=Bearer") {
-            let token = token_part.trim().to_string();
-            if !token.is_empty() {
-                return Ok(OAuthBearerResult::Credentials(OAuthBearerCredentials {
-                    token,
-                    authzid,
-                }));
-            }
-        }
-    }
-
-    // No token found - treat as discovery request
-    Ok(OAuthBearerResult::DiscoveryRequest)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,21 +207,9 @@ mod tests {
     // OAUTHBEARER tests
 
     #[test]
-    fn test_parse_oauthbearer_empty() {
-        let result = parse_oauthbearer(b"").unwrap();
-        assert!(matches!(result, OAuthBearerResult::DiscoveryRequest));
-    }
-
-    #[test]
-    fn test_parse_oauthbearer_discovery_gs2_only() {
-        let result = parse_oauthbearer(b"n,,").unwrap();
-        assert!(matches!(result, OAuthBearerResult::DiscoveryRequest));
-    }
-
-    #[test]
-    fn test_parse_oauthbearer_discovery_minimal() {
-        let result = parse_oauthbearer(b"n,,\x01\x01").unwrap();
-        assert!(matches!(result, OAuthBearerResult::DiscoveryRequest));
+    fn test_parse_oauthbearer_empty_credentials() {
+        let result = parse_oauthbearer(b"n,,\x01auth=\x01\x01").unwrap();
+        assert!(matches!(result, OAuthBearerResult::EmptyCredentials));
     }
 
     #[test]
@@ -250,10 +219,10 @@ mod tests {
         let result = parse_oauthbearer(data).unwrap();
 
         if let OAuthBearerResult::Credentials(creds) = result {
-            assert_eq!(creds.token, "test-token-123");
-            assert!(creds.authzid.is_none());
+            assert_eq!(creds.token().expose_secret(), "test-token-123");
+            assert!(creds.authorization_identity().is_none());
         } else {
-            panic!("Expected Credentials, got DiscoveryRequest");
+            panic!("expected OAUTHBEARER credentials");
         }
     }
 
@@ -264,46 +233,39 @@ mod tests {
         let result = parse_oauthbearer(data).unwrap();
 
         if let OAuthBearerResult::Credentials(creds) = result {
-            assert_eq!(creds.token, "test-token-456");
-            assert_eq!(creds.authzid, Some("user@example.com".to_string()));
+            assert_eq!(creds.token().expose_secret(), "test-token-456");
+            assert_eq!(
+                creds.authorization_identity().map(ToString::to_string),
+                Some("user@example.com".to_string())
+            );
         } else {
-            panic!("Expected Credentials, got DiscoveryRequest");
+            panic!("expected OAUTHBEARER credentials");
         }
     }
 
     #[test]
     fn test_parse_oauthbearer_no_space_after_bearer() {
-        // Some clients don't include the space after "Bearer"
         let data = b"n,,\x01auth=Bearertest-token-789\x01\x01";
-        let result = parse_oauthbearer(data).unwrap();
-
-        if let OAuthBearerResult::Credentials(creds) = result {
-            assert_eq!(creds.token, "test-token-789");
-        } else {
-            panic!("Expected Credentials, got DiscoveryRequest");
-        }
+        assert_eq!(
+            parse_oauthbearer(data).unwrap_err(),
+            OAuthBearerParseError::UnsupportedAuthorizationScheme
+        );
     }
 
     #[test]
     fn test_sasl_mechanism_parse() {
         assert_eq!(SaslMechanism::parse("PLAIN"), Some(SaslMechanism::Plain));
-        assert_eq!(SaslMechanism::parse("plain"), Some(SaslMechanism::Plain));
+        assert_eq!(SaslMechanism::parse("plain"), None);
         assert_eq!(
             SaslMechanism::parse("OAUTHBEARER"),
             Some(SaslMechanism::OAuthBearer)
         );
-        assert_eq!(
-            SaslMechanism::parse("oauthbearer"),
-            Some(SaslMechanism::OAuthBearer)
-        );
+        assert_eq!(SaslMechanism::parse("oauthbearer"), None);
         assert_eq!(
             SaslMechanism::parse("SCRAM-SHA-256"),
             Some(SaslMechanism::ScramSha256)
         );
-        assert_eq!(
-            SaslMechanism::parse("scram-sha-256"),
-            Some(SaslMechanism::ScramSha256)
-        );
+        assert_eq!(SaslMechanism::parse("scram-sha-256"), None);
         assert_eq!(SaslMechanism::parse("UNKNOWN"), None);
     }
 
@@ -312,5 +274,15 @@ mod tests {
         assert_eq!(SaslMechanism::Plain.to_string(), "PLAIN");
         assert_eq!(SaslMechanism::OAuthBearer.to_string(), "OAUTHBEARER");
         assert_eq!(SaslMechanism::ScramSha256.to_string(), "SCRAM-SHA-256");
+    }
+
+    #[test]
+    fn typed_sasl_payload_debug_is_redacted() {
+        let initial = SaslInitialResponse(b"Bearer session-secret".to_vec());
+        let response = SaslResponsePayload(b"session-secret".to_vec());
+        for debug in [format!("{initial:?}"), format!("{response:?}")] {
+            assert!(debug.contains("<redacted>"));
+            assert!(!debug.contains("session-secret"));
+        }
     }
 }

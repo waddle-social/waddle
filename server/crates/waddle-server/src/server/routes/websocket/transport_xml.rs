@@ -246,7 +246,11 @@ pub(super) fn build_conflict_stream_error() -> String {
 /// clustering/Postgres at all. This slice is what first gates the
 /// advertisement and fixes the wire shape (`isr_stream_feature_element`),
 /// not a "reintroduction" of something Phase 0 had removed.
-pub(super) fn build_stream_features_xml(authenticated: bool, isr_available: bool) -> String {
+pub(super) fn build_stream_features_xml(
+    authenticated: bool,
+    isr_available: bool,
+    oauthbearer_available: bool,
+) -> String {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
         features = features.append(Element::builder("bind", waddle_xmpp::ns::BIND).build());
@@ -260,20 +264,19 @@ pub(super) fn build_stream_features_xml(authenticated: bool, isr_available: bool
             features = features.append(waddle_xmpp::isr::isr_stream_feature_element());
         }
     } else {
-        features = features.append(
-            Element::builder("mechanisms", waddle_xmpp::ns::SASL)
-                .append(
-                    Element::builder("mechanism", waddle_xmpp::ns::SASL)
-                        .append("SCRAM-SHA-256")
-                        .build(),
-                )
-                .append(
-                    Element::builder("mechanism", waddle_xmpp::ns::SASL)
-                        .append("OAUTHBEARER")
-                        .build(),
-                )
+        let mut mechanisms = Element::builder("mechanisms", waddle_xmpp::ns::SASL).append(
+            Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                .append("SCRAM-SHA-256")
                 .build(),
         );
+        if oauthbearer_available {
+            mechanisms = mechanisms.append(
+                Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                    .append("OAUTHBEARER")
+                    .build(),
+            );
+        }
+        features = features.append(mechanisms.build());
     }
 
     element_to_xml(features.build())
@@ -282,18 +285,49 @@ pub(super) fn build_stream_features_xml(authenticated: bool, isr_available: bool
 pub(super) fn build_stream_features_for_phase(
     phase: &ConnectionPhase,
     isr_available: bool,
+    oauthbearer_available: bool,
 ) -> String {
-    build_stream_features_xml(phase.is_authenticated(), isr_available)
+    build_stream_features_xml(
+        phase.is_authenticated(),
+        isr_available,
+        oauthbearer_available,
+    )
 }
 
 pub(super) fn sasl_success_xml() -> String {
     element_to_xml(Element::builder("success", waddle_xmpp::ns::SASL).build())
 }
 
-pub(super) fn sasl_failure_xml(condition: &str) -> String {
+/// RFC 6120 SASL failure conditions emitted by this transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SaslFailureCondition {
+    Aborted,
+    IncorrectEncoding,
+    InvalidMechanism,
+    InvalidAuthzid,
+    MalformedRequest,
+    NotAuthorized,
+    TemporaryAuthFailure,
+}
+
+impl SaslFailureCondition {
+    const fn element_name(self) -> &'static str {
+        match self {
+            Self::Aborted => "aborted",
+            Self::IncorrectEncoding => "incorrect-encoding",
+            Self::InvalidMechanism => "invalid-mechanism",
+            Self::InvalidAuthzid => "invalid-authzid",
+            Self::MalformedRequest => "malformed-request",
+            Self::NotAuthorized => "not-authorized",
+            Self::TemporaryAuthFailure => "temporary-auth-failure",
+        }
+    }
+}
+
+pub(super) fn sasl_failure_xml(condition: SaslFailureCondition) -> String {
     element_to_xml(
         Element::builder("failure", waddle_xmpp::ns::SASL)
-            .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
+            .append(Element::builder(condition.element_name(), waddle_xmpp::ns::SASL).build())
             .build(),
     )
 }

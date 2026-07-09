@@ -6,7 +6,12 @@ interface ImportMetaEnv {
   readonly PUBLIC_FARO_URL: string;
   readonly PUBLIC_FARO_APP_NAME: string;
   readonly PUBLIC_FARO_APP_VERSION: string;
-  readonly PUBLIC_FARO_ENVIRONMENT: string;
+  readonly PUBLIC_FARO_DEPLOYMENT_ENVIRONMENT: string;
+  readonly PUBLIC_FARO_CLUSTER: string;
+  readonly PUBLIC_FARO_NAMESPACE: string;
+  readonly PUBLIC_FARO_SOURCE_ID: string;
+  readonly PUBLIC_FARO_RELEASE: string;
+  readonly PUBLIC_BUILD_IDENTITY_MARKER: string;
 }
 
 interface ImportMeta {

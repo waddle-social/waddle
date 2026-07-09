@@ -28,17 +28,43 @@ static LOGGER_PROVIDER: std::sync::OnceLock<SdkLoggerProvider> = std::sync::Once
 
 /// Build the OpenTelemetry resource with service information.
 fn build_resource() -> Resource {
-    let service_name =
-        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "waddle-server".to_string());
-    let service_version = std::env::var("OTEL_SERVICE_VERSION")
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+    build_resource_from(
+        |name| std::env::var(name).ok(),
+        crate::build_identity::printable_git_sha(),
+    )
+}
 
-    Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", service_name),
-            KeyValue::new("service.version", service_version),
-        ])
-        .build()
+fn build_resource_from(get: impl Fn(&str) -> Option<String>, build_commit: &str) -> Resource {
+    let non_empty = |name: &str| get(name).filter(|value| !value.trim().is_empty());
+    let service_name =
+        non_empty("OTEL_SERVICE_NAME").unwrap_or_else(|| "waddle-server".to_string());
+    let service_instance_id = non_empty("OTEL_SERVICE_INSTANCE_ID")
+        .or_else(|| non_empty("K8S_POD_UID"))
+        .or_else(|| non_empty("HOSTNAME"))
+        .unwrap_or_else(|| format!("local-process-{}", std::process::id()));
+
+    let mut attributes = vec![
+        KeyValue::new("service.name", service_name),
+        // This value is intentionally compile-time identity. Runtime
+        // environment variables are deployment metadata and cannot relabel
+        // telemetry emitted by a different binary revision.
+        KeyValue::new("service.version", build_commit.to_owned()),
+        KeyValue::new("service.instance.id", service_instance_id),
+    ];
+    if let Some(pod_name) = non_empty("K8S_POD_NAME") {
+        attributes.push(KeyValue::new("k8s.pod.name", pod_name));
+    }
+    if let Some(namespace) = non_empty("K8S_NAMESPACE_NAME") {
+        attributes.push(KeyValue::new("k8s.namespace.name", namespace));
+    }
+    if let Some(environment) = non_empty("DEPLOYMENT_ENVIRONMENT_NAME") {
+        attributes.push(KeyValue::new("deployment.environment.name", environment));
+    }
+    if let Some(cluster) = non_empty("DEPLOYMENT_CLUSTER_NAME") {
+        attributes.push(KeyValue::new("k8s.cluster.name", cluster));
+    }
+
+    Resource::builder().with_attributes(attributes).build()
 }
 
 fn default_filter() -> EnvFilter {
@@ -121,7 +147,8 @@ fn build_log_filter() -> EnvFilter {
 /// Environment variables:
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint (default: http://localhost:4317)
 /// - `OTEL_SERVICE_NAME`: Service name (default: waddle-server)
-/// - `OTEL_SERVICE_VERSION`: Service version (default: crate version)
+/// - `DEPLOYMENT_ENVIRONMENT_NAME`: Deployment environment resource attribute
+/// - `DEPLOYMENT_CLUSTER_NAME`: Kubernetes cluster resource attribute
 /// - `RUST_LOG`: Log filter (default: info)
 ///
 /// # Example
@@ -298,6 +325,82 @@ pub fn shutdown() {
     }
 
     tracing::info!("Telemetry shutdown complete");
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use opentelemetry::Key;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn resource_has_unique_instance_and_deployment_identity() {
+        let values = BTreeMap::from([
+            ("K8S_NAMESPACE_NAME", "waddle"),
+            ("K8S_POD_NAME", "waddle-server-abc"),
+            ("K8S_POD_UID", "pod-uid-123"),
+            ("DEPLOYMENT_ENVIRONMENT_NAME", "production"),
+            ("DEPLOYMENT_CLUSTER_NAME", "waddle-cloud"),
+            ("WADDLE_GIT_SHA", "0123456789abcdef0123456789abcdef01234567"),
+        ]);
+        let resource = build_resource_from(
+            |name| values.get(name).map(ToString::to_string),
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+
+        assert_eq!(
+            resource.get(&Key::new("service.instance.id")),
+            Some("pod-uid-123".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("service.version")),
+            Some("0123456789abcdef0123456789abcdef01234567".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("k8s.pod.name")),
+            Some("waddle-server-abc".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("k8s.namespace.name")),
+            Some("waddle".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("deployment.environment.name")),
+            Some("production".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("k8s.cluster.name")),
+            Some("waddle-cloud".into())
+        );
+    }
+
+    #[test]
+    fn runtime_values_cannot_override_compiled_service_version() {
+        let values = BTreeMap::from([
+            ("OTEL_SERVICE_NAME", "custom-server"),
+            ("OTEL_SERVICE_VERSION", "release-1"),
+            ("OTEL_SERVICE_INSTANCE_ID", "instance-1"),
+            ("K8S_POD_UID", "pod-fallback"),
+            ("WADDLE_GIT_SHA", "commit-fallback"),
+        ]);
+        let resource = build_resource_from(
+            |name| values.get(name).map(ToString::to_string),
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+
+        assert_eq!(
+            resource.get(&Key::new("service.name")),
+            Some("custom-server".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("service.version")),
+            Some("0123456789abcdef0123456789abcdef01234567".into())
+        );
+        assert_eq!(
+            resource.get(&Key::new("service.instance.id")),
+            Some("instance-1".into())
+        );
+    }
 }
 #[cfg(test)]
 mod tests {

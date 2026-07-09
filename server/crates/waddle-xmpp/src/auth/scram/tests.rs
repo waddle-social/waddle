@@ -257,7 +257,7 @@ fn test_client_final_channel_binding_mismatch_is_rejected() {
     );
 
     let result = server.process_client_final(&client_final, &stored_key, &server_key);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(ScramFinalError::Malformed)));
     assert_eq!(server.state(), &ScramState::Complete);
 }
 
@@ -370,5 +370,34 @@ fn test_wrong_password() {
 
     // Server should reject
     let result = server.process_client_final(&client_final, &stored_key, &server_key);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(ScramFinalError::InvalidCredentials)));
+}
+
+#[test]
+fn client_final_failure_classification_is_typed() {
+    let mut server = ScramServer::new();
+    assert!(matches!(
+        server.process_client_final("c=biws,r=nonce,p=proof", &[], &[]),
+        Err(ScramFinalError::InvalidState)
+    ));
+
+    let mut server = ScramServer::new();
+    server
+        .process_client_first("n,,n=user,r=client-nonce")
+        .expect("client first");
+    let missing_proof = format!("c=biws,r={}", server.combined_nonce);
+    assert!(matches!(
+        server.process_client_final(&missing_proof, &[0; 32], &[0; 32]),
+        Err(ScramFinalError::Malformed)
+    ));
+
+    let mut server = ScramServer::new();
+    server
+        .process_client_first("n,,n=user,r=client-nonce")
+        .expect("client first");
+    let invalid_proof = format!("c=biws,r={},p=not-base64!", server.combined_nonce);
+    assert!(matches!(
+        server.process_client_final(&invalid_proof, &[0; 32], &[0; 32]),
+        Err(ScramFinalError::Malformed)
+    ));
 }

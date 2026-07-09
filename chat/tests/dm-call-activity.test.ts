@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import {
   $dmCallActivities,
   DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
@@ -723,7 +723,7 @@ describe("DM call activity", () => {
     expect(readDmCallActivity(bob, new Date("2026-05-26T10:00:01.000Z"))).toBeNull();
   });
 
-  test("scheduled prune timer clears subscribed activity after the fallback window", async () => {
+  test("scheduled prune timer clears subscribed activity after the fallback window", () => {
     const originalSetTimeout = globalThis.setTimeout;
     const originalClearTimeout = globalThis.clearTimeout;
     const timer = { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
@@ -739,12 +739,14 @@ describe("DM call activity", () => {
       };
       return timer;
     }) as typeof setTimeout;
-    globalThis.clearTimeout = (() => {
-      scheduledPrune = null;
+    globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout>) => {
+      if (handle === timer) scheduledPrune = null;
+      else originalClearTimeout(handle);
     }) as typeof clearTimeout;
 
     try {
-      const timerArmedAt = new Date();
+      const timerArmedAt = new Date("2026-05-25T10:00:00.000Z");
+      setSystemTime(timerArmedAt);
       const timestamp = new Date(timerArmedAt.getTime() - DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS).toISOString();
       applyDmCallEvent({
         event: {
@@ -763,11 +765,13 @@ describe("DM call activity", () => {
       expect(scheduledDelay).toBe(1_000);
       expect(scheduledPrune).not.toBeNull();
 
-      await new Promise<void>((resolve) => originalSetTimeout(resolve, 5));
-      scheduledPrune?.();
+      const runScheduledPrune = scheduledPrune as (() => void) | null;
+      setSystemTime(new Date(timerArmedAt.getTime() + 1_000));
+      runScheduledPrune?.();
 
       expect($dmCallActivities.get()).toEqual({});
     } finally {
+      setSystemTime();
       globalThis.setTimeout = originalSetTimeout;
       globalThis.clearTimeout = originalClearTimeout;
     }
@@ -789,8 +793,9 @@ describe("DM call activity", () => {
       };
       return timer;
     }) as typeof setTimeout;
-    globalThis.clearTimeout = (() => {
-      scheduledRefresh = null;
+    globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout>) => {
+      if (handle === timer) scheduledRefresh = null;
+      else originalClearTimeout(handle);
     }) as typeof clearTimeout;
 
     try {

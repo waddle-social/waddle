@@ -334,6 +334,7 @@ async fn xep_0313_archive_direct_persists_to_mam_storage() {
     msg.id = Some(xmpp_parsers::message::Id("orig-1".to_string()));
 
     let events = vec![OutboundEvent::ArchiveDirect {
+        side: waddle_xmpp::protocol::ArchiveSide::Sender,
         archive_jid: archive_jid.clone(),
         from,
         to,
@@ -476,6 +477,7 @@ async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_
 
     let events = vec![
         OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Sender,
             archive_jid: alice.clone(),
             from: alice.clone(),
             to: bob.clone(),
@@ -561,6 +563,7 @@ async fn origin_id_dedup_rewrites_downstream_archive_refs_to_existing_mam_id() {
 
     let events = vec![
         OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Sender,
             archive_jid: alice.clone(),
             from: alice.clone(),
             to: bob.clone(),
@@ -650,6 +653,7 @@ async fn origin_id_collision_with_distinct_content_keeps_fresh_archive_refs() {
 
     let events = vec![
         OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Sender,
             archive_jid: alice.clone(),
             from: alice.clone(),
             to: bob.clone(),
@@ -697,12 +701,14 @@ async fn xep_0313_archive_direct_writes_one_entry_per_event() {
 
     let events = vec![
         OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Sender,
             archive_jid: alice.clone(),
             from: alice.clone(),
             to: bob.clone(),
             message: Box::new(msg.clone()),
         },
         OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Recipient,
             archive_jid: bob.clone(),
             from: alice.clone(),
             to: bob.clone(),
@@ -728,6 +734,76 @@ async fn xep_0313_archive_direct_writes_one_entry_per_event() {
         bob_archive.messages.len(),
         1,
         "bob archive has the recipient-pass entry"
+    );
+}
+
+#[tokio::test]
+async fn archive_direct_metrics_count_only_the_typed_sender_pass_including_self_dm() {
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::prometheus::{MessageArchiveKind, MessageArchiveOutcome};
+    use waddle_xmpp::protocol::ArchiveSide;
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+    let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
+    let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let attempts = std::sync::Mutex::new(Vec::new());
+    let record = |kind, outcome| attempts.lock().expect("attempt lock").push((kind, outcome));
+
+    for (side, archive_jid, from, to, id) in [
+        (
+            ArchiveSide::Sender,
+            alice.clone(),
+            alice.clone(),
+            bob.clone(),
+            "sender-pass",
+        ),
+        (
+            ArchiveSide::Recipient,
+            bob.clone(),
+            alice.clone(),
+            bob.clone(),
+            "recipient-pass",
+        ),
+        (
+            ArchiveSide::Sender,
+            alice.clone(),
+            alice.clone(),
+            alice.clone(),
+            "self-sender-pass",
+        ),
+        (
+            ArchiveSide::Recipient,
+            alice.clone(),
+            alice.clone(),
+            alice.clone(),
+            "self-recipient-pass",
+        ),
+    ] {
+        let mut message = chat_msg(&format!("{from}/web"), &to.to_string(), id);
+        message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+        super::direct_archive::archive_direct_with_recorder(
+            &deps,
+            side,
+            archive_jid,
+            from,
+            to,
+            Box::new(message),
+            &record,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        *attempts.lock().expect("attempt lock"),
+        vec![
+            (MessageArchiveKind::Direct, MessageArchiveOutcome::Committed),
+            (MessageArchiveKind::Direct, MessageArchiveOutcome::Committed),
+        ],
+        "recipient passes, including the same-bare-JID self-DM pass, must not enter the DM metric denominator",
     );
 }
 
@@ -816,6 +892,7 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "yo");
     let events = vec![OutboundEvent::ArchiveDirect {
+        side: waddle_xmpp::protocol::ArchiveSide::Sender,
         archive_jid: alice.clone(),
         from: alice,
         to: bob,

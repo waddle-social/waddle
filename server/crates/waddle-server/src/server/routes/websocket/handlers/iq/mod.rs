@@ -7,10 +7,9 @@ use waddle_xmpp::{
     commands::{CommandContext, CommandResult},
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
-        build_disco_items_response, community_service_features, muc_room_features,
-        muc_service_features, parse_disco_info_query, parse_disco_items_query,
-        push_service_features, spaces_service_features, upload_service_features, DiscoItem,
-        Feature, Identity,
+        build_disco_items_response, community_service_features, parse_disco_info_query,
+        parse_disco_items_query, push_service_features, spaces_service_features,
+        upload_service_features, DiscoItem, Feature, Identity,
     },
     mam::{
         build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
@@ -69,7 +68,7 @@ use waddle_xmpp::{
         is_search_form_request, is_search_request, is_time_query, is_version_query,
         parse_command_from_iq, parse_moderation_iq, parse_search_request, AdHocCommandCondition,
         ChannelResult, Command, CommandError, CommandStatus, RsmRequest, RsmResponse, Searchable,
-        SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };

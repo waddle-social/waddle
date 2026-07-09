@@ -1,6 +1,6 @@
 use super::*;
 
-#[instrument(skip(state))]
+#[instrument(skip_all)]
 pub(super) async fn callback_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<CallbackQuery>,
@@ -188,12 +188,9 @@ pub(super) async fn callback_handler(
                 None => crate::profile::PhotoIntent::RemoveIfOidcOwned,
                 Some(s) => match url::Url::parse(s) {
                     Ok(url) => crate::profile::PhotoIntent::SetFromUrl(url),
-                    Err(parse_err) => {
+                    Err(_) => {
                         tracing::warn!(
-                            jid = %linked.user.xmpp_localpart,
-                            url = %s,
-                            error = %parse_err,
-                            "OIDC `picture` claim is not a parseable URL; skipping PHOTO sync (prior avatar preserved)"
+                            "OIDC picture claim is not a parseable URL; skipping PHOTO sync"
                         );
                         crate::profile::PhotoIntent::Skip
                     }
@@ -297,43 +294,6 @@ pub(super) async fn callback_handler(
                 axum::response::Html("<html><body><h1>Device authorized</h1><p>You can close this window.</p></body></html>".to_string()),
             )
                 .into_response()
-        }
-        PendingFlow::Xmpp {
-            client_redirect_uri,
-            client_state,
-            client_code_challenge,
-        } => {
-            let auth_code = Uuid::new_v4().to_string();
-            state.xmpp_auth_codes.insert(
-                auth_code.clone(),
-                XmppAuthCode {
-                    session_id: session.id,
-                    redirect_uri: client_redirect_uri.clone(),
-                    code_challenge: client_code_challenge,
-                    created_at: Utc::now(),
-                },
-            );
-
-            let mut redirect = match url::Url::parse(&client_redirect_uri) {
-                Ok(v) => v,
-                Err(err) => {
-                    error!(error = %err, "Invalid XMPP redirect URI");
-                    return auth_error_to_response(AuthError::InvalidRequest(
-                        "invalid xmpp redirect_uri".to_string(),
-                    ))
-                    .into_response();
-                }
-            };
-
-            {
-                let mut qp = redirect.query_pairs_mut();
-                qp.append_pair("code", &auth_code);
-                if let Some(state_value) = client_state {
-                    qp.append_pair("state", &state_value);
-                }
-            }
-
-            Redirect::temporary(redirect.as_str()).into_response()
         }
     }
 }

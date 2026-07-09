@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::disco_targets::{target_identities, DiscoTarget};
 
 const FEED_NODE_LABEL: &str = "Community Feed";
 const STORIES_NODE_LABEL: &str = "Community Stories";
@@ -43,7 +44,7 @@ pub(super) fn handle_community_disco_info<'a>(
         return Some(DiscoInfoResponse::iq(response));
     }
 
-    let identities = vec![Identity::community_service(Some("Community"))];
+    let identities = target_identities(DiscoTarget::CommunityService);
     let features = community_service_features();
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))

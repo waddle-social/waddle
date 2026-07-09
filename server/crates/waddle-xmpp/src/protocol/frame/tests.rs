@@ -55,9 +55,12 @@ fn rejects_close_frame_with_whitespace_payload() {
 fn parses_scram_auth_frame() {
     let xml = r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="SCRAM-SHA-256">bixhPWFsaWNlLHI9cmFuZG9t</auth>"#;
     match parse_frame(xml).expect("auth should parse") {
-        InboundFrame::Auth { mechanism, data } => {
-            assert_eq!(mechanism, "SCRAM-SHA-256");
-            assert_eq!(data, "bixhPWFsaWNlLHI9cmFuZG9t");
+        InboundFrame::Auth {
+            mechanism,
+            initial_response,
+        } => {
+            assert_eq!(mechanism, SaslMechanism::ScramSha256);
+            assert_eq!(initial_response.as_bytes(), b"n,a=alice,r=random");
         }
         other => panic!("expected Auth, got {other:?}"),
     }
@@ -73,9 +76,47 @@ fn rejects_auth_frame_with_wrong_namespace() {
 fn parses_oauthbearer_auth_frame() {
     let xml = r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="OAUTHBEARER">biwsdG9rZW49YWJjMTIz</auth>"#;
     match parse_frame(xml).expect("oauthbearer should parse") {
-        InboundFrame::Auth { mechanism, .. } => assert_eq!(mechanism, "OAUTHBEARER"),
+        InboundFrame::Auth { mechanism, .. } => {
+            assert_eq!(mechanism, SaslMechanism::OAuthBearer)
+        }
         other => panic!("expected Auth, got {other:?}"),
     }
+}
+
+#[test]
+fn mechanism_names_are_classified_with_registered_case() {
+    let xml = r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="oauthbearer">=</auth>"#;
+    match parse_frame(xml).expect("syntactically valid unsupported mechanism") {
+        InboundFrame::Auth {
+            mechanism: SaslMechanism::Unsupported,
+            initial_response,
+        } => {
+            assert!(initial_response.is_empty());
+        }
+        other => panic!("expected typed unsupported mechanism, got {other:?}"),
+    }
+    let classified = SaslMechanism::from_wire_name("alice@example.test/private-resource");
+    assert_eq!(classified, SaslMechanism::Unsupported);
+    assert_eq!(classified.to_string(), "UNSUPPORTED");
+    assert!(!format!("{classified:?}").contains("alice"));
+}
+
+#[test]
+fn invalid_sasl_base64_is_rejected_at_the_xml_boundary() {
+    let auth =
+        r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="OAUTHBEARER">%%%</auth>"#;
+    assert!(matches!(
+        parse_frame(auth),
+        Err(ParseError::InvalidSaslInitialResponseEncoding {
+            mechanism: SaslMechanism::OAuthBearer
+        })
+    ));
+
+    let response = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">%%%</response>"#;
+    assert!(matches!(
+        parse_frame(response),
+        Err(ParseError::InvalidSaslResponseEncoding)
+    ));
 }
 
 #[test]
@@ -86,9 +127,10 @@ fn rejects_auth_frame_with_child_payload() {
 
 #[test]
 fn parses_sasl_response_frame() {
-    let xml = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1iaXdzLHI9...</response>"#;
+    let xml =
+        r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1iaXdzLHI9bm9uY2U=</response>"#;
     match parse_frame(xml).expect("response should parse") {
-        InboundFrame::SaslResponse(data) => assert_eq!(data, "Yz1iaXdzLHI9..."),
+        InboundFrame::SaslResponse(data) => assert_eq!(data.as_bytes(), b"c=biws,r=nonce"),
         other => panic!("expected SaslResponse, got {other:?}"),
     }
 }
@@ -97,6 +139,26 @@ fn parses_sasl_response_frame() {
 fn rejects_sasl_response_with_child_payload() {
     let xml = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1i<foo/>aXdz</response>"#;
     assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+}
+
+#[test]
+fn parses_empty_sasl_abort_frame() {
+    let xml = r#"<abort xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>"#;
+    assert!(matches!(parse_frame(xml), Ok(InboundFrame::SaslAbort)));
+}
+
+#[test]
+fn rejects_sasl_abort_with_wrong_namespace_or_payload() {
+    for xml in [
+        r#"<abort xmlns="jabber:client"/>"#,
+        r#"<abort xmlns="urn:ietf:params:xml:ns:xmpp-sasl">x</abort>"#,
+        r#"<abort xmlns="urn:ietf:params:xml:ns:xmpp-sasl" reason="x"/>"#,
+    ] {
+        assert!(matches!(
+            parse_frame(xml),
+            Err(ParseError::InvalidXml(_)) | Err(ParseError::MalformedSasl(_))
+        ));
+    }
 }
 
 #[test]

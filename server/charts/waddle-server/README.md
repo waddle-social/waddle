@@ -37,6 +37,27 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set-string secret.occupantIdSecret="${OCCUPANT_ID_SECRET}"
 ```
 
+## Deployment identity and telemetry
+
+Set stable, bounded deployment scope values when exporting telemetry. The chart
+maps them to OpenTelemetry resource attributes and the `/metrics`
+`waddle_build_info` series used to prove that evidence came from one deployment:
+
+```yaml
+telemetry:
+  commit: 0123456789abcdef0123456789abcdef01234567
+  environment: production
+  cluster: self-hosted-eu-1
+```
+
+`telemetry.commit` must be the full lowercase commit used to build the deployed
+image and is exposed as release metadata. The `waddle_build_info` evidence
+identity comes from the revision compiled into the shipped Nix image, so a
+runtime override cannot impersonate another binary. Gate evidence collection
+rejects missing or `unknown` identity and any window in which the expected
+replica count does not continuously report the same commit, environment, and
+cluster.
+
 ## XMPP TLS secret (recommended)
 
 When `xmpp.enabled=true`, mount a TLS secret and pass it through chart values:
@@ -254,6 +275,9 @@ This chart supports two extra env mechanisms:
 - `containerExtraEnv`:
   - list rendered directly into `Deployment.spec.template.spec.containers[0].env`
   - supports `value` and `valueFrom`
+  - cannot override chart-managed deployment identity variables; configure
+    `telemetry.commit`, `telemetry.environment`, and `telemetry.cluster`
+    through their typed values instead
 
 ## Graceful drain
 
@@ -264,6 +288,6 @@ This chart supports two extra env mechanisms:
 ## Probes
 
 - Liveness probe: `GET /health`
-- Readiness probe: `GET /api/v1/health`
+- Readiness probe: `GET /readyz`
 
 Both are configurable via `probes.*`.

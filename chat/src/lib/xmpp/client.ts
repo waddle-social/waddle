@@ -139,6 +139,7 @@ import {
   type OutboundFileAttachment,
   type SendDirectMessageOptions,
   type SendGroupMessageOptions,
+  type SendQueueReason,
 } from "./send-types";
 import { requestPlaintextLinkPreviewLookup, trustedLinkPreviewMediaOrigin, type LinkPreviewLookupResult } from "./link-preview";
 import {
@@ -745,7 +746,7 @@ export class BrowserXmppClient {
   onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
   onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
   onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
-  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
+  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: SendQueueReason }) => void) { this.events.on("sendEnqueued", hook); }
   onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
   onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
@@ -1309,7 +1310,7 @@ export class BrowserXmppClient {
     return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(this.roomJoinKey(roomJid));
   }
 
-  private enqueueReason(): string {
+  private enqueueReason(): SendQueueReason {
     if (browserOffline()) return "offline";
     if (this.destroying) return "destroying";
     if (!this.xmpp) return "no-client";

@@ -1,6 +1,7 @@
 mod acme;
 pub(crate) mod caps_resolution;
 mod config;
+pub mod disco_targets;
 pub(crate) mod dual_registration;
 pub(crate) mod durable_membership;
 mod extension_commands;

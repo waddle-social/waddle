@@ -9,7 +9,10 @@
 //! [`ParseError`] if the frame is malformed. Internal callers that already
 //! have one complete top-level element can also reuse the same classifier.
 
-use crate::Stanza;
+use crate::{
+    auth::{SaslInitialResponse, SaslMechanism, SaslResponsePayload},
+    Stanza,
+};
 use std::str::FromStr;
 use thiserror::Error;
 use xmpp_parsers::minidom::Element;
@@ -31,13 +34,19 @@ pub enum InboundFrame {
     Close,
     /// SASL `<auth>` initial client message.
     ///
-    /// `mechanism` is the SASL mechanism requested (e.g. `SCRAM-SHA-256`,
-    /// `OAUTHBEARER`, `PLAIN`). `data` is the base64-encoded initial
-    /// response payload; empty when the mechanism doesn't need one.
-    Auth { mechanism: String, data: String },
+    /// The mechanism and decoded initial response are classified at the XML
+    /// boundary; downstream dispatch never handles mechanism or base64
+    /// strings.
+    Auth {
+        mechanism: SaslMechanism,
+        initial_response: SaslInitialResponse,
+    },
     /// SASL `<response>` continuation message (e.g. SCRAM
-    /// client-final-message). The body is the base64-encoded payload.
-    SaslResponse(String),
+    /// client-final-message), decoded at the XML boundary.
+    SaslResponse(SaslResponsePayload),
+    /// RFC 6120 SASL `<abort/>`, valid only while a challenge/response
+    /// exchange is pending.
+    SaslAbort,
     /// XEP-0397 (ADR-0017 Phase 3 Slice 8) Instant Stream Resumption: a
     /// SASL2 (XEP-0388) `<authenticate/>` carrying an inline
     /// `<inst-resume with-isr-token='true'>` wrapping a XEP-0198
@@ -46,8 +55,8 @@ pub enum InboundFrame {
     /// with no inline ISR resume request) is out of scope for this slice;
     /// see the phase plan's Slice 8 deviations.
     IsrResumeAuthenticate {
-        mechanism: String,
-        initial_response: String,
+        mechanism: SaslMechanism,
+        initial_response: SaslInitialResponse,
         resume: crate::stream_management::SmResume,
     },
     /// A typed XMPP stanza (IQ, message, or presence).
@@ -80,15 +89,21 @@ pub enum ParseError {
     /// The payload was not well-formed XML.
     #[error("invalid XML: {0}")]
     InvalidXml(String),
-    /// The payload's root element is not one of the seven frame roots we
-    /// know how to handle (`open`, `close`, `auth`, `response`, `iq`,
-    /// `message`, `presence`).
+    /// The payload's root element is not one of the frame roots we know how
+    /// to handle (`open`, `close`, `auth`, `response`, `abort`,
+    /// `authenticate`, `iq`, `message`, `presence`).
     #[error("unknown root element: <{0}>")]
     UnknownRoot(String),
     /// A SASL frame was recognised but was missing a required attribute or
     /// was otherwise malformed.
     #[error("malformed SASL frame: {0}")]
     MalformedSasl(&'static str),
+    /// A SASL `<auth/>` or SASL2 `<initial-response/>` body was not base64.
+    #[error("invalid base64 initial response for SASL mechanism {mechanism}")]
+    InvalidSaslInitialResponseEncoding { mechanism: SaslMechanism },
+    /// A SASL `<response/>` body was not base64.
+    #[error("invalid base64 SASL response")]
+    InvalidSaslResponseEncoding,
     /// A SASL2 `<authenticate/>` was recognised but did not match the one
     /// shape this server accepts (ADR-0017 Phase 3 Slice 8: an inline
     /// `<inst-resume with-isr-token='true'>` wrapping a XEP-0198
@@ -132,6 +147,7 @@ pub fn parse_frame(frame: &str) -> Result<InboundFrame, ParseError> {
         "close" => parse_close(trimmed),
         "auth" => parse_auth(trimmed),
         "response" => parse_response(trimmed),
+        "abort" => parse_sasl_abort(trimmed),
         "authenticate" => parse_isr_resume_authenticate(trimmed),
         "iq" | "message" | "presence" => parse_stanza(trimmed, root),
         other => Err(ParseError::UnknownRoot(other.to_string())),
@@ -163,13 +179,19 @@ fn parse_auth(frame: &str) -> Result<InboundFrame, ParseError> {
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "auth", crate::ns::SASL)?;
     require_text_only_element(&element, "auth")?;
-    let mechanism = element
-        .attr("mechanism")
-        .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?
-        .to_string();
+    let mechanism = SaslMechanism::from_wire_name(
+        element
+            .attr("mechanism")
+            .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?,
+    );
+    let initial_response = SaslInitialResponse::decode(&element.text()).map_err(|_| {
+        ParseError::InvalidSaslInitialResponseEncoding {
+            mechanism: mechanism.clone(),
+        }
+    })?;
     Ok(InboundFrame::Auth {
         mechanism,
-        data: element.text().trim().to_string(),
+        initial_response,
     })
 }
 
@@ -183,14 +205,19 @@ fn parse_isr_resume_authenticate(frame: &str) -> Result<InboundFrame, ParseError
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "authenticate", crate::ns::SASL2)?;
-    let mechanism = element
-        .attr("mechanism")
-        .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?
-        .to_string();
+    let mechanism = SaslMechanism::from_wire_name(
+        element
+            .attr("mechanism")
+            .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?,
+    );
     let initial_response = element
         .get_child("initial-response", crate::ns::SASL2)
-        .map(|child| child.text().trim().to_string())
-        .unwrap_or_default();
+        .map(|child| SaslInitialResponse::decode(&child.text()))
+        .transpose()
+        .map_err(|_| ParseError::InvalidSaslInitialResponseEncoding {
+            mechanism: mechanism.clone(),
+        })?
+        .unwrap_or_else(SaslInitialResponse::empty);
     let inst_resume = crate::isr::InstResume::from_element(&element).ok_or(
         ParseError::MalformedIsrAuthenticate(
             "authenticate must carry an inline <inst-resume/> wrapping <resume/> \
@@ -215,9 +242,22 @@ fn parse_response(frame: &str) -> Result<InboundFrame, ParseError> {
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "response", crate::ns::SASL)?;
     require_text_only_element(&element, "response")?;
-    Ok(InboundFrame::SaslResponse(
-        element.text().trim().to_string(),
-    ))
+    let response = SaslResponsePayload::decode(&element.text())
+        .map_err(|_| ParseError::InvalidSaslResponseEncoding)?;
+    Ok(InboundFrame::SaslResponse(response))
+}
+
+fn parse_sasl_abort(frame: &str) -> Result<InboundFrame, ParseError> {
+    let element =
+        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    require_namespace(&element, "abort", crate::ns::SASL)?;
+    require_empty_element(&element, "abort")?;
+    if element.attrs().iter().next().is_some() {
+        return Err(ParseError::MalformedSasl(
+            "abort must not contain attributes",
+        ));
+    }
+    Ok(InboundFrame::SaslAbort)
 }
 
 fn parse_open(frame: &str) -> Result<InboundFrame, ParseError> {

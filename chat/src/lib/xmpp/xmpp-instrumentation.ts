@@ -60,9 +60,6 @@ export function installInstrumentation(client: BrowserXmppClient): void {
     const kind = ERROR_KIND_MAP[event.kind];
     const condition = telemetryCondition(event.kind, event.condition);
     const detail = telemetryErrorDetail(event, condition);
-    const streamDetail = event.kind === "stream"
-      ? telemetryStreamSourceDetail(event.detail, detail)
-      : undefined;
     const smCounts = event.kind === "stream"
       ? telemetryStreamManagementCounts(event)
       : undefined;
@@ -71,7 +68,6 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       recoverable: event.recoverable,
       detail,
       ...(condition ? { condition } : {}),
-      ...(streamDetail ? { streamDetail } : {}),
       ...(smCounts ?? {}),
     });
   });
@@ -131,19 +127,11 @@ function telemetryStreamFallbackDetail(detail: string): string {
   return "stream-error";
 }
 
-function telemetryStreamSourceDetail(detail: string, telemetryDetail: string): string | undefined {
-  const trimmed = detail.trim();
-  if (!trimmed || trimmed.toLowerCase() === "stream error" || trimmed === telemetryDetail) {
-    return undefined;
-  }
-  return trimmed;
-}
-
-function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, string> | undefined {
+function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, number> | undefined {
   if (event.streamManagementError?.kind !== "handled-count-too-high") return undefined;
   return {
-    smH: String(event.streamManagementError.h),
-    smSendCount: String(event.streamManagementError.sendCount),
+    smH: event.streamManagementError.h,
+    smSendCount: event.streamManagementError.sendCount,
   };
 }
 

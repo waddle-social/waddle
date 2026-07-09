@@ -1,32 +1,83 @@
-use super::transport_xml::{element_to_xml, sasl_failure_xml, sasl_success_xml};
+use super::transport_xml::{
+    element_to_xml, sasl_failure_xml, sasl_success_xml, SaslFailureCondition,
+};
 use super::*;
+use waddle_xmpp::auth::{
+    oauthbearer::{
+        parse_oauthbearer, parse_oauthbearer_error_response, OAuthBearerErrorChallenge,
+        OAuthBearerResult,
+    },
+    SaslInitialResponse, SaslResponsePayload, ScramFinalError,
+};
+use waddle_xmpp::prometheus::{
+    increment_auth_terminal_attempt, AuthMechanism, AuthTerminalOutcome,
+};
+
+const fn scram_final_error_outcome(error: ScramFinalError) -> AuthTerminalOutcome {
+    match error {
+        ScramFinalError::InvalidCredentials => AuthTerminalOutcome::InvalidCredentials,
+        ScramFinalError::Malformed => AuthTerminalOutcome::Malformed,
+        ScramFinalError::InvalidState => AuthTerminalOutcome::InternalError,
+    }
+}
+
+fn record_oauth_terminal(state: &WebSocketState, outcome: AuthTerminalOutcome) {
+    state
+        .deps
+        .oauth_terminal_recorder
+        .record(AuthMechanism::OAuthBearer, outcome);
+}
 
 /// Handle SASL OAUTHBEARER authentication.
-pub(super) async fn handle_sasl_oauthbearer(
-    b64_data: &str,
+pub(super) async fn handle_sasl_oauthbearer_initial(
+    initial_response: &SaslInitialResponse,
+    state: &WebSocketState,
+    authenticated_session: &mut Option<Session>,
+    phase: &mut ConnectionPhase,
+) -> Vec<String> {
+    if initial_response.is_empty() {
+        *phase = ConnectionPhase::oauthbearer_initial_response_pending();
+        return vec![element_to_xml(
+            Element::builder("challenge", waddle_xmpp::ns::SASL).build(),
+        )];
+    }
+    handle_sasl_oauthbearer_response_bytes(
+        initial_response.as_bytes(),
+        state,
+        authenticated_session,
+        phase,
+    )
+    .await
+}
+
+pub(super) async fn handle_sasl_oauthbearer_response(
+    response: &SaslResponsePayload,
+    state: &WebSocketState,
+    authenticated_session: &mut Option<Session>,
+    phase: &mut ConnectionPhase,
+) -> Vec<String> {
+    handle_sasl_oauthbearer_response_bytes(response.as_bytes(), state, authenticated_session, phase)
+        .await
+}
+
+async fn handle_sasl_oauthbearer_response_bytes(
+    response: &[u8],
     state: &WebSocketState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
     debug!("SASL OAUTHBEARER auth attempt");
 
-    let decoded = match BASE64_STANDARD.decode(b64_data) {
-        Ok(data) => data,
-        Err(e) => {
-            warn!(error = %e, "SASL OAUTHBEARER: failed to decode base64 data");
-            return vec![sasl_failure_xml("not-authorized")];
-        }
-    };
-
-    let token = match parse_oauthbearer(&decoded) {
-        Ok(OAuthBearerResult::Credentials(credentials)) => credentials.token,
-        Ok(OAuthBearerResult::DiscoveryRequest) => {
-            warn!("SASL OAUTHBEARER: discovery request received on token-auth WebSocket path");
-            return vec![sasl_failure_xml("not-authorized")];
-        }
-        Err(e) => {
-            warn!(error = %e, "SASL OAUTHBEARER: failed to parse bearer data");
-            return vec![sasl_failure_xml("not-authorized")];
+    let credentials = match parse_oauthbearer(response) {
+        Ok(OAuthBearerResult::Credentials(credentials)) => credentials,
+        Ok(OAuthBearerResult::EmptyCredentials) => return oauthbearer_invalid_token(state, phase),
+        Err(_) => {
+            warn!(
+                category = "oauthbearer-malformed",
+                "SASL OAUTHBEARER: failed to parse bearer data"
+            );
+            record_oauth_terminal(state, AuthTerminalOutcome::Malformed);
+            return vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)];
         }
     };
 
@@ -34,48 +85,93 @@ pub(super) async fn handle_sasl_oauthbearer(
         .deps
         .auth_state
         .session_manager
-        .validate_session(&token)
+        .validate_session(credentials.token().expose_secret())
         .await
     {
         Ok(session) => {
-            let bare_jid_str =
+            let bare_jid =
                 match localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
+                    .ok()
+                    .and_then(|jid| jid.parse::<BareJid>().ok())
                 {
-                    Ok(jid) => jid,
-                    Err(e) => {
-                        warn!(
-                            localpart = %session.xmpp_localpart,
-                            error = %e,
-                            "SASL OAUTHBEARER: failed to build JID from session localpart",
-                        );
-                        return vec![sasl_failure_xml("not-authorized")];
+                    Some(jid) => jid,
+                    None => {
+                        warn!("SASL OAUTHBEARER: failed to build JID from session localpart");
+                        record_oauth_terminal(state, AuthTerminalOutcome::InternalError);
+                        return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
                     }
                 };
 
-            let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
+            if credentials
+                .authorization_identity()
+                .is_some_and(|authzid| authzid != &bare_jid)
+            {
+                warn!("SASL OAUTHBEARER authorization identity does not match session");
+                record_oauth_terminal(state, AuthTerminalOutcome::InvalidCredentials);
+                return vec![sasl_failure_xml(SaslFailureCondition::InvalidAuthzid)];
+            }
+
+            let full_jid = match format!("{bare_jid}/pending").parse::<FullJid>() {
                 Ok(jid) => jid,
-                Err(e) => {
-                    warn!(jid = %bare_jid_str, error = %e, "SASL OAUTHBEARER: JID construction failed");
-                    return vec![sasl_failure_xml("not-authorized")];
+                Err(_) => {
+                    warn!("SASL OAUTHBEARER: JID construction failed");
+                    record_oauth_terminal(state, AuthTerminalOutcome::InternalError);
+                    return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
                 }
             };
 
-            info!(
-                jid = %bare_jid_str,
-                user_jid = %session.user_jid,
-                "SASL OAUTHBEARER authentication successful",
-            );
+            info!("SASL OAUTHBEARER authentication successful");
 
             *authenticated_session = Some(session);
             *phase = ConnectionPhase::authenticated(&full_jid);
+            record_oauth_terminal(state, AuthTerminalOutcome::Success);
 
             vec![sasl_success_xml()]
         }
-        Err(e) => {
-            warn!(error = %e, "SASL OAUTHBEARER authentication failed");
-            vec![sasl_failure_xml("not-authorized")]
+        Err(AuthError::SessionNotFound(_) | AuthError::SessionExpired) => {
+            warn!("SASL OAUTHBEARER authentication failed");
+            oauthbearer_invalid_token(state, phase)
+        }
+        Err(_) => {
+            warn!("SASL OAUTHBEARER authentication failed internally");
+            record_oauth_terminal(state, AuthTerminalOutcome::InternalError);
+            vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)]
         }
     }
+}
+
+fn oauthbearer_invalid_token(state: &WebSocketState, phase: &mut ConnectionPhase) -> Vec<String> {
+    let challenge = match OAuthBearerErrorChallenge::invalid_token().to_element() {
+        Ok(challenge) => challenge,
+        Err(_) => {
+            warn!(
+                category = "oauthbearer-challenge-encoding",
+                "SASL OAUTHBEARER: failed to encode RFC 7628 error challenge"
+            );
+            record_oauth_terminal(state, AuthTerminalOutcome::InternalError);
+            return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
+        }
+    };
+    *phase = ConnectionPhase::oauthbearer_error_pending();
+    vec![element_to_xml(challenge)]
+}
+
+/// Complete the RFC 7628 failed-authentication sequence. The original
+/// invalid-credential attempt becomes terminal only after this response.
+pub(super) fn handle_sasl_oauthbearer_error_response(
+    response: &SaslResponsePayload,
+    state: &WebSocketState,
+) -> Vec<String> {
+    if parse_oauthbearer_error_response(response.as_bytes()).is_err() {
+        warn!(
+            category = "oauthbearer-error-response-malformed",
+            "SASL OAUTHBEARER error response is not the RFC response octet"
+        );
+        record_oauth_terminal(state, AuthTerminalOutcome::Malformed);
+        return vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)];
+    }
+    record_oauth_terminal(state, AuthTerminalOutcome::InvalidCredentials);
+    vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)]
 }
 
 /// Handle SASL SCRAM-SHA-256 client-first-message.
@@ -84,26 +180,25 @@ pub(super) async fn handle_sasl_oauthbearer(
 /// credentials, creates a ScramServer with the user's salt/iterations, and
 /// returns a `<challenge>` frame.
 pub(super) async fn handle_sasl_scram_client_first(
-    b64_data: &str,
+    initial_response: &SaslInitialResponse,
     domain: &str,
     state: &WebSocketState,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
     debug!("SASL SCRAM-SHA-256 auth attempt");
 
-    let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
-        Ok(data) => data,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: failed to decode base64 client-first");
-            return vec![sasl_failure_xml("not-authorized")];
-        }
-    };
-
-    let client_first = match String::from_utf8(decoded) {
+    let client_first = match String::from_utf8(initial_response.as_bytes().to_vec()) {
         Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: invalid UTF-8 in client-first");
-            return vec![sasl_failure_xml("not-authorized")];
+        Err(_) => {
+            warn!(
+                category = "scram-client-first-invalid-utf8",
+                "SCRAM: invalid UTF-8 in client-first"
+            );
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::Malformed,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)];
         }
     };
 
@@ -113,9 +208,16 @@ pub(super) async fn handle_sasl_scram_client_first(
         let mut tmp = ScramServer::new();
         match tmp.process_client_first(&client_first) {
             Ok(result) => result.username,
-            Err(e) => {
-                warn!(error = %e, "SCRAM: failed to parse client-first");
-                return vec![sasl_failure_xml("not-authorized")];
+            Err(_) => {
+                warn!(
+                    category = "scram-client-first-malformed",
+                    "SCRAM: failed to parse client-first"
+                );
+                increment_auth_terminal_attempt(
+                    AuthMechanism::ScramSha256,
+                    AuthTerminalOutcome::Malformed,
+                );
+                return vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)];
             }
         }
     };
@@ -130,12 +232,20 @@ pub(super) async fn handle_sasl_scram_client_first(
     {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            warn!(username = %username, "SCRAM: user not found");
-            return vec![sasl_failure_xml("not-authorized")];
+            warn!("SCRAM: user not found");
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::InvalidCredentials,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)];
         }
-        Err(e) => {
-            warn!(error = %e, username = %username, "SCRAM: credential lookup failed");
-            return vec![sasl_failure_xml("not-authorized")];
+        Err(_) => {
+            warn!("SCRAM: credential lookup failed");
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::InternalError,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
         }
     };
 
@@ -144,14 +254,21 @@ pub(super) async fn handle_sasl_scram_client_first(
     let mut scram_server = ScramServer::with_salt_b64(creds.salt_b64, creds.iterations);
     let server_first = match scram_server.process_client_first(&client_first) {
         Ok(result) => result,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: failed to process client-first with stored params");
-            return vec![sasl_failure_xml("not-authorized")];
+        Err(_) => {
+            warn!(
+                category = "scram-client-first-state",
+                "SCRAM: failed to process client-first with stored params"
+            );
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::InternalError,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
         }
     };
 
     let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
-    debug!(username = %username, "SCRAM-SHA-256 challenge generated");
+    debug!("SCRAM-SHA-256 challenge generated");
 
     *phase = ConnectionPhase::scram_pending(ScramPendingState::new(
         scram_server,
@@ -172,37 +289,49 @@ pub(super) async fn handle_sasl_scram_client_first(
 /// Verifies the client proof against stored keys and returns `<success>` or
 /// `<failure>`.
 pub(super) fn handle_sasl_scram_response(
-    b64_data: &str,
+    response: &SaslResponsePayload,
     domain: &str,
     mut scram: ScramPendingState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
-    let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
-        Ok(data) => data,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: failed to decode base64 client-final");
-            return vec![sasl_failure_xml("not-authorized")];
-        }
-    };
-
-    let client_final = match String::from_utf8(decoded) {
+    let client_final = match String::from_utf8(response.as_bytes().to_vec()) {
         Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: invalid UTF-8 in client-final");
-            return vec![sasl_failure_xml("not-authorized")];
+        Err(_) => {
+            warn!(
+                category = "scram-client-final-invalid-utf8",
+                "SCRAM: invalid UTF-8 in client-final"
+            );
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::Malformed,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)];
         }
     };
 
     let server_final = match scram.process_client_final(&client_final) {
         Ok(result) => result,
-        Err(e) => {
-            warn!(
-                error = %e,
-                username = %scram.username(),
-                "SCRAM-SHA-256 authentication failed"
+        Err(error) => {
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                scram_final_error_outcome(error),
             );
-            return vec![sasl_failure_xml("not-authorized")];
+            let condition = match error {
+                ScramFinalError::InvalidCredentials => {
+                    warn!("SCRAM-SHA-256 authentication failed");
+                    SaslFailureCondition::NotAuthorized
+                }
+                ScramFinalError::Malformed => {
+                    warn!("SCRAM-SHA-256 client-final message was malformed");
+                    SaslFailureCondition::MalformedRequest
+                }
+                ScramFinalError::InvalidState => {
+                    warn!("SCRAM-SHA-256 client-final reached an invalid server state");
+                    SaslFailureCondition::TemporaryAuthFailure
+                }
+            };
+            return vec![sasl_failure_xml(condition)];
         }
     };
 
@@ -210,29 +339,35 @@ pub(super) fn handle_sasl_scram_response(
     let bare_jid_str = format!("{}@{}", scram.username(), domain);
     let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
         Ok(jid) => jid,
-        Err(e) => {
-            warn!(error = %e, jid = %bare_jid_str, "SCRAM: JID construction failed");
-            return vec![sasl_failure_xml("not-authorized")];
+        Err(_) => {
+            warn!("SCRAM: JID construction failed");
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::InternalError,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
         }
     };
 
     let bare_jid: BareJid = match bare_jid_str.parse() {
         Ok(jid) => jid,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: bare JID parse failed");
-            return vec![sasl_failure_xml("not-authorized")];
+        Err(_) => {
+            warn!("SCRAM: bare JID parse failed");
+            increment_auth_terminal_attempt(
+                AuthMechanism::ScramSha256,
+                AuthTerminalOutcome::InternalError,
+            );
+            return vec![sasl_failure_xml(SaslFailureCondition::TemporaryAuthFailure)];
         }
     };
 
-    info!(
-        jid = %bare_jid_str,
-        "SASL SCRAM-SHA-256 authentication successful",
-    );
+    info!("SASL SCRAM-SHA-256 authentication successful");
 
     let session = Session::new(&bare_jid.to_string(), scram.username(), scram.username());
 
     *authenticated_session = Some(session);
     *phase = ConnectionPhase::authenticated(&full_jid);
+    increment_auth_terminal_attempt(AuthMechanism::ScramSha256, AuthTerminalOutcome::Success);
 
     let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
     vec![element_to_xml(
@@ -240,4 +375,25 @@ pub(super) fn handle_sasl_scram_response(
             .append(success_b64)
             .build(),
     )]
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+
+    #[test]
+    fn scram_final_errors_map_to_exact_terminal_outcomes() {
+        assert_eq!(
+            scram_final_error_outcome(ScramFinalError::InvalidCredentials),
+            AuthTerminalOutcome::InvalidCredentials
+        );
+        assert_eq!(
+            scram_final_error_outcome(ScramFinalError::Malformed),
+            AuthTerminalOutcome::Malformed
+        );
+        assert_eq!(
+            scram_final_error_outcome(ScramFinalError::InvalidState),
+            AuthTerminalOutcome::InternalError
+        );
+    }
 }

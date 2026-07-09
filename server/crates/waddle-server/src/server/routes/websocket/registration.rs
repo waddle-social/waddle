@@ -110,10 +110,9 @@ pub(super) async fn register_bound_connection_after_frame(
     } else {
         match load_blocklist_for_bind(&state.deps.app_state.db_pool, &jid).await {
             Ok(blocklist) => blocklist,
-            Err(error) => {
+            Err(_) => {
                 error!(
-                    jid = %jid,
-                    %error,
+                    category = "blocklist-load-failed",
                     "Failed to load XEP-0191 blocklist at bind; failing the bind to avoid a \
                      session-long fail-open. Client should reconnect."
                 );
@@ -235,7 +234,7 @@ pub(super) async fn register_bound_connection_after_frame(
 
     let sm_finalization = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     info!(
-        jid = %jid,
+        category = "success",
         resumed = conn.phase.is_resumed(),
         carbons_enabled = conn.carbons_enabled,
         "WebSocket connection registered"

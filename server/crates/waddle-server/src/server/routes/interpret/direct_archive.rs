@@ -4,12 +4,42 @@ const DM_CALL_PENDING_TTL_SECS: i64 = 30 * 60;
 const DM_CALL_ACTIVE_TTL_SECS: i64 = 12 * 60 * 60;
 const DM_CALL_STATE_MAX_KEYS: usize = 4096;
 
+type ArchiveAttemptRecorder<'a> = dyn Fn(waddle_xmpp::prometheus::MessageArchiveKind, waddle_xmpp::prometheus::MessageArchiveOutcome)
+    + Sync
+    + 'a;
+
+const fn is_sender_archive(side: waddle_xmpp::protocol::ArchiveSide) -> bool {
+    matches!(side, waddle_xmpp::protocol::ArchiveSide::Sender)
+}
+
 pub(super) async fn archive_direct(
     deps: &Deps<'_>,
+    side: waddle_xmpp::protocol::ArchiveSide,
     archive_jid: BareJid,
     from: BareJid,
     to: BareJid,
     message: Box<Message>,
+) -> Option<ArchiveIdRewrite> {
+    archive_direct_with_recorder(
+        deps,
+        side,
+        archive_jid,
+        from,
+        to,
+        message,
+        &waddle_xmpp::prometheus::increment_message_archive_attempt,
+    )
+    .await
+}
+
+pub(super) async fn archive_direct_with_recorder(
+    deps: &Deps<'_>,
+    side: waddle_xmpp::protocol::ArchiveSide,
+    archive_jid: BareJid,
+    from: BareJid,
+    to: BareJid,
+    message: Box<Message>,
+    record_archive_attempt: &ArchiveAttemptRecorder<'_>,
 ) -> Option<ArchiveIdRewrite> {
     let mut message = *message;
     let Some(mam_storage) = deps.mam_storage else {
@@ -53,8 +83,14 @@ pub(super) async fn archive_direct(
             // once for the recipient's. Only the sender path bumps
             // `(sender, peer)` activity, gated by `archive_jid ==
             // from`: persisting the message into the recipient's
-            // archive does NOT indicate the recipient is active.
-            if archive_jid == from {
+            // archive does NOT indicate the recipient is active. The typed
+            // side is authoritative because cross-resource self-DMs have the
+            // same bare JID on both archive passes.
+            if is_sender_archive(side) {
+                record_archive_attempt(
+                    waddle_xmpp::prometheus::MessageArchiveKind::Direct,
+                    waddle_xmpp::prometheus::MessageArchiveOutcome::Committed,
+                );
                 super::notification_activity_ingest::record_outbound_message_activity(
                     deps, &from, &to, &message,
                 )
@@ -72,6 +108,12 @@ pub(super) async fn archive_direct(
             rewrite
         }
         Err(error) => {
+            if is_sender_archive(side) {
+                record_archive_attempt(
+                    waddle_xmpp::prometheus::MessageArchiveKind::Direct,
+                    waddle_xmpp::prometheus::MessageArchiveOutcome::StorageError,
+                );
+            }
             // Archive errors must not block dispatch — the
             // message is already on the wire to other
             // resources via routing/carbons. Log and drop.
@@ -583,5 +625,17 @@ async fn apply_direct_retraction_tombstone(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod archive_side_tests {
+    use super::*;
+    use waddle_xmpp::protocol::ArchiveSide;
+
+    #[test]
+    fn only_the_typed_sender_pass_records_the_logical_dm_attempt() {
+        assert!(is_sender_archive(ArchiveSide::Sender));
+        assert!(!is_sender_archive(ArchiveSide::Recipient));
     }
 }

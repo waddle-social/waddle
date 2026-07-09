@@ -30,6 +30,17 @@ use crypto::hi;
 use crypto::{generate_nonce, hmac_sha256, sha256};
 use parser::{parse_client_final, parse_client_first};
 
+/// Typed terminal failures for the SCRAM client-final step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScramFinalError {
+    #[error("invalid SCRAM state for client-final")]
+    InvalidState,
+    #[error("malformed SCRAM client-final message")]
+    Malformed,
+    #[error("SCRAM credentials rejected")]
+    InvalidCredentials,
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -227,11 +238,9 @@ impl ScramServer {
         client_final: &str,
         stored_key: &[u8],
         server_key: &[u8],
-    ) -> Result<ServerFinalMessage, XmppError> {
+    ) -> Result<ServerFinalMessage, ScramFinalError> {
         if self.state != ScramState::WaitingForClientFinal {
-            return Err(XmppError::auth_failed(
-                "Invalid SCRAM state for client-final",
-            ));
+            return Err(ScramFinalError::InvalidState);
         }
 
         // Parse client-final-message
@@ -241,13 +250,13 @@ impl ScramServer {
         // GS2 header exactly as sent in client-first (e.g. "n,," → "biws").
         if parsed.channel_binding != BASE64_STANDARD.encode(&self.gs2_header) {
             self.state = ScramState::Complete;
-            return Err(XmppError::auth_failed("Channel binding mismatch"));
+            return Err(ScramFinalError::Malformed);
         }
 
         // Verify the nonce matches
         if parsed.nonce != self.combined_nonce {
             self.state = ScramState::Complete;
-            return Err(XmppError::auth_failed("Nonce mismatch"));
+            return Err(ScramFinalError::Malformed);
         }
 
         // Compute AuthMessage = client-first-message-bare + "," + server-first-message + "," + client-final-message-without-proof
@@ -263,11 +272,11 @@ impl ScramServer {
         // ClientKey = ClientProof XOR ClientSignature
         let client_proof = BASE64_STANDARD
             .decode(&parsed.proof)
-            .map_err(|e| XmppError::auth_failed(format!("Invalid client proof base64: {}", e)))?;
+            .map_err(|_| ScramFinalError::Malformed)?;
 
         if client_proof.len() != client_signature.len() {
             self.state = ScramState::Complete;
-            return Err(XmppError::auth_failed("Invalid client proof length"));
+            return Err(ScramFinalError::Malformed);
         }
 
         let client_key: Vec<u8> = client_proof
@@ -280,7 +289,7 @@ impl ScramServer {
         let computed_stored_key = sha256(&client_key);
         if computed_stored_key != stored_key {
             self.state = ScramState::Complete;
-            return Err(XmppError::auth_failed("Authentication failed"));
+            return Err(ScramFinalError::InvalidCredentials);
         }
 
         // Compute ServerSignature = HMAC(ServerKey, AuthMessage)

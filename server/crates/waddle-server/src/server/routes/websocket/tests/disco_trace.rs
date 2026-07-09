@@ -2,11 +2,10 @@
 //! must be emitted at `INFO`, not `DEBUG`.
 //!
 //! Production runs at `INFO`. When a connection wedges (the #757 incident),
-//! these traces are the load-bearing signal for *which* subhandler (or none)
-//! answered each component target. At `DEBUG` they are filtered out in
-//! production and never surface. This test pins the level by capturing the
-//! tracing output through an `INFO`-max subscriber and asserting the trace is
-//! present.
+//! these traces expose the bounded subhandler category that answered, without
+//! exporting client IQ ids or target JIDs. At `DEBUG` they are filtered out in
+//! production and never surface. This test pins both the level and privacy
+//! boundary with an `INFO`-max subscriber.
 
 use super::super::handlers::iq::handle_iq;
 use super::super::ConnectionPhase;
@@ -64,7 +63,7 @@ async fn disco_info_answered_trace_surfaces_at_info_level() {
     let state = create_test_websocket_state().await;
     let full: FullJid = "alice@example.com/web".parse().expect("valid jid");
     let phase = ConnectionPhase::ready(full, false);
-    let frame = r#"<iq xmlns="jabber:client" id="disco-806" type="get" to="example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+    let frame = r#"<iq xmlns="jabber:client" id="private-session-iq-806" type="get" to="alice@example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
 
     let responses = handle_iq(
         frame,
@@ -91,5 +90,9 @@ async fn disco_info_answered_trace_surfaces_at_info_level() {
         logs.contains("\"handler\""),
         "#806: the disco#info trace must keep its stable `handler` field for \
          grep/OTLP. Captured INFO logs:\n{logs}"
+    );
+    assert!(
+        !logs.contains("private-session-iq-806") && !logs.contains("alice@example.com"),
+        "disco discovery traces must retain category fields without exporting IQ ids or JIDs. Captured INFO logs:\n{logs}"
     );
 }

@@ -1,18 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import type { WaddleSession } from "../src/lib/server-auth";
-import { BrowserXmppClient, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   __clearSensitiveUrlsForTesting,
-  __scrubMissingFetchSpanUrlForTesting,
-  __scrubSpanUrlForTesting,
-  __scrubXhrSpanUrlForTesting,
-  __sanitizeFaroTransportItemForTesting,
   __setFaroForTesting,
+  __setGateZeroFaroScopeForTesting,
   initTelemetry,
-  markSensitiveUrlForTelemetry,
   reportCallAudioProcessing,
+  reportAuthBootstrap,
   reportCatchup,
-  reportError,
   reportMessageAcked,
   reportMessageFailed,
   reportQueueDepthChange,
@@ -22,82 +16,11 @@ import {
   reportSessionLifecycle,
   reportStatusChange,
 } from "../src/lib/telemetry";
-import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
-
-function session(partial: Partial<WaddleSession> = {}): WaddleSession {
-  return {
-    username: "alice",
-    jid: "alice@example.com/desktop",
-    session_id: "tok",
-    xmpp_websocket_url: "wss://example.com/ws",
-    ...partial,
-  } as WaddleSession;
-}
-
-type TestXmppStreamErrorPayload = string | {
-  detail?: string;
-  condition?: string;
-  streamManagementError?: { kind: "handled-count-too-high"; h: number; sendCount: number };
-};
-
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.has(key) ? values.get(key)! : null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
-
-/**
- * Minimal Faro API stub that records every pushEvent / pushMeasurement
- * call. The telemetry module never reaches into the full Faro instance
- * beyond `faro.api.*`, so mirroring the `api` surface is enough.
- */
-function createFaroStub() {
-  const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
-  const measurements: Array<{
-    type: string;
-    values: Record<string, number>;
-    context?: Record<string, string>;
-  }> = [];
-  const errors: Array<{
-    error: Error;
-    options?: { type?: string; context?: Record<string, string> };
-  }> = [];
-  return {
-    events,
-    measurements,
-    errors,
-    api: {
-      pushEvent: (name: string, attributes?: Record<string, string>) => {
-        events.push({ name, attributes });
-      },
-      pushMeasurement: (payload: {
-        type: string;
-        values: Record<string, number>;
-        context?: Record<string, string>;
-      }, options?: { context?: Record<string, string> }) => {
-        measurements.push({ ...payload, context: options?.context });
-      },
-      pushError: (
-        error: Error,
-        options?: { type?: string; context?: Record<string, string> },
-      ) => {
-        errors.push({ error, options });
-      },
-    },
-  };
-}
+import {
+  createFaroStub,
+  createStorageMock,
+  GATE_ZERO_SCOPE,
+} from "./support/telemetry";
 
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
@@ -111,6 +34,7 @@ beforeEach(() => {
   } as Window & { localStorage: typeof storage };
   localStorage.clear();
   __setFaroForTesting(null);
+  __setGateZeroFaroScopeForTesting(GATE_ZERO_SCOPE);
   __clearSensitiveUrlsForTesting();
 });
 
@@ -186,6 +110,7 @@ describe("telemetry module no-op behaviour", () => {
     // faro refs the chat would blow up on every send in local dev.
     expect(() => {
       reportMessageAcked({ id: "x", kind: "room", latencyMs: 5 });
+      reportAuthBootstrap({ outcome: "ready", durationMs: 10 });
       reportMessageFailed({ id: "x", kind: "dm" });
       reportSendEnqueued({ kind: "room", reason: "offline" });
       reportQueueDepthChange({ persisted: 0, inflight: 0 });
@@ -197,11 +122,29 @@ describe("telemetry module no-op behaviour", () => {
     }).not.toThrow();
   });
 
+  test("auth bootstrap telemetry cannot break authentication state", () => {
+    __setFaroForTesting({
+      api: {
+        pushEvent: () => {
+          throw new Error("event transport failed");
+        },
+        pushMeasurement: () => {
+          throw new Error("measurement transport failed");
+        },
+      },
+    } as never);
+
+    expect(() =>
+      reportAuthBootstrap({ outcome: "ready", durationMs: 10 }),
+    ).not.toThrow();
+  });
+
   test("report functions forward to Faro api when initialized", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
     reportMessageAcked({ id: "m-1", kind: "room", latencyMs: 123.4 });
+    reportAuthBootstrap({ outcome: "expired", durationMs: 27.6 });
     reportMessageFailed({ id: "m-2", kind: "dm" });
     reportSendEnqueued({ kind: "dm", reason: "offline" });
     reportQueueDepthChange({ persisted: 2, inflight: 1 });
@@ -222,6 +165,7 @@ describe("telemetry module no-op behaviour", () => {
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toEqual([
       "chat.xmpp.message.acked",
+      "chat.journey.auth",
       "chat.xmpp.message.failed",
       "chat.xmpp.send.enqueued",
       "chat.xmpp.session.lifecycle",
@@ -229,14 +173,17 @@ describe("telemetry module no-op behaviour", () => {
       "chat.xmpp.status",
       "chat.xmpp.reconnect.scheduled",
     ]);
-    expect(stub.events[0].attributes).toEqual({ kind: "room" });
-    expect(stub.events[1].attributes).toEqual({ kind: "dm" });
-    expect(stub.events[4].attributes).toEqual({ state: "reconnecting" });
-    expect(stub.events[6].attributes).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+    expect(stub.events[0].attributes).toEqual({ kind: "room", ...GATE_ZERO_SCOPE });
+    expect(stub.events[1].attributes).toEqual({ outcome: "expired", ...GATE_ZERO_SCOPE });
+    expect(stub.events[2].attributes).toEqual({ kind: "dm" });
+    expect(stub.events[4].attributes).toEqual({ type: "resumed", ...GATE_ZERO_SCOPE });
+    expect(stub.events[5].attributes).toEqual({ state: "reconnecting" });
+    expect(stub.events[7].attributes).toEqual({ visibility: "visible", hidden_bucket: "visible" });
 
     const measurementTypes = stub.measurements.map((m) => m.type);
     expect(measurementTypes).toEqual([
       "chat.xmpp.message.acked.latency_ms",
+      "chat.journey.auth.duration_ms",
       "chat.xmpp.queue.depth",
       "chat.xmpp.reconnect.duration_ms",
       "chat.xmpp.reconnect.attempt",
@@ -246,15 +193,20 @@ describe("telemetry module no-op behaviour", () => {
 
     const ackMeasurement = stub.measurements[0];
     expect(ackMeasurement.values.latency_ms).toBe(123.4);
-    expect(ackMeasurement.context).toEqual({ kind: "room" });
+    expect(ackMeasurement.context).toEqual({ kind: "room", ...GATE_ZERO_SCOPE });
 
-    const depthMeasurement = stub.measurements[1];
+    const authMeasurement = stub.measurements[1];
+    expect(authMeasurement.values).toEqual({ duration_ms: 28 });
+    expect(authMeasurement.context).toEqual({ outcome: "expired", ...GATE_ZERO_SCOPE });
+
+    const depthMeasurement = stub.measurements[2];
     expect(depthMeasurement.values).toEqual({ persisted: 2, inflight: 1 });
 
-    const reconnectMeasurement = stub.measurements[2];
+    const reconnectMeasurement = stub.measurements[3];
     expect(reconnectMeasurement.values.duration_ms).toBe(4_321);
+    expect(reconnectMeasurement.context).toEqual(GATE_ZERO_SCOPE);
 
-    const reconnectAttempt = stub.measurements[3];
+    const reconnectAttempt = stub.measurements[4];
     expect(reconnectAttempt.values).toEqual({
       count: 1,
       attempt: 3,
@@ -263,7 +215,7 @@ describe("telemetry module no-op behaviour", () => {
     });
     expect(reconnectAttempt.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
 
-    const catchup = stub.measurements[4];
+    const catchup = stub.measurements[5];
     expect(catchup.values).toEqual({
       conversations: 2,
       processed_conversations: 1,
@@ -278,856 +230,9 @@ describe("telemetry module no-op behaviour", () => {
       outcome: "aborted",
     });
 
-    const resumeDrain = stub.measurements[5];
+    const resumeDrain = stub.measurements[6];
     expect(resumeDrain.values).toEqual({ buffered: 5, duration_ms: 12, hidden_ms: 0 });
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
   });
 
-  test("reportError drops identifier-bearing context fields", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    reportError("storage.read", new Error("boom"), {
-      recoverable: true,
-      detail: "storage failed",
-      accountKey: "alice@example.com",
-      api_key: "secret",
-      jid: "alice@example.com/desktop",
-      key: "waddle.chat.sm-resume.alice@example.com",
-      note: "download /api/files/slot-1/file.png?waddle_session_id=tok",
-      queueSize: 2,
-      storage_area: "outbound-queue",
-      storageKey: "waddle.chat.outbound.alice@example.com",
-    });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].options?.context).toEqual({
-      kind: "storage.read",
-      recoverable: "true",
-      detail: "storage failed",
-      note: "download /api/files/:slot/:file?waddle_session_id=:redacted",
-      queueSize: "2",
-      storage_area: "outbound-queue",
-    });
-  });
-
-  test("transport sanitizer replaces Faro page URLs with route templates", () => {
-    let currentUrl = new URL("https://chat.example/dm/alice?thread=secret-thread#waddle_session_id=tok");
-    const location = {
-      get href() { return currentUrl.href; },
-      get origin() { return currentUrl.origin; },
-      get pathname() { return currentUrl.pathname; },
-      get search() { return currentUrl.search; },
-      get hash() { return currentUrl.hash; },
-    } as Location;
-    (globalThis as typeof globalThis & { window: Window }).window = {
-      ...(originalWindow ?? {}),
-      location,
-    } as Window;
-
-    const sanitized = __sanitizeFaroTransportItemForTesting({
-      type: "event",
-      payload: {},
-      meta: {
-        page: {
-          id: currentUrl.href,
-          url: currentUrl.href,
-          attributes: {
-            referrer: "https://chat.example/api/files/slot-1/file.png?waddle_session_id=tok",
-          },
-        },
-      },
-    } as never);
-
-    expect(sanitized.meta.page).toEqual({
-      id: "/dm/:user",
-      url: "https://chat.example/dm/:user",
-      attributes: {
-        referrer: "https://chat.example/api/files/:slot/:file?waddle_session_id=:redacted",
-      },
-    });
-
-    currentUrl = new URL("https://chat.example/r/general/x/polls/results?pinned=1&thread=reply");
-    expect(__sanitizeFaroTransportItemForTesting({ payload: {}, meta: {} } as never).meta.page).toEqual({
-      id: "/r/:room/x/:plugin/:route",
-      url: "https://chat.example/r/:room/x/:plugin/:route",
-      attributes: undefined,
-    });
-  });
-
-  test("span URL scrubber redacts untrusted XEP file-transfer URLs", () => {
-    expect(__scrubSpanUrlForTesting(
-      "https://uploads.example/signed/slot-secret/file.png?token=secret#fragment",
-      ["https://chat.example", "https://xmpp.example"],
-    )).toBe("external:unknown");
-
-    expect(__scrubSpanUrlForTesting(
-      "https://xmpp.example/api/messages?session_id=tok#fragment",
-      ["https://xmpp.example"],
-    )).toBe("https://xmpp.example/api/:endpoint");
-
-    expect(__scrubSpanUrlForTesting(
-      "https://chat.example/api/files/slot-1/file.png?download=1",
-      ["https://chat.example"],
-    )).toBe("https://chat.example/api/files/:slot/:file");
-
-    expect(__scrubSpanUrlForTesting(
-      "https://chat.example/dm/alice?thread=secret-thread",
-      ["https://chat.example"],
-    )).toBe("https://chat.example/dm/:user");
-
-    expect(__scrubSpanUrlForTesting(
-      "https://chat.example/r/general/x/polls/results?pinned=1&thread=reply",
-      ["https://chat.example"],
-    )).toBe("https://chat.example/r/:room/x/:plugin/:route");
-
-    markSensitiveUrlForTelemetry("https://chat.example/signed-upload/slot-secret/file.png?token=secret");
-    expect(__scrubSpanUrlForTesting(
-      "https://chat.example/signed-upload/slot-secret/file.png?token=secret",
-      ["https://chat.example"],
-    )).toBe("file-transfer:unknown");
-
-    expect(__scrubXhrSpanUrlForTesting("", ["https://chat.example"])).toEqual({
-      "http.host": ":redacted",
-      "http.target": ":unknown",
-      "http.url": "xhr:unknown",
-      "server.address": ":redacted",
-      "server.port": 0,
-      "url.full": "xhr:unknown",
-      "url.path": ":unknown",
-    });
-
-    expect(__scrubMissingFetchSpanUrlForTesting()).toEqual({
-      "http.host": ":redacted",
-      "http.target": ":unknown",
-      "http.url": "fetch:unknown",
-      "server.address": ":redacted",
-      "server.port": 0,
-      "url.full": "fetch:unknown",
-      "url.path": ":unknown",
-    });
-  });
-
-  test("transport sanitizer redacts finalized trace span URL attributes", () => {
-    const currentUrl = new URL("https://chat.example/r/general");
-    (globalThis as typeof globalThis & { window: Window }).window = {
-      ...(originalWindow ?? {}),
-      location: {
-        get href() { return currentUrl.href; },
-        get origin() { return currentUrl.origin; },
-        get pathname() { return currentUrl.pathname; },
-      } as Location,
-    } as Window;
-
-    const sanitized = __sanitizeFaroTransportItemForTesting({
-      type: "trace",
-      payload: {
-        resourceSpans: [{
-          scopeSpans: [{
-            spans: [{
-              attributes: [
-                { key: "http.url", value: { stringValue: "https://uploads.example/signed/slot-secret/file.png?token=secret" } },
-                { key: "url.full", value: { stringValue: "https://uploads.example/signed/slot-secret/file.png?token=secret" } },
-                { key: "http.host", value: { stringValue: "uploads.example" } },
-                { key: "http.target", value: { stringValue: "/signed/slot-secret/file.png?token=secret" } },
-                { key: "http.status_text", value: { stringValue: "Signed URL expired for slot-secret" } },
-                { key: "server.address", value: { stringValue: "uploads.example" } },
-                { key: "server.port", value: { intValue: 443 } },
-                { key: "url.path", value: { stringValue: "/signed/slot-secret/file.png" } },
-                { key: "url.query", value: { stringValue: "token=secret" } },
-              ],
-            }],
-          }],
-        }],
-      },
-      meta: {},
-    } as never) as unknown as {
-      payload: {
-        resourceSpans: Array<{
-          scopeSpans: Array<{
-            spans: Array<{
-              attributes: Array<{ key: string; value: { stringValue?: string; intValue?: number } }>;
-            }>;
-          }>;
-        }>;
-      };
-    };
-
-    const attributes = Object.fromEntries(
-      sanitized.payload.resourceSpans[0].scopeSpans[0].spans[0].attributes.map((attr) => [
-        attr.key,
-        attr.value.stringValue ?? attr.value.intValue,
-      ]),
-    );
-    expect(attributes).toEqual({
-      "http.host": ":redacted",
-      "http.status_text": ":redacted",
-      "http.target": ":unknown",
-      "http.url": "external:unknown",
-      "server.address": ":redacted",
-      "server.port": 0,
-      "url.full": "external:unknown",
-      "url.path": ":unknown",
-      "url.query": ":redacted",
-    });
-  });
-
-  test("transport sanitizer redacts synthetic Faro trace event attributes", () => {
-    const sanitized = __sanitizeFaroTransportItemForTesting({
-      type: "event",
-      payload: {
-        name: "faro.tracing.fetch",
-        attributes: {
-          "http.host": "uploads.example",
-          "http.status_text": "Signed URL expired for slot-secret",
-          "http.target": "/signed/slot-secret/file.png?token=secret",
-          "http.url": "https://uploads.example/signed/slot-secret/file.png?token=secret",
-          "server.address": "uploads.example",
-          "server.port": "443",
-          "url.full": "https://uploads.example/signed/slot-secret/file.png?token=secret",
-          "url.path": "/signed/slot-secret/file.png",
-          "url.query": "token=secret",
-          peer: "bob@example.com/phone",
-        },
-      },
-      meta: {},
-    } as never) as unknown as {
-      payload: { attributes: Record<string, string> };
-    };
-
-    expect(sanitized.payload.attributes).toEqual({
-      "http.host": ":redacted",
-      "http.status_text": ":redacted",
-      "http.target": ":unknown",
-      "http.url": "external:unknown",
-      "server.address": ":redacted",
-      "server.port": "0",
-      "url.full": "external:unknown",
-      "url.path": ":unknown",
-      "url.query": ":redacted",
-      peer: ":jid",
-    });
-  });
-});
-
-describe("BrowserXmppClient telemetry hooks", () => {
-  test("hooks fire in addition to primary handlers", () => {
-    const client = new BrowserXmppClient(session());
-
-    const primaryAcks: string[] = [];
-    const hookAcks: Array<{ id: string; kind: "room" | "dm"; latencyMs: number }> = [];
-    client.setMessageAckHandler((id) => primaryAcks.push(id));
-    client.onMessageAcked((id, meta) => hookAcks.push({ id, kind: meta.kind, latencyMs: meta.latencyMs }));
-
-    // Stub the pending-send bookkeeping by simulating a flush that
-    // added an inflight entry plus a pending timestamp, then emit ack.
-    const internal = client as unknown as {
-      outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
-      };
-      xmpp: { on: (name: string, fn: (msg: unknown) => void) => void; emit: (name: string, msg: unknown) => void };
-      wireEvents: (xmpp: unknown) => void;
-    };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
-    internal.xmpp = stubXmpp as never;
-    internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("room-1");
-    internal.outboundQueue.notePendingSend("room-1", "room");
-
-    stubXmpp.emit("message:acked", { id: "room-1" });
-
-    expect(primaryAcks).toEqual(["room-1"]);
-    expect(hookAcks).toHaveLength(1);
-    expect(hookAcks[0].id).toBe("room-1");
-    expect(hookAcks[0].kind).toBe("room");
-    expect(hookAcks[0].latencyMs).toBeGreaterThanOrEqual(0);
-  });
-
-  test("installInstrumentation forwards client hooks to Faro api", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    const internal = client as unknown as {
-      outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
-      };
-      xmpp: unknown;
-      wireEvents: (xmpp: unknown) => void;
-      emitStatus: (snap: { state: string; detail?: string }) => void;
-      emitSessionLifecycle: (evt: SessionLifecycleEvent) => void;
-      events: { emitSafe: (event: string, ...args: unknown[]) => void };
-    };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
-    internal.xmpp = stubXmpp;
-    internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("dm-9");
-    internal.outboundQueue.notePendingSend("dm-9", "dm");
-    // Record the pending kind so the failure hook reports it truthfully.
-    internal.outboundQueue.notePendingSend("live-1", "dm");
-
-    // Ack → Faro event + measurement
-    (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "dm-9" });
-    // Fail → Faro event
-    (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:failed", { id: "live-1" });
-    // Session lifecycle + status
-    internal.emitSessionLifecycle({ type: "resumed" });
-    internal.emitStatus({ state: "reconnecting", detail: "ws dropped" });
-    internal.emitStatus({ state: "online", detail: "back" });
-    // Background-tab health hooks
-    internal.events.emitSafe("reconnectScheduled", { attempt: 1, delayMs: 2_000 });
-    internal.events.emitSafe("catchup", {
-      conversations: 1,
-      processedConversations: 1,
-      pages: 2,
-      messages: 3,
-      durationMs: 4,
-      outcome: "completed",
-    });
-    internal.events.emitSafe("resumeDrain", { buffered: 7, durationMs: 8 });
-
-    const eventNames = stub.events.map((e) => e.name);
-    expect(eventNames).toContain("chat.xmpp.message.acked");
-    expect(eventNames).toContain("chat.xmpp.message.failed");
-    expect(eventNames).toContain("chat.xmpp.session.lifecycle");
-    expect(eventNames).toContain("chat.xmpp.reconnect.scheduled");
-    expect(eventNames.filter((n) => n === "chat.xmpp.status")).toHaveLength(2);
-
-    const reconnectMeasurement = stub.measurements.find(
-      (m) => m.type === "chat.xmpp.reconnect.duration_ms",
-    );
-    expect(reconnectMeasurement).toBeDefined();
-    expect(reconnectMeasurement?.values.duration_ms).toBeGreaterThanOrEqual(0);
-    expect(stub.measurements.some((m) => m.type === "chat.xmpp.reconnect.attempt")).toBe(true);
-    expect(stub.measurements.some((m) => m.type === "chat.xmpp.catchup")).toBe(true);
-    expect(stub.measurements.some((m) => m.type === "chat.xmpp.resume_drain")).toBe(true);
-  });
-
-  test("catch-up hook reports failed outcomes and processed conversation count", async () => {
-    const client = new BrowserXmppClient(session());
-    const events: Array<{
-      conversations: number;
-      processedConversations: number;
-      pages: number;
-      messages: number;
-      outcome: string;
-    }> = [];
-    client.onCatchup((info) => events.push(info));
-
-    const xmpp = {
-      fetch_dm_history_page: mock(async (peer: string) => {
-        if (peer === "carol@example.com") throw new Error("MAM failed");
-        return {
-          messages: [{
-            mam_id: "mam-2",
-            id: "dm-2",
-            from: "bob@example.com/phone",
-            to: "alice@example.com/desktop",
-            message_type: "chat",
-            body: "missed while suspended",
-            timestamp: "2024-01-01T00:00:01.000Z",
-            reaction_emojis: [],
-            shared_files: [],
-          }],
-          complete: true,
-        };
-      }),
-    };
-
-    const internal = client as unknown as {
-      xmpp: unknown;
-      connected: boolean;
-      runReconnectCatchup: (
-        xmpp: unknown,
-        entries: Array<{ kind: "dm"; key: string; after?: string }>,
-      ) => Promise<void>;
-    };
-    internal.xmpp = xmpp;
-    internal.connected = true;
-
-    await internal.runReconnectCatchup(xmpp, [
-      { kind: "dm", key: "bob@example.com", after: "mam-1" },
-      { kind: "dm", key: "carol@example.com", after: "mam-1" },
-    ]);
-
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      conversations: 2,
-      processedConversations: 2,
-      pages: 1,
-      messages: 1,
-      outcome: "failed",
-    });
-  });
-
-  test("client.onError forwards XMPP failures to Faro pushError with kind tagging", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    const internal = client as unknown as {
-      emitError: (event: {
-        kind: "stream" | "auth" | "connect-timeout" | "member-query";
-        recoverable: boolean;
-        detail: string;
-        cause?: unknown;
-        condition?: string;
-      }) => void;
-    };
-
-    // Fatal stream error with an XMPP condition.
-    const streamCause = new Error("peer closed stream");
-    internal.emitError({
-      kind: "stream",
-      recoverable: false,
-      detail: "not-authorized",
-      cause: streamCause,
-      condition: "not-authorized",
-    });
-
-    // Recoverable auth (treated as non-recoverable from the client's POV
-    // since refresh failed — but the shape is what we verify).
-    internal.emitError({
-      kind: "auth",
-      recoverable: false,
-      detail: "Session expired (no refresh available)",
-    });
-
-    // Recoverable connect-timeout (Rust client stalled, client discards + retries).
-    internal.emitError({
-      kind: "connect-timeout",
-      recoverable: true,
-      detail: "Rust client reconnect stalled past 15s; discarding agent",
-    });
-    internal.emitError({
-      kind: "member-query",
-      recoverable: true,
-      detail: "affiliation query failed for owner",
-      condition: "room@example.com",
-    });
-
-    expect(stub.errors).toHaveLength(4);
-
-    const streamErr = stub.errors[0];
-    expect(streamErr.error).not.toBe(streamCause);
-    expect(streamErr.error.message).toBe("stream-not-authorized");
-    expect(streamErr.options?.type).toBe("xmpp.stream");
-    expect(streamErr.options?.context?.kind).toBe("xmpp.stream");
-    expect(streamErr.options?.context?.recoverable).toBe("false");
-    expect(streamErr.options?.context?.detail).toBe("stream-not-authorized");
-    expect(streamErr.options?.context?.condition).toBe("not-authorized");
-
-    const authErr = stub.errors[1];
-    expect(authErr.options?.type).toBe("xmpp.auth");
-    expect(authErr.options?.context?.recoverable).toBe("false");
-    expect(authErr.options?.context?.detail).toBe("auth-error");
-
-    const timeoutErr = stub.errors[2];
-    expect(timeoutErr.options?.type).toBe("xmpp.disconnect");
-    expect(timeoutErr.options?.context?.recoverable).toBe("true");
-    expect(timeoutErr.options?.context?.detail).toBe("connect-timeout");
-
-    const memberErr = stub.errors[3];
-    expect(memberErr.options?.type).toBe("xmpp.stream");
-    expect(memberErr.options?.context?.condition).toBe("unknown");
-    expect(memberErr.options?.context?.detail).toBe("member-query-unknown");
-  });
-
-  test("self-presence join timeout reports a stable room timeout detail", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    const internal = client as unknown as {
-      emitError: (event: {
-        kind: "connect-timeout";
-        recoverable: boolean;
-        detail: string;
-      }) => void;
-    };
-
-    internal.emitError({
-      kind: "connect-timeout",
-      recoverable: true,
-      detail: "Timed out waiting for self-presence in c1@muc.example.com",
-    });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].options?.type).toBe("xmpp.disconnect");
-    expect(stub.errors[0].options?.context?.recoverable).toBe("true");
-    expect(stub.errors[0].options?.context?.detail).toBe("room-self-presence-timeout");
-  });
-
-  test("set_on_error bridge preserves stream error conditions for telemetry", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.({ detail: "stream error", condition: "not-authorized" });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
-  });
-
-  test("set_on_error bridge recovers stream condition from object detail", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.({ detail: "not-authorized" });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("not-authorized");
-  });
-
-  test("set_on_error bridge keeps stanza-only conditions out of stream telemetry", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.("forbidden");
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-error");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-error");
-  });
-
-  test("set_on_error bridge classifies driver errors without losing stream detail", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.("websocket transport error");
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-transport-error");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-transport-error");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("websocket transport error");
-  });
-
-  test("set_on_error bridge names handled-count detail when SM metadata is absent", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.({ detail: "handled-count-too-high" });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("handled-count-too-high");
-  });
-
-  test("set_on_error bridge names XEP-0198 handled-count stream failures", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.({
-      detail: "stream error",
-      condition: "undefined-condition",
-      streamManagementError: {
-        kind: "handled-count-too-high",
-        h: 3,
-        sendCount: 2,
-      },
-    });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBe("undefined-condition");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.context?.smH).toBe("3");
-    expect(stub.errors[0].options?.context?.smSendCount).toBe("2");
-  });
-
-  test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {
-    const client = new BrowserXmppClient(session());
-    // Force the slow path: make connect throw so we stay in "no-client" reason.
-    (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
-      throw new Error("Reconnection timed out");
-    });
-    (client as unknown as { switchRoom: ReturnType<typeof mock> }).switchRoom = mock(async () => {
-      throw new Error("Reconnection timed out");
-    });
-
-    const enqueued: Array<{ kind: string; reason: string }> = [];
-    const depths: Array<{ persisted: number; inflight: number }> = [];
-    client.onSendEnqueued((info) => enqueued.push(info));
-    client.onQueueDepthChange((d) => depths.push(d));
-
-    await client.sendDirectMessage("bob@example.com", "hi", { id: "dm-queued-1" });
-
-    expect(enqueued).toHaveLength(1);
-    expect(enqueued[0].kind).toBe("dm");
-    expect(depths).toHaveLength(1);
-    expect(depths[0].persisted).toBe(1);
-  });
-
-  test("hook exceptions are swallowed and do not break chat", () => {
-    const client = new BrowserXmppClient(session());
-    client.onMessageAcked(() => {
-      throw new Error("hook failure");
-    });
-
-    const internal = client as unknown as {
-      outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
-      };
-      xmpp: unknown;
-      wireEvents: (xmpp: unknown) => void;
-    };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
-    internal.xmpp = stubXmpp;
-    internal.wireEvents(stubXmpp);
-    internal.outboundQueue.notePendingSend("m-bad", "dm");
-
-    expect(() => {
-      (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
-    }).not.toThrow();
-  });
-
-  test("message:failed emits queue depth and preserves recorded DM kind", () => {
-    const client = new BrowserXmppClient(session());
-
-    const fails: Array<{ id: string; kind: "room" | "dm" }> = [];
-    const depths: Array<{ persisted: number; inflight: number }> = [];
-    client.onMessageDeliveryFailed((id, meta) => fails.push({ id, kind: meta.kind }));
-    client.onQueueDepthChange((d) => depths.push(d));
-
-    const internal = client as unknown as {
-      outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
-      };
-      xmpp: unknown;
-      wireEvents: (xmpp: unknown) => void;
-    };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
-    internal.xmpp = stubXmpp;
-    internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("dm-fail-1");
-    internal.outboundQueue.notePendingSend("dm-fail-1", "dm");
-
-    stubXmpp.emit("message:failed", { id: "dm-fail-1" });
-
-    expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
-    expect(depths).toHaveLength(1);
-    expect(depths[0].inflight).toBe(0);
-  });
-
-  test("message:failed without a recorded pending entry does not fire the failure hook", () => {
-    const client = new BrowserXmppClient(session());
-
-    const fails: string[] = [];
-    client.onMessageDeliveryFailed((id) => fails.push(id));
-
-    const internal = client as unknown as {
-      xmpp: unknown;
-      wireEvents: (xmpp: unknown) => void;
-    };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
-    internal.xmpp = stubXmpp;
-    internal.wireEvents(stubXmpp);
-
-    stubXmpp.emit("message:failed", { id: "orphan" });
-
-    expect(fails).toEqual([]);
-  });
-
-  test("reconnect duration is only reported on reconnecting → online", () => {
-    const client = new BrowserXmppClient(session());
-
-    const reconnectDurations: number[] = [];
-    client.onStatus((_snap, meta) => {
-      if (meta.reconnectDurationMs !== undefined) {
-        reconnectDurations.push(meta.reconnectDurationMs);
-      }
-    });
-
-    const internal = client as unknown as {
-      emitStatus: (snap: { state: string; detail?: string }) => void;
-    };
-
-    // reconnecting → offline: should NOT emit a duration.
-    internal.emitStatus({ state: "reconnecting" });
-    internal.emitStatus({ state: "offline" });
-    expect(reconnectDurations).toEqual([]);
-
-    // reconnecting → online: SHOULD emit a duration.
-    internal.emitStatus({ state: "reconnecting" });
-    internal.emitStatus({ state: "online" });
-    expect(reconnectDurations).toHaveLength(1);
-    expect(reconnectDurations[0]).toBeGreaterThanOrEqual(0);
-
-    // reconnecting → error: should NOT emit, and should reset the timer
-    // so a subsequent bare `online` doesn't retroactively emit.
-    internal.emitStatus({ state: "reconnecting" });
-    internal.emitStatus({ state: "error", detail: "fatal" });
-    internal.emitStatus({ state: "online" });
-    expect(reconnectDurations).toHaveLength(1);
-  });
 });

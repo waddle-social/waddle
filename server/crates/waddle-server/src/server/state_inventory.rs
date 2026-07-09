@@ -34,7 +34,6 @@ pub struct StateInventorySnapshot {
 pub struct AuthInventory {
     pub pending_auth: usize,
     pub device_auth: usize,
-    pub xmpp_auth_codes: usize,
     pub dynamic_oidc_clients: usize,
     pub dynamic_oidc_client_locks: usize,
 }
@@ -132,7 +131,6 @@ pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
         auth: AuthInventory {
             pending_auth: auth_state.pending_auth.len(),
             device_auth: auth_state.device_auth.len(),
-            xmpp_auth_codes: auth_state.xmpp_auth_codes.len(),
             dynamic_oidc_clients: auth_state.dynamic_oidc_clients.len(),
             dynamic_oidc_client_locks: auth_state.dynamic_oidc_client_locks.len(),
         },

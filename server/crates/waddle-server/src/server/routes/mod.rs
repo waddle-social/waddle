@@ -10,6 +10,5 @@ pub mod muc_muji_clear; // Shared Muji clear + broadcast for SFU/Jingle teardown
 pub mod uploads; // File upload endpoints (XEP-0363)
 pub mod websocket; // XMPP over WebSocket (RFC 7395)
 pub mod well_known; // /.well-known/ endpoints (host-meta, etc.)
-pub mod xmpp_oauth; // XMPP OAuth (XEP-0493) for standard XMPP clients
 
 // Future route modules will be defined here:

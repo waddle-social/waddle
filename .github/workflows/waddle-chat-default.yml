@@ -12,20 +12,12 @@ on:
     - bun.lock/**
     - chat/astro.config.mjs
     - chat/astro.config.mjs/**
-    - chat/dist/**
     - chat/env.cue
     - chat/package.json
     - chat/package.json/**
     - chat/public/**
     - chat/schema/**
-    - chat/scripts/build-xmpp-wasm.mjs
-    - chat/scripts/build-xmpp-wasm.mjs/**
-    - chat/scripts/generate-service-worker.mjs
-    - chat/scripts/generate-service-worker.mjs/**
-    - chat/scripts/resolve-commit-sha.mjs
-    - chat/scripts/resolve-commit-sha.mjs/**
-    - chat/scripts/strip-sourcemaps.mjs
-    - chat/scripts/strip-sourcemaps.mjs/**
+    - chat/scripts/**
     - chat/src/**
     - chat/tsconfig.json
     - chat/tsconfig.json/**
@@ -42,6 +34,7 @@ on:
     - server/Cargo.toml/**
     - server/crates/waddle-xmpp-client-wasm/**
     - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-core/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}

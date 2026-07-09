@@ -8,9 +8,6 @@ stack, authentication bootstrap, upload transfer, or operations require it.
 - `GET /ws`: RFC 7395 XMPP over WebSocket client transport.
 - `GET /.well-known/host-meta`: XEP-0156 WebSocket discovery.
 - `GET /.well-known/host-meta.json`: XEP-0156 WebSocket discovery.
-- `GET /.well-known/oauth-authorization-server`: OAuth metadata for XMPP OAuth clients.
-- `GET /api/auth/xmpp/authorize`: XEP-0493 OAuth authorization.
-- `POST /api/auth/xmpp/token`: XEP-0493 OAuth token issuance.
 - `GET /api/auth/providers`: Browser/app auth provider discovery.
 - `GET /api/auth/start`: Browser/app auth start.
 - `GET /api/auth/callback`: Browser/app auth callback.
@@ -51,3 +48,9 @@ stack, authentication bootstrap, upload transfer, or operations require it.
 The server does not expose Waddle-domain CRUD over HTTP. Space, channel,
 member, permission, message, user-search, and server-info behavior must flow
 through XMPP or internal services.
+
+Waddle also does not advertise XEP-0493 OAuth Client Login. The former OAuth
+metadata, XMPP authorization, and XMPP token routes were removed until Waddle
+has a complete registered-client, scope, PKCE, revocation, and cluster-safe
+authorization-server contract. SASL OAUTHBEARER remains available over secure
+transports for already-issued Waddle session tokens.

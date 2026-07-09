@@ -52,6 +52,7 @@ const serverBaseUrl = env.SERVER_BASE_URL;
       // build time, while the configured server origin arrives via the
       // `waddle:server-base-url` meta tag.
       import { consumeRedirectSession } from "@/auth/redirect-session";
+      import { webBuildIdentity } from "@/build-identity";
       import { initTelemetry } from "@/lib/telemetry";
       consumeRedirectSession();
       const serverBaseUrl = document
@@ -61,8 +62,10 @@ const serverBaseUrl = env.SERVER_BASE_URL;
         url: import.meta.env.PUBLIC_FARO_URL,
         appName: import.meta.env.PUBLIC_FARO_APP_NAME,
         appVersion: import.meta.env.PUBLIC_FARO_APP_VERSION,
-        environment: import.meta.env.PUBLIC_FARO_ENVIRONMENT,
-        release: import.meta.env.PUBLIC_COMMIT_SHA,
+        environment: webBuildIdentity.faroScope.deploymentEnvironment,
+        release: webBuildIdentity.faroRelease,
+        deploymentScope: webBuildIdentity.faroScope,
+        buildIdentityMarker: webBuildIdentity.marker,
         propagateTraceHeadersTo: serverBaseUrl ? [serverBaseUrl] : [],
       });
     </script>

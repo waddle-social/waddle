@@ -26,7 +26,6 @@ use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
-    auth::{parse_oauthbearer, OAuthBearerResult},
     commands::CommandRegistry,
     inbox::storage::InboxStorage,
     mam::MamStorage,
@@ -62,7 +61,7 @@ use waddle_xmpp::mam::InMemoryMamStorage;
 use waddle_extensions::ExtensionManager;
 
 use super::auth::AuthState;
-use crate::auth::{localpart_to_jid, NativeUserStore, Session};
+use crate::auth::{localpart_to_jid, AuthError, NativeUserStore, Session};
 use crate::server::AppState;
 use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
@@ -87,6 +86,7 @@ mod send;
 mod session_init;
 mod state;
 mod stream_management;
+mod telemetry_privacy;
 mod timers;
 mod transport_xml;
 
@@ -98,6 +98,9 @@ pub use cleanup::cleanup_muc_presence_for_jid;
 #[cfg(feature = "clustering")]
 pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
 pub use connection::router;
+pub(crate) use state::oauthbearer_available_for_base_url;
+#[cfg(test)]
+pub use state::OAuthTerminalRecorder;
 pub use state::{
     ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore, PendingDmCallOffer, ProtocolServices,
     RemoteMucMemberships, WebSocketDeps, WebSocketState, XmppServiceDomains,

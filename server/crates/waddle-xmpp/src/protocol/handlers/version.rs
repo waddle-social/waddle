@@ -1,10 +1,8 @@
 //! XEP-0092 — Software Version.
 //!
-//! Responds with the git commit SHA while omitting the optional operating-system
-//! field, which keeps the server compliant with XEP-0092's OS privacy guidance.
-//! The SHA is read at runtime from the `WADDLE_GIT_SHA` environment variable
-//! (set by the deployment environment); local runs fall back to the Cargo
-//! package version.
+//! Responds with the immutable build commit while omitting the optional
+//! operating-system field, which keeps the server compliant with XEP-0092's OS
+//! privacy guidance. Runtime deployment metadata cannot relabel this surface.
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
@@ -67,50 +65,14 @@ fn build_version_error(iq: &Iq, error_type: ErrorType, condition: DefinedConditi
 }
 
 fn server_version() -> String {
-    std::env::var("WADDLE_GIT_SHA")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+    waddle_xmpp_core::build_identity::printable_git_sha().to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use minidom::Element;
-    use std::sync::Mutex;
     use xmpp_parsers::iq::Iq;
-
-    // Serializes tests that mutate version env vars so they don't race each other.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn capture(key: &'static str) -> Self {
-            Self {
-                key,
-                previous: std::env::var(key).ok(),
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(value) = &self.previous {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
-    fn capture_version_env() -> EnvGuard {
-        EnvGuard::capture("WADDLE_GIT_SHA")
-    }
 
     fn test_ctx_jid() -> jid::FullJid {
         "alice@waddle.social/web".parse().expect("valid test JID")
@@ -133,10 +95,6 @@ mod tests {
 
     #[test]
     fn version_query_produces_result_without_os() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = capture_version_env();
-        std::env::set_var("WADDLE_GIT_SHA", "  deadbeef1234567890abcdef  ");
-
         let query = Element::builder("query", NS_VERSION).build();
         let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
@@ -176,7 +134,10 @@ mod tests {
                     assert_eq!(payload.ns(), NS_VERSION);
                     assert!(payload.get_child("name", NS_VERSION).is_some());
                     let version = payload.get_child("version", NS_VERSION).expect("version");
-                    assert_eq!(version.text(), "deadbeef1234567890abcdef");
+                    assert_eq!(
+                        version.text(),
+                        waddle_xmpp_core::build_identity::printable_git_sha()
+                    );
                     assert!(payload.get_child("os", NS_VERSION).is_none());
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
@@ -186,11 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn version_query_falls_back_to_package_version_when_env_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = capture_version_env();
-        std::env::remove_var("WADDLE_GIT_SHA");
-
+    fn version_response_uses_the_shared_immutable_build_identity() {
         let query = Element::builder("query", NS_VERSION).build();
         let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
@@ -218,7 +175,10 @@ mod tests {
                         panic!("expected version result payload");
                     };
                     let version = payload.get_child("version", NS_VERSION).expect("version");
-                    assert_eq!(version.text(), env!("CARGO_PKG_VERSION"));
+                    assert_eq!(
+                        version.text(),
+                        waddle_xmpp_core::build_identity::printable_git_sha()
+                    );
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
             },

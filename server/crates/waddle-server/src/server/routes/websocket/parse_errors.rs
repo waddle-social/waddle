@@ -1,9 +1,15 @@
-use super::transport_xml::sasl_failure_xml;
+use super::transport_xml::{element_to_xml, sasl_failure_xml, SaslFailureCondition};
 use super::*;
 
 pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
     match (parse_error_root_name(frame), err) {
-        (Some("auth" | "response"), ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)) => {
+        (
+            Some("auth" | "response" | "abort"),
+            ParseError::MalformedSasl(_)
+            | ParseError::InvalidXml(_)
+            | ParseError::InvalidSaslInitialResponseEncoding { .. }
+            | ParseError::InvalidSaslResponseEncoding,
+        ) => {
             raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL)
                 == waddle_xmpp::ns::SASL
         }
@@ -11,14 +17,42 @@ pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
     }
 }
 
+/// Whether a malformed SASL1 frame starts a replacement authentication
+/// exchange. RFC 6120 section 6.4.2 requires the server to discard any
+/// pending handshake when a subsequent `<auth/>` arrives, even if that new
+/// handshake cannot be decoded.
+pub(super) fn is_sasl_auth_parse_failure(frame: &str, err: &ParseError) -> bool {
+    matches!(parse_error_root_name(frame), Some("auth")) && is_sasl_parse_failure(frame, err)
+}
+
 pub(super) fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
     match (parse_error_root_name(frame), err) {
-        _ if is_sasl_parse_failure(frame, err) => Some(vec![sasl_failure_xml("malformed-request")]),
+        (
+            Some("auth" | "response"),
+            ParseError::InvalidSaslInitialResponseEncoding { .. }
+            | ParseError::InvalidSaslResponseEncoding,
+        ) => Some(vec![sasl_failure_xml(
+            SaslFailureCondition::IncorrectEncoding,
+        )]),
+        _ if is_sasl_parse_failure(frame, err) => Some(vec![sasl_failure_xml(
+            SaslFailureCondition::MalformedRequest,
+        )]),
+        (Some("authenticate"), ParseError::InvalidSaslInitialResponseEncoding { .. }) => {
+            Some(vec![sasl2_failure_xml("incorrect-encoding")])
+        }
         (Some("iq"), ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_)) => {
             invalid_iq_parse_error_response(frame).map(|response| vec![response])
         }
         _ => None,
     }
+}
+
+fn sasl2_failure_xml(condition: &'static str) -> String {
+    element_to_xml(
+        Element::builder("failure", waddle_xmpp::ns::SASL2)
+            .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
+            .build(),
+    )
 }
 
 fn parse_error_root_name(frame: &str) -> Option<&str> {

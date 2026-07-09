@@ -46,6 +46,16 @@ pub enum ConnectionPhase {
     /// challenge. The next legal client step is `<response>`.
     ScramPending { auth: ScramPendingState },
 
+    /// The client selected OAUTHBEARER without an initial response. The server
+    /// sent the empty SASL challenge required by the non-optimized exchange
+    /// and now expects the RFC 7628 client response.
+    OAuthBearerInitialResponsePending,
+
+    /// An empty, invalid, or expired bearer credential was rejected with the
+    /// RFC 7628 JSON error challenge. The next legal client step is the
+    /// single-octet error-completion `<response/>` or a SASL `<abort/>`.
+    OAuthBearerErrorPending,
+
     /// SASL succeeded and the connection now has an authenticated bare JID,
     /// but resource binding has not yet completed.
     Authenticated { bare_jid: BareJid },
@@ -81,6 +91,14 @@ impl ConnectionPhase {
 
     pub fn scram_pending(auth: ScramPendingState) -> Self {
         Self::ScramPending { auth }
+    }
+
+    pub fn oauthbearer_initial_response_pending() -> Self {
+        Self::OAuthBearerInitialResponsePending
+    }
+
+    pub fn oauthbearer_error_pending() -> Self {
+        Self::OAuthBearerErrorPending
     }
 
     pub fn authenticated(full_jid: &FullJid) -> Self {
@@ -155,7 +173,12 @@ impl ConnectionPhase {
     }
 
     pub fn allows_sasl_response(&self) -> bool {
-        matches!(self, Self::ScramPending { .. })
+        matches!(
+            self,
+            Self::ScramPending { .. }
+                | Self::OAuthBearerInitialResponsePending
+                | Self::OAuthBearerErrorPending
+        )
     }
 
     pub fn allows_resource_binding(&self) -> bool {
@@ -179,6 +202,48 @@ impl ConnectionPhase {
             Self::ScramPending { auth } => Some(auth.username()),
             _ => None,
         }
+    }
+
+    pub fn has_pending_oauthbearer_exchange(&self) -> bool {
+        matches!(
+            self,
+            Self::OAuthBearerInitialResponsePending | Self::OAuthBearerErrorPending
+        )
+    }
+
+    pub fn has_pending_sasl_exchange(&self) -> bool {
+        matches!(
+            self,
+            Self::ScramPending { .. }
+                | Self::OAuthBearerInitialResponsePending
+                | Self::OAuthBearerErrorPending
+        )
+    }
+
+    /// End any challenge/response exchange and return to the retryable SASL
+    /// phase. Returns whether a pending exchange was actually cleared.
+    pub fn reset_pending_sasl_exchange(&mut self) -> bool {
+        if !self.has_pending_sasl_exchange() {
+            return false;
+        }
+        *self = Self::Unauthenticated;
+        true
+    }
+
+    pub fn take_oauthbearer_initial_response_pending(&mut self) -> bool {
+        if !matches!(self, Self::OAuthBearerInitialResponsePending) {
+            return false;
+        }
+        *self = Self::Unauthenticated;
+        true
+    }
+
+    pub fn take_oauthbearer_error_pending(&mut self) -> bool {
+        if !matches!(self, Self::OAuthBearerErrorPending) {
+            return false;
+        }
+        *self = Self::Unauthenticated;
+        true
     }
 
     pub fn take_scram_pending(&mut self) -> Option<ScramPendingState> {
@@ -215,7 +280,7 @@ impl ScramPendingState {
     pub fn process_client_final(
         &mut self,
         client_final: &str,
-    ) -> Result<crate::auth::ServerFinalMessage, crate::XmppError> {
+    ) -> Result<crate::auth::ServerFinalMessage, crate::auth::ScramFinalError> {
         self.scram_server
             .process_client_final(client_final, &self.stored_key, &self.server_key)
     }
@@ -256,6 +321,22 @@ mod tests {
         assert!(!phase.allows_stream_management_enable());
         assert!(!phase.allows_stream_management_resume());
         assert_eq!(phase.scram_pending_username(), Some("alice"));
+    }
+
+    #[test]
+    fn oauthbearer_pending_phases_only_allow_sasl_response() {
+        for phase in [
+            ConnectionPhase::oauthbearer_initial_response_pending(),
+            ConnectionPhase::oauthbearer_error_pending(),
+        ] {
+            assert!(!phase.allows_sasl_auth());
+            assert!(phase.allows_sasl_response());
+            assert!(phase.has_pending_oauthbearer_exchange());
+            assert!(phase.has_pending_sasl_exchange());
+            assert!(!phase.allows_resource_binding());
+            assert!(!phase.allows_stream_management_enable());
+            assert!(!phase.allows_stream_management_resume());
+        }
     }
 
     #[test]
@@ -337,6 +418,40 @@ mod tests {
         let auth = phase.take_scram_pending().expect("scram pending state");
         assert_eq!(auth.username(), "alice");
         assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+    }
+
+    #[test]
+    fn take_oauthbearer_pending_phases_reset_phase() {
+        let mut phase = ConnectionPhase::oauthbearer_initial_response_pending();
+        assert!(phase.take_oauthbearer_initial_response_pending());
+        assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+        assert!(!phase.take_oauthbearer_initial_response_pending());
+
+        let mut phase = ConnectionPhase::oauthbearer_error_pending();
+        assert!(phase.take_oauthbearer_error_pending());
+        assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+        assert!(!phase.take_oauthbearer_error_pending());
+    }
+
+    #[test]
+    fn reset_pending_sasl_exchange_clears_both_challenge_types_only() {
+        let mut scram = ConnectionPhase::scram_pending(scram_pending_state("alice"));
+        assert!(scram.reset_pending_sasl_exchange());
+        assert!(matches!(scram, ConnectionPhase::Unauthenticated));
+
+        for mut oauth in [
+            ConnectionPhase::oauthbearer_initial_response_pending(),
+            ConnectionPhase::oauthbearer_error_pending(),
+        ] {
+            assert!(oauth.reset_pending_sasl_exchange());
+            assert!(matches!(oauth, ConnectionPhase::Unauthenticated));
+        }
+
+        let mut authenticated = ConnectionPhase::authenticated(
+            &"alice@example.com/pending".parse().expect("valid jid"),
+        );
+        assert!(!authenticated.reset_pending_sasl_exchange());
+        assert!(authenticated.is_authenticated());
     }
 
     #[test]

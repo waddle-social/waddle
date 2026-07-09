@@ -54,7 +54,10 @@ impl waddle_xmpp::AppState for XmppAppState {
     ///
     /// The token is expected to be a session ID. The JID is derived from the
     /// session's immutable localpart after validation.
-    async fn validate_session_token(&self, token: &str) -> Result<XmppSession, XmppError> {
+    async fn validate_session_token(
+        &self,
+        token: &waddle_xmpp::auth::oauthbearer::OAuthBearerToken,
+    ) -> Result<XmppSession, XmppError> {
         super::xmpp_auth_state::validate_session_token(&self.session_manager, &self.domain, token)
             .await
     }
@@ -62,13 +65,6 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// Get the XMPP server domain.
     fn domain(&self) -> &str {
         &self.domain
-    }
-
-    /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).
-    ///
-    /// Returns the RFC 8414 OAuth authorization server metadata endpoint URL.
-    fn oauth_discovery_url(&self) -> String {
-        super::xmpp_auth_state::oauth_discovery_url(&self.domain)
     }
 
     /// List all relations a subject has on an object.

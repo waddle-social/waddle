@@ -43,7 +43,7 @@ fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
 #[tokio::test]
 async fn sm_features_advertise_sm_namespace() {
     // Stream features after successful auth must include <sm/>.
-    let features = build_stream_features_xml(true, false);
+    let features = build_stream_features_xml(true, false, true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children()

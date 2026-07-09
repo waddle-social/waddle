@@ -1,4 +1,7 @@
 use super::*;
+use crate::server::disco_targets::{
+    extensions_service_target_features, target_identities, DiscoTarget,
+};
 
 pub(super) async fn handle_extensions_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -110,16 +113,9 @@ pub(super) async fn handle_extensions_disco_info<'a>(
         return Some(DiscoInfoResponse::iq(response));
     }
 
-    let identities = vec![Identity::pubsub_service(Some("Waddle Extensions"))];
-    let mut features = vec![
-        Feature::disco_info(),
-        Feature::disco_items(),
-        Feature::commands(),
-        Feature::pubsub(),
-        Feature::pubsub_retrieve_items(),
-        Feature::new("urn:waddle:extension:1"),
-    ];
-    features.extend(extension_features_for_disco(state));
+    let identities = target_identities(DiscoTarget::ExtensionsService);
+    let extension_features = extension_features_for_disco(state);
+    let features = extensions_service_target_features(&extension_features);
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))
 }

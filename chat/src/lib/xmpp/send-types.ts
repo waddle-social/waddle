@@ -1,6 +1,13 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
+export type SendQueueReason =
+  | "offline"
+  | "destroying"
+  | "no-client"
+  | "reconnecting"
+  | "not-ready";
+
 export interface OutboundFileAttachment {
   url: string;
   name: string;

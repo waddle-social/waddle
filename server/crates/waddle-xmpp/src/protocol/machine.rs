@@ -274,6 +274,7 @@ impl XmppStateMachine {
             }
             InboundFrame::Auth { .. } => vec![],
             InboundFrame::SaslResponse(_) => vec![],
+            InboundFrame::SaslAbort => vec![],
             // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR resume, like SASL
             // Auth/SaslResponse above, is owned by the WebSocket frame
             // dispatcher; the state machine delegates silently.
@@ -290,6 +291,8 @@ impl XmppStateMachine {
             ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
+            | ConnectionPhase::OAuthBearerInitialResponsePending
+            | ConnectionPhase::OAuthBearerErrorPending
             | ConnectionPhase::Authenticated { .. }
             | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {
@@ -375,6 +378,8 @@ impl XmppStateMachine {
             ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
+            | ConnectionPhase::OAuthBearerInitialResponsePending
+            | ConnectionPhase::OAuthBearerErrorPending
             | ConnectionPhase::Authenticated { .. }
             | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {

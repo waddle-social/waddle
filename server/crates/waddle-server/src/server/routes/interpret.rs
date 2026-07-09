@@ -662,12 +662,15 @@ async fn interpret_with_depth(
                 .await;
             }
             OutboundEvent::ArchiveDirect {
+                side,
                 archive_jid,
                 from,
                 to,
                 message,
             } => {
-                if let Some(rewrite) = archive_direct(deps, archive_jid, from, to, message).await {
+                if let Some(rewrite) =
+                    archive_direct(deps, side, archive_jid, from, to, message).await
+                {
                     archive_id_rewrites.push(rewrite);
                 }
             }

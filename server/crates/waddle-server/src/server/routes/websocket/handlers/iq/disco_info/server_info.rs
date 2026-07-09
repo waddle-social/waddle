@@ -1,4 +1,7 @@
 use super::*;
+use crate::server::disco_targets::{
+    calls_available, server_target_features, target_identities, DiscoTarget, RuntimeFeatureOptions,
+};
 
 pub(super) async fn handle_command_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -41,16 +44,7 @@ pub(super) async fn handle_server_disco_info<'a>(
     state: &WebSocketState,
     authenticated_session: Option<&Session>,
 ) -> DiscoInfoResponse<'a> {
-    // Disco info on server. Source the canonical feature catalogue
-    // from `waddle-xmpp-core::disco::info::server_features()` so the
-    // rich-message XEPs (corrections, retractions, reactions,
-    // references, stanza-ids, etc.) declared there stay discoverable
-    // here without drift between the two lists. Server-instance
-    // additions (Spaces, jabber:iq:search) are appended below,
-    // and dynamic extension namespaces extend further still.
-    let identities = vec![Identity::server(Some("Waddle"))];
-    let mut features = waddle_xmpp::disco::info::server_features();
-    features.push(Feature::new("jabber:iq:search"));
+    let identities = target_identities(DiscoTarget::Server);
     // ADR-0017 Phase 3 Slice 8 (Q8): XEP-0397 ISR is advertised ONLY when
     // `clustering.enabled && Postgres` — `isr_token_store().is_some()` is
     // the single source of truth for that gate (see its doc comment), so
@@ -59,30 +53,18 @@ pub(super) async fn handle_server_disco_info<'a>(
     // unadvertised — it was advertised UNCONDITIONALLY and
     // non-conformantly (the wrong namespace, `urn:xmpp:isr:0`, with no
     // gating at all). This slice is what first gates it correctly.
-    if state
+    let isr_available = state
         .deps
         .app_state
         .clustering_claims
         .isr_token_store()
-        .is_some()
-    {
-        features.push(Feature::new(waddle_xmpp::isr::ISR_NS));
-    }
-    features.extend(extension_features_for_disco(state));
-    // Advertise XMPP-native A/V calling only when the Jingle handler
-    // is registered. `register_call_handlers` is invoked at startup
-    // iff `SfuConfig::from_env` produced a config — so the
-    // dispatcher's handler set is the canonical "is calling
-    // available" flag. Lying about features that have no behavior
-    // is the lesson we took from PR #243.
-    if state
-        .deps
-        .protocol
-        .dispatcher
-        .has_iq_handler("urn:xmpp:jingle:1")
-    {
-        features.extend(waddle_xmpp::disco::info::call_features());
-    }
+        .is_some();
+    let extension_features = extension_features_for_disco(state);
+    let features = server_target_features(RuntimeFeatureOptions {
+        calls_available: calls_available(state),
+        isr_available,
+        extension_features: &extension_features,
+    });
     let response = match server_affiliation_for_requester(state, authenticated_session).await {
         Some(role) => build_disco_info_response_with_extensions(
             req.request_iq,

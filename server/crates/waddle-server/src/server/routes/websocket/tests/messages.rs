@@ -146,12 +146,14 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     let _ = crate::server::routes::interpret::interpret(
         vec![
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                side: waddle_xmpp::protocol::ArchiveSide::Sender,
                 archive_jid: bob.clone(),
                 from: bob.clone(),
                 to: alice.clone(),
                 message: Box::new(accepted_proceed.clone()),
             },
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                side: waddle_xmpp::protocol::ArchiveSide::Recipient,
                 archive_jid: alice.clone(),
                 from: bob.clone(),
                 to: alice.clone(),
@@ -237,6 +239,7 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     let self_proceed: Element = waddle_xmpp::xep::xep0353::build_proceed(sid.clone()).into();
     let _ = crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Sender,
             archive_jid: alice.clone(),
             from: alice.clone(),
             to: bob.clone(),
@@ -296,12 +299,14 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     let _ = crate::server::routes::interpret::interpret(
         vec![
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                side: waddle_xmpp::protocol::ArchiveSide::Sender,
                 archive_jid: bob.clone(),
                 from: bob.clone(),
                 to: alice.clone(),
                 message: Box::new(replayed_proceed.clone()),
             },
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                side: waddle_xmpp::protocol::ArchiveSide::Recipient,
                 archive_jid: alice.clone(),
                 from: bob.clone(),
                 to: alice.clone(),
@@ -2822,6 +2827,7 @@ async fn notification_candidate_recovery_preserves_sender_resource_from_archived
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            side: waddle_xmpp::protocol::ArchiveSide::Recipient,
             archive_jid: recipient.clone(),
             from: sender_bare.clone(),
             to: recipient.clone(),

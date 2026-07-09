@@ -1,0 +1,1 @@
+export const MAX_FARO_MEASUREMENT_VALUE = 1_000_000_000;

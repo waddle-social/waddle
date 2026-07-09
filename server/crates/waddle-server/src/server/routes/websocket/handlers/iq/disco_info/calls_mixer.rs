@@ -9,38 +9,33 @@
 //! understands.
 
 use super::*;
+use crate::server::disco_targets::{
+    calls_available, calls_mixer_target_features, target_identities, DiscoTarget,
+};
 
 /// Handle a disco#info query targeted at `calls.<server-domain>`.
 /// Returns `None` for queries to any other JID so the dispatcher
 /// chain falls through to the next handler.
 pub(super) fn handle_calls_mixer_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
+    state: &WebSocketState,
 ) -> Option<DiscoInfoResponse<'a>> {
     let expected = format!("calls.{}", req.domain);
     if req.target_to != Some(expected.as_str()) {
         return None;
     }
 
-    // Identity matches the av-conferences ProtoXEP convention
-    // (`category='conference' type='audio-video'`). Lets a strict
-    // peer disco the mixer and confirm it's a focus before
-    // session-initiate.
-    let identities = vec![Identity::audio_video_conference(Some(
-        "Waddle Group Call Mixer",
-    ))];
+    if !calls_available(state) {
+        return Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            service_unavailable_iq_error("Calling is not available."),
+        ));
+    }
 
-    // Features the mixer accepts on the wire. `Feature::muji()` is
-    // the load-bearing one (XEP-0272); the rest document the
-    // shape of the Jingle session-initiate the mixer accepts.
-    let features = vec![
-        Feature::disco_info(),
-        Feature::muji(),
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_rtp_audio(),
-        Feature::jingle_rtp_video(),
-        Feature::waddle_livekit_transport(),
-    ];
+    let identities = target_identities(DiscoTarget::CallsMixer);
+    let features = calls_mixer_target_features();
 
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))

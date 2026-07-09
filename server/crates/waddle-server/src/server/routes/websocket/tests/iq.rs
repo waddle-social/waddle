@@ -846,7 +846,7 @@ async fn handle_iq_disco_info_advertises_replies() {
 async fn handle_iq_disco_info_answers_every_component_domain() {
     let server_domain = "example.com";
     let muc_domain = "muc.example.com";
-    let state = create_test_websocket_state().await;
+    let state = create_test_websocket_state_with_calls().await;
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
 
     let domains = &state.deps.service_domains;
@@ -918,6 +918,107 @@ async fn handle_iq_disco_info_answers_every_component_domain() {
                 "disco#info to {target} ({phase_label}) must advertise at least one feature: {xml}",
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn handle_iq_disco_target_contract_matches_live_feature_and_identity_owners() {
+    use crate::server::disco_targets::{
+        claimable_target_features, required_target_features, target_identity_contracts, DiscoTarget,
+    };
+    use std::collections::BTreeSet;
+
+    let state = create_test_websocket_state_with_calls().await;
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let targets = [
+        (DiscoTarget::Server, "example.com"),
+        (DiscoTarget::MucService, "muc.example.com"),
+        (DiscoTarget::UploadService, "upload.example.com"),
+        (DiscoTarget::SpacesService, "spaces.example.com"),
+        (DiscoTarget::CommunityService, "community.example.com"),
+        (DiscoTarget::ExtensionsService, "extensions.example.com"),
+        (DiscoTarget::PushService, "push.example.com"),
+        (DiscoTarget::CallsMixer, "calls.example.com"),
+        (
+            DiscoTarget::RepresentativeMucRoom,
+            "representative@muc.example.com",
+        ),
+        (DiscoTarget::AuthenticatedSelf, "alice@example.com"),
+    ];
+
+    for (target, jid) in targets {
+        let phase = if target == DiscoTarget::AuthenticatedSelf {
+            ready_phase(&alice)
+        } else {
+            ConnectionPhase::Unauthenticated
+        };
+        let response = handle_iq(
+            &disco_info_iq_frame(&format!("target-contract-{}", target.slug()), jid, None),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &phase,
+        )
+        .await
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{} returned no disco response", target.slug()));
+        let iq = parse_iq_for_test(&response);
+        let query = match iq.split().1 {
+            IqPayload::Result(Some(payload)) => payload,
+            _ => panic!("{} returned a non-result: {response}", target.slug()),
+        };
+
+        let observed_features = disco_feature_vars_for_test(&query);
+        let claimable_features = claimable_target_features(target)
+            .into_iter()
+            .map(|feature| feature.0)
+            .collect::<BTreeSet<_>>();
+        let required_features = required_target_features(target)
+            .into_iter()
+            .map(|feature| feature.0)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            observed_features.is_subset(&claimable_features),
+            "{} advertised a feature outside its claimable contract: {:?}",
+            target.slug(),
+            observed_features.difference(&claimable_features)
+        );
+        assert!(
+            required_features.is_subset(&observed_features),
+            "{} omitted required features: {:?}",
+            target.slug(),
+            required_features.difference(&observed_features)
+        );
+
+        let observed_identities = query
+            .children()
+            .filter(|child| {
+                child.name() == "identity" && child.ns() == waddle_xmpp::disco::DISCO_INFO_NS
+            })
+            .map(|identity| {
+                (
+                    identity.attr("category").unwrap_or_default().to_string(),
+                    identity.attr("type").unwrap_or_default().to_string(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_identities = target_identity_contracts(target)
+            .iter()
+            .map(|identity| {
+                (
+                    identity.category.as_str().to_string(),
+                    identity.type_.as_str().to_string(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            observed_identities,
+            expected_identities,
+            "{} identity ownership drifted",
+            target.slug()
+        );
     }
 }
 
@@ -1005,6 +1106,68 @@ async fn handle_iq_disco_items_server_advertises_spaces_service() {
     assert!(
         response.contains("push.example.com"),
         "expected Push Service in server disco#items: {response}"
+    );
+    assert!(
+        !response.contains("calls.example.com"),
+        "a deployment without an SFU must not list a calls mixer: {response}"
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_disco_calls_visibility_requires_the_complete_calls_runtime() {
+    let state = create_test_websocket_state().await;
+    let info = disco_info_iq_frame("calls-off", "calls.example.com", None);
+    let response = handle_iq(
+        &info,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await
+    .into_iter()
+    .next()
+    .expect("disabled calls disco response");
+    assert!(response.contains("service-unavailable"), "{response}");
+    assert!(!response.contains("urn:xmpp:jingle:1"), "{response}");
+
+    let state = create_test_websocket_state_with_calls().await;
+    let items = disco_items_iq_frame("calls-items-on", "example.com", None);
+    let items_response = handle_iq(
+        &items,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await
+    .into_iter()
+    .next()
+    .expect("enabled calls items response");
+    assert!(
+        items_response.contains("calls.example.com"),
+        "{items_response}"
+    );
+
+    let info_response = handle_iq(
+        &info,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await
+    .into_iter()
+    .next()
+    .expect("enabled calls disco response");
+    assert!(info_response.contains("conference"), "{info_response}");
+    assert!(info_response.contains("audio-video"), "{info_response}");
+    assert!(
+        info_response.contains("urn:xmpp:jingle:1"),
+        "{info_response}"
     );
 }
 

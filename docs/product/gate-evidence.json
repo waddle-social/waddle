@@ -4,11 +4,63 @@
     "0": {
       "status": "not-ready",
       "requiredKinds": ["capability-baseline", "journey-baseline", "telemetry-baseline"],
-      "records": []
+      "records": [
+        {
+          "kind": "capability-baseline",
+          "status": "partial",
+          "reference": {
+            "type": "repo-test",
+            "path": "server/crates/waddle-server/tests/server_capability_manifest.rs",
+            "testId": "capability_manifest_has_complete_unique_release_claims"
+          }
+        },
+        {
+          "kind": "capability-baseline",
+          "status": "partial",
+          "reference": {
+            "type": "repo-test",
+            "path": "server/crates/waddle-server/tests/server_capability_manifest.rs",
+            "testId": "advertised_feature_claims_exist_in_runtime_feature_vectors"
+          }
+        },
+        {
+          "kind": "journey-baseline",
+          "status": "partial",
+          "reference": {
+            "type": "repo-test",
+            "path": "tests/critical-journeys.test.ts",
+            "testId": "covers every release dimension and named critical journey"
+          }
+        },
+        {
+          "kind": "telemetry-baseline",
+          "status": "partial",
+          "reference": {
+            "type": "repo-test",
+            "path": "tests/switchable-baseline-signals.test.ts",
+            "testId": "defines a unique complete implementation-backed signal catalog"
+          }
+        }
+      ]
     },
     "1": {
       "status": "not-ready",
       "requiredKinds": ["availability-slo", "delivery-slo", "authentication-slo", "restore-drill", "security"],
+      "records": []
+    },
+    "2": {
+      "status": "not-ready",
+      "requiredKinds": ["e2e", "interop", "security", "chaos"],
+      "records": []
+    },
+    "3": {
+      "status": "not-ready",
+      "requiredKinds": ["e2e", "chaos", "accessibility", "performance", "device"],
+      "records": []
+    },
+    "4": {
+      "status": "not-ready",
+      "requiredKinds": ["e2e", "metric", "authorization", "audit"],
       "records": []
     },
     "5": {

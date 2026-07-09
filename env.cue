@@ -47,9 +47,12 @@ schema.#Base & {
 			// ambient env, so build-time PUBLIC_* values must be declared here
 			// to reach `astro build`. Scoped to production so previews, PR, and
 			// local builds ship telemetry off.
-			PUBLIC_FARO_URL:         "https://faro-collector-prod-eu-west-6.grafana.net/collect/0eab89b00ec9f7cfd5c97e96636a3d20"
-			PUBLIC_FARO_APP_NAME:    "waddle-chat"
-			PUBLIC_FARO_ENVIRONMENT: "production"
+			PUBLIC_FARO_URL:                    "https://faro-collector-prod-eu-west-6.grafana.net/collect/0eab89b00ec9f7cfd5c97e96636a3d20"
+			PUBLIC_FARO_APP_NAME:               "waddle-chat"
+			PUBLIC_FARO_DEPLOYMENT_ENVIRONMENT: "production"
+			PUBLIC_FARO_CLUSTER:                "waddle-cloud"
+			PUBLIC_FARO_NAMESPACE:              "waddle"
+			PUBLIC_FARO_SOURCE_ID:              "waddle-chat"
 
 			FARO_SOURCEMAP_ENDPOINT: "https://faro-api-prod-eu-west-6.grafana.net/faro/api/v1"
 			FARO_SOURCEMAP_APP_ID:   "92"

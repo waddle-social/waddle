@@ -10,7 +10,7 @@ resources:
   - runtime-external-secret.yaml
   - openrouter-external-secret.yaml
   - livekit-external-secret.yaml
-  - helmrepository.yaml
+  - chart-ocirepository.yaml
   - helmrelease.yaml
   - httproute.yaml
   - httproute-http-redirect.yaml

@@ -9,6 +9,28 @@
 {{- $killMargin := 5 -}}
 {{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
 {{- $preStopSleep := int .Values.preStopSleepSeconds -}}
+
+{{- $scopeLabelPattern := "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$" -}}
+{{- range $field, $value := dict "telemetry.environment" .Values.telemetry.environment "telemetry.cluster" .Values.telemetry.cluster -}}
+{{- if and $value (not (regexMatch $scopeLabelPattern (toString $value))) -}}
+{{- fail (printf "%s must be 1-64 lowercase ASCII letters, digits, dots, underscores, or hyphens and start/end alphanumeric" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.telemetry.commit (not (regexMatch "^[a-f0-9]{40}$" (toString .Values.telemetry.commit))) -}}
+{{- fail "telemetry.commit must be a full 40-character lowercase Git SHA" -}}
+{{- end -}}
+
+{{- $reservedIdentityEnv := list "OTEL_SERVICE_INSTANCE_ID" "OTEL_SERVICE_VERSION" "K8S_POD_UID" "K8S_POD_NAME" "K8S_NAMESPACE_NAME" "DEPLOYMENT_ENVIRONMENT_NAME" "DEPLOYMENT_CLUSTER_NAME" "WADDLE_GIT_SHA" -}}
+{{- range $index, $entry := default (list) .Values.containerExtraEnv -}}
+{{- if has (toString $entry.name) $reservedIdentityEnv -}}
+{{- fail (printf "containerExtraEnv[%d].name %q is reserved deployment identity and cannot be overridden" $index $entry.name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $_ := default (dict) .Values.config.extraEnv -}}
+{{- if has (toString $name) $reservedIdentityEnv -}}
+{{- fail (printf "config.extraEnv key %q is reserved deployment identity and cannot be overridden" $name) -}}
+{{- end -}}
+{{- end -}}
 {{- /*
   ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain
   (`clustering::drain::run_shutdown_drain`) runs on its own budget,

@@ -7,6 +7,7 @@ import {
   getStoredSessionId,
   storeSessionId,
 } from "@/auth/redirect-session";
+import { reportAuthBootstrap, type AuthBootstrapOutcome } from "@/lib/telemetry";
 
 function trimTrailingSlash(value: string) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
@@ -37,6 +38,11 @@ export function useSessionAuth(defaultServerUrl: string) {
   }
 
   async function bootstrap() {
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const reportOutcome = (outcome: AuthBootstrapOutcome) => {
+      const finishedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      reportAuthBootstrap({ outcome, durationMs: finishedAt - startedAt });
+    };
     isBootstrapping.value = true;
     appState.value = "loading";
     appError.value = "";
@@ -45,19 +51,23 @@ export function useSessionAuth(defaultServerUrl: string) {
       const loaded = await auth.getSession(consumeRedirectSession() ?? undefined);
 
       if (!loaded || loaded.is_expired) {
+        const outcome: AuthBootstrapOutcome = loaded?.is_expired ? "expired" : "signed_out";
         clearStoredSessionId();
         session.value = null;
         await loadProviders();
         appState.value = "signed-out";
+        reportOutcome(outcome);
         return;
       }
 
       storeSessionId(loaded.session_id);
       session.value = loaded;
       appState.value = "ready";
+      reportOutcome("ready");
     } catch (e) {
       appError.value = e instanceof Error ? e.message : "Something went wrong.";
       appState.value = "error";
+      reportOutcome("failed");
     } finally {
       isBootstrapping.value = false;
     }

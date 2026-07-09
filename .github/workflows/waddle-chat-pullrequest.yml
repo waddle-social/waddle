@@ -21,12 +21,18 @@ on:
     - chat/public/**
     - chat/schema/**
     - chat/scripts/**
+    - chat/scripts/build-identity.mjs
+    - chat/scripts/build-identity.mjs/**
     - chat/scripts/build-xmpp-wasm.mjs
     - chat/scripts/build-xmpp-wasm.mjs/**
+    - chat/scripts/generate-build-identity.mjs
+    - chat/scripts/generate-build-identity.mjs/**
     - chat/scripts/generate-service-worker.mjs
     - chat/scripts/generate-service-worker.mjs/**
     - chat/scripts/resolve-commit-sha.mjs
     - chat/scripts/resolve-commit-sha.mjs/**
+    - chat/scripts/verify-build-identity.mjs
+    - chat/scripts/verify-build-identity.mjs/**
     - chat/src/**
     - chat/src/styles/global/tokens.css
     - chat/src/styles/global/tokens.css/**

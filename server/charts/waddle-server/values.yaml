@@ -195,7 +195,11 @@ extraSecretChecksum: ""
 telemetry:
   otlpEndpoint: ""
   serviceName: waddle-server
-  serviceVersion: ""
+  # Release source revision exposed to XMPP version metadata. Gate evidence
+  # uses the immutable build-embedded revision instead.
+  commit: ""
+  environment: ""
+  cluster: ""
 
 secret:
   create: true
@@ -238,7 +242,7 @@ probes:
     timeoutSeconds: 2
     failureThreshold: 3
   readiness:
-    path: /api/v1/health
+    path: /readyz
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 2

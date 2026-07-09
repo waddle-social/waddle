@@ -577,8 +577,8 @@ async fn handle_isr_resume_authenticate_is_a_noop_failure_without_clustering() {
         blocklist_interested: &mut conn.blocklist_interested,
     };
     let responses = handle_isr_resume_authenticate(
-        "PLAIN".to_string(),
-        BASE64_STANDARD.encode("\0alice@example.com\0some-token"),
+        waddle_xmpp::auth::SaslMechanism::Plain,
+        waddle_xmpp::auth::SaslInitialResponse::empty(),
         SmResume {
             previd: "does-not-matter".to_string(),
             h: 0,

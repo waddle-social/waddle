@@ -2,9 +2,7 @@
 
 use waddle_ws_test_support as ws_common;
 
-use ws_common::{
-    disco_info_query, extract_element_text, version_query, TestServer, WsXmppClient, TEST_GIT_SHA,
-};
+use ws_common::{disco_info_query, extract_element_text, version_query, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -57,8 +55,9 @@ async fn websocket_version_query_returns_name_and_version_without_os() {
         Some("Waddle")
     );
     assert!(
-        extract_element_text(&response, "version").as_deref() == Some(TEST_GIT_SHA),
-        "expected <version/> child, got: {response}"
+        extract_element_text(&response, "version").as_deref()
+            == Some(waddle_xmpp_core::build_identity::printable_git_sha()),
+        "expected immutable build identity in <version/>, got: {response}"
     );
     assert!(
         extract_element_text(&response, "os").is_none(),

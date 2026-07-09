@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 describe("handleWindowErrorEvent", () => {
-  test("pushes a sanitized window-error to Faro", () => {
+  test("pushes only the bounded window-error category to Faro", () => {
     handleWindowErrorEvent({
       error: new Error("stream broke for alice@example.com/desktop"),
     });
@@ -52,15 +52,17 @@ describe("handleWindowErrorEvent", () => {
     expect(stub.errors).toHaveLength(1);
     const pushed = stub.errors[0]!;
     expect(pushed.options?.type).toBe("window-error");
-    expect(pushed.error.message).toBe("stream broke for :jid");
-    expect(pushed.error.message).not.toContain("alice@example.com");
+    expect(pushed.error.message).toBe("window-error");
+    expect(pushed.error.stack).toBeUndefined();
+    expect(JSON.stringify(pushed)).not.toContain("alice@example.com");
   });
 
   test("falls back to the event message when no Error object is attached", () => {
     handleWindowErrorEvent({ message: "Script error for bob@example.com" });
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0]!.error.message).toBe("Script error for :jid");
+    expect(stub.errors[0]!.error.message).toBe("window-error");
+    expect(JSON.stringify(stub.errors[0])).not.toContain("bob@example.com");
   });
 
   test("dedupes an identical error flood into a single push", () => {
@@ -89,15 +91,18 @@ describe("handleUnhandledRejectionEvent", () => {
     expect(stub.errors).toHaveLength(1);
     const pushed = stub.errors[0]!;
     expect(pushed.options?.type).toBe("unhandled-rejection");
+    expect(pushed.error.message).toBe("unhandled-rejection");
+    expect(pushed.error.stack).toBeUndefined();
     expect(pushed.error.message).not.toContain("topsecret");
     expect(pushed.error.message).not.toContain("abc123");
   });
 
-  test("stringifies non-Error rejection reasons", () => {
+  test("categorizes non-Error rejection reasons without stringifying them", () => {
     handleUnhandledRejectionEvent({ reason: "plain string reason" });
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0]!.error.message).toBe("plain string reason");
+    expect(stub.errors[0]!.error.message).toBe("unhandled-rejection");
+    expect(JSON.stringify(stub.errors[0])).not.toContain("plain string reason");
   });
 });
 
@@ -124,7 +129,8 @@ describe("installGlobalErrorTelemetry", () => {
       listeners.get("unhandledrejection")![0]!({ reason: new Error("rejection boom") });
 
       expect(stub.errors).toHaveLength(2);
-      expect(stub.errors[0]!.error.message).toBe("listener boom for :jid");
+      expect(stub.errors[0]!.error.message).toBe("window-error");
+      expect(JSON.stringify(stub.errors[0])).not.toContain("carol@example.com");
       expect(stub.errors[1]!.options?.type).toBe("unhandled-rejection");
     } finally {
       if (originalWindow === undefined) {
@@ -185,7 +191,7 @@ describe("vue app errorHandler", () => {
     return app;
   }
 
-  test("funnels render errors through sanitized reportError", () => {
+  test("funnels render errors through bounded reportError categories", () => {
     const app = appWithHandler();
     expect(app.config.errorHandler).toBeInstanceOf(Function);
 
@@ -198,11 +204,16 @@ describe("vue app errorHandler", () => {
     expect(stub.errors).toHaveLength(1);
     const pushed = stub.errors[0]!;
     expect(pushed.options?.type).toBe("vue-render-error");
-    expect(pushed.error.message).toBe("render exploded for :jid");
-    expect(pushed.options?.context?.detail).toBe("render function");
+    expect(pushed.error.message).toBe("vue-render-error");
+    expect(pushed.error.stack).toBeUndefined();
+    expect(pushed.options?.context).toEqual({
+      kind: "vue-render-error",
+      recoverable: "false",
+    });
+    expect(JSON.stringify(pushed)).not.toContain("dave@example.com");
   });
 
-  test("includes the component name when the instance exposes one", () => {
+  test("does not export component names from framework error context", () => {
     const app = appWithHandler();
     const instance = { $options: { name: "GifPicker" } };
 
@@ -213,6 +224,7 @@ describe("vue app errorHandler", () => {
     );
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0]!.options?.context?.component).toBe("GifPicker");
+    expect(stub.errors[0]!.options?.context?.component).toBeUndefined();
+    expect(JSON.stringify(stub.errors[0])).not.toContain("GifPicker");
   });
 });

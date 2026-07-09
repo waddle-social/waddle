@@ -18,6 +18,10 @@ use super::{
 
 pub fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-info-{}", next_id());
+    build_disco_info_iq_with_id(to, node, id)
+}
+
+fn build_disco_info_iq_with_id(to: &str, node: Option<&str>, id: String) -> Element {
     let mut query_builder = Element::builder("query", DISCO_INFO_NS);
     if let Some(n) = node {
         query_builder = query_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), n);
@@ -28,6 +32,15 @@ pub fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query_builder.build())
         .build()
+}
+
+/// Typed XEP-0030 request builder for a bare entity JID.
+pub fn build_disco_info_iq_for(to: &BareJid) -> Element {
+    build_disco_info_iq_with_id(
+        to.as_str(),
+        None,
+        format!("disco-info-{}", uuid::Uuid::new_v4()),
+    )
 }
 
 pub fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {

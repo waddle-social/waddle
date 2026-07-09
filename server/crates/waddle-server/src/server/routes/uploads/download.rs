@@ -6,21 +6,18 @@ use super::*;
 /// - Exist in the database
 /// - Have status 'uploaded'
 /// - Have a valid storage_key
-#[instrument(skip(state))]
+#[instrument(skip_all)]
 pub(super) async fn download_handler(
     State(state): State<Arc<UploadState>>,
     Path((slot_id, filename)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    debug!(
-        "Download request for slot: {}, filename: {}",
-        slot_id, filename
-    );
+    debug!("Download request");
 
     // Get upload slot from database
     let slot = match get_upload_slot(state.global_actor(), &slot_id).await {
         Ok(Some(slot)) => slot,
         Ok(None) => {
-            warn!("Download slot not found: {}", slot_id);
+            warn!("Download slot not found");
             return upload_error_to_response(UploadError::FileNotFound(format!(
                 "File not found for slot '{}'",
                 slot_id
@@ -28,17 +25,14 @@ pub(super) async fn download_handler(
             .into_response();
         }
         Err(err) => {
-            error!("Database error fetching slot: {}", err);
+            error!("Database error fetching download slot");
             return upload_error_to_response(UploadError::Database(err)).into_response();
         }
     };
 
     // Verify status is uploaded
     if slot.status != "uploaded" {
-        warn!(
-            "File not yet uploaded for slot {}: status is '{}'",
-            slot_id, slot.status
-        );
+        warn!("Requested file is not uploaded");
         return upload_error_to_response(UploadError::FileNotFound(format!(
             "File not yet uploaded for slot '{}'",
             slot_id
@@ -48,10 +42,7 @@ pub(super) async fn download_handler(
 
     // Verify filename matches (basic security check)
     if slot.filename != filename {
-        warn!(
-            "Filename mismatch for slot {}: expected '{}', got '{}'",
-            slot_id, slot.filename, filename
-        );
+        warn!("Requested filename does not match upload slot");
         return upload_error_to_response(UploadError::FileNotFound(format!(
             "File '{}' not found",
             filename
@@ -63,7 +54,7 @@ pub(super) async fn download_handler(
     let storage_key = match &slot.storage_key {
         Some(key) => key.clone(),
         None => {
-            error!("Slot {} has no storage_key despite being uploaded", slot_id);
+            error!("Uploaded slot has no storage key");
             return upload_error_to_response(UploadError::Storage(
                 "File storage key missing".to_string(),
             ))
@@ -75,7 +66,7 @@ pub(super) async fn download_handler(
     let (file_contents, blob_meta) = match state.app_state.blob_storage.get(&storage_key).await {
         Ok(result) => result,
         Err(crate::storage::StorageError::NotFound(_)) => {
-            error!("File not found in storage: {}", storage_key);
+            error!("Uploaded file not found in storage");
             return upload_error_to_response(UploadError::FileNotFound(format!(
                 "File '{}' not found on server",
                 filename
@@ -83,7 +74,7 @@ pub(super) async fn download_handler(
             .into_response();
         }
         Err(err) => {
-            error!("Failed to read from storage: {}", err);
+            error!("Failed to read uploaded file from storage");
             return upload_error_to_response(UploadError::Storage(format!(
                 "Failed to read file: {}",
                 err
@@ -118,11 +109,7 @@ pub(super) async fn download_handler(
         headers.insert(header::CACHE_CONTROL, cache);
     }
 
-    info!(
-        "Serving file: {} ({} bytes)",
-        slot.filename,
-        file_contents.len()
-    );
+    info!(bytes = file_contents.len(), "Serving uploaded file");
 
     (StatusCode::OK, headers, file_contents).into_response()
 }

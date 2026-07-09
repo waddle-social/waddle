@@ -52,7 +52,7 @@ mod wire_trace_l4_tests;
 
 pub use dispatch::{MessageDispatchOutcome, MessageDispatchTermination, StanzaDispatcher};
 pub use event::{
-    ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OutboundEvent,
+    ArchiveSide, ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OutboundEvent,
     StanzaContext, TimerId,
 };
 pub use frame::InboundFrame;

@@ -147,6 +147,7 @@ async fn candidate_insert_is_idempotent_and_worker_coalesces_distinct_messages()
 /// output is preserved per the locked Q2 design.
 #[tokio::test]
 async fn t1_drain_reevaluates_xep0492_when_projection_changes_after_insert() {
+    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
     let store = store().await;
     let target = target();
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();

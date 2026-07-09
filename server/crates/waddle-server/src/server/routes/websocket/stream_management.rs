@@ -54,7 +54,7 @@ fn max_resume_secs_from_env() -> u32 {
             Ok(secs) => secs.clamp(MIN_MAX_RESUME_SECS, MAX_MAX_RESUME_SECS),
             Err(_) => {
                 warn!(
-                    raw = %raw,
+                    category = "invalid-max-resume-config",
                     "WADDLE_SM_MAX_RESUME_SECS not parseable; using default {DEFAULT_MAX_RESUME_SECS}s"
                 );
                 DEFAULT_MAX_RESUME_SECS
@@ -160,7 +160,7 @@ pub(super) async fn apply_sm_ack(
         // entirely. Acknowledging would corrupt last_acked, and the
         // numeric range-delete below would wipe every pending row.
         warn!(
-            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            category = "ack-regressed",
             client_h = h,
             last_acked = sm_state.last_acked,
             "SM ack ignored: handled count regressed behind last_acked"
@@ -170,7 +170,7 @@ pub(super) async fn apply_sm_ack(
     if sm_state.ack_exceeds_outbound(h) {
         let send_count = sm_state.outbound_count;
         info!(
-            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+            category = "ack-too-high",
             client_h = h,
             send_count,
             "SM ack rejected: handled count too high"
@@ -200,18 +200,15 @@ pub(super) async fn apply_sm_ack(
         {
             Ok(removed) if removed > 0 => {
                 debug!(
-                    session = %session_id,
-                    h,
-                    removed,
-                    "pending_delivery rows cleared by SM ack"
+                    category = "pending-delivery-cleared",
+                    h, removed, "pending_delivery rows cleared by SM ack"
                 );
             }
             Ok(_) => {}
-            Err(error) => {
+            Err(_) => {
                 warn!(
-                    session = %session_id,
+                    category = "pending-delivery-delete-error",
                     h,
-                    error = %error,
                     "pending_delivery delete_acked_in_window failed; rows \
                      will be retried on next session via release_claim"
                 );
@@ -300,7 +297,7 @@ async fn handle_sm_enable(
     let isr_token = if !enable.resume {
         if enable.isr_enable_mechanism.is_some() {
             debug!(
-                stream_id = %stream_id,
+                category = "isr-non-resumable",
                 "ISR enable requested on a non-resumable <enable/>; ignoring (FIX 7)"
             );
         }
@@ -312,8 +309,11 @@ async fn handle_sm_enable(
                     Some(isr_token_store) => {
                         match isr_token_store.issue(&stream_id, mechanism).await {
                             Ok(issued) => Some(issued.token),
-                            Err(error) => {
-                                warn!(stream_id = %stream_id, %error, "ISR token issuance failed");
+                            Err(_) => {
+                                warn!(
+                                    category = "isr-token-issuance-error",
+                                    "ISR token issuance failed"
+                                );
                                 None
                             }
                         }
@@ -321,10 +321,9 @@ async fn handle_sm_enable(
                     None => None,
                 }
             }
-            Some(mechanism) => {
+            Some(_) => {
                 warn!(
-                    stream_id = %stream_id,
-                    mechanism = %mechanism,
+                    category = "isr-unsupported-mechanism",
                     "ISR enable requested an unsupported pinned mechanism; ignoring"
                 );
                 None
@@ -333,7 +332,12 @@ async fn handle_sm_enable(
         }
     };
 
-    info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
+    info!(
+        category = "success",
+        resume = enable.resume,
+        max,
+        "SM enabled"
+    );
     let mut enabled = if enable.resume {
         SmEnabled::with_resume(stream_id, max)
     } else {
@@ -543,7 +547,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                     CrossNodeResumeOutcome::NotAuthorized,
                 ))) => {
                     warn!(
-                        stream_id = %resume.previd,
+                        category = "cross-node-identity-mismatch",
                         "SM resume rejected: cross-node identity mismatch"
                     );
                     return vec![SmFailed::with_condition("not-authorized").to_xml()];
@@ -557,7 +561,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                     // RFC 6120" rule, but is "our chosen condition" for this
                     // case, not one XEP-0198 itself demonstrates.
                     warn!(
-                        stream_id = %resume.previd,
+                        category = "cross-node-owner-unreachable",
                         "SM resume rejected: cross-node owner unreachable within the \
                          resume-handshake window"
                     );
@@ -566,15 +570,14 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
                     info!(
-                        stream_id = %resume.previd,
+                        category = "session-not-found",
                         "SM resume rejected: session not found or expired"
                     );
                     return vec![SmFailed::with_condition("item-not-found").to_xml()];
                 }
-                Some(CrossNodeAttemptOutcome::Completed(Err(error))) => {
+                Some(CrossNodeAttemptOutcome::Completed(Err(_))) => {
                     warn!(
-                        stream_id = %resume.previd,
-                        %error,
+                        category = "cross-node-registry-error",
                         "SM resume failed: cross-node registry error"
                     );
                     return vec![SmFailed::with_condition("internal-server-error").to_xml()];
@@ -596,15 +599,18 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                     // iteration (the WS read arm); the hold itself is
                     // already bounded by FIX 1's budget regardless.
                     info!(
-                        stream_id = %resume.previd,
+                        category = "shutdown-abandoned",
                         "SM resume abandoned: graceful shutdown in progress"
                     );
                     return vec![];
                 }
             }
         }
-        Err(e) => {
-            warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");
+        Err(_) => {
+            warn!(
+                category = "registry-error",
+                "SM resume failed: registry error"
+            );
             return vec![SmFailed::with_condition("internal-server-error").to_xml()];
         }
     };
@@ -612,18 +618,21 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     if let ConnectionPhase::Authenticated { bare_jid } = phase {
         if detached.jid.to_bare() != *bare_jid {
             warn!(
-                current_jid = %bare_jid,
-                resumed_jid = %detached.jid,
+                category = "identity-mismatch",
                 "SM resume rejected due to authenticated identity mismatch"
             );
-            if let Err(error) = state
+            if state
                 .deps
                 .protocol
                 .sm_session_registry
                 .release_claim(&resume.previd)
                 .await
+                .is_err()
             {
-                warn!(stream_id = %resume.previd, error = %error, "Failed to release rejected SM resume claim");
+                warn!(
+                    category = "claim-release-error",
+                    "Failed to release rejected SM resume claim"
+                );
             }
             return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
@@ -641,20 +650,23 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // ahead-of-window `h` passes it and hits the too-high error below.
     if !detached.can_resume_from(resume.h) {
         warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
+            category = "replay-window-truncated",
             client_h = resume.h,
             replay_gap_through = ?detached.replay_gap_through,
             "SM resume rejected: replay window no longer contains every stanza required by client h"
         );
-        if let Err(error) = state
+        if state
             .deps
             .protocol
             .sm_session_registry
             .release_claim(&resume.previd)
             .await
+            .is_err()
         {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release truncated SM resume claim");
+            warn!(
+                category = "claim-release-error",
+                "Failed to release truncated SM resume claim"
+            );
         }
         return vec![
             SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
@@ -662,18 +674,22 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     }
 
     if detached.handled_count_exceeds_outbound(resume.h) {
-        if let Err(error) = state
+        if state
             .deps
             .protocol
             .sm_session_registry
             .release_claim(&resume.previd)
             .await
+            .is_err()
         {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release invalid SM resume claim");
+            warn!(
+                category = "claim-release-error",
+                "Failed to release invalid SM resume claim"
+            );
         }
         *phase = ConnectionPhase::closing(None);
         info!(
-            stream_id = %resume.previd,
+            category = "handled-count-too-high",
             client_h = resume.h,
             send_count = detached.outbound_count,
             "SM resume rejected: handled count too high"
@@ -701,8 +717,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         .map(|s| s.clone());
     if restored_session.is_none() && preserve_authenticated_session {
         warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
+            category = "detached-session-cache-miss",
             "SM resumed without cached detached Session; preserving current authenticated Session"
         );
     }
@@ -745,12 +760,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             stamp_replay_delay(&entry.stanza_xml, server_domain, entry.original_receipt_at)
         })
         .collect();
-    info!(
-        stream_id = %resume.previd,
-        jid = %detached.jid,
-        replay = replay.len(),
-        "SM resumed"
-    );
+    info!(category = "success", replay = replay.len(), "SM resumed");
 
     let mut responses = Vec::with_capacity(replay.len() + 1);
     responses.push(SmResumed::new(resume.previd, sm_state.get_inbound_count()).to_xml());

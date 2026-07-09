@@ -7,17 +7,19 @@
     "node": ">=22.12.0"
   },
   "scripts": {
+    "generate-build-identity": "bun run scripts/generate-build-identity.mjs",
     "generate-service-worker": "bun run scripts/generate-service-worker.mjs",
+    "verify-build-identity": "bun run scripts/verify-build-identity.mjs",
     "copy-background-assets": "bun run scripts/copy-background-assets.mjs",
     "wasm:build": "bun run scripts/build-xmpp-wasm.mjs",
-    "dev": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro dev",
-    "build": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro check && astro build",
-    "preview": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro preview",
+    "dev": "bun run wasm:build && bun run generate-build-identity && bun run generate-service-worker && bun run copy-background-assets && astro dev",
+    "build": "bun run wasm:build && bun run generate-build-identity && bun run generate-service-worker && bun run copy-background-assets && astro check && astro build && bun run verify-build-identity",
+    "preview": "bun run build && astro preview",
     "astro": "astro",
     "test": "bun test",
     "generate-types": "wrangler types",
     "sourcemaps:strip": "bun run scripts/strip-sourcemaps.mjs",
-    "deploy": "bun run wasm:build && bun run generate-service-worker && bun run sourcemaps:strip && wrangler deploy",
+    "deploy": "bun run scripts/deploy.mjs",
     "lint": "bun run wasm:build && knip",
     "lint:fix": "bun run wasm:build && knip --fix --allow-remove-files"
   },
@@ -64,6 +66,7 @@
     "@cloudflare/workers-types": "^4.20260603.1",
     "@grafana/faro-rollup-plugin": "^0.11.0",
     "@types/node": "^25.9.1",
+    "acorn": "8.16.0",
     "knip": "^6.15.0",
     "typescript": "^6.0.3"
   }

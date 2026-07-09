@@ -37,6 +37,7 @@ import type {
 } from "./types";
 import type { InboxEntry } from "./inbox-types";
 import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
+import type { SendQueueReason } from "./send-types";
 
 /** Event name → payload tuple. */
 export type ClientEventMap = Record<string, ReadonlyArray<unknown>>;
@@ -124,7 +125,7 @@ export type ClientEvents = {
   messageDeliveryFailed: [id: string, meta: { kind: "room" | "dm" }];
   sessionLifecycleHook: [event: SessionLifecycleEvent];
   statusHook: [status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }];
-  sendEnqueued: [info: { kind: "room" | "dm"; reason: string }];
+  sendEnqueued: [info: { kind: "room" | "dm"; reason: SendQueueReason }];
   queueDepthChange: [depth: { persisted: number; inflight: number }];
   error: [event: XmppErrorEvent];
   reconnectScheduled: [info: { attempt: number; delayMs: number }];

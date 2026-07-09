@@ -1,4 +1,8 @@
 use super::*;
+use crate::server::disco_targets::{
+    muc_room_target_features, muc_service_target_features, target_identities,
+    target_identities_with_name, DiscoTarget, MucRoomFeatureOptions,
+};
 
 /// XEP-0030 routing classification for a disco#info target as seen by the
 /// MUC dispatcher.
@@ -77,10 +81,9 @@ async fn classify_room_command_target(
     if let Some(room_actor) = get_room_actor(state, room_jid).await {
         let snapshot = match room_actor.ask(GetSnapshot).await {
             Ok(snapshot) => snapshot.room,
-            Err(error) => {
+            Err(_) => {
                 warn!(
-                    room = %room_jid,
-                    error = ?error,
+                    operation = "room_snapshot",
                     "Failed to load room snapshot for command disco#info"
                 );
                 return RoomCommandTarget::Failed;
@@ -130,20 +133,18 @@ async fn classify_room_command_target(
                     })
                     .await
                 {
-                    Err(kameo::error::SendError::HandlerError(error)) => {
+                    Err(kameo::error::SendError::HandlerError(_)) => {
                         warn!(
-                            room = %room_jid,
-                            error = ?error,
+                            operation = "membership_check",
                             "Failed to check persisted group-DM membership for command disco#info"
                         );
                         RoomCommandTarget::Failed
                     }
                     Ok(response) if response.allowed => RoomCommandTarget::GroupDm,
                     Ok(_) => RoomCommandTarget::NotMember,
-                    Err(error) => {
+                    Err(_) => {
                         warn!(
-                            room = %room_jid,
-                            error = ?error,
+                            operation = "permission_check",
                             "Failed to ask permission actor for command disco#info"
                         );
                         RoomCommandTarget::Failed
@@ -153,10 +154,9 @@ async fn classify_room_command_target(
         }
         Ok(Some(_)) => RoomCommandTarget::NotGroupDm,
         Ok(None) => RoomCommandTarget::Missing,
-        Err(error) => {
+        Err(_) => {
             warn!(
-                room = %room_jid,
-                error = ?error,
+                operation = "room_lookup",
                 "Failed to load persisted room for command disco#info"
             );
             RoomCommandTarget::Failed
@@ -302,11 +302,9 @@ pub(super) async fn handle_muc_disco_info<'a>(
     // disco#info for every component, not just MUC.
     let room_jid = match classify_muc_disco_target(req.target_to, req.muc_domain) {
         MucDiscoTarget::Service => {
-            let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-            let mut features = muc_service_features();
-            features.push(Feature::replies());
-            features.push(Feature::new(NS_CHANNEL_SEARCH));
-            features.extend(extension_features_for_disco(state));
+            let identities = target_identities(DiscoTarget::MucService);
+            let extension_features = extension_features_for_disco(state);
+            let features = muc_service_target_features(&extension_features);
             let response = build_disco_info_response(req.request_iq, &identities, &features, None);
             return Some(DiscoInfoResponse::iq(response));
         }
@@ -317,10 +315,9 @@ pub(super) async fn handle_muc_disco_info<'a>(
     if let Some(room_actor) = get_room_actor(state, &room_jid).await {
         let snapshot = match room_actor.ask(GetSnapshot).await {
             Ok(snapshot) => snapshot.room,
-            Err(error) => {
+            Err(_) => {
                 warn!(
-                    room = %room_jid,
-                    error = ?error,
+                    operation = "room_snapshot",
                     "Failed to load room snapshot for disco#info"
                 );
                 return Some(DiscoInfoResponse::error(
@@ -352,23 +349,22 @@ pub(super) async fn handle_muc_disco_info<'a>(
         } else {
             Some(snapshot.config.name.as_str())
         };
-        let identities = vec![Identity::muc_room(room_name)];
-        let mut features = muc_room_features(
-            snapshot.config.persistent,
-            snapshot.config.members_only,
-            snapshot.config.public_room,
-            snapshot.config.moderated || channel_type == "announcement",
-            snapshot.config.forum || channel_type == "forum",
-        );
-        if snapshot.config.group_dm {
-            features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
-        }
-        features.extend(extension_features_for_disco(state));
+        let identities = target_identities_with_name(DiscoTarget::RepresentativeMucRoom, room_name);
+        let extension_features = extension_features_for_disco(state);
         let mut extensions = room_space_metadata_extensions(state, &room_jid, description).await;
         let has_space_metadata = !extensions.is_empty();
-        if has_space_metadata {
-            features.push(Feature::spaces());
-        }
+        let features = muc_room_target_features(
+            MucRoomFeatureOptions {
+                persistent: snapshot.config.persistent,
+                members_only: snapshot.config.members_only,
+                public_room: snapshot.config.public_room,
+                moderated: snapshot.config.moderated || channel_type == "announcement",
+                forum: snapshot.config.forum || channel_type == "forum",
+                group_dm: snapshot.config.group_dm,
+                has_space_metadata,
+            },
+            &extension_features,
+        );
         extensions.push(build_muc_slow_mode_roominfo_form(0));
         extensions.push(build_room_metadata_form(
             channel_type,
@@ -394,24 +390,23 @@ pub(super) async fn handle_muc_disco_info<'a>(
         } else {
             Some(channel.name.as_str())
         };
-        let identities = vec![Identity::muc_room(room_name)];
-        let mut features = muc_room_features(
-            true,
-            channel.members_only,
-            channel.public_room,
-            channel.channel_type == "announcement",
-            channel.channel_type == "forum",
-        );
-        if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
-            features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
-        }
-        features.extend(extension_features_for_disco(state));
+        let identities = target_identities_with_name(DiscoTarget::RepresentativeMucRoom, room_name);
+        let extension_features = extension_features_for_disco(state);
         let mut extensions =
             room_space_metadata_extensions(state, &room_jid, channel.description.as_deref()).await;
         let has_space_metadata = !extensions.is_empty();
-        if has_space_metadata {
-            features.push(Feature::spaces());
-        }
+        let features = muc_room_target_features(
+            MucRoomFeatureOptions {
+                persistent: true,
+                members_only: channel.members_only,
+                public_room: channel.public_room,
+                moderated: channel.channel_type == "announcement",
+                forum: channel.channel_type == "forum",
+                group_dm: channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
+                has_space_metadata,
+            },
+            &extension_features,
+        );
         // #422: read the persisted pin policy from the channel record so
         // dormant rooms advertise the truth, not the default.
         extensions.push(build_muc_slow_mode_roominfo_form(0));
@@ -433,9 +428,10 @@ pub(super) async fn handle_muc_disco_info<'a>(
         .node()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "Room".to_string());
-    let identities = vec![Identity::muc_room(Some(&room_name))];
-    let mut features = muc_room_features(false, false, true, false, false);
-    features.extend(extension_features_for_disco(state));
+    let identities =
+        target_identities_with_name(DiscoTarget::RepresentativeMucRoom, Some(&room_name));
+    let extension_features = extension_features_for_disco(state);
+    let features = muc_room_target_features(MucRoomFeatureOptions::default(), &extension_features);
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))
 }

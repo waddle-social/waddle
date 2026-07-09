@@ -403,11 +403,71 @@ pub struct WebSocketState {
     pub deps: WebSocketDeps,
 }
 
+/// RFC 7628 requires TLS for OAUTHBEARER. `WADDLE_BASE_URL` is the
+/// deployment-authoritative public origin for the RFC 7395 endpoint, so only
+/// an HTTPS origin enables the mechanism in production. Explicit loopback
+/// HTTP origins remain available to local harnesses that have no network TLS
+/// terminator; non-loopback HTTP origins never advertise the mechanism.
+pub(crate) fn oauthbearer_available_for_base_url(base_url: &str) -> bool {
+    url::Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            || (url.scheme() == "http"
+                && url.host_str().is_some_and(|host| {
+                    host.eq_ignore_ascii_case("localhost")
+                        || host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|address| address.is_loopback())
+                }))
+    })
+}
+
+/// Typed terminal-auth metric sink. Production uses the process Prometheus
+/// counter; focused protocol tests can install an isolated recorder and prove
+/// exact-once behavior without racing unrelated connections.
+#[derive(Clone)]
+pub struct OAuthTerminalRecorder(
+    Arc<
+        dyn Fn(waddle_xmpp::prometheus::AuthMechanism, waddle_xmpp::prometheus::AuthTerminalOutcome)
+            + Send
+            + Sync,
+    >,
+);
+
+impl OAuthTerminalRecorder {
+    pub fn new(
+        recorder: impl Fn(waddle_xmpp::prometheus::AuthMechanism, waddle_xmpp::prometheus::AuthTerminalOutcome)
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self(Arc::new(recorder))
+    }
+
+    pub fn record(
+        &self,
+        mechanism: waddle_xmpp::prometheus::AuthMechanism,
+        outcome: waddle_xmpp::prometheus::AuthTerminalOutcome,
+    ) {
+        (self.0)(mechanism, outcome);
+    }
+}
+
+impl Default for OAuthTerminalRecorder {
+    fn default() -> Self {
+        Self::new(waddle_xmpp::prometheus::increment_auth_terminal_attempt)
+    }
+}
+
 pub struct WebSocketDeps {
     /// Core app state for accessing the global and per-waddle databases.
     pub app_state: Arc<AppState>,
     /// Authentication state for session validation.
     pub auth_state: Arc<AuthState>,
+    /// Whether this deployment may advertise and accept RFC 7628
+    /// OAUTHBEARER. Derived once from the configured public HTTPS origin.
+    pub oauthbearer_available: bool,
+    /// Exact terminal accounting sink for RFC 7628 authentication attempts.
+    pub oauth_terminal_recorder: OAuthTerminalRecorder,
     /// Authoritative XMPP component/service JIDs used by this deployment.
     pub service_domains: XmppServiceDomains,
     /// Protocol/runtime services used by the WebSocket C2S path.

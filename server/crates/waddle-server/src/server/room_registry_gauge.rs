@@ -1,4 +1,4 @@
-//! Periodic mailbox-depth gauge for the MUC `RoomRegistry` (#807).
+//! Periodic mailbox-depth and registry-entry gauges for the MUC `RoomRegistry`.
 //!
 //! The #757 incident was a wedged registry actor with no actionable signal.
 //! Besides the per-request reply timeout in
@@ -12,7 +12,8 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use waddle_xmpp::metrics;
-use waddle_xmpp::muc::RoomRegistry;
+use waddle_xmpp::muc::{RoomRegistry, RoomRegistryError};
+use waddle_xmpp::prometheus;
 
 /// How often the registry mailbox depth is sampled and recorded.
 ///
@@ -22,10 +23,29 @@ const GAUGE_INTERVAL: Duration = Duration::from_secs(15);
 
 const ACTOR_LABEL: &str = "room_registry";
 
-/// Spawn the mailbox-depth gauge task. It records
-/// [`metrics::record_actor_mailbox_depth`] every [`GAUGE_INTERVAL`] until either
-/// `stop_token` is cancelled or the registry actor stops.
+async fn sample_room_count(
+    registry: &RoomRegistry,
+    record: impl FnOnce(usize),
+    record_success: impl FnOnce(),
+) -> Result<usize, RoomRegistryError> {
+    let count = registry.room_count().await?;
+    record(count);
+    record_success();
+    Ok(count)
+}
+
+/// Spawn the registry gauge task. It records mailbox depth and registry-entry
+/// count every [`GAUGE_INTERVAL`] until either `stop_token` is cancelled or the
+/// registry actor stops.
 pub(crate) fn spawn(registry: RoomRegistry, stop_token: CancellationToken) {
+    spawn_with_room_count_recorder(registry, stop_token, prometheus::set_room_count);
+}
+
+fn spawn_with_room_count_recorder(
+    registry: RoomRegistry,
+    stop_token: CancellationToken,
+    record_room_count: impl Fn(usize) + Send + Sync + 'static,
+) {
     tokio::spawn(async move {
         let mut ticker = interval(GAUGE_INTERVAL);
         let max_capacity = registry.max_capacity();
@@ -44,6 +64,13 @@ pub(crate) fn spawn(registry: RoomRegistry, stop_token: CancellationToken) {
                             max_capacity,
                         );
                     }
+                    if let Err(error) = sample_room_count(
+                        &registry,
+                        &record_room_count,
+                        prometheus::record_room_registry_sample_success,
+                    ).await {
+                        debug!(%error, "RoomRegistry count sample failed");
+                    }
                 }
                 _ = stop_token.cancelled() => break,
             }
@@ -54,6 +81,7 @@ pub(crate) fn spawn(registry: RoomRegistry, stop_token: CancellationToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     fn test_registry() -> RoomRegistry {
@@ -66,7 +94,7 @@ mod tests {
     async fn gauge_task_runs_then_stops_on_cancel() {
         let registry = test_registry();
         let token = CancellationToken::new();
-        spawn(registry.clone(), token.clone());
+        spawn_with_room_count_recorder(registry.clone(), token.clone(), |_| {});
         // Let the task reach its select! and register the interval.
         tokio::task::yield_now().await;
         token.cancel();
@@ -79,5 +107,37 @@ mod tests {
         let registry = test_registry();
         assert_eq!(registry.mailbox_depth(), Some(0));
         assert_eq!(registry.max_capacity(), 128);
+    }
+
+    #[tokio::test]
+    async fn gauge_records_the_production_room_registry_count() {
+        let registry = test_registry();
+        registry
+            .create_room(
+                "general@muc.example.com".parse().expect("room JID"),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                RoomConfig::default(),
+            )
+            .await
+            .expect("create room");
+
+        let sampled = std::sync::atomic::AtomicUsize::new(0);
+        let succeeded = std::sync::atomic::AtomicBool::new(false);
+        let count = sample_room_count(
+            &registry,
+            |count| {
+                sampled.store(count, std::sync::atomic::Ordering::Relaxed);
+            },
+            || {
+                succeeded.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+        )
+        .await
+        .expect("sample room count");
+
+        assert_eq!(count, 1);
+        assert_eq!(sampled.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(succeeded.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

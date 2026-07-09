@@ -24,7 +24,7 @@ use xmpp_parsers::message::Message;
 
 mod outbound;
 
-pub use outbound::OutboundEvent;
+pub use outbound::{ArchiveSide, OutboundEvent};
 
 /// Reference to a previously-archived message.
 ///

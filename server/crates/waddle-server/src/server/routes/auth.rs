@@ -35,8 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, instrument, warn};
-use uuid::Uuid;
+use tracing::{instrument, warn};
 
 mod callback;
 mod state;
@@ -73,11 +72,6 @@ pub enum PendingFlow {
     },
     Device {
         device_code: String,
-    },
-    Xmpp {
-        client_redirect_uri: String,
-        client_state: Option<String>,
-        client_code_challenge: Option<String>,
     },
 }
 
@@ -122,20 +116,6 @@ pub enum DeviceAuthStatus {
     Approved,
 }
 
-#[derive(Debug, Clone)]
-pub struct XmppAuthCode {
-    pub session_id: String,
-    pub redirect_uri: String,
-    pub code_challenge: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl XmppAuthCode {
-    pub fn is_expired(&self) -> bool {
-        Utc::now() > self.created_at + Duration::minutes(10)
-    }
-}
-
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
         .route("/api/auth/providers", get(list_providers_handler))
@@ -155,14 +135,6 @@ pub struct StartQuery {
     pub next: Option<String>,
     #[serde(default = "default_session_transport")]
     pub session_transport: String,
-
-    // XMPP fields
-    #[serde(default)]
-    pub redirect_uri: Option<String>,
-    #[serde(default)]
-    pub client_state: Option<String>,
-    #[serde(default)]
-    pub code_challenge: Option<String>,
 
     // Device field
     #[serde(default)]
@@ -323,12 +295,12 @@ async fn load_avatar_url(
     }
 }
 
-#[instrument(skip(state))]
+#[instrument(skip_all)]
 pub async fn list_providers_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     (StatusCode::OK, Json(state.providers.list()))
 }
 
-#[instrument(skip(state))]
+#[instrument(skip_all)]
 pub async fn start_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<StartQuery>,
@@ -362,22 +334,9 @@ pub async fn start_handler(
             };
             PendingFlow::Device { device_code }
         }
-        "xmpp" => {
-            let Some(client_redirect_uri) = query.redirect_uri else {
-                return auth_error_to_response(AuthError::InvalidRequest(
-                    "xmpp flow requires redirect_uri".to_string(),
-                ))
-                .into_response();
-            };
-            PendingFlow::Xmpp {
-                client_redirect_uri,
-                client_state: query.client_state,
-                client_code_challenge: query.code_challenge,
-            }
-        }
         _ => {
             return auth_error_to_response(AuthError::InvalidRequest(
-                "flow must be browser|device|xmpp".to_string(),
+                "flow must be browser|device".to_string(),
             ))
             .into_response();
         }
@@ -389,7 +348,7 @@ pub async fn start_handler(
     }
 }
 
-#[instrument(skip(state, headers))]
+#[instrument(skip_all)]
 pub async fn session_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<SessionQuery>,
@@ -442,7 +401,7 @@ pub async fn session_handler(
     }
 }
 
-#[instrument(skip(state, headers))]
+#[instrument(skip_all)]
 pub async fn logout_handler(
     State(state): State<Arc<AuthState>>,
     headers: axum::http::HeaderMap,
@@ -452,8 +411,13 @@ pub async fn logout_handler(
     let session_id = requested.or_else(|| AuthState::extract_session_cookie(&headers));
 
     if let Some(session_id) = session_id {
-        if let Err(err) = state.session_manager.delete_session(&session_id).await {
-            warn!(error = %err, "Failed to delete session on logout");
+        if state
+            .session_manager
+            .delete_session(&session_id)
+            .await
+            .is_err()
+        {
+            warn!("Failed to delete session on logout");
         }
     }
 

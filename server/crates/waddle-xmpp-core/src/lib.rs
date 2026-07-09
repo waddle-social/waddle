@@ -1,8 +1,10 @@
 //! Shared typed primitives for Waddle's native XMPP client crates.
 
+pub mod build_identity;
 pub mod carbons;
 pub mod connection;
 pub mod disco;
+pub mod disco_target;
 pub mod domain;
 pub mod error;
 pub mod link_preview;

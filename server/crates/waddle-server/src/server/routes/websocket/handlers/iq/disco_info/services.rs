@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::disco_targets::{target_identities, DiscoTarget};
 
 pub(super) fn handle_upload_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -7,7 +8,7 @@ pub(super) fn handle_upload_disco_info<'a>(
         return None;
     }
 
-    let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
+    let identities = target_identities(DiscoTarget::UploadService);
     let features = upload_service_features();
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))
@@ -95,8 +96,11 @@ pub(super) async fn handle_push_service_disco_info<'a>(
                     item_not_found_iq_error("Requested Push Service node not found."),
                 ));
             }
-            Err(error) => {
-                warn!(error = %error, node, "Failed to load Push Service node disco info");
+            Err(_) => {
+                warn!(
+                    operation = "push_node_lookup",
+                    "Failed to load Push Service node disco info"
+                );
                 return Some(DiscoInfoResponse::error(
                     req.id,
                     req.response_from,
@@ -107,7 +111,7 @@ pub(super) async fn handle_push_service_disco_info<'a>(
         }
     }
 
-    let identities = vec![Identity::pubsub_push(Some("Push Service"))];
+    let identities = target_identities(DiscoTarget::PushService);
     let features = push_service_features();
     // XEP-0128 extension: advertise the active VAPID public key + kid so
     // chat clients can subscribe without a build-time embedded key. The

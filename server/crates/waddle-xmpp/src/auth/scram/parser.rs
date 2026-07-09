@@ -1,3 +1,4 @@
+use super::ScramFinalError;
 use crate::XmppError;
 
 /// Parsed client-first-message components.
@@ -106,15 +107,13 @@ pub(super) fn parse_client_first(message: &str) -> Result<ClientFirstMessage, Xm
 /// Parse client-final-message.
 ///
 /// Format: `c=channel-binding,r=nonce,p=proof`
-pub(super) fn parse_client_final(message: &str) -> Result<ClientFinalMessage, XmppError> {
+pub(super) fn parse_client_final(message: &str) -> Result<ClientFinalMessage, ScramFinalError> {
     let mut channel_binding = None;
     let mut nonce = None;
     let mut proof = None;
 
     // Find the proof part to separate it
-    let proof_idx = message
-        .rfind(",p=")
-        .ok_or_else(|| XmppError::auth_failed("Missing proof in client-final-message"))?;
+    let proof_idx = message.rfind(",p=").ok_or(ScramFinalError::Malformed)?;
 
     let without_proof = &message[..proof_idx];
 
@@ -128,12 +127,9 @@ pub(super) fn parse_client_final(message: &str) -> Result<ClientFinalMessage, Xm
         }
     }
 
-    let channel_binding = channel_binding
-        .ok_or_else(|| XmppError::auth_failed("Missing channel binding in client-final-message"))?;
-    let nonce =
-        nonce.ok_or_else(|| XmppError::auth_failed("Missing nonce in client-final-message"))?;
-    let proof =
-        proof.ok_or_else(|| XmppError::auth_failed("Missing proof in client-final-message"))?;
+    let channel_binding = channel_binding.ok_or(ScramFinalError::Malformed)?;
+    let nonce = nonce.ok_or(ScramFinalError::Malformed)?;
+    let proof = proof.ok_or(ScramFinalError::Malformed)?;
 
     Ok(ClientFinalMessage {
         channel_binding,

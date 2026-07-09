@@ -95,6 +95,12 @@ package cuenv
 ]
 
 #CheckedInGitOpsValues: {
+	telemetry: {
+		environment: "production"
+		cluster:     "waddle-cloud"
+		commit:      ""
+		...
+	}
 	extensions: {
 		enabled: false
 		modules: []
@@ -109,6 +115,12 @@ package cuenv
 }
 
 #PublishedValues: {
+	telemetry: {
+		environment: "production"
+		cluster:     "waddle-cloud"
+		commit:      #GitSha
+		...
+	}
 	image: {
 		digest: #ServerImageDigest
 		...

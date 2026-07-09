@@ -7,6 +7,7 @@ use super::{
     state::WsConnState,
     transport_xml::{
         build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
+        SaslFailureCondition,
     },
 };
 use crate::config::ServerConfig;
@@ -48,6 +49,7 @@ mod isr_resume;
 mod messages;
 mod misc;
 mod muc;
+mod oauthbearer;
 mod registration;
 mod send;
 mod stream_features;
@@ -425,6 +427,11 @@ async fn create_test_websocket_state_with_extension_manager(
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
+                oauth_terminal_recorder: Default::default(),
+                // The in-process harness has no network transport. Opt in so
+                // protocol tests can exercise RFC 7628 without weakening the
+                // production HTTPS-derived gate.
+                oauthbearer_available: true,
                 service_domains: XmppServiceDomains {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),

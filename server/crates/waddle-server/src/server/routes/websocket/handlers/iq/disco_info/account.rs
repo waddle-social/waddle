@@ -1,4 +1,7 @@
 use super::*;
+use crate::server::disco_targets::{
+    authenticated_self_target_features, target_identities, DiscoTarget,
+};
 
 pub(super) async fn handle_account_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -11,18 +14,8 @@ pub(super) async fn handle_account_disco_info<'a>(
     let target_bare = target.parse::<BareJid>().ok()?;
 
     if target_bare == bound_jid.to_bare() {
-        let identities = vec![
-            Identity::server(Some("Personal Archive")),
-            build_pep_identity(),
-        ];
-        let mut features = vec![
-            Feature::disco_info(),
-            Feature::mam(),
-            Feature::mam_extended(),
-            Feature::fulltext_mam(),
-            Feature::threads_query(),
-        ];
-        features.extend(pep_features());
+        let identities = target_identities(DiscoTarget::AuthenticatedSelf);
+        let features = authenticated_self_target_features();
         let response = build_disco_info_response(req.request_iq, &identities, &features, None);
         return Some(DiscoInfoResponse::iq(response));
     }
@@ -59,8 +52,11 @@ pub(super) async fn handle_account_disco_info<'a>(
             req.response_to,
             item_not_found_iq_error("Requested item not found."),
         )),
-        Err(error) => {
-            warn!(target = %target_bare, error = %error, "Failed to resolve PEP disco target");
+        Err(_) => {
+            warn!(
+                operation = "account_lookup",
+                "Failed to resolve PEP disco target"
+            );
             Some(DiscoInfoResponse::error(
                 req.id,
                 req.response_from,

@@ -28,7 +28,7 @@ critical-journey ledger.
 
 | Gate | Status | Evidence |
 | ---: | --- | --- |
-| 0 | in-progress | [XEP conformance audit](../xep-conformance-audit.md); [server capability manifest](../../server/capabilities.toml); [critical journeys](../product/critical-journeys.json); [typed gate evidence](../product/gate-evidence.json); baseline audit pending |
+| 0 | in-progress | [XEP conformance audit](../xep-conformance-audit.md); [server capability manifest](../../server/capabilities.toml); [critical journeys](../product/critical-journeys.json); [signal catalog](../observability/switchable-baseline-signals.json); [collection runbook](../runbooks/switchable-baseline.md); [typed gate evidence](../product/gate-evidence.json); live telemetry window pending |
 | 1 | planned | Reliability SLO report, restore exercise, and multi-replica auth/reconnect results pending |
 | 2 | planned | Federation profile and Prosody/ejabberd/Snikket interoperability results pending |
 | 3 | planned | Shared web/PWA, iOS, and macOS journey report pending |
@@ -54,6 +54,16 @@ tests, every advertised XEP has a dedicated Rust suite, and each critical
 journey has an owner, supported-client matrix, and executable or explicitly
 manual evidence requirements with an explicit current status. The switchable
 release remains blocked until every generated scenario has complete evidence.
+
+Current Gate 0 blockers are explicit and fail closed: the trusted Faro
+aggregate read adapter/live collection workflow is not implemented, and the
+release-artifact provenance verifier cannot yet retrieve and verify separate
+server and web publication attestations or independently bind their exact OCI,
+web, Kubernetes, Flux, and Cloudflare deployment state. Embedded commit strings
+or caller-supplied digests do not satisfy either blocker. Existing generated
+release workflows are not trusted publishers because their third-party actions
+and downloaded cuenv executable are not pinned and verified by immutable
+digests.
 
 ## Gate 1 — Make Waddle trustworthy as a daily driver
 
@@ -132,9 +142,17 @@ repeat adoption of views or catch-up workflows.
   models, fallback behavior, exact advertisement, and dedicated tests.
 - Every slice is validated at the typed parser/builder, server behavior, client
   journey, and multi-node/federated end-to-end layers appropriate to its scope.
-- Gates 0, 1, and 5 use the typed immutable evidence ledger; Gates 2–4 use the
-  per-scenario journey ledger. Tracker links summarize evidence but cannot mark
-  a gate complete unless its machine-readable ledger is also `ready`.
+- The typed immutable evidence ledger indexes all six gates and freezes each
+  gate's evidence-kind set. Gates 2–4 derive their indexed readiness from the
+  per-scenario journey ledger, whose evidence-kind set is also immutable for
+  every journey. Tracker links summarize evidence but cannot mark a gate
+  complete unless the validated machine-readable state derives `ready`.
+- Repository tests, CI links, Markdown reports, and hashed typed manual-schema
+  artifacts are partial context for Gates 1–5. They cannot complete a gate or
+  scenario until a trusted passing-run or kind-specific operational,
+  manual/live, or pilot evidence attestation binds the exact gate/scenario,
+  client and topology where applicable, evidence kind, immutable release, and
+  required outcome contract.
 - Rollout proceeds through dogfood, three design partners, and then the
   eight-week switchable beta. At least one pilot exercises supported
   self-hosting and restore procedures.

@@ -9,14 +9,17 @@ description = "Native XMPP client scaffold for Waddle"
 
 [features]
 default = ["native"]
-native = ["dep:futures", "dep:reqwest", "dep:tokio", "dep:tokio-tungstenite"]
+native = ["dep:clap", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:sha2", "dep:tokio", "dep:tokio-tungstenite"]
 wasm = ["dep:futures", "dep:getrandom", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys"]
 
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true }
+clap = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 sha1 = { workspace = true }
+sha2 = { workspace = true, optional = true }
 uuid = { workspace = true }
 futures = { workspace = true, optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
@@ -36,3 +39,11 @@ xmpp-parsers = { workspace = true }
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[[bin]]
+name = "waddle-capability-collector"
+path = "src/bin/waddle_capability_collector.rs"
+required-features = ["native"]

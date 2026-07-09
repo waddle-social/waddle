@@ -33,14 +33,20 @@ pub(crate) fn make_request_span(request: &axum::http::Request<axum::body::Body>)
 
 fn redacted_request_uri(uri: &Uri) -> String {
     let path = uri.path();
+    if path.starts_with("/api/upload/") {
+        return "/api/upload/:slot".to_string();
+    }
+    if path.starts_with("/api/files/") {
+        return "/api/files/:slot/:file".to_string();
+    }
     let Some(token_and_suffix) = path.strip_prefix("/api/calendar/community/") else {
-        return uri.to_string();
+        return path.to_string();
     };
     let Some(token) = token_and_suffix.strip_suffix("/events.ics") else {
-        return uri.to_string();
+        return path.to_string();
     };
     if token.is_empty() || token.contains('/') {
-        return uri.to_string();
+        return path.to_string();
     }
     "/api/calendar/community/:token/events.ics".to_string()
 }
@@ -62,14 +68,34 @@ mod tests {
     }
 
     #[test]
-    fn non_calendar_feed_uri_is_not_redacted() {
-        let uri: Uri = "/api/auth/session?session_id=still-owned-by-telemetry-redactor"
+    fn request_query_is_never_exported_to_the_span() {
+        let uri: Uri = "/api/auth/session?session_id=secret&code=oauth-code&state=csrf-state"
+            .parse()
+            .unwrap();
+
+        assert_eq!(redacted_request_uri(&uri), "/api/auth/session");
+    }
+
+    #[test]
+    fn calendar_feed_query_and_token_are_both_redacted() {
+        let uri: Uri = "/api/calendar/community/v1.payload.signature/events.ics?download=1"
             .parse()
             .unwrap();
 
         assert_eq!(
             redacted_request_uri(&uri),
-            "/api/auth/session?session_id=still-owned-by-telemetry-redactor",
+            "/api/calendar/community/:token/events.ics",
         );
+    }
+
+    #[test]
+    fn upload_capability_and_filename_are_redacted() {
+        let upload: Uri = "/api/upload/secret-slot?signature=secret".parse().unwrap();
+        let download: Uri = "/api/files/secret-slot/private-name.txt?download=1"
+            .parse()
+            .unwrap();
+
+        assert_eq!(redacted_request_uri(&upload), "/api/upload/:slot");
+        assert_eq!(redacted_request_uri(&download), "/api/files/:slot/:file");
     }
 }

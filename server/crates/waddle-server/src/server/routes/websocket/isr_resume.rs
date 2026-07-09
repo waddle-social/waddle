@@ -58,8 +58,10 @@
 //! leaking which SM-IDs exist.
 
 use super::stream_management::SmCtx;
+use super::telemetry_privacy::sasl_mechanism_category;
 use super::transport_xml::element_to_xml;
 use super::*;
+use waddle_xmpp::auth::{SaslInitialResponse, SaslMechanism};
 use waddle_xmpp::isr::{
     inst_resume_failed_element, inst_resumed_element, IsrConsumeOutcome, ISR_PINNED_MECHANISM,
 };
@@ -95,8 +97,8 @@ fn sasl2_success(bare_jid: &BareJid, isr_child: Element) -> String {
 }
 
 pub(super) async fn handle_isr_resume_authenticate(
-    mechanism: String,
-    initial_response: String,
+    mechanism: SaslMechanism,
+    initial_response: SaslInitialResponse,
     resume: SmResume,
     state: &WebSocketState,
     ctx: SmCtx<'_>,
@@ -132,22 +134,21 @@ pub(super) async fn handle_isr_resume_authenticate(
         return vec![sasl2_failure("invalid-mechanism")];
     };
 
-    if mechanism != ISR_PINNED_MECHANISM {
-        warn!(mechanism = %mechanism, "ISR resume rejected: unsupported pinned mechanism");
+    if mechanism != SaslMechanism::Plain {
+        warn!(
+            mechanism = sasl_mechanism_category(&mechanism),
+            "ISR resume rejected: unsupported pinned mechanism"
+        );
         return vec![sasl2_failure("invalid-mechanism")];
     }
 
-    let decoded = match BASE64_STANDARD.decode(initial_response.trim()) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            warn!(error = %error, "ISR resume: failed to decode base64 initial-response");
-            return vec![sasl2_failure("incorrect-encoding")];
-        }
-    };
-    let credentials = match waddle_xmpp::auth::parse_plain(&decoded) {
+    let credentials = match waddle_xmpp::auth::parse_plain(initial_response.as_bytes()) {
         Ok(credentials) => credentials,
-        Err(error) => {
-            warn!(error = %error, "ISR resume: failed to parse PLAIN initial-response");
+        Err(_) => {
+            warn!(
+                category = "plain-initial-response-malformed",
+                "ISR resume: failed to parse PLAIN initial-response"
+            );
             return vec![sasl2_failure("not-authorized")];
         }
     };
@@ -184,7 +185,7 @@ pub(super) async fn handle_isr_resume_authenticate(
                 waddle_xmpp::stream_management::CrossNodeResumeOutcome::NotAuthorized,
             )) => {
                 warn!(
-                    stream_id = %resume.previd,
+                    category = "cross-node-identity-mismatch",
                     "ISR resume rejected: cross-node identity mismatch"
                 );
                 return vec![sasl2_failure("not-authorized")];
@@ -193,7 +194,7 @@ pub(super) async fn handle_isr_resume_authenticate(
                 waddle_xmpp::stream_management::CrossNodeResumeOutcome::OwnerUnreachable,
             )) => {
                 warn!(
-                    stream_id = %resume.previd,
+                    category = "cross-node-owner-unreachable",
                     "ISR resume failed: cross-node owner unreachable within the \
                      resume-handshake window"
                 );
@@ -207,15 +208,14 @@ pub(super) async fn handle_isr_resume_authenticate(
                 // token — the conservative choice from a
                 // not-leaking-which-SM-IDs-exist standpoint.
                 info!(
-                    stream_id = %resume.previd,
+                    category = "session-not-found",
                     "ISR resume rejected: no local or cross-node session record"
                 );
                 return vec![sasl2_failure("not-authorized")];
             }
-            super::stream_management::CrossNodeAttemptOutcome::Completed(Err(error)) => {
+            super::stream_management::CrossNodeAttemptOutcome::Completed(Err(_)) => {
                 warn!(
-                    stream_id = %resume.previd,
-                    %error,
+                    category = "cross-node-registry-error",
                     "ISR resume failed: cross-node registry error"
                 );
                 return vec![sasl2_failure("temporary-auth-failure")];
@@ -228,14 +228,17 @@ pub(super) async fn handle_isr_resume_authenticate(
                 // observes the same cancelled shutdown token on its next
                 // iteration and sends the conformant stream-error instead.
                 info!(
-                    stream_id = %resume.previd,
+                    category = "shutdown-abandoned",
                     "ISR resume abandoned: graceful shutdown in progress"
                 );
                 return vec![];
             }
         },
-        Err(error) => {
-            warn!(stream_id = %resume.previd, %error, "ISR resume failed: registry error");
+        Err(_) => {
+            warn!(
+                category = "registry-error",
+                "ISR resume failed: registry error"
+            );
             return vec![sasl2_failure("temporary-auth-failure")];
         }
     };
@@ -246,19 +249,21 @@ pub(super) async fn handle_isr_resume_authenticate(
     // resumable pool, exactly like `handle_sm_resume`'s own identity check.
     if verify_resume_identity(&claimed_identity, &detached.jid.to_bare()).is_none() {
         warn!(
-            stream_id = %resume.previd,
-            claimed = %claimed_identity,
-            actual = %detached.jid,
+            category = "identity-mismatch",
             "ISR resume rejected: authenticated identity does not match the SM session owner"
         );
-        if let Err(error) = state
+        if state
             .deps
             .protocol
             .sm_session_registry
             .release_claim(&resume.previd)
             .await
+            .is_err()
         {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release rejected ISR resume claim");
+            warn!(
+                category = "claim-release-error",
+                "Failed to release rejected ISR resume claim"
+            );
         }
         return vec![sasl2_failure("not-authorized")];
     }
@@ -274,16 +279,23 @@ pub(super) async fn handle_isr_resume_authenticate(
         .await
     {
         Ok(epoch) => epoch,
-        Err(error) => {
-            warn!(stream_id = %resume.previd, %error, "ISR resume failed: could not confirm claim epoch");
-            if let Err(release_error) = state
+        Err(_) => {
+            warn!(
+                category = "claim-epoch-error",
+                "ISR resume failed: could not confirm claim epoch"
+            );
+            if state
                 .deps
                 .protocol
                 .sm_session_registry
                 .release_claim(&resume.previd)
                 .await
+                .is_err()
             {
-                warn!(stream_id = %resume.previd, error = %release_error, "Failed to release ISR resume claim after epoch failure");
+                warn!(
+                    category = "claim-release-error",
+                    "Failed to release ISR resume claim after epoch failure"
+                );
             }
             return vec![sasl2_failure("temporary-auth-failure")];
         }
@@ -306,15 +318,22 @@ pub(super) async fn handle_isr_resume_authenticate(
             // -force MUST: destroy the session state the SM-ID identified.
             // `complete_claim`, not `release_claim` — this claim ends
             // here, it does not go back into the resumable pool.
-            warn!(stream_id = %resume.previd, "ISR resume rejected: token mismatch; destroying session state");
-            if let Err(error) = state
+            warn!(
+                category = "token-mismatch",
+                "ISR resume rejected: token mismatch; destroying session state"
+            );
+            if state
                 .deps
                 .protocol
                 .sm_session_registry
                 .complete_claim(&resume.previd)
                 .await
+                .is_err()
             {
-                warn!(stream_id = %resume.previd, error = %error, "Failed to destroy session state after ISR token mismatch");
+                warn!(
+                    category = "claim-completion-error",
+                    "Failed to destroy session state after ISR token mismatch"
+                );
             }
             return vec![sasl2_failure("not-authorized")];
         }
@@ -330,30 +349,41 @@ pub(super) async fn handle_isr_resume_authenticate(
             // -ISR-enabled session must not be destroyed just because
             // someone attempted ISR auth against it.
             warn!(
-                stream_id = %resume.previd,
+                category = "token-not-found",
                 "ISR resume rejected: no ISR token exists for this SM-ID"
             );
-            if let Err(error) = state
+            if state
                 .deps
                 .protocol
                 .sm_session_registry
                 .release_claim(&resume.previd)
                 .await
+                .is_err()
             {
-                warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after no-such-token outcome");
+                warn!(
+                    category = "claim-release-error",
+                    "Failed to release ISR resume claim after no-such-token outcome"
+                );
             }
             return vec![sasl2_failure("not-authorized")];
         }
-        Err(error) => {
-            warn!(stream_id = %resume.previd, %error, "ISR resume failed: token store error");
-            if let Err(release_error) = state
+        Err(_) => {
+            warn!(
+                category = "token-store-error",
+                "ISR resume failed: token store error"
+            );
+            if state
                 .deps
                 .protocol
                 .sm_session_registry
                 .release_claim(&resume.previd)
                 .await
+                .is_err()
             {
-                warn!(stream_id = %resume.previd, error = %release_error, "Failed to release ISR resume claim after store error");
+                warn!(
+                    category = "claim-release-error",
+                    "Failed to release ISR resume claim after store error"
+                );
             }
             return vec![sasl2_failure("temporary-auth-failure")];
         }
@@ -373,18 +403,22 @@ pub(super) async fn handle_isr_resume_authenticate(
     // blind spot at `h == outbound + 2^31`.
     if !detached.can_resume_from(resume.h) {
         warn!(
-            stream_id = %resume.previd,
+            category = "replay-window-truncated",
             replay_gap_through = ?detached.replay_gap_through,
             "ISR resume: resumption impossible (replay window no longer covers client h)"
         );
-        if let Err(error) = state
+        if state
             .deps
             .protocol
             .sm_session_registry
             .release_claim(&resume.previd)
             .await
+            .is_err()
         {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after replay-window truncation");
+            warn!(
+                category = "claim-release-error",
+                "Failed to release ISR resume claim after replay-window truncation"
+            );
         }
         let failed = SmFailed::resume_failed("resource-constraint", detached.inbound_count);
         return vec![sasl2_success(
@@ -395,19 +429,23 @@ pub(super) async fn handle_isr_resume_authenticate(
 
     if detached.handled_count_exceeds_outbound(resume.h) {
         warn!(
-            stream_id = %resume.previd,
+            category = "handled-count-too-high",
             client_h = resume.h,
             send_count = detached.outbound_count,
             "ISR resume: resumption impossible (handled count exceeds server's outbound count)"
         );
-        if let Err(error) = state
+        if state
             .deps
             .protocol
             .sm_session_registry
             .release_claim(&resume.previd)
             .await
+            .is_err()
         {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after handled-count mismatch");
+            warn!(
+                category = "claim-release-error",
+                "Failed to release ISR resume claim after handled-count mismatch"
+            );
         }
         let failed = SmFailed::resume_failed("unexpected-request", detached.inbound_count);
         return vec![sasl2_success(
@@ -457,12 +495,7 @@ pub(super) async fn handle_isr_resume_authenticate(
         })
         .collect();
 
-    info!(
-        stream_id = %resume.previd,
-        jid = %detached.jid,
-        replay = replay.len(),
-        "ISR resumed"
-    );
+    info!(category = "success", replay = replay.len(), "ISR resumed");
 
     let resumed = SmResumed::new(resume.previd.clone(), sm_state.get_inbound_count());
     let mut responses = Vec::with_capacity(replay.len() + 1);

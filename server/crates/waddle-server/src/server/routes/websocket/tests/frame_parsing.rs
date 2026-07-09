@@ -55,7 +55,10 @@ async fn handle_xmpp_frame_malformed_auth_returns_malformed_request() {
     )
     .await;
 
-    assert_eq!(responses, vec![sasl_failure_xml("malformed-request")]);
+    assert_eq!(
+        responses,
+        vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)]
+    );
 }
 
 #[tokio::test]
@@ -105,7 +108,10 @@ async fn handle_xmpp_frame_malformed_sasl_response_returns_malformed_request() {
     )
     .await;
 
-    assert_eq!(responses, vec![sasl_failure_xml("malformed-request")]);
+    assert_eq!(
+        responses,
+        vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)]
+    );
 }
 
 #[tokio::test]
@@ -218,7 +224,10 @@ async fn websocket_rejects_plain_auth() {
 
     let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
-    assert_eq!(responses, vec![sasl_failure_xml("invalid-mechanism")]);
+    assert_eq!(
+        responses,
+        vec![sasl_failure_xml(SaslFailureCondition::InvalidMechanism)]
+    );
     assert!(!conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(conn.authenticated_session.is_none());
@@ -330,7 +339,10 @@ async fn websocket_rejects_reauthentication_after_successful_sasl() {
 
     let second = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
-    assert_eq!(second, vec![sasl_failure_xml("not-authorized")]);
+    assert_eq!(
+        second,
+        vec![sasl_failure_xml(SaslFailureCondition::NotAuthorized)]
+    );
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert_eq!(conn.phase.authenticated_bare_jid(), first_bare_jid.as_ref());
@@ -374,10 +386,42 @@ async fn websocket_failed_scram_response_resets_phase_to_unauthenticated() {
     let response_responses =
         handle_xmpp_frame(&response_frame, &domain, state.as_ref(), &mut conn).await;
 
-    assert_eq!(response_responses, vec![sasl_failure_xml("not-authorized")]);
+    assert_eq!(
+        response_responses,
+        vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)]
+    );
     assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
     assert!(!conn.phase.is_authenticated());
     assert!(conn.authenticated_session.is_none());
+}
+
+#[tokio::test]
+async fn websocket_scram_abort_returns_aborted_and_resets_phase() {
+    let state = create_test_websocket_state().await;
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    register_test_native_user(state.as_ref(), "alice", "correct horse battery staple").await;
+    let auth_frame = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
+            .append(BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL"))
+            .build(),
+    );
+    let abort = element_to_xml(Element::builder("abort", waddle_xmpp::ns::SASL).build());
+    let mut conn = WsConnState::new();
+
+    let challenge = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+    assert_eq!(challenge.len(), 1);
+    assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+    let terminal = handle_xmpp_frame(&abort, &domain, state.as_ref(), &mut conn).await;
+    assert_eq!(
+        terminal,
+        vec![sasl_failure_xml(SaslFailureCondition::Aborted)]
+    );
+    assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
 }
 
 #[tokio::test]
@@ -403,7 +447,10 @@ async fn websocket_malformed_scram_response_resets_phase_and_allows_retry() {
     assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
 
     let malformed = handle_xmpp_frame(malformed_response, &domain, state.as_ref(), &mut conn).await;
-    assert_eq!(malformed, vec![sasl_failure_xml("malformed-request")]);
+    assert_eq!(
+        malformed,
+        vec![sasl_failure_xml(SaslFailureCondition::MalformedRequest)]
+    );
     assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
     assert!(!conn.phase.is_authenticated());
     assert!(conn.authenticated_session.is_none());
@@ -416,7 +463,7 @@ async fn websocket_malformed_scram_response_resets_phase_and_allows_retry() {
 }
 
 #[tokio::test]
-async fn websocket_failed_reauth_during_scram_resets_phase_and_allows_retry() {
+async fn websocket_reauth_during_scram_replaces_the_pending_exchange() {
     let state = create_test_websocket_state().await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
     register_test_native_user(state.as_ref(), "alice", "correct horse battery staple").await;
@@ -434,11 +481,25 @@ async fn websocket_failed_reauth_during_scram_resets_phase_and_allows_retry() {
 
     let first = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
     assert_eq!(first.len(), 1);
+    assert_eq!(
+        Element::from_str(&first[0]).expect("challenge xml").name(),
+        "challenge"
+    );
     assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
 
     let second = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
-    assert_eq!(second, vec![sasl_failure_xml("not-authorized")]);
-    assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        Element::from_str(&second[0])
+            .expect("replacement challenge xml")
+            .name(),
+        "challenge"
+    );
+    assert_ne!(
+        second, first,
+        "replacement must start a fresh SCRAM exchange"
+    );
+    assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
 
     let third = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
     assert_eq!(third.len(), 1);

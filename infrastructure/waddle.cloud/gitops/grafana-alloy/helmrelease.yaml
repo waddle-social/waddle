@@ -93,12 +93,31 @@ spec:
               regex         = "http"
             }
             rule {
-              source_labels = ["__meta_kubernetes_pod_name"]
+              // Pod names can be reused; the Kubernetes UID is globally unique
+              // for the lifetime of the scraped process and is therefore the
+              // only safe join key for deployment evidence.
+              source_labels = ["__meta_kubernetes_pod_uid"]
               target_label  = "instance"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "pod"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_namespace"]
+              target_label  = "namespace"
             }
             rule {
               target_label = "job"
               replacement  = "waddle-server"
+            }
+            rule {
+              target_label = "deployment_environment"
+              replacement  = "production"
+            }
+            rule {
+              target_label = "cluster"
+              replacement  = "waddle-cloud"
             }
           }
 
@@ -107,6 +126,10 @@ spec:
             forward_to      = [otelcol.receiver.prometheus.waddle_server.receiver]
             metrics_path    = "/metrics"
             scrape_interval = "30s"
+            // Keep target scope authoritative. Conflicting labels exposed by
+            // waddle_build_info are retained as exported_* labels, allowing
+            // the evidence collector to reject an unknown or mixed build.
+            honor_labels    = false
           }
 
           // Bridge Prometheus scrape samples into the OTLP pipeline so

@@ -2,6 +2,17 @@ use super::*;
 use waddle_xmpp::mam::MamStorageError;
 use waddle_xmpp::muc::RoomClaimFenceContext;
 
+type ArchiveAttemptRecorder<'a> = dyn Fn(waddle_xmpp::prometheus::MessageArchiveKind, waddle_xmpp::prometheus::MessageArchiveOutcome)
+    + Sync
+    + 'a;
+
+#[derive(Clone, Copy)]
+struct ArchiveGroupchatContext<'a> {
+    sender_nickname_generation: u64,
+    fence: Option<&'a RoomClaimFenceContext>,
+    sender_item: Option<&'a waddle_xmpp_core::mam::ArchivedMucSender>,
+}
+
 /// Outcome of a groupchat archive write attempt (ADR-0017 Phase 3 Slice 7
 /// FIX 1, council-adjudicated). `OwnershipLost` is the fenced backstop
 /// firing: the caller MUST neither treat the message as archived NOR fan
@@ -60,6 +71,27 @@ pub(super) async fn archive_groupchat_message(
     fence: Option<&RoomClaimFenceContext>,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    archive_groupchat_message_with_recorder(
+        mam_storage,
+        room,
+        message,
+        ArchiveGroupchatContext {
+            sender_nickname_generation,
+            fence,
+            sender_item,
+        },
+        &waddle_xmpp::prometheus::increment_message_archive_attempt,
+    )
+    .await
+}
+
+async fn archive_groupchat_message_with_recorder(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    message: &Message,
+    context: ArchiveGroupchatContext<'_>,
+    record_archive_attempt: &ArchiveAttemptRecorder<'_>,
+) -> ArchiveGroupchatOutcome {
     // XEP-0313 §MUC Archives: for non-anonymous rooms the *archived*
     // copy carries a room-authored `<x xmlns='muc#user'><item
     // jid='real-jid' affiliation role/></x>` disclosing the sender's
@@ -68,7 +100,7 @@ pub(super) async fn archive_groupchat_message(
     // `MucCanonicalizeHandler` has already stripped any
     // client-supplied muc#user forgery (#1251).
     let mut archive_clone = message.clone();
-    if let Some(sender_item) = sender_item {
+    if let Some(sender_item) = context.sender_item {
         archive_clone
             .payloads
             .push(waddle_xmpp_core::mam::build_archived_muc_sender_x(
@@ -78,6 +110,10 @@ pub(super) async fn archive_groupchat_message(
     let archive_id = match extract_room_stanza_id(&archive_clone, room) {
         Some(id) => id,
         None => {
+            record_archive_attempt(
+                waddle_xmpp::prometheus::MessageArchiveKind::Room,
+                waddle_xmpp::prometheus::MessageArchiveOutcome::ChainInvalid,
+            );
             // Chain bug: `MucCanonicalizeHandler` MUST stamp
             // `<stanza-id by='room'/>` before `MucArchiveHandler`
             // emits `ArchiveGroupchat`. Persisting a fresh archive-
@@ -85,9 +121,9 @@ pub(super) async fn archive_groupchat_message(
             // stanza-id" invariant — clients reflecting back the wire
             // stanza-id (XEP-0308 corrections, XEP-0424 retractions)
             // would fail to resolve the archive row. Skip the write;
-            // the reflection still goes out, and a separate audit can
-            // surface the chain regression (Copilot review on
-            // PR #279).
+            // the reflection still goes out. The bounded chain-invalid
+            // archive outcome and scalar safety counter make the permanent
+            // loss/corruption condition release-blocking.
             warn!(
                 room = %room,
                 "ArchiveGroupchat: message has no `<stanza-id by='room'/>`; \
@@ -98,14 +134,13 @@ pub(super) async fn archive_groupchat_message(
         }
     };
 
-    finish_archive_groupchat_message(
+    finish_archive_groupchat_message_with_recorder(
         mam_storage,
         room,
         archive_clone,
         archive_id,
-        sender_nickname_generation,
-        fence,
-        sender_item,
+        context,
+        record_archive_attempt,
     )
     .await
 }
@@ -120,14 +155,13 @@ pub(super) fn extract_room_stanza_id(message: &Message, room: &BareJid) -> Optio
         .and_then(|payload| payload.attr("id").map(ToOwned::to_owned))
 }
 
-pub(super) async fn finish_archive_groupchat_message(
+async fn finish_archive_groupchat_message_with_recorder(
     mam_storage: &Arc<dyn MamStorage>,
     room: &BareJid,
     archive_clone: Message,
     archive_id: String,
-    sender_nickname_generation: u64,
-    fence: Option<&RoomClaimFenceContext>,
-    sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
+    context: ArchiveGroupchatContext<'_>,
+    record_archive_attempt: &ArchiveAttemptRecorder<'_>,
 ) -> ArchiveGroupchatOutcome {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
@@ -136,7 +170,7 @@ pub(super) async fn finish_archive_groupchat_message(
     let body = super::prototype_body(&archive_clone);
     let reply = extract_groupchat_reply_reference(&archive_clone, room);
     let origin_id = extract_origin_id(&archive_clone);
-    let rich = rich_archive_payload(&archive_clone, sender_item);
+    let rich = rich_archive_payload(&archive_clone, context.sender_item);
     let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
 
     // XEP-0201: read the typed thread info (id + optional parent) from the
@@ -156,6 +190,10 @@ pub(super) async fn finish_archive_groupchat_message(
     // (The protocol-side handler stamps `from` before reaching this
     // arm, so this guard is defensive.)
     let Some(from_jid) = archive_clone.from.clone() else {
+        record_archive_attempt(
+            waddle_xmpp::prometheus::MessageArchiveKind::Room,
+            waddle_xmpp::prometheus::MessageArchiveOutcome::ChainInvalid,
+        );
         warn!(
             room = %room,
             "ArchiveGroupchat: missing from JID on reflection; dropping archive write"
@@ -183,7 +221,7 @@ pub(super) async fn finish_archive_groupchat_message(
         message_type: archive_clone.type_.clone(),
         stanza_xml,
         rich,
-        nickname_generation: Some(sender_nickname_generation),
+        nickname_generation: Some(context.sender_nickname_generation),
     };
 
     // ADR-0017 Phase 3 Slice 7 FIX 1: the fenced variant when this room's
@@ -192,7 +230,7 @@ pub(super) async fn finish_archive_groupchat_message(
     // `pending_delivery::insert_fenced` establishes one table over,
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
-    let store_result = match fence {
+    let store_result = match context.fence {
         Some(fence) => {
             mam_storage
                 .store_message_fenced(room, &archived, fence)
@@ -201,15 +239,25 @@ pub(super) async fn finish_archive_groupchat_message(
         None => mam_storage.store_message(room, &archived).await,
     };
     match store_result {
-        Ok(stored_id) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
-            rewrite: ArchiveIdRewrite::from_store_result(
-                jid::Jid::from(room.clone()),
-                archive_id,
-                stored_id.clone(),
-            ),
-            stored_id,
-        }),
+        Ok(stored_id) => {
+            record_archive_attempt(
+                waddle_xmpp::prometheus::MessageArchiveKind::Room,
+                waddle_xmpp::prometheus::MessageArchiveOutcome::Committed,
+            );
+            ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
+                rewrite: ArchiveIdRewrite::from_store_result(
+                    jid::Jid::from(room.clone()),
+                    archive_id,
+                    stored_id.clone(),
+                ),
+                stored_id,
+            })
+        }
         Err(MamStorageError::NotOwner { entity }) => {
+            record_archive_attempt(
+                waddle_xmpp::prometheus::MessageArchiveKind::Room,
+                waddle_xmpp::prometheus::MessageArchiveOutcome::OwnershipLost,
+            );
             warn!(
                 room = %room,
                 %entity,
@@ -219,6 +267,10 @@ pub(super) async fn finish_archive_groupchat_message(
             ArchiveGroupchatOutcome::OwnershipLost
         }
         Err(error) => {
+            record_archive_attempt(
+                waddle_xmpp::prometheus::MessageArchiveKind::Room,
+                waddle_xmpp::prometheus::MessageArchiveOutcome::StorageError,
+            );
             warn!(
                 room = %room,
                 %error,
@@ -232,6 +284,202 @@ pub(super) async fn finish_archive_groupchat_message(
 pub(super) struct ArchiveStoreResult {
     pub stored_id: String,
     pub rewrite: Option<ArchiveIdRewrite>,
+}
+
+#[cfg(test)]
+mod archive_metric_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamResult};
+    use waddle_xmpp::ownership::{Entity, EntityType};
+    use waddle_xmpp::prometheus::{MessageArchiveKind, MessageArchiveOutcome};
+    use waddle_xmpp_core::xep0359::build_stanza_id_element;
+
+    #[derive(Clone, Copy)]
+    enum StoreOutcome {
+        Committed,
+        StorageError,
+        OwnershipLost,
+    }
+
+    struct OutcomeMam(StoreOutcome);
+
+    #[async_trait]
+    impl MamStorage for OutcomeMam {
+        async fn store_message(
+            &self,
+            _: &BareJid,
+            message: &ArchivedMessage,
+        ) -> Result<String, MamStorageError> {
+            match self.0 {
+                StoreOutcome::Committed => Ok(message.id.clone()),
+                StoreOutcome::StorageError => {
+                    Err(MamStorageError::Database("simulated".to_string()))
+                }
+                StoreOutcome::OwnershipLost => Err(MamStorageError::NotOwner {
+                    entity: Entity::new(EntityType::RoomActor, "room@example.com"),
+                }),
+            }
+        }
+
+        async fn query_messages(
+            &self,
+            _: &BareJid,
+            _: &MamQuery,
+        ) -> Result<MamResult, MamStorageError> {
+            unreachable!("group archive metric tests never query")
+        }
+
+        async fn get_message(&self, _: &str) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            unreachable!("group archive metric tests never read")
+        }
+
+        async fn replace_with_tombstone(
+            &self,
+            _: &str,
+            _: waddle_xmpp::mam::ArchivedTombstone,
+        ) -> Result<bool, MamStorageError> {
+            unreachable!("group archive metric tests never tombstone")
+        }
+
+        async fn get_message_by_stanza_id(
+            &self,
+            _: &BareJid,
+            _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            unreachable!("group archive metric tests never read")
+        }
+
+        async fn get_message_by_message_id(
+            &self,
+            _: &BareJid,
+            _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            unreachable!("group archive metric tests never read")
+        }
+
+        async fn get_message_by_archive_or_stanza_id(
+            &self,
+            _: &BareJid,
+            _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            unreachable!("group archive metric tests never read")
+        }
+
+        async fn count_messages(&self, _: &BareJid) -> Result<u32, MamStorageError> {
+            unreachable!("group archive metric tests never count")
+        }
+
+        async fn delete_before(
+            &self,
+            _: &BareJid,
+            _: DateTime<Utc>,
+        ) -> Result<u64, MamStorageError> {
+            unreachable!("group archive metric tests never delete")
+        }
+    }
+
+    fn group_message(room: &BareJid, with_stanza_id: bool, with_from: bool) -> Message {
+        let mut message = Message::new(Some(jid::Jid::from(room.clone())));
+        message.type_ = XmppMessageType::Groupchat;
+        message.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
+        if with_from {
+            message.from = Some(format!("{room}/alice").parse().expect("valid occupant JID"));
+        }
+        if with_stanza_id {
+            message.payloads.push(build_stanza_id_element(
+                "room-archive-id",
+                &jid::Jid::from(room.clone()),
+            ));
+        }
+        message
+    }
+
+    async fn run_metric_case(
+        storage_outcome: StoreOutcome,
+        with_stanza_id: bool,
+        with_from: bool,
+    ) -> (
+        ArchiveGroupchatOutcome,
+        Vec<(MessageArchiveKind, MessageArchiveOutcome)>,
+    ) {
+        let storage: Arc<dyn MamStorage> = Arc::new(OutcomeMam(storage_outcome));
+        let room: BareJid = "room@example.com".parse().expect("room JID");
+        let message = group_message(&room, with_stanza_id, with_from);
+        let attempts = std::sync::Mutex::new(Vec::new());
+        let record = |kind, outcome| {
+            attempts
+                .lock()
+                .expect("archive attempts lock")
+                .push((kind, outcome));
+        };
+        let result = archive_groupchat_message_with_recorder(
+            &storage,
+            &room,
+            &message,
+            ArchiveGroupchatContext {
+                sender_nickname_generation: 0,
+                fence: None,
+                sender_item: None,
+            },
+            &record,
+        )
+        .await;
+        let attempts = attempts.into_inner().expect("archive attempts");
+        (result, attempts)
+    }
+
+    #[tokio::test]
+    async fn production_group_archive_paths_record_exact_terminal_outcomes() {
+        let (committed, attempts) = run_metric_case(StoreOutcome::Committed, true, true).await;
+        assert!(matches!(committed, ArchiveGroupchatOutcome::Stored(_)));
+        assert_eq!(
+            attempts,
+            vec![(MessageArchiveKind::Room, MessageArchiveOutcome::Committed)]
+        );
+
+        let (storage_error, attempts) =
+            run_metric_case(StoreOutcome::StorageError, true, true).await;
+        assert!(matches!(storage_error, ArchiveGroupchatOutcome::Skipped));
+        assert_eq!(
+            attempts,
+            vec![(
+                MessageArchiveKind::Room,
+                MessageArchiveOutcome::StorageError,
+            )]
+        );
+
+        let (ownership_lost, attempts) =
+            run_metric_case(StoreOutcome::OwnershipLost, true, true).await;
+        assert!(matches!(
+            ownership_lost,
+            ArchiveGroupchatOutcome::OwnershipLost
+        ));
+        assert_eq!(
+            attempts,
+            vec![(
+                MessageArchiveKind::Room,
+                MessageArchiveOutcome::OwnershipLost,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn both_group_archive_chain_guards_record_exactly_one_permanent_failure() {
+        for (with_stanza_id, with_from) in [(false, true), (true, false)] {
+            let (result, attempts) =
+                run_metric_case(StoreOutcome::Committed, with_stanza_id, with_from).await;
+            assert!(matches!(result, ArchiveGroupchatOutcome::Skipped));
+            assert_eq!(
+                attempts,
+                vec![(
+                    MessageArchiveKind::Room,
+                    MessageArchiveOutcome::ChainInvalid,
+                )],
+            );
+        }
+    }
 }
 
 pub(super) async fn apply_groupchat_retraction_tombstone(

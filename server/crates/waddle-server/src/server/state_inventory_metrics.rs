@@ -124,7 +124,7 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
     let snapshot = collect_snapshot(websocket_state).await;
     let labels: &[opentelemetry::KeyValue] = &[];
 
-    // Auth state — the three DashMaps swept by spawn_auth_state_janitor,
+    // Auth state — the two DashMaps swept by spawn_auth_state_janitor,
     // plus the OIDC dynamic-client cache they share state with.
     gauge!(
         "waddle.state.auth.pending_auth",
@@ -136,11 +136,6 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
         "Live DeviceAuthorization entries awaiting device-flow approval."
     )
     .record(as_i64(snapshot.auth.device_auth), labels);
-    gauge!(
-        "waddle.state.auth.xmpp_auth_codes",
-        "Live XmppAuthCode entries awaiting XMPP OAuth token exchange."
-    )
-    .record(as_i64(snapshot.auth.xmpp_auth_codes), labels);
     gauge!(
         "waddle.state.auth.dynamic_oidc_clients",
         "Cached dynamic OIDC client registrations."

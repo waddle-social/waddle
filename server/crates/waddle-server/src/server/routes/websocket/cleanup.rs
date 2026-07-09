@@ -586,7 +586,7 @@ pub(super) async fn cleanup_connection_shutdown(
         // a future session reusing the same `(hash, ver)` short-
         // circuits the disco#info round-trip.
         state.deps.protocol.caps_resolver.drop_resource(&jid);
-        info!(jid = %jid, "WebSocket connection unregistered");
+        info!(category = "success", "WebSocket connection unregistered");
         broadcast_unavailable_if_no_replacement(state, &jid, was_presence_available).await;
         cleanup_muc_presence_with_origin(state, &jid, cleanup_origin.as_ref()).await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
@@ -601,7 +601,10 @@ pub(super) async fn cleanup_connection_shutdown(
         .await;
         unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
     } else {
-        debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
+        debug!(
+            category = "non-owner",
+            "Skipped websocket cleanup for non-owned registry entry"
+        );
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.

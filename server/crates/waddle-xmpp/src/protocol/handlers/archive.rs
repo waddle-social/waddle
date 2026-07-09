@@ -5,7 +5,7 @@
 //! - **Sender pass** (`Locality::Sender` / `Locality::Both`): emit
 //!   [`OutboundEvent::ArchiveDirect`] keyed under the sender's bare
 //!   JID — the sender's own MAM archive captures their outgoing copy.
-//! - **Recipient pass** (`Locality::Recipient` / `Locality::Both`):
+//! - **Recipient pass** (`Locality::Recipient`):
 //!   emit [`OutboundEvent::ArchiveDirect`] keyed under the recipient's
 //!   bare JID — the recipient's MAM archive captures the incoming copy.
 //!   This is what gives a local-to-local message *two* archive entries
@@ -34,7 +34,7 @@
 //! events from a single dispatch (sender-side and recipient-side
 //! when locality is `Both`) flow through the same interpreter arm.
 
-use crate::protocol::event::OutboundEvent;
+use crate::protocol::event::{ArchiveSide, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
@@ -71,6 +71,7 @@ impl MessageHandler for ArchiveHandler {
             if let Some(to) = to_bare.clone() {
                 let from = from_bare.clone().unwrap_or_else(|| local_bare.clone());
                 events.push(OutboundEvent::ArchiveDirect {
+                    side: ArchiveSide::Sender,
                     archive_jid: from.clone(),
                     from,
                     to,
@@ -95,6 +96,7 @@ impl MessageHandler for ArchiveHandler {
                 if from != local_bare {
                     let to = to_bare.unwrap_or_else(|| local_bare.clone());
                     events.push(OutboundEvent::ArchiveDirect {
+                        side: ArchiveSide::Recipient,
                         archive_jid: to.clone(),
                         from,
                         to,
@@ -257,6 +259,19 @@ mod tests {
         }
     }
 
+    fn extract_archive_sides(outcome: &HandlerOutcome) -> Vec<ArchiveSide> {
+        match outcome {
+            HandlerOutcome::Continue(events) => events
+                .iter()
+                .filter_map(|event| match event {
+                    OutboundEvent::ArchiveDirect { side, .. } => Some(*side),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------
     // Locality + (from, to) shape
     // -----------------------------------------------------------------
@@ -270,6 +285,7 @@ mod tests {
         assert_eq!(archives.len(), 1);
         assert_eq!(archives[0].0, bare("alice@example.com"));
         assert_eq!(archives[0].1, bare("bob@example.com"));
+        assert_eq!(extract_archive_sides(&outcome), vec![ArchiveSide::Sender]);
     }
 
     #[test]
@@ -281,6 +297,10 @@ mod tests {
         assert_eq!(archives.len(), 1);
         assert_eq!(archives[0].0, bare("alice@example.com"));
         assert_eq!(archives[0].1, bare("bob@example.com"));
+        assert_eq!(
+            extract_archive_sides(&outcome),
+            vec![ArchiveSide::Recipient]
+        );
     }
 
     #[test]
@@ -301,6 +321,7 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let archives = extract_archive_events(&outcome);
         assert_eq!(archives.len(), 1);
+        assert_eq!(extract_archive_sides(&outcome), vec![ArchiveSide::Sender]);
     }
 
     #[test]

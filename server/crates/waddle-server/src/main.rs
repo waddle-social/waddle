@@ -4,6 +4,20 @@ use waddle_server::{config, config::ServerConfig, db, server, telemetry};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--build-commit")) {
+        println!("{}", waddle_server::build_identity::printable_git_sha());
+        return Ok(());
+    }
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--disco-target-contract"))
+    {
+        println!(
+            "{}",
+            waddle_server::server::disco_targets::target_contract_json()?
+        );
+        return Ok(());
+    }
+
     // Install the ring crypto provider for rustls (required for XMPP TLS)
     rustls::crypto::ring::default_provider()
         .install_default()

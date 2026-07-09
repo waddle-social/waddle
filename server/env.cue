@@ -35,6 +35,105 @@ let _gitopsWaddleServerInputs = [
 	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
 ]
 let _deploymentInputs = ["deployment.cue"]
+let _releasePublicationInputs = [
+	"scripts/publish-waddle-release.sh",
+	"scripts/publish-container-image.sh",
+	"scripts/publish-helm-chart.sh",
+	"scripts/publish-extension-modules.sh",
+	"scripts/publish-gitops-release.sh",
+	"scripts/publish-container-tags.sh",
+]
+let _gateZeroEvidenceSourceInputs = [
+	"capabilities.toml",
+	"disco-target-contract.json",
+	"crates/waddle-server/src/build_identity.rs",
+	"crates/waddle-server/src/notification_outbox/**",
+	"crates/waddle-server/src/pending_delivery/**",
+	"crates/waddle-server/src/server/**",
+	"crates/waddle-server/src/telemetry.rs",
+	"crates/waddle-xmpp/src/admin.rs",
+	"crates/waddle-xmpp/src/auth/**",
+	"crates/waddle-xmpp/src/disco/**",
+	"crates/waddle-xmpp/src/isr.rs",
+	"crates/waddle-xmpp/src/parser/ns.rs",
+	"crates/waddle-xmpp/src/prometheus.rs",
+	"crates/waddle-xmpp/src/prometheus/**",
+	"crates/waddle-xmpp/src/protocol/frame.rs",
+	"crates/waddle-xmpp/src/protocol/phase.rs",
+	"crates/waddle-xmpp/src/pubsub/pep.rs",
+	"crates/waddle-xmpp/src/registry/**",
+	"crates/waddle-xmpp/src/stream_management/**",
+	"crates/waddle-xmpp/src/protocol/handlers/version.rs",
+	"crates/waddle-xmpp/src/xep/xep0430.rs",
+	"crates/waddle-xmpp/src/xep/xep0433.rs",
+	"crates/waddle-xmpp/src/xep/xep0092.rs",
+	"crates/waddle-xmpp-client/src/bin/waddle_capability_collector.rs",
+	"crates/waddle-xmpp-client/src/client.rs",
+	"crates/waddle-xmpp-client/src/capability_evidence.rs",
+	"crates/waddle-xmpp-client/src/capability_evidence/**",
+	"crates/waddle-xmpp-client/src/config.rs",
+	"crates/waddle-xmpp-client/src/discovery.rs",
+	"crates/waddle-xmpp-client/src/discovery/**",
+	"crates/waddle-xmpp-client/src/error.rs",
+	"crates/waddle-xmpp-client/src/event.rs",
+	"crates/waddle-xmpp-client/src/runtime.rs",
+	"crates/waddle-xmpp-client/src/runtime/**",
+	"crates/waddle-xmpp-client/src/transport.rs",
+	"crates/waddle-xmpp-client/src/transport/**",
+	"crates/waddle-xmpp-core/src/build_identity.rs",
+	"crates/waddle-xmpp-core/src/disco_target.rs",
+	"crates/waddle-xmpp-core/src/disco/**",
+	"crates/waddle-xmpp-core/src/pubsub/pep.rs",
+	"charts/waddle-server/templates/configmap.yaml",
+	"charts/waddle-server/templates/deployment.yaml",
+	"charts/waddle-server/templates/_helpers.tpl",
+	"charts/waddle-server/templates/service.yaml",
+	"charts/waddle-server/templates/validations.yaml",
+	"charts/waddle-server/values.yaml",
+	"../infrastructure/waddle.cloud/gitops/grafana-alloy/helmrelease.yaml",
+	"../docs/observability/**",
+	"../chat/astro.config.mjs",
+	"../chat/scripts/build-identity.mjs",
+	"../chat/scripts/generate-build-identity.mjs",
+	"../chat/scripts/resolve-commit-sha.mjs",
+	"../chat/src/auth/**",
+	"../chat/src/build-identity-contract.ts",
+	"../chat/src/build-identity.ts",
+	"../chat/src/layouts/AppLayout.astro",
+	"../chat/src/lib/telemetry.ts",
+	"../chat/src/lib/telemetry/**",
+	"../chat/src/lib/xmpp/**",
+]
+let _capabilityCollectionEnv = {
+	WADDLE_CAPABILITY_ENDPOINT: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_ACCOUNT_JID: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_REPRESENTATIVE_MUC_ROOM: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_ACCESS_TOKEN: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_XMPP_DOMAIN: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_MUC_DOMAIN: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_SPACES_DOMAIN: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_SERVER_COMMIT: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_WINDOW_START: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_WINDOW_END: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_JOB: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_ENVIRONMENT: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_CLUSTER: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_NAMESPACE: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_EXPECTED_REPLICAS: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_ORIGIN: schema.#EnvPassthrough & {}
+}
+let _baselineFinalizationEnv = {
+	WADDLE_CAPABILITY_SERVER_COMMIT: schema.#EnvPassthrough & {}
+	WADDLE_BASELINE_WEB_COMMIT: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_WINDOW_START: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_WINDOW_END: schema.#EnvPassthrough & {}
+	WADDLE_BASELINE_CAPTURED_AT: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_JOB: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_ENVIRONMENT: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_CLUSTER: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_NAMESPACE: schema.#EnvPassthrough & {}
+	WADDLE_CAPABILITY_EXPECTED_REPLICAS: schema.#EnvPassthrough & {}
+}
 
 let _NamespaceNix = schema.#Contributor & {
 	id: "namespaceNix"
@@ -244,6 +343,10 @@ schema.#Project & {
 					test -f capabilities.toml
 					test -f ../docs/product/critical-journeys.json
 					test -f ../docs/product/gate-evidence.json
+					test -f ../docs/observability/switchable-baseline-signals.json
+					test -f ../docs/runbooks/switchable-baseline.md
+					test -f ../scripts/collect-switchable-baseline.ts
+					test -f ../scripts/finalize-switchable-baseline.ts
 					for gate in 0 1 2 3 4 5; do
 					  test "$(grep -c "^## Gate ${gate} —" "${tracker}")" -eq 1
 					done
@@ -294,13 +397,46 @@ schema.#Project & {
 					    exit 1
 					  fi
 					done < <(grep '^| [0-5] | complete |' "${tracker}" || true)
-					bun test ../tests/critical-journeys.test.ts
+					bun test ../tests
 				"""#]
 			inputs: [
+				"../flake.nix",
 				"../apps/apple/**/Tests/**",
+				"../chat/src/auth/session.ts",
+				"../chat/src/lib/telemetry.ts",
+				"../chat/src/lib/xmpp/**",
 				"../chat/tests/**",
 				"../docs/evidence/**",
+				"../docs/observability/**",
+				"../docs/runbooks/**",
 				"capabilities.toml",
+				"disco-target-contract.json",
+				"crates/waddle-xmpp-client/src/bin/waddle_capability_collector.rs",
+				"crates/waddle-xmpp-client/src/capability_evidence.rs",
+				"crates/waddle-xmpp-client/src/capability_evidence/**",
+				"crates/waddle-xmpp-client/src/discovery/**",
+				"crates/waddle-server/src/build_identity.rs",
+				"crates/waddle-server/src/main.rs",
+				"crates/waddle-server/src/server/disco_targets.rs",
+				"crates/waddle-server/src/server/health.rs",
+				"crates/waddle-server/src/server/room_registry_gauge.rs",
+				"crates/waddle-server/src/server/trace.rs",
+				"crates/waddle-server/src/server/xmpp_auth_state.rs",
+				"crates/waddle-server/src/server/routes/interpret/direct_archive.rs",
+				"crates/waddle-server/src/server/routes/interpret/groupchat_archive.rs",
+				"crates/waddle-server/src/server/routes/websocket/frame.rs",
+				"crates/waddle-server/src/server/routes/websocket/parse_errors.rs",
+				"crates/waddle-server/src/server/routes/websocket/sasl.rs",
+				"crates/waddle-server/src/server/routes/websocket/transport_xml.rs",
+				"crates/waddle-server/src/telemetry.rs",
+				"crates/waddle-xmpp/src/auth/mod.rs",
+				"crates/waddle-xmpp/src/auth/scram/**",
+				"crates/waddle-xmpp/src/auth/scram.rs",
+				"crates/waddle-xmpp/src/prometheus/**",
+				"crates/waddle-xmpp/src/prometheus.rs",
+				"crates/waddle-xmpp/src/protocol/frame.rs",
+				"crates/waddle-xmpp/src/protocol/phase.rs",
+				"crates/waddle-xmpp/src/auth/oauthbearer.rs",
 				"crates/**/tests/**",
 				"crates/waddle-server/src/server/routes/websocket/tests/**",
 				"crates/waddle-server/tests/server_capability_manifest.rs",
@@ -308,11 +444,65 @@ schema.#Project & {
 				"../docs/product/gate-evidence.json",
 				"../docs/product/performance-profile.json",
 				"../docs/planning/switchable-alternative.md",
+				"../scripts/collect-switchable-baseline.ts",
+				"../scripts/finalize-switchable-baseline.ts",
+				"../scripts/switchable-baseline/**",
 				"../tests/**",
+				"../infrastructure/waddle.cloud/gitops/grafana-alloy/helmrelease.yaml",
+				"charts/waddle-server/templates/deployment.yaml",
+				"charts/waddle-server/templates/validations.yaml",
+				"charts/waddle-server/values.yaml",
 				"../cuenv.lock",
 				"../xeps/xep-*.xml",
 				"env.cue",
 			]
+		}
+
+		collectCapabilityBaseline: schema.#Task & {
+			command: "bash"
+			args: ["scripts/collect-capability-baseline.sh"]
+			env: _capabilityCollectionEnv
+			cache: mode: "never"
+			inputs: [
+				"Cargo.toml",
+				"Cargo.lock",
+				"crates/waddle-xmpp-client/**",
+				"disco-target-contract.json",
+				"scripts/collect-capability-baseline.sh",
+			]
+			outputs: ["../target/switchable-baseline-inputs/capability/live-disco-export.json"]
+		}
+
+		finalizeGateZeroBaseline: schema.#Task & {
+			command: "bash"
+			args: ["scripts/finalize-gate-zero-baseline.sh"]
+			env: _baselineFinalizationEnv
+			cache: mode: "never"
+			inputs: list.Concat([[
+				"../target/switchable-baseline-inputs/capability/live-disco-export.json",
+				"../target/switchable-baseline-inputs/prometheus/telemetry-baseline.json",
+				"../target/switchable-baseline-inputs/faro/browser-auth-bootstrap.json",
+				"../target/switchable-baseline-inputs/faro/browser-message-ack-latency.json",
+				"../target/switchable-baseline-inputs/faro/browser-session-lifecycle.json",
+				"../target/switchable-baseline-inputs/faro/browser-reconnect-duration.json",
+				"../target/switchable-baseline-inputs/attestation/live-collection-subject.json",
+				"../target/switchable-baseline-inputs/attestation/live-collection.sigstore.json",
+				"scripts/finalize-gate-zero-baseline.sh",
+				"../scripts/finalize-switchable-baseline.ts",
+				"../scripts/switchable-baseline/**",
+			], _gateZeroEvidenceSourceInputs])
+			outputs: ["../docs/evidence/gate-0/**"]
+		}
+
+		verifySwitchableBaseline: schema.#Task & {
+			command: "bun"
+			args: ["../scripts/finalize-switchable-baseline.ts", "verify"]
+			cache: mode: "never"
+			inputs: list.Concat([[
+				"../docs/evidence/gate-0/**",
+				"../scripts/finalize-switchable-baseline.ts",
+				"../scripts/switchable-baseline/**",
+			], _gateZeroEvidenceSourceInputs])
 		}
 
 		nixFmt: schema.#Task & {
@@ -425,10 +615,23 @@ schema.#Project & {
 					modules_yaml="$(mktemp)"
 					published_values="$(mktemp).yaml"
 					published_render="$(mktemp)"
+					published_gitops_dir="$(mktemp -d)"
+					published_gitops_kustomize="$(mktemp)"
 					chart_secret_args=(
 					  --set-string secret.sessionKey=ci-session-key
 					  --set-string secret.occupantIdSecret=ci-occupant-id-secret-32-bytes-long
 					)
+					chart_version="$(yq -r '.version' charts/waddle-server/Chart.yaml)"
+					chart_source=../infrastructure/waddle.cloud/gitops/waddle-server/chart-ocirepository.yaml
+					gitops_chart_tag="$(yq -r '.spec.ref.tag' "${chart_source}")"
+					if [ "${gitops_chart_tag}" != "${chart_version}" ]; then
+					  echo "checked-in chart OCIRepository must select exact chart version ${chart_version}, got ${gitops_chart_tag}" >&2
+					  exit 1
+					fi
+					yq -e '.kind == "OCIRepository" and .metadata.name == "waddle-server-chart" and .metadata.namespace == "waddle"' "${chart_source}" >/dev/null
+					yq -e '.spec.url == "oci://ghcr.io/waddle-social/waddle/charts/waddle-server"' "${chart_source}" >/dev/null
+					yq -e '.spec.layerSelector.mediaType == "application/vnd.cncf.helm.chart.content.v1.tar+gzip" and .spec.layerSelector.operation == "copy"' "${chart_source}" >/dev/null
+					yq -e '.spec.chartRef.kind == "OCIRepository" and .spec.chartRef.name == "waddle-server-chart" and .spec.chartRef.namespace == "waddle" and (.spec.chart == null)' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml >/dev/null
 
 					cue vet .
 					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml -d '#RuntimeExternalSecret'
@@ -465,6 +668,61 @@ schema.#Project & {
 					  --namespace waddle \
 					  --set spicedb.enabled=false \
 					  "${chart_secret_args[@]}" > "${chart_render}"
+					liveness_path="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .livenessProbe.httpGet.path' "${chart_render}")"
+					case "${liveness_path}" in
+					  /health) ;;
+					  *) echo "chart liveness probe must use /health, got: ${liveness_path:-<missing>}" >&2; exit 1 ;;
+					esac
+					readiness_path="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .readinessProbe.httpGet.path' "${chart_render}")"
+					case "${readiness_path}" in
+					  /readyz) ;;
+					  *) echo "chart readiness probe must use the self-fencing-aware /readyz endpoint, got: ${readiness_path:-<missing>}" >&2; exit 1 ;;
+					esac
+					for env_and_path in \
+					  "OTEL_SERVICE_INSTANCE_ID:metadata.uid" \
+					  "K8S_POD_UID:metadata.uid" \
+					  "K8S_POD_NAME:metadata.name" \
+					  "K8S_NAMESPACE_NAME:metadata.namespace"; do
+					  env_name="${env_and_path%%:*}"
+					  field_path="${env_and_path#*:}"
+					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .valueFrom.fieldRef.fieldPath == \"${field_path}\")" "${chart_render}" > /dev/null
+					done
+
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
+					  --set-string telemetry.environment='Production/Secret' > /dev/null 2>&1; then
+					  echo "chart must reject unsafe deployment scope labels" >&2
+					  exit 1
+					fi
+					for reserved_identity in WADDLE_GIT_SHA OTEL_SERVICE_VERSION; do
+					  if helm template waddle-server charts/waddle-server \
+					    --namespace waddle \
+					    --set spicedb.enabled=false \
+					    "${chart_secret_args[@]}" \
+					    --set-string "containerExtraEnv[0].name=${reserved_identity}" \
+					    --set-string 'containerExtraEnv[0].value=ffffffffffffffffffffffffffffffffffffffff' > /dev/null 2>&1; then
+					    echo "chart must reject containerExtraEnv override of ${reserved_identity}" >&2
+					    exit 1
+					  fi
+					done
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
+					  --set-string 'config.extraEnv.OTEL_SERVICE_VERSION=spoofed' > /dev/null 2>&1; then
+					  echo "chart must reject config.extraEnv overrides of immutable telemetry identity" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
+					  --set-string telemetry.commit='not-a-full-git-sha' > /dev/null 2>&1; then
+					  echo "chart must reject invalid release commit metadata" >&2
+					  exit 1
+					fi
 
 					if helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
@@ -512,6 +770,13 @@ schema.#Project & {
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  -f "${gitops_values}" > "${gitops_render}"
+					for env_and_value in \
+					  "DEPLOYMENT_ENVIRONMENT_NAME:production" \
+					  "DEPLOYMENT_CLUSTER_NAME:waddle-cloud"; do
+					  env_name="${env_and_value%%:*}"
+					  env_value="${env_and_value#*:}"
+					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .value == \"${env_value}\")" "${gitops_render}" > /dev/null
+					done
 					for env_name in WADDLE_SESSION_KEY WADDLE_OCCUPANT_ID_SECRET; do
 					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .valueFrom.secretKeyRef.name == \"waddle-runtime-secrets\" and .valueFrom.secretKeyRef.optional == false)" "${gitops_render}" > /dev/null
 					done
@@ -540,10 +805,15 @@ schema.#Project & {
 					cp "${gitops_values}" "${published_values}"
 					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
-					  .containerExtraEnv = ((.containerExtraEnv // []) | map(select(.name != "WADDLE_GIT_SHA"))) + [{"name": "WADDLE_GIT_SHA", "value": strenv(SAMPLE_GIT_SHA)}] |
+					  .telemetry.commit = strenv(SAMPLE_GIT_SHA) |
 					  .extensions.enabled = true |
 					  .extensions.modules = load(strenv(MODULES_YAML))
 					' "${published_values}"
+					cp -R ../infrastructure/waddle.cloud/gitops/waddle-server/. "${published_gitops_dir}/"
+					SAMPLE_DIGEST="${sample_digest}" yq -i '.spec.ref = {"digest": strenv(SAMPLE_DIGEST)}' "${published_gitops_dir}/chart-ocirepository.yaml"
+					kubectl kustomize "${published_gitops_dir}" > "${published_gitops_kustomize}"
+					yq -e "select(.kind == \"OCIRepository\" and .metadata.name == \"waddle-server-chart\") | (.spec.ref.digest == \"${sample_digest}\" and (.spec.ref.tag == null))" "${published_gitops_kustomize}" >/dev/null
+					yq -e 'select(.kind == "HelmRelease" and .metadata.name == "waddle-server") | (.spec.chartRef.kind == "OCIRepository" and .spec.chartRef.name == "waddle-server-chart" and (.spec.chart == null))' "${published_gitops_kustomize}" >/dev/null
 					cue vet . "${published_values}" -d '#PublishedValues' \
 					  -t serverImageDigest="${sample_digest}" \
 					  -t linkBoardDigest="${sample_digest}" \
@@ -580,6 +850,12 @@ schema.#Project & {
 					fi
 					image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
 					"${image_stream}" | docker image load
+					expected_commit="$(git rev-parse HEAD)"
+					embedded_commit="$(docker run --rm ghcr.io/waddle-social/waddle:nix --build-commit)"
+					if [ "${embedded_commit}" != "${expected_commit}" ]; then
+					  echo "container build identity ${embedded_commit} does not match source ${expected_commit}" >&2
+					  exit 1
+					fi
 				"""#]
 			inputs: _nixInputs
 			dependsOn: [tasks.buildCi]
@@ -594,195 +870,20 @@ schema.#Project & {
 				CI_GITHUB_REF_NAME: schema.#EnvPassthrough & {name: "GITHUB_REF_NAME"}
 				CUENV_ARCH: "amd64"
 			}
-			args: ["-c", #"""
-					set -euo pipefail
-					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
-					GITHUB_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
-					GITHUB_ACTOR="${CI_GITHUB_ACTOR:?missing GITHUB_ACTOR}"
-					GITHUB_REF_TYPE="${CI_GITHUB_REF_TYPE:?missing GITHUB_REF_TYPE}"
-					GITHUB_REF_NAME="${CI_GITHUB_REF_NAME:?missing GITHUB_REF_NAME}"
-					case "${CUENV_ARCH}" in
-					  amd64) ;;
-					  *) echo "unsupported CUENV_ARCH=${CUENV_ARCH}" >&2; exit 1 ;;
-					esac
-
-					echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-					FULL_SHA="$(git rev-parse HEAD)"
-					SHORT_SHA="$(git rev-parse --short HEAD)"
-					mkdir -p ../target/digests
-
-					image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
-					"${image_stream}" | docker image load
-
-					docker tag ghcr.io/waddle-social/waddle:nix "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}"
-					docker push "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" 2>&1 | tee "../target/digests/push-${CUENV_ARCH}.log"
-					digest="$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" | sed 's/^.*@//')"
-					if [ -z "${digest}" ]; then
-					  digest="$(grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/push-${CUENV_ARCH}.log" | tail -n1)"
-					fi
-					if [ -z "${digest}" ]; then
-					  echo "No image digest found" >&2
-					  exit 1
-					fi
-					if ! [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-					  echo "Invalid image digest: ${digest}" >&2
-					  exit 1
-					fi
-					if [ "${digest}" = "${placeholder_digest}" ]; then
-					  echo "Refusing to publish GitOps with the all-zero image digest placeholder" >&2
-					  exit 1
-					fi
-					printf '%s\n' "${digest}" > "../target/digests/${CUENV_ARCH}.txt"
-
-					TAG_ARGS=()
-					TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}")
-					if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-					  VERSION="${GITHUB_REF_NAME}"
-					  TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:${VERSION}")
-					  if [[ "${VERSION}" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-					    MAJOR="${BASH_REMATCH[1]}"
-					    MINOR="${BASH_REMATCH[2]}"
-					    PATCH="${BASH_REMATCH[3]}"
-					    TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:${MAJOR}.${MINOR}.${PATCH}")
-					    TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:${MAJOR}.${MINOR}")
-					    TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:${MAJOR}")
-					  fi
-					else
-					  TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:main")
-					fi
-
-					docker buildx imagetools create "${TAG_ARGS[@]}" "ghcr.io/waddle-social/waddle@${digest}"
-					docker buildx imagetools inspect "${TAG_ARGS[1]}"
-
-					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-					chart_package="$(helm package charts/waddle-server -d /tmp/charts | awk '{print $NF}')"
-					chart_version="$(helm show chart "${chart_package}" | awk '$1 == "version:" {print $2; exit}')"
-					helm_push_log="$(mktemp)"
-					if ! helm push "${chart_package}" oci://ghcr.io/waddle-social/waddle/charts 2>&1 | tee "${helm_push_log}"; then
-					  if grep -Eiq 'already exists|409|conflict' "${helm_push_log}"; then
-					    remote_chart_dir="$(mktemp -d)"
-					    local_chart_dir="$(mktemp -d)"
-					    if helm pull oci://ghcr.io/waddle-social/waddle/charts/waddle-server --version "${chart_version}" --destination "${remote_chart_dir}" >/dev/null 2>&1; then
-					      tar -xzf "${chart_package}" -C "${local_chart_dir}"
-					      tar -xzf "${remote_chart_dir}/waddle-server-${chart_version}.tgz" -C "${remote_chart_dir}"
-					      if diff -qr "${local_chart_dir}/waddle-server" "${remote_chart_dir}/waddle-server" >/dev/null; then
-					        echo "Chart version ${chart_version} already exists with identical content, skipping"
-					      else
-					        echo "Chart version ${chart_version} already exists with different content; bump charts/waddle-server/Chart.yaml version" >&2
-					        exit 1
-					      fi
-					    else
-					      echo "Chart version ${chart_version} already exists but could not pull remote chart for comparison" >&2
-					      exit 1
-					    fi
-					  else
-					    exit 1
-					  fi
-					fi
-					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-
-					rustup target add wasm32-wasip2 >/dev/null 2>&1 || true
-					declare -a EXTENSIONS=(
-					  "link-board:link_board:urn:waddle:link-board:1"
-					  "ai-chatbot:ai_chatbot:urn:waddle:ai-chatbot:1"
-					  "decision-polls:decision_polls:urn:waddle:decision-polls:1"
-					  "github:github:urn:waddle:web-integration:1"
-					  "stargate-quotes:stargate_quotes:urn:waddle:stargate-quotes:1"
-					)
-
-					link_board_digest=""
-					ai_chatbot_digest=""
-					decision_polls_digest=""
-					github_digest=""
-					stargate_quotes_digest=""
-					modules_yaml="../target/digests/extensions-modules.yaml"
-					for extension_spec in "${EXTENSIONS[@]}"; do
-					  IFS=: read -r extension_name crate_name _namespace_scheme _namespace_rest <<< "${extension_spec}"
-					  wasm_path="target/wasm32-wasip2/release/${crate_name}.wasm"
-					  extension_ref="ghcr.io/waddle-social/waddle/extensions/${extension_name}:sha-${SHORT_SHA}"
-
-					  cargo build --release --locked --target wasm32-wasip2 --target-dir target --manifest-path "extensions/${extension_name}/Cargo.toml"
-					  test -s "${wasm_path}"
-					  if [ "${extension_name}" = "ai-chatbot" ]; then
-					    if grep -aE "AI provider unavailable|WADDLE_AI_PROVIDER|OPENROUTER_API_KEY|OPENAI_API_KEY" "${wasm_path}" >/dev/null; then
-					      echo "Refusing to publish ai-chatbot WASM with legacy server-provider fallback strings" >&2
-					      exit 1
-					    fi
-					  fi
-					  oras push \
-					    --artifact-type "application/vnd.waddle.extension.wasm.v1+wasm" \
-					    "${extension_ref}" \
-					    "${wasm_path}:application/wasm"
-					  extension_digest="$(oras resolve "${extension_ref}")"
-					  if ! [[ "${extension_digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-					    echo "Invalid digest for ${extension_name}: ${extension_digest}" >&2
-					    exit 1
-					  fi
-					  if [ "${extension_digest}" = "${placeholder_digest}" ]; then
-					    echo "Refusing to pin all-zero digest placeholder for ${extension_name}" >&2
-					    exit 1
-					  fi
-					  case "${extension_name}" in
-					    link-board) link_board_digest="${extension_digest}" ;;
-					    ai-chatbot) ai_chatbot_digest="${extension_digest}" ;;
-					    decision-polls) decision_polls_digest="${extension_digest}" ;;
-					    github) github_digest="${extension_digest}" ;;
-					    stargate-quotes) stargate_quotes_digest="${extension_digest}" ;;
-					    *) echo "unknown extension ${extension_name}" >&2; exit 1 ;;
-					  esac
-					done
-					cue export . -e '#PublishedExtensionModules' --out yaml \
-					  -t linkBoardDigest="${link_board_digest:?missing link-board digest}" \
-					  -t aiChatbotDigest="${ai_chatbot_digest:?missing ai-chatbot digest}" \
-					  -t decisionPollsDigest="${decision_polls_digest:?missing decision-polls digest}" \
-					  -t githubDigest="${github_digest:?missing github digest}" \
-					  -t stargateQuotesDigest="${stargate_quotes_digest:?missing stargate-quotes digest}" > "${modules_yaml}"
-
-					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-					yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e ".spec.values.image.digest == \"${digest}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e ".spec.values.containerExtraEnv[] | select(.name == \"WADDLE_GIT_SHA\") | .value == \"${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -i ".spec.values.extensions.modules = load(\"${modules_yaml}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-					yq -e ".spec.values.extensions.enabled == true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then
-					  echo "refusing to publish GitOps with all-zero digest placeholders" >&2
-					  exit 1
-					fi
-					if grep -R "github-enricher" ../infrastructure/waddle.cloud/gitops/waddle-server; then
-					  echo "refusing to publish GitOps with github-enricher" >&2
-					  exit 1
-					fi
-					gitops_values="$(mktemp).yaml"
-					gitops_render="$(mktemp)"
-					yq -o=yaml '.spec.values' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > "${gitops_values}"
-					cue vet . "${gitops_values}" -d '#PublishedValues' \
-					  -t serverImageDigest="${digest}" \
-					  -t linkBoardDigest="${link_board_digest}" \
-					  -t aiChatbotDigest="${ai_chatbot_digest}" \
-					  -t decisionPollsDigest="${decision_polls_digest}" \
-					  -t githubDigest="${github_digest}" \
-					  -t stargateQuotesDigest="${stargate_quotes_digest}"
-					helm template waddle-server charts/waddle-server \
-					  --namespace waddle \
-					  -f "${gitops_values}" > "${gitops_render}"
-					rendered_image="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .image' "${gitops_render}")"
-					case "${rendered_image}" in
-					  ghcr.io/waddle-social/waddle@"${digest}") ;;
-					  *) echo "published GitOps render must pin the server image digest ${digest}, got: ${rendered_image}" >&2; exit 1 ;;
-					esac
-					rendered_git_sha="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | (.env // [])[] | select(.name == "WADDLE_GIT_SHA") | .value' "${gitops_render}")"
-					case "${rendered_git_sha}" in
-					  "${FULL_SHA}") ;;
-					  *) echo "published GitOps render must set WADDLE_GIT_SHA=${FULL_SHA}, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
-					esac
-					flux push artifact oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \
-					  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
-					  --source="$(git config --get remote.origin.url)" \
-					  --revision="${SHORT_SHA}"
-				"""#]
-			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
+			args: ["scripts/publish-waddle-release.sh"]
+			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, _releasePublicationInputs])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.renderDeployment, tasks.buildExtensionModules]
+			dependsOn: [
+				tasks.checkRootSyncDrift,
+				tasks.checkCiDrift,
+				tasks.checkSwitchableAlternativeProgram,
+				tasks.fmt,
+				tasks.clippy,
+				tasks.test,
+				tasks.checkXmppClientFfiBindings,
+				tasks.renderDeployment,
+				tasks.buildExtensionModules,
+			]
 		}
 
 		flakehubPublished: schema.#Task & {

@@ -833,3 +833,109 @@ fn parse_disco_data_form_ignores_form_type_when_x_type_missing() {
 // XEP-0357 wire-shape coverage moved to
 // `crate::xep::xep0357::tests::enable_iq_with_no_publish_options_carries_no_form_or_provider_fields`
 // where it lives alongside the typed builder.
+
+#[test]
+fn typed_disco_request_ids_are_random_v4_values() {
+    let target: BareJid = "upload.example.com".parse().expect("target JID");
+    let first = build_disco_info_iq_for(&target);
+    let second = build_disco_info_iq_for(&target);
+    let first_id = first.attr("id").expect("first request id");
+    let second_id = second.attr("id").expect("second request id");
+    assert_ne!(first_id, second_id);
+    for id in [first_id, second_id] {
+        let uuid = uuid::Uuid::parse_str(id.strip_prefix("disco-info-").expect("typed prefix"))
+            .expect("UUID request id");
+        assert_eq!(uuid.get_version_num(), 4);
+    }
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+async fn typed_disco_response_from(
+    response_from: Option<&'static str>,
+    response_node: Option<&'static str>,
+) -> crate::ClientResult<DiscoInfoResult> {
+    use std::sync::{Arc, RwLock};
+
+    use tokio::sync::{broadcast, mpsc};
+
+    use crate::command::XmppCommand;
+    use crate::event::ClientEvent;
+    use crate::state::SessionSnapshot;
+    use crate::{ClientHandle, DiscoveryExt};
+
+    let (commands, mut command_rx) = mpsc::channel(1);
+    let (events, _) = broadcast::channel::<ClientEvent>(1);
+    let handle = ClientHandle::from_parts(
+        commands,
+        events,
+        Arc::new(RwLock::new(SessionSnapshot::new())),
+    );
+    tokio::spawn(async move {
+        let Some(XmppCommand::SendIq { stanza, responder }) = command_rx.recv().await else {
+            return;
+        };
+        let mut response = Element::builder("iq", CLIENT_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                stanza.attr("id").expect("request id"),
+            );
+        if let Some(from) = response_from {
+            response = response.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
+        }
+        let mut query = Element::builder("query", DISCO_INFO_NS);
+        if let Some(node) = response_node {
+            query = query.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+        }
+        let response = response
+            .append(
+                query
+                    .append(
+                        Element::builder("identity", DISCO_INFO_NS)
+                            .attr(minidom::rxml::xml_ncname!("category").to_owned(), "store")
+                            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "file")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let _ = responder.send(Ok(response));
+    });
+
+    let target: BareJid = "upload.example.com".parse().expect("target JID");
+    handle.discover_info_for(&target).await
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "current_thread")]
+async fn typed_disco_accepts_only_the_case_normalized_queried_bare_jid() {
+    let result = typed_disco_response_from(Some("UPLOAD.EXAMPLE.COM"), None)
+        .await
+        .expect("normalized matching response");
+    assert_eq!(result.jid, "upload.example.com");
+
+    for from in [None, Some("upload.example.com/forged-resource")] {
+        assert!(typed_disco_response_from(from, None).await.is_err());
+    }
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "current_thread")]
+async fn typed_disco_rejects_a_forged_response_that_wins_the_id_race() {
+    assert!(typed_disco_response_from(Some("mallory@example.com"), None)
+        .await
+        .is_err());
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "current_thread")]
+async fn typed_root_disco_requires_the_response_to_omit_node() {
+    typed_disco_response_from(Some("upload.example.com"), None)
+        .await
+        .expect("root response without node");
+    assert!(
+        typed_disco_response_from(Some("upload.example.com"), Some("injected-node"))
+            .await
+            .is_err()
+    );
+}

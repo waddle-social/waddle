@@ -24,7 +24,6 @@
       "targets": [
         { "expr": "waddle_state_auth_pending_auth_entry", "legendFormat": "pending_auth" },
         { "expr": "waddle_state_auth_device_auth_entry", "legendFormat": "device_auth" },
-        { "expr": "waddle_state_auth_xmpp_auth_codes_entry", "legendFormat": "xmpp_auth_codes" },
         { "expr": "waddle_state_auth_dynamic_oidc_clients_entry", "legendFormat": "dynamic_oidc_clients" },
         { "expr": "waddle_state_auth_dynamic_oidc_client_locks_entry", "legendFormat": "dynamic_oidc_client_locks" }
       ],

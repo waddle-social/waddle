@@ -1,3 +1,4 @@
+use super::telemetry_privacy::connection_phase_category;
 use super::*;
 
 fn build_bind_result_xml(id: &str, full_jid: &FullJid) -> String {
@@ -27,7 +28,10 @@ pub(super) fn handle_resource_binding(
     let id = iq.id().to_string();
 
     if !phase.allows_resource_binding() {
-        warn!(phase = ?phase, id = %id, "Resource binding received in invalid phase");
+        warn!(
+            phase = connection_phase_category(phase),
+            "Resource binding received in invalid phase"
+        );
         return vec![build_iq_error_xml_typed(
             &id,
             None,
@@ -37,7 +41,10 @@ pub(super) fn handle_resource_binding(
     }
 
     let Some(bare_jid) = phase.authenticated_bare_jid() else {
-        warn!(id = %id, "Resource binding without authenticated session");
+        warn!(
+            category = "missing-authentication",
+            "Resource binding without authenticated session"
+        );
         return vec![build_iq_error_xml_typed(
             &id,
             None,
@@ -59,11 +66,14 @@ pub(super) fn handle_resource_binding(
     let full_jid_str = format!("{}/{}", bare_jid, resource);
 
     if let Ok(full_jid) = full_jid_str.parse::<FullJid>() {
-        info!(jid = %full_jid, id = %id, "Resource bound");
+        info!(category = "success", "Resource bound");
         *phase = ConnectionPhase::ready(full_jid.clone(), false);
         vec![build_bind_result_xml(&id, &full_jid)]
     } else {
-        warn!(jid = %full_jid_str, "Invalid JID during resource binding");
+        warn!(
+            category = "invalid-resource",
+            "Invalid JID during resource binding"
+        );
         vec![]
     }
 }

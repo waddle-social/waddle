@@ -346,13 +346,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // return explicit errors.
     let auth_router = routes::auth::router(auth_state.clone());
     let device_router = routes::device::router(auth_state.clone());
-    let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
     let auth_page_router = routes::auth_page::router(auth_state.clone());
 
     router = router
         .merge(auth_router)
         .merge(device_router)
-        .merge(xmpp_oauth_router)
         .merge(auth_page_router)
         .merge(extension_webhooks_router)
         .merge(livekit_webhook_router)
@@ -716,6 +714,18 @@ async fn create_websocket_state(
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),
+            oauth_terminal_recorder: Default::default(),
+            oauthbearer_available: {
+                let available =
+                    routes::websocket::oauthbearer_available_for_base_url(&server_config.base_url);
+                if !available {
+                    warn!(
+                        base_url = %server_config.base_url,
+                        "OAUTHBEARER disabled because the configured public origin is not HTTPS"
+                    );
+                }
+                available
+            },
             service_domains,
             protocol: ProtocolServices {
                 connection_registry,

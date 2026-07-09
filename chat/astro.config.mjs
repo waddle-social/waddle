@@ -6,17 +6,23 @@ import faroUploader from "@grafana/faro-rollup-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
 import { noiseSuppressionAudioWorkletVitePlugin } from "@workadventure/noise-suppression/vite";
-import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
+import { resolveBuildIdentity } from "./scripts/build-identity.mjs";
 
-const COMMIT_SHA = resolveCommitSha();
+const BUILD_IDENTITY = resolveBuildIdentity();
+const COMMIT_SHA = BUILD_IDENTITY.commitSha;
 // Faro Web SDK config is baked at build time via Vite `define`. The
 // PUBLIC_FARO_* values are injected only for production deploys (see
 // env.environment.production in the repo-root env.cue); every other
 // build leaves them empty, which initTelemetry() treats as "off".
-const FARO_URL = process.env.PUBLIC_FARO_URL ?? "";
-const FARO_APP_NAME = process.env.PUBLIC_FARO_APP_NAME ?? "waddle-chat";
+const FARO_URL = process.env.PUBLIC_FARO_URL?.trim() ?? "";
+const FARO_APP_NAME = BUILD_IDENTITY.faro.application;
 const FARO_APP_VERSION = process.env.PUBLIC_FARO_APP_VERSION ?? "1.0.0";
-const FARO_ENVIRONMENT = process.env.PUBLIC_FARO_ENVIRONMENT ?? "";
+const FARO_SCOPE = BUILD_IDENTITY.faro.scope;
+const FARO_ENVIRONMENT = FARO_SCOPE?.deploymentEnvironment ?? "";
+const FARO_CLUSTER = FARO_SCOPE?.cluster ?? "";
+const FARO_NAMESPACE = FARO_SCOPE?.namespace ?? "";
+const FARO_SOURCE_ID = FARO_SCOPE?.sourceId ?? "";
+const FARO_RELEASE = BUILD_IDENTITY.faro.release ?? "";
 const FARO_SOURCEMAP_ENABLED = process.env.FARO_SOURCEMAP_ENABLED === "true";
 const FARO_BUNDLE_ID = process.env.FARO_BUNDLE_ID ?? `${FARO_APP_NAME}-${COMMIT_SHA}`;
 const FARO_SOURCEMAP_ENDPOINT = process.env.FARO_SOURCEMAP_ENDPOINT ?? "";
@@ -24,7 +30,7 @@ const FARO_SOURCEMAP_APP_ID = process.env.FARO_SOURCEMAP_APP_ID ?? "";
 const FARO_SOURCEMAP_STACK_ID = process.env.FARO_SOURCEMAP_STACK_ID ?? "";
 const FARO_SOURCEMAP_API_KEY = process.env.FARO_SOURCEMAP_API_KEY ?? "";
 const FARO_SOURCEMAP_VERBOSE = process.env.FARO_SOURCEMAP_VERBOSE !== "false";
-const FARO_GIT_HASH = process.env.WADDLE_GIT_SHA ?? process.env.GITHUB_SHA ?? process.env.CF_PAGES_COMMIT_SHA;
+const FARO_GIT_HASH = COMMIT_SHA === "unknown" ? undefined : COMMIT_SHA;
 const CLIENT_OUTPUT_SUFFIX = "/dist/client";
 const FARO_CLIENT_SOURCE_MAP = /^_astro\/.*\.(?:js|mjs|cjs)\.map$/;
 const FARO_UPLOAD_FAILURES = [/failed with status/i, /no sourcemaps uploaded/i];
@@ -197,7 +203,12 @@ export default defineConfig({
       "import.meta.env.PUBLIC_FARO_URL": JSON.stringify(FARO_URL),
       "import.meta.env.PUBLIC_FARO_APP_NAME": JSON.stringify(FARO_APP_NAME),
       "import.meta.env.PUBLIC_FARO_APP_VERSION": JSON.stringify(FARO_APP_VERSION),
-      "import.meta.env.PUBLIC_FARO_ENVIRONMENT": JSON.stringify(FARO_ENVIRONMENT),
+      "import.meta.env.PUBLIC_FARO_DEPLOYMENT_ENVIRONMENT": JSON.stringify(FARO_ENVIRONMENT),
+      "import.meta.env.PUBLIC_FARO_CLUSTER": JSON.stringify(FARO_CLUSTER),
+      "import.meta.env.PUBLIC_FARO_NAMESPACE": JSON.stringify(FARO_NAMESPACE),
+      "import.meta.env.PUBLIC_FARO_SOURCE_ID": JSON.stringify(FARO_SOURCE_ID),
+      "import.meta.env.PUBLIC_FARO_RELEASE": JSON.stringify(FARO_RELEASE),
+      "import.meta.env.PUBLIC_BUILD_IDENTITY_MARKER": JSON.stringify(BUILD_IDENTITY.marker),
     },
     resolve: {
       alias: {

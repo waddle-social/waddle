@@ -61,6 +61,8 @@
               ./server/Cargo.toml
               ./server/Cargo.lock
               ./server/capabilities.toml
+              ./server/deployment.cue
+              ./server/disco-target-contract.json
               ./server/crates
               ./server/extensions
               ./server/wit
@@ -140,6 +142,17 @@
             // {
               inherit cargoArtifacts;
               doCheck = false;
+              # Compile the source revision into the shipped server binary.
+              # Runtime environment variables remain useful release metadata,
+              # but cannot impersonate the binary used for Gate evidence.
+              WADDLE_BUILD_GIT_SHA = self.rev or "unknown";
+              postInstall = ''
+                embedded_commit="$($out/bin/waddle-server --build-commit)"
+                if [ "$embedded_commit" != "$WADDLE_BUILD_GIT_SHA" ]; then
+                  echo "packaged waddle-server build identity mismatch: $embedded_commit" >&2
+                  exit 1
+                fi
+              '';
             }
           );
           image = pkgs.dockerTools.streamLayeredImage {
@@ -196,6 +209,8 @@
               ./server/Cargo.toml
               ./server/Cargo.lock
               ./server/capabilities.toml
+              ./server/deployment.cue
+              ./server/disco-target-contract.json
               ./server/crates
               ./server/extensions
               ./server/wit

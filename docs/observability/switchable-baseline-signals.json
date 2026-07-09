@@ -1,0 +1,331 @@
+{
+  "schemaVersion": 1,
+  "milestone": "switchable-alternative",
+  "minimumCollectionWindowMinutes": 60,
+  "deploymentScope": {
+    "identityMetric": "waddle_build_info",
+    "targetSignalId": "server-deployment-identity-targets",
+    "maximumRangeLookbackSeconds": 3600,
+    "requiredLabels": ["job", "deployment_environment", "cluster", "namespace"],
+    "queryPlaceholders": ["{{scope}}"]
+  },
+  "privacy": {
+    "forbiddenAttributeFragments": [
+      "account",
+      "body",
+      "channel",
+      "email",
+      "id",
+      "jid",
+      "message",
+      "peer",
+      "provider",
+      "room",
+      "session",
+      "stanza",
+      "token",
+      "url",
+      "user"
+    ],
+    "maximumValuesPerAttribute": 16,
+    "prohibitedPayloads": [
+      "message content",
+      "XMPP payload XML",
+      "JIDs",
+      "room names or identifiers",
+      "message, stanza, stream, session, or account identifiers",
+      "access tokens, authorization codes, redirect URIs, or query strings"
+    ]
+  },
+  "signals": [
+    {
+      "id": "server-deployment-identity-targets",
+      "owner": "operations",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "gauge",
+      "metricNames": ["waddle_build_info"],
+      "attributes": {
+        "commit": ["{{commit}}"],
+        "exported_cluster": ["{{cluster}}"],
+        "exported_deployment_environment": ["{{environment}}"]
+      },
+      "unit": "target",
+      "query": "count by (commit, exported_cluster, exported_deployment_environment) (count_over_time(waddle_build_info{{scope}}[60s]) > 0)",
+      "window": "point",
+      "collectionLookbackSeconds": 3600,
+      "interpretation": "Complete revision set and count of Waddle server targets that produced at least one build-info scrape in each preceding 60-second interval in the exact job, environment, cluster, and namespace scope; the only returned revision must be the evidence commit and every sample must equal the intended replica count.",
+      "limitations": "A matching build-info history proves scrape continuity and deployment identity at 60-second resolution, not readiness or journey correctness."
+    },
+    {
+      "id": "server-process-start-continuity",
+      "owner": "operations",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "gauge",
+      "metricNames": ["waddle_process_start_time_seconds"],
+      "attributes": {},
+      "unit": "unix second",
+      "query": "sum(waddle_process_start_time_seconds{{scope}})",
+      "window": "point",
+      "collectionLookbackSeconds": 3600,
+      "requiredStability": "constant",
+      "interpretation": "Aggregate process-generation start marker across the exact deployment scope; with the build-info target count held exact, the value must remain constant from the one-hour pre-window through the frozen end.",
+      "limitations": "This rejects observed process or container replacements that could erase process-local counters. It is an aggregate continuity check, not an instance inventory, and cannot detect a pathological replacement that reproduces the same floating-point aggregate."
+    },
+    {
+      "id": "connection-registry-entries",
+      "owner": "server-runtime",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "gauge",
+      "metricNames": ["waddle_connected_users"],
+      "attributes": {},
+      "unit": "registry entry",
+      "query": "sum(waddle_connected_users{{scope}})",
+      "window": "point",
+      "interpretation": "Current connection-registry entries across all replicas.",
+      "limitations": "A clustered resource can have both a physical-socket entry and a foreign-owner relay mirror, so this is not a connected-resource, unique-human, or active-member count."
+    },
+    {
+      "id": "room-registry-entries",
+      "owner": "server-runtime",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "gauge",
+      "metricNames": ["waddle_room_count"],
+      "attributes": {},
+      "unit": "registry entry",
+      "query": "sum(waddle_room_count{{scope}})",
+      "window": "point",
+      "interpretation": "Current production room-registry entries across all replicas, sampled every 15 seconds.",
+      "limitations": "Registry entries can briefly include sealed, dead, or otherwise stale actors until registry cleanup, and the gauge can lag by one sampling interval. This is operational inventory, not community engagement."
+    },
+    {
+      "id": "room-registry-sample-freshness",
+      "owner": "server-runtime",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "gauge",
+      "metricNames": ["waddle_room_registry_sample_last_success_unixtime_seconds"],
+      "attributes": {},
+      "unit": "second",
+      "query": "max(time() - waddle_room_registry_sample_last_success_unixtime_seconds{{scope}})",
+      "window": "point",
+      "minimumAllowedValue": 0,
+      "maximumAllowedValue": 60,
+      "interpretation": "Age in seconds of the oldest successful production room-registry sample across the requested deployment scope; every sample must remain between zero and 60 seconds.",
+      "limitations": "This proves the gauge sampler is fresh, not that every registry entry represents a live room actor."
+    },
+    {
+      "id": "xmpp-sasl1-terminal-attempts",
+      "owner": "identity",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "counter",
+      "metricNames": ["waddle_auth_terminal_attempts_total"],
+      "attributes": {
+        "mechanism": ["oauthbearer", "scram_sha_256"],
+        "outcome": ["success", "invalid_credentials", "malformed", "internal_error", "cancelled"]
+      },
+      "unit": "attempt",
+      "query": "sum by (mechanism, outcome) (increase(waddle_auth_terminal_attempts_total{{scope}}[1h]))",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": { "mechanism": "oauthbearer", "outcome": "success" }, "minimumValue": 1 },
+        { "attributes": { "mechanism": "scram_sha_256", "outcome": "success" }, "minimumValue": 1 }
+      ],
+      "interpretation": "Completed SASL1 OAUTHBEARER and SCRAM-SHA-256 exchanges, separated into bounded terminal outcomes. An explicit SASL abort or an unfinished exchange superseded by a new RFC 6120 auth request records the old exchange as cancelled; the replacement records its own terminal outcome, so one replacement flow intentionally contributes two exchange outcomes.",
+      "limitations": "SASL clients that disconnect before a terminal response, RFC 7628 OAUTHBEARER challenge exchanges that do not reach a terminal handler outcome, malformed XML rejected before the SASL1 handler, and invalid-phase re-authentication rejected at the frame boundary are not authentication exchanges. XEP-0388 SASL2 PLAIN used by XEP-0397 instant resumption and browser OAuth callback success are excluded, so this is not the full authentication denominator."
+    },
+    {
+      "id": "message-archive-attempts",
+      "owner": "messaging",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "counter",
+      "metricNames": ["waddle_message_archive_attempts_total"],
+      "attributes": {
+        "kind": ["dm", "room"],
+        "outcome": ["committed", "storage_error", "ownership_lost", "chain_invalid"]
+      },
+      "unit": "attempt",
+      "query": "sum by (kind, outcome) (increase(waddle_message_archive_attempts_total{{scope}}[1h]))",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": { "kind": "dm", "outcome": "committed" }, "minimumValue": 1 },
+        { "attributes": { "kind": "room", "outcome": "committed" }, "minimumValue": 1 }
+      ],
+      "interpretation": "One typed sender-pass DM archive attempt or one room archive storage attempt by terminal outcome; chain_invalid is a permanent room archive-chain invariant failure.",
+      "limitations": "Room attempts include server-authored room system messages and are not exclusively sender-side. Direct chain_invalid remains zero because the guarded invariants are room-specific. Committed includes idempotent retries that found an existing archive row. It proves durable presence, not recipient visibility or the full accepted-message denominator."
+    },
+    {
+      "id": "live-delivery-channel-outcomes",
+      "owner": "messaging",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "counter",
+      "metricNames": [
+        "waddle_broadcast_delivered_total",
+        "waddle_broadcast_dropped_full_total",
+        "waddle_broadcast_dropped_closed_total"
+      ],
+      "attributes": {
+        "outcome": ["delivered", "dropped_closed", "dropped_full"]
+      },
+      "unit": "delivery attempt",
+      "query": "sum by (outcome) (label_replace(increase(waddle_broadcast_delivered_total{{scope}}[1h]), \"outcome\", \"delivered\", \"\", \"\") or label_replace(increase(waddle_broadcast_dropped_closed_total{{scope}}[1h]), \"outcome\", \"dropped_closed\", \"\", \"\") or label_replace(increase(waddle_broadcast_dropped_full_total{{scope}}[1h]), \"outcome\", \"dropped_full\", \"\", \"\"))",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": { "outcome": "delivered" }, "minimumValue": 1 }
+      ],
+      "interpretation": "Successful and failed connection-registry outbound-channel enqueue operations; both drop outcomes must remain zero.",
+      "limitations": "Delivered means one registry hop accepted an outbound item, not that a client handled or displayed it. A clustered delivery can increment once for a relay-forwarder hop and again for the physical WebSocket hop, so this is neither a resource-delivery nor logical-message denominator."
+    },
+    {
+      "id": "loss-corruption-safety",
+      "owner": "messaging",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "counter",
+      "metricNames": [
+        "waddle_delivery_terminal_error_drop_total",
+        "waddle_message_archive_chain_invalid_total",
+        "waddle_pending_delivery_aged_out_total",
+        "waddle_pending_delivery_unresolved_poison_pill_total",
+        "waddle_sm_detached_unacked_evicted_total",
+        "waddle_sm_promotion_dead_lettered_total",
+        "waddle_sm_unacked_evicted_total"
+      ],
+      "attributes": {
+        "surface": ["archive_chain_invalid", "detached_unacked_evicted", "pending_aged_out", "pending_poison_pill", "promotion_dead_lettered", "terminal_error_drop", "unacked_evicted"]
+      },
+      "unit": "failure",
+      "query": "sum by (surface) (label_replace(increase(waddle_delivery_terminal_error_drop_total{{scope}}[1h]), \"surface\", \"terminal_error_drop\", \"\", \"\") or label_replace(increase(waddle_message_archive_chain_invalid_total{{scope}}[1h]), \"surface\", \"archive_chain_invalid\", \"\", \"\") or label_replace(increase(waddle_pending_delivery_aged_out_total{{scope}}[1h]), \"surface\", \"pending_aged_out\", \"\", \"\") or label_replace(increase(waddle_pending_delivery_unresolved_poison_pill_total{{scope}}[1h]), \"surface\", \"pending_poison_pill\", \"\", \"\") or label_replace(increase(waddle_sm_detached_unacked_evicted_total{{scope}}[1h]), \"surface\", \"detached_unacked_evicted\", \"\", \"\") or label_replace(increase(waddle_sm_promotion_dead_lettered_total{{scope}}[1h]), \"surface\", \"promotion_dead_lettered\", \"\", \"\") or label_replace(increase(waddle_sm_unacked_evicted_total{{scope}}[1h]), \"surface\", \"unacked_evicted\", \"\", \"\"))",
+      "window": "1h",
+      "interpretation": "Known permanent-loss, archive-chain invariant, replay-gap, ambiguous-drop, and corruption outcomes; objective is zero.",
+      "limitations": "Zero does not prove every accepted message was delivered; it only covers the named failure surfaces."
+    },
+    {
+      "id": "push-pipeline-outcomes",
+      "owner": "notifications",
+      "source": "prometheus",
+      "collection": "automated",
+      "kind": "counter",
+      "metricNames": [
+        "waddle_push_candidate_created_total",
+        "waddle_push_outbox_dead_lettered_total",
+        "waddle_push_outbox_published_total",
+        "waddle_push_outbox_retry_scheduled_total"
+      ],
+      "attributes": {
+        "outcome": ["candidate_created", "dead_lettered", "published", "retry_scheduled"]
+      },
+      "unit": "notification job",
+      "query": "sum by (outcome) (label_replace(increase(waddle_push_candidate_created_total{{scope}}[1h]), \"outcome\", \"candidate_created\", \"\", \"\") or label_replace(increase(waddle_push_outbox_dead_lettered_total{{scope}}[1h]), \"outcome\", \"dead_lettered\", \"\", \"\") or label_replace(increase(waddle_push_outbox_published_total{{scope}}[1h]), \"outcome\", \"published\", \"\", \"\") or label_replace(increase(waddle_push_outbox_retry_scheduled_total{{scope}}[1h]), \"outcome\", \"retry_scheduled\", \"\", \"\"))",
+      "window": "1h",
+      "interpretation": "XMPP push candidates and publication jobs through the server-side XEP-0357 boundary.",
+      "limitations": "Publication does not prove provider acceptance, device receipt, display, or click."
+    },
+    {
+      "id": "browser-auth-bootstrap",
+      "owner": "web-client",
+      "source": "faro",
+      "collection": "manual-export",
+      "kind": "event-and-measurement",
+      "metricNames": ["chat.journey.auth", "chat.journey.auth.duration_ms"],
+      "attributes": {
+        "outcome": ["ready", "signed_out", "expired", "failed"]
+      },
+      "unit": "event and millisecond",
+      "query": "Faro event chat.journey.auth and measurement chat.journey.auth.duration_ms grouped only by outcome",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": { "outcome": "ready" }, "minimumValue": 1 }
+      ],
+      "faroQuery": {
+        "sourceId": "waddle-chat",
+        "signalNames": ["chat.journey.auth", "chat.journey.auth.duration_ms"],
+        "groupBy": ["outcome"],
+        "aggregates": ["duration_ms_count", "duration_ms_p50", "duration_ms_p95", "event_count"]
+      },
+      "interpretation": "Browser session bootstrap terminal outcome and duration.",
+      "limitations": "No provider, account, transport, redirect, or identity dimension is collected. It is a page/session measure, not unique users."
+    },
+    {
+      "id": "browser-message-ack-latency",
+      "owner": "web-client",
+      "source": "faro",
+      "collection": "manual-export",
+      "kind": "measurement",
+      "metricNames": ["chat.xmpp.message.acked.latency_ms"],
+      "attributes": {
+        "kind": ["room", "dm"]
+      },
+      "unit": "millisecond",
+      "query": "Faro measurement chat.xmpp.message.acked.latency_ms percentile grouped only by kind",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": { "kind": "dm" }, "minimumValue": 1 },
+        { "attributes": { "kind": "room" }, "minimumValue": 1 }
+      ],
+      "faroQuery": {
+        "sourceId": "waddle-chat",
+        "signalNames": ["chat.xmpp.message.acked.latency_ms"],
+        "groupBy": ["kind"],
+        "aggregates": ["count", "latency_ms_p50", "latency_ms_p95"]
+      },
+      "interpretation": "Client send bookkeeping to XMPP acknowledgement latency.",
+      "limitations": "This is not send-to-visible latency; the timer begins after the WASM send returns."
+    },
+    {
+      "id": "browser-session-lifecycle",
+      "owner": "web-client",
+      "source": "faro",
+      "collection": "manual-export",
+      "kind": "event",
+      "metricNames": ["chat.xmpp.session.lifecycle"],
+      "attributes": {
+        "type": ["fresh", "resumed"]
+      },
+      "unit": "session",
+      "query": "Faro event chat.xmpp.session.lifecycle grouped only by type",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": { "type": "fresh" }, "minimumValue": 1 },
+        { "attributes": { "type": "resumed" }, "minimumValue": 1 }
+      ],
+      "faroQuery": {
+        "sourceId": "waddle-chat",
+        "signalNames": ["chat.xmpp.session.lifecycle"],
+        "groupBy": ["type"],
+        "aggregates": ["count"]
+      },
+      "interpretation": "Successful session-ready outcomes split between fresh bind and XEP-0198 resume.",
+      "limitations": "A fresh bind can be either an initial connection or a resume fallback; a separate reconnect denominator is still required for the Gate 1 resume SLO."
+    },
+    {
+      "id": "browser-reconnect-duration",
+      "owner": "web-client",
+      "source": "faro",
+      "collection": "manual-export",
+      "kind": "measurement",
+      "metricNames": ["chat.xmpp.reconnect.duration_ms"],
+      "attributes": {},
+      "unit": "millisecond",
+      "query": "Faro measurement chat.xmpp.reconnect.duration_ms percentile",
+      "window": "1h",
+      "requiredActivity": [
+        { "attributes": {}, "minimumValue": 1 }
+      ],
+      "faroQuery": {
+        "sourceId": "waddle-chat",
+        "signalNames": ["chat.xmpp.reconnect.duration_ms"],
+        "groupBy": [],
+        "aggregates": ["count", "duration_ms_p50", "duration_ms_p95"]
+      },
+      "interpretation": "Elapsed time from reconnecting status to the next online status.",
+      "limitations": "Terminal reconnect failures have no duration sample and require the status/error events for a denominator."
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::disco_targets::{target_identities, DiscoTarget};
 
 pub(super) async fn handle_spaces_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -34,8 +35,11 @@ pub(super) async fn handle_spaces_disco_info<'a>(
                     item_not_found_iq_error("Requested item not found."),
                 ));
             }
-            Err(error) => {
-                warn!(node, error = %error, "Failed to resolve Spaces node info");
+            Err(_) => {
+                warn!(
+                    operation = "space_node_lookup",
+                    "Failed to resolve Spaces node info"
+                );
                 return Some(DiscoInfoResponse::error(
                     req.id,
                     None,
@@ -47,7 +51,7 @@ pub(super) async fn handle_spaces_disco_info<'a>(
 
         let Some(mut space) = space_details_from_node(&space_node) else {
             warn!(
-                node,
+                operation = "space_access_model",
                 access_model = %space_node.config.access_model,
                 "Spaces node has unsupported access model"
             );
@@ -113,7 +117,7 @@ pub(super) async fn handle_spaces_disco_info<'a>(
         return Some(DiscoInfoResponse::iq(response));
     }
 
-    let identities = vec![Identity::spaces_service(Some("Spaces"))];
+    let identities = target_identities(DiscoTarget::SpacesService);
     let features = spaces_service_features();
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))
