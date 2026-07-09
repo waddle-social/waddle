@@ -254,7 +254,8 @@ impl NotificationOutboxStore {
                        noping,
                        no_store,
                        no_permanent_store,
-                       last_message_body
+                       last_message_body,
+                       reaction
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)

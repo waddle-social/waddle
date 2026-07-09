@@ -367,6 +367,73 @@ async fn t1_noping_records_typed_suppressed_reason() {
     assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_noping\"} 1"),);
 }
 
+// #780: a reaction-only message's candidate persists at T0 and is
+// suppressed at T1 with the typed `xep0444_reaction` reason + labeled
+// metric — no outbox job is created.
+#[tokio::test]
+async fn t1_xep0444_reaction_records_typed_suppressed_reason() {
+    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let store = store().await;
+    let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let projection = settings_projection().await;
+    let room_policy = StubRoomPolicy::new();
+    let dnd_reader = NoopDndReader;
+    let recipient = bare("alice@example.com");
+    let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+    let candidate = NotificationCandidate::direct_message_with_hints(
+        recipient.clone(),
+        sender_jid,
+        StanzaId::new("t1-reaction", Jid::from(recipient.clone())),
+        false,
+        NotificationMessageHints::none().with_reaction(true),
+    )
+    .expect("candidate");
+    assert!(candidate.reaction());
+    store
+        .insert_candidate(&candidate)
+        .await
+        .expect("insert candidate");
+
+    let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
+    store
+        .drain_pending_candidates_into_outbox(
+            &push_store,
+            &blocking,
+            &projection,
+            deps,
+            &bare("push.example.com"),
+            16,
+        )
+        .await
+        .expect("drain candidates");
+
+    let mut rows = store
+        .query(
+            "SELECT suppressed_reason, reaction FROM notification_candidates WHERE stanza_id = ?",
+            waddle_server::db_params!["t1-reaction"],
+        )
+        .await
+        .expect("query");
+    let row = rows.next().await.expect("row").expect("row exists");
+    assert_eq!(
+        row.get::<Option<String>>(0).expect("reason").as_deref(),
+        Some("xep0444_reaction")
+    );
+    assert_eq!(row.get::<i64>(1).expect("reaction"), 1);
+    assert!(
+        store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty(),
+        "a reaction-only candidate must not produce an outbox job"
+    );
+    let rendered = waddle_xmpp::prometheus::render_metrics();
+    assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0444_reaction\"} 1"),);
+}
+
 /// #719: with the rich-payload opt-in set and no XEP-0334 storage
 /// hint, the drained push carries the full XEP-0357 §5.4 summary —
 /// both `last-message-sender` and `last-message-body`.

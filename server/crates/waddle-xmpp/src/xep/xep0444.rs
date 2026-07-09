@@ -109,6 +109,16 @@ pub fn is_reaction_message(msg: &Message) -> bool {
     msg.payloads.iter().any(is_reactions_element)
 }
 
+/// A reaction-ONLY message: carries `<reactions/>` and no substantive
+/// body (#780). This is the push-suppression predicate — "Alice
+/// reacted 👍" should not fire an OS push, but a message that adjusts
+/// reactions AND carries a real body still notifies. Whitespace-only
+/// bodies do not count as substantive, matching the archive layer's
+/// body test.
+pub fn is_reaction_only_message(msg: &Message) -> bool {
+    is_reaction_message(msg) && !msg.bodies.values().any(|text| !text.trim().is_empty())
+}
+
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Extract the reaction set from a message.
@@ -236,6 +246,39 @@ mod tests {
 
         let wrong_name = Element::builder("reaction", NS_REACTIONS).build();
         assert!(!is_reactions_element(&wrong_name));
+    }
+
+    #[test]
+    fn reaction_only_requires_reactions_and_no_substantive_body() {
+        // Reaction with no body → reaction-only (#780 push suppression).
+        let mut reaction_only = Message::new(None::<jid::Jid>);
+        reaction_only
+            .payloads
+            .push(build_reactions_element("msg-1", &["👍"]));
+        assert!(is_reaction_only_message(&reaction_only));
+
+        // Whitespace-only body still counts as reaction-only.
+        let mut whitespace_body = reaction_only.clone();
+        whitespace_body
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "  ".to_string());
+        assert!(is_reaction_only_message(&whitespace_body));
+
+        // Reaction + substantive body → NOT reaction-only (an edit
+        // that also adjusts reactions must still notify).
+        let mut with_body = reaction_only.clone();
+        with_body.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "also saying something".to_string(),
+        );
+        assert!(!is_reaction_only_message(&with_body));
+
+        // Plain body message → not reaction-only.
+        let mut plain = Message::new(None::<jid::Jid>);
+        plain
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
+        assert!(!is_reaction_only_message(&plain));
     }
 
     #[test]

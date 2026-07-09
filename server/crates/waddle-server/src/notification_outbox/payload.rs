@@ -19,6 +19,20 @@ pub(super) fn build_waddle_context(candidate: &NotificationCandidate) -> Element
             minidom::rxml::xml_ncname!("class").to_owned(),
             candidate.class.as_db_value(),
         )
+        // #779: the originating message's XEP-0359 stanza-id, typed
+        // onto the context so the push service can source
+        // `PushEnvelope.item` from it — the SW's in-band-vs-Web-Push
+        // dedupe compares against the stanza-id the foreground tab
+        // posts, never the pubsub item id (which stays the job id for
+        // coalesce/idempotency stability). Coalescing keeps this
+        // fresh: `merge_outbox_job_tx` overwrites `context_xml` with
+        // the latest candidate's context, so a coalesced job names
+        // the newest message — the one the foreground most recently
+        // rendered.
+        .attr(
+            minidom::rxml::xml_ncname!("stanza-id").to_owned(),
+            candidate.archive_stanza_id.id.as_str(),
+        )
         .build()
 }
 

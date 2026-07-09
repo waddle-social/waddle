@@ -327,7 +327,10 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 original_message,
                 waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
             ),
-        );
+        )
+        .with_reaction(waddle_xmpp::xep::xep0444::is_reaction_only_message(
+            original_message,
+        ));
     let candidate = match crate::notification_outbox::NotificationCandidate::direct_message_with_hints(
         recipient.clone(),
         sender_jid.clone(),

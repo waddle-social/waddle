@@ -199,6 +199,11 @@ pub(crate) enum SuppressedReason {
     /// push would be spurious (#1126). Emitted at publish time;
     /// the job is dropped terminally instead of published.
     UnreadZeroAtPublish,
+    /// The originating message was XEP-0444 reaction-only (reactions
+    /// payload, no substantive body) — "Alice reacted 👍" is archived
+    /// but never fires an OS push (#780). Message-frozen at T0,
+    /// suppressed by the T1 evaluator like `<noping/>`.
+    Xep0444Reaction,
 }
 
 impl SuppressedReason {
@@ -224,6 +229,7 @@ impl SuppressedReason {
         Self::ProviderTokenExpired,
         Self::Xep0357PushServiceDegraded,
         Self::UnreadZeroAtPublish,
+        Self::Xep0444Reaction,
     ];
 
     pub(crate) fn as_db_value(self) -> &'static str {
@@ -241,6 +247,7 @@ impl SuppressedReason {
             Self::ProviderTokenExpired => "provider_token_expired",
             Self::Xep0357PushServiceDegraded => "xep0357_push_service_degraded",
             Self::UnreadZeroAtPublish => "unread_zero_at_publish",
+            Self::Xep0444Reaction => "xep0444_reaction",
         }
     }
 

@@ -60,6 +60,21 @@ pub(crate) struct ParsedPushPayload {
     /// values are rejected at this boundary, not silently folded to
     /// `Mention`.
     pub class: NotificationClass,
+    /// `<context stanza-id='...'/>` — the originating message's
+    /// XEP-0359 stanza-id (#779). Sourced into `PushEnvelope.item`
+    /// so the service worker's in-band-vs-Web-Push dedupe key matches
+    /// what the foreground tab posts. `None` when the publisher
+    /// omitted it (the envelope falls back to the pubsub item id).
+    pub stanza_id: Option<String>,
+}
+
+/// The dedup key shipped as `PushEnvelope.item` (#779): the
+/// originating message's XEP-0359 stanza-id when the context carries
+/// it, else the pubsub item id (the outbox job id) — the pre-#779
+/// behavior, kept as the fallback so a payload without the typed
+/// attribute still produces a usable (if non-matching) key.
+pub(crate) fn envelope_item<'a>(parsed: &'a ParsedPushPayload, pubsub_item_id: &'a str) -> &'a str {
+    parsed.stanza_id.as_deref().unwrap_or(pubsub_item_id)
 }
 
 /// Parse the serialized `<notification>` element. Strictly validates
@@ -105,12 +120,17 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
         .attr("thread")
         .filter(|t| !t.is_empty())
         .map(str::to_owned);
+    let stanza_id = context
+        .attr("stanza-id")
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let message_count = parse_summary_message_count(&payload);
     Ok(ParsedPushPayload {
         message_count,
         conversation,
         thread,
         class,
+        stanza_id,
     })
 }
 
@@ -238,7 +258,7 @@ pub(crate) async fn dispatch_one_web_push(
         parsed.class.as_db_value(),
         &conversation_str,
         parsed.thread.as_deref(),
-        item_id,
+        envelope_item(parsed, item_id),
         parsed.message_count,
     );
     let plaintext = envelope.to_plaintext();
@@ -381,6 +401,46 @@ mod tests {
             ctx = ctx.attr(minidom::rxml::xml_ncname!("thread").to_owned(), t);
         }
         ctx.build()
+    }
+
+    /// Fixture with the #779 typed `stanza-id` context attribute.
+    fn build_notification_xml_with_stanza_id(stanza_id: &str) -> String {
+        let summary = build_summary_form(Some(1));
+        let context = Element::builder("context", NS_WADDLE_PUSH_CONTEXT)
+            .attr(
+                minidom::rxml::xml_ncname!("conversation").to_owned(),
+                "alice@example.com",
+            )
+            .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
+            .attr(
+                minidom::rxml::xml_ncname!("stanza-id").to_owned(),
+                stanza_id,
+            )
+            .build();
+        let notification = Element::builder("notification", NS_PUSH)
+            .append(summary)
+            .append(context)
+            .build();
+        String::from(&notification)
+    }
+
+    // #779: the XEP-0359 stanza-id rides the typed context attribute
+    // and becomes the SW dedup key; the pubsub item id (job id) stays
+    // the fallback when absent.
+    #[test]
+    fn parse_publish_payload_extracts_stanza_id() {
+        let xml = build_notification_xml_with_stanza_id("stanza-abc-123");
+        let parsed = parse_publish_payload(&xml).expect("valid payload");
+        assert_eq!(parsed.stanza_id.as_deref(), Some("stanza-abc-123"));
+        assert_eq!(envelope_item(&parsed, "job-uuid"), "stanza-abc-123");
+    }
+
+    #[test]
+    fn parse_publish_payload_missing_stanza_id_falls_back_to_item_id() {
+        let xml = build_notification_xml("dm", "alice@example.com", None, Some(1));
+        let parsed = parse_publish_payload(&xml).expect("valid payload");
+        assert!(parsed.stanza_id.is_none());
+        assert_eq!(envelope_item(&parsed, "job-uuid"), "job-uuid");
     }
 
     #[test]

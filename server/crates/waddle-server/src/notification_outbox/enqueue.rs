@@ -28,8 +28,9 @@ impl NotificationOutboxStore {
                     noping,
                     no_store,
                     no_permanent_store,
-                    last_message_body
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
+                    last_message_body,
+                    reaction
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
@@ -47,6 +48,7 @@ impl NotificationOutboxStore {
                     i64::from(candidate.no_store),
                     i64::from(candidate.no_permanent_store),
                     candidate.last_message_body.clone(),
+                    i64::from(candidate.reaction),
                 ],
             )
             .await?;

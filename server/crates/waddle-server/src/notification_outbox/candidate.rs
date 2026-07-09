@@ -32,6 +32,12 @@ pub struct NotificationCandidate {
     /// hint applies — an off-the-record body is never persisted onto the
     /// candidate row, even temporarily (XEP-0334 §3 storage conformance).
     pub(super) last_message_body: Option<String>,
+    /// XEP-0444 reaction-only hint, message-frozen at T0 (#780).
+    /// `true` when the originating message carried `<reactions/>` and
+    /// no substantive body — the T1 evaluator suppresses with
+    /// [`SuppressedReason::Xep0444Reaction`]; "Alice reacted 👍" is
+    /// archived (MAM is untouched) but never fires an OS push.
+    pub(super) reaction: bool,
 }
 
 /// Message-frozen suppression hints carried on a
@@ -48,6 +54,9 @@ pub struct NotificationMessageHints {
     pub noping: bool,
     pub no_store: bool,
     pub no_permanent_store: bool,
+    /// XEP-0444 reaction-only message (#780) — reactions payload with
+    /// no substantive body.
+    pub reaction: bool,
 }
 
 impl NotificationMessageHints {
@@ -63,6 +72,11 @@ impl NotificationMessageHints {
     pub fn with_xep0334(mut self, no_store: bool, no_permanent_store: bool) -> Self {
         self.no_store = no_store;
         self.no_permanent_store = no_permanent_store;
+        self
+    }
+
+    pub fn with_reaction(mut self, reaction: bool) -> Self {
+        self.reaction = reaction;
         self
     }
 }
@@ -138,6 +152,7 @@ impl NotificationCandidate {
             no_store: hints.no_store,
             no_permanent_store: hints.no_permanent_store,
             last_message_body: None,
+            reaction: hints.reaction,
         })
     }
 
@@ -204,6 +219,7 @@ impl NotificationCandidate {
             no_store: hints.no_store,
             no_permanent_store: hints.no_permanent_store,
             last_message_body: None,
+            reaction: hints.reaction,
         })
     }
 
@@ -267,6 +283,10 @@ impl NotificationCandidate {
 
     pub fn no_permanent_store(&self) -> bool {
         self.no_permanent_store
+    }
+
+    pub fn reaction(&self) -> bool {
+        self.reaction
     }
 }
 

@@ -35,7 +35,7 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
-pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 13] = [
+pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 14] = [
     "xep0357_self",
     "xep0357_no_registration",
     "xep0357_registration_disabled",
@@ -49,8 +49,9 @@ pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 13] = 
     "provider_token_expired",
     "xep0357_push_service_degraded",
     "unread_zero_at_publish",
+    "xep0444_reaction",
 ];
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish')";
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish', 'xep0444_reaction')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
@@ -86,6 +87,7 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             no_store INTEGER NOT NULL DEFAULT 0,
             no_permanent_store INTEGER NOT NULL DEFAULT 0,
             last_message_body TEXT,
+            reaction INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -259,6 +261,13 @@ impl NotificationOutboxStore {
         // storage hint applies.
         self.add_column_if_missing("notification_candidates", "last_message_body TEXT")
             .await?;
+        // #780: XEP-0444 reaction-only hint, message-frozen at T0 like
+        // `noping`; T1 suppresses with `xep0444_reaction`.
+        self.add_column_if_missing(
+            "notification_candidates",
+            "reaction INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
         self.execute(
@@ -1280,7 +1289,7 @@ mod tests {
 
     #[test]
     fn postgres_suppressed_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying, 'unread_zero_at_publish'::character varying])::text[]))))";
+        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying, 'unread_zero_at_publish'::character varying, 'xep0444_reaction'::character varying])::text[]))))";
         assert!(
             notification_candidates_suppressed_reason_constraint_matches_expected(
                 postgres_definition
