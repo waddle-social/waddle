@@ -796,6 +796,12 @@ async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_waterm
 /// for the rest of the batch (this stream only) rather than wedging.
 #[tokio::test]
 async fn send_window_deferred_cap_degrades_to_eviction() {
+    // This test intentionally evicts, bumping the process-global
+    // `waddle_sm_unacked_evicted_total`. Hold the shared metrics lock so it
+    // serializes against `write_response_batch_drains_acks_between_chunks_so_nothing_evicts`,
+    // which asserts that counter's delta is zero under the same lock —
+    // otherwise these two contend under parallel test execution.
+    let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     conn.sm_state = StreamManagementState::with_config(10, 100);
