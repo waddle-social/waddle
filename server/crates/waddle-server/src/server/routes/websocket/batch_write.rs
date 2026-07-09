@@ -252,7 +252,10 @@ where
             Err(_) => {
                 waddle_xmpp::prometheus::increment_sm_send_window_pause_timeout();
                 warn!(
+                    stream_id = conn.sm_state.stream_id.as_deref().unwrap_or("<unset>"),
                     deadline_secs = SEND_WINDOW_PAUSE_DEADLINE.as_secs(),
+                    unacked = conn.sm_state.unacked_count(),
+                    queue_len = conn.sm_state.queue_len(),
                     "SM send-window pause timed out with no recovering ack; \
                      closing into detach-for-resume"
                 );
@@ -362,7 +365,9 @@ pub(super) fn record_remaining_for_replay(
     }
     if dropped > 0 {
         warn!(
+            stream_id = conn.sm_state.stream_id.as_deref().unwrap_or("<unset>"),
             dropped,
+            queue_len = conn.sm_state.queue_len(),
             "dropped untransmitted frames beyond SM unacked-queue capacity to keep resume clean"
         );
         waddle_xmpp::prometheus::add_sm_send_window_frames_dropped(dropped);

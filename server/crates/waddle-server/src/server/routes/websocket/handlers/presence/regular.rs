@@ -4,6 +4,7 @@ use super::subscription::{
 };
 use super::*;
 use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
+use tracing::Instrument as _;
 use waddle_xmpp::Stanza;
 
 /// Handle a broadcast (undirected) presence update from a live connection.
@@ -312,75 +313,87 @@ fn spawn_session_recovery_delivery(
     let recipient = resource.to_bare();
     let resource = resource.clone();
     let owner = std::sync::Arc::clone(owner);
-    tokio::spawn(async move {
-        // If this session was superseded (same full JID re-registered) before
-        // the task ran, skip the flush: the replacement runs its OWN flush via
-        // its own once-per-session CAS, and pushing SM-claimed rows to a
-        // replacement whose stream id differs would leave them claimed by the
-        // now-dead session (self-healed later by the claim-expiry janitor, but
-        // redundant and a duplicate-delivery risk). The rows stay unclaimed
-        // for the replacement. This narrows the window the off-task spawn
-        // opened; a replacement racing in mid-flush is still janitor-healed.
-        let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
-        if let Some(plan) = flush_plan.filter(|_| still_owner) {
-            let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
-            let outcome = crate::pending_delivery::flush_for_resource(
-                &storage,
-                &registry,
-                &recipient,
-                &resource,
-                crate::pending_delivery::FlushContext {
-                    server_domain: &server_domain,
-                    sm_session: plan.sm_session.as_ref(),
-                    // XEP-0191 §2 step 4 flush-time block re-evaluation
-                    // (PR #360): pass live blocking storage so a recipient who
-                    // blocked a sender AFTER intake doesn't see queued
-                    // messages from that sender on reconnect.
-                    blocking_storage: Some(&blocking_storage),
-                    // Owner-gate SM pushes so a same-full-JID replacement
-                    // racing in mid-flush can't receive this session's
-                    // SM-claimed rows (issue #1220 review).
-                    owner: Some(&owner),
-                    archive_resolver: &resolver,
-                },
-            )
-            .await;
-            if outcome.batches > 0 {
-                waddle_xmpp::prometheus::add_pending_flush_batches(u64::from(outcome.batches));
-            }
-            if outcome.pushed > 0 {
-                waddle_xmpp::prometheus::add_pending_flush_rows_pushed(u64::from(outcome.pushed));
-            }
-            if outcome.deferred_transient > 0 {
-                // Issue #1122 follow-up (R2): the flush hit a transient MAM
-                // failure and released the failing row plus the rest of the
-                // batch. `claim_offline_flush` is a once-per-connection CAS,
-                // so without a reset those rows would wait for a full
-                // reconnect. Re-open the CAS (re-acquiring the entry, which
-                // may be gone if the session was superseded) so the client's
-                // next presence update re-attempts the flush.
-                if let Some(entry) = registry.entry_if_owner(&resource, &owner) {
-                    entry.reset_offline_flush();
+    // Carry the current tracing span into the spawned task (issue #1220): the
+    // flush is logically part of this presence-handling flow, but `tokio::spawn`
+    // resets the task-local span context, which would orphan the flush's own
+    // `#[instrument]` span (and its OTLP logs/trace) from the connection's
+    // trace. Instrumenting the spawned future with `Span::current()` re-parents
+    // it — the same idiom `server::http` uses for off-task request work.
+    let flush_span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            // If this session was superseded (same full JID re-registered) before
+            // the task ran, skip the flush: the replacement runs its OWN flush via
+            // its own once-per-session CAS, and pushing SM-claimed rows to a
+            // replacement whose stream id differs would leave them claimed by the
+            // now-dead session (self-healed later by the claim-expiry janitor, but
+            // redundant and a duplicate-delivery risk). The rows stay unclaimed
+            // for the replacement. This narrows the window the off-task spawn
+            // opened; a replacement racing in mid-flush is still janitor-healed.
+            let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
+            if let Some(plan) = flush_plan.filter(|_| still_owner) {
+                let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
+                let outcome = crate::pending_delivery::flush_for_resource(
+                    &storage,
+                    &registry,
+                    &recipient,
+                    &resource,
+                    crate::pending_delivery::FlushContext {
+                        server_domain: &server_domain,
+                        sm_session: plan.sm_session.as_ref(),
+                        // XEP-0191 §2 step 4 flush-time block re-evaluation
+                        // (PR #360): pass live blocking storage so a recipient who
+                        // blocked a sender AFTER intake doesn't see queued
+                        // messages from that sender on reconnect.
+                        blocking_storage: Some(&blocking_storage),
+                        // Owner-gate SM pushes so a same-full-JID replacement
+                        // racing in mid-flush can't receive this session's
+                        // SM-claimed rows (issue #1220 review).
+                        owner: Some(&owner),
+                        archive_resolver: &resolver,
+                    },
+                )
+                .await;
+                if outcome.batches > 0 {
+                    waddle_xmpp::prometheus::add_pending_flush_batches(u64::from(outcome.batches));
+                }
+                if outcome.pushed > 0 {
+                    waddle_xmpp::prometheus::add_pending_flush_rows_pushed(u64::from(
+                        outcome.pushed,
+                    ));
+                }
+                if outcome.deferred_transient > 0 {
+                    // Issue #1122 follow-up (R2): the flush hit a transient MAM
+                    // failure and released the failing row plus the rest of the
+                    // batch. `claim_offline_flush` is a once-per-connection CAS,
+                    // so without a reset those rows would wait for a full
+                    // reconnect. Re-open the CAS (re-acquiring the entry, which
+                    // may be gone if the session was superseded) so the client's
+                    // next presence update re-attempts the flush.
+                    if let Some(entry) = registry.entry_if_owner(&resource, &owner) {
+                        entry.reset_offline_flush();
+                    }
+                }
+                if outcome.claimed > 0 {
+                    info!(
+                        jid = %resource,
+                        claimed = outcome.claimed,
+                        batches = outcome.batches,
+                        pushed = outcome.pushed,
+                        unresolved = outcome.unresolved,
+                        deferred_transient = outcome.deferred_transient,
+                        "XEP-0160 pending_delivery flush completed"
+                    );
                 }
             }
-            if outcome.claimed > 0 {
-                info!(
-                    jid = %resource,
-                    claimed = outcome.claimed,
-                    batches = outcome.batches,
-                    pushed = outcome.pushed,
-                    unresolved = outcome.unresolved,
-                    deferred_transient = outcome.deferred_transient,
-                    "XEP-0160 pending_delivery flush completed"
-                );
+            // RFC 6121 §3.1.3 queued inbound subscription requests, delivered on
+            // this resource's initial available presence.
+            for stanza in subscribe_stanzas {
+                let _ = registry.send_to(&resource, stanza).await;
             }
         }
-        // RFC 6121 §3.1.3 queued inbound subscription requests, delivered on
-        // this resource's initial available presence.
-        for stanza in subscribe_stanzas {
-            let _ = registry.send_to(&resource, stanza).await;
-        }
-    });
+        .instrument(flush_span),
+    );
 }
 
 async fn broadcast_presence_to_subscribers(
