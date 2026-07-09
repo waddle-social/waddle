@@ -45,42 +45,246 @@ pub struct PendingDmCallOffer {
 
 #[derive(Debug, Default)]
 pub struct RemoteMucMemberships {
-    entries: dashmap::DashMap<(FullJid, BareJid), String>,
+    entries: dashmap::DashMap<(FullJid, BareJid), RemoteMucMembershipEntry>,
+    locks: dashmap::DashMap<(FullJid, BareJid), std::sync::Arc<tokio::sync::Mutex<()>>>,
+    next_generation: std::sync::atomic::AtomicU64,
+}
+
+pub struct RemoteMucMembershipLockGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[derive(Debug, Clone)]
+enum RemoteMucMembershipEntry {
+    Active(RemoteMucMembership),
+    Tombstone { generation: u64 },
+}
+
+#[derive(Debug, Clone)]
+struct RemoteMucMembership {
+    nick: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMucMembershipSnapshot {
+    occupant: FullJid,
+    room: BareJid,
+    nick: String,
+    generation: u64,
+}
+
+impl RemoteMucMembershipSnapshot {
+    pub fn room(&self) -> &BareJid {
+        &self.room
+    }
+
+    pub fn nick(&self) -> &str {
+        &self.nick
+    }
 }
 
 impl RemoteMucMemberships {
+    pub async fn lock_membership(
+        &self,
+        occupant: &FullJid,
+        room: &BareJid,
+    ) -> RemoteMucMembershipLockGuard {
+        let lock = self
+            .locks
+            .entry((occupant.clone(), room.clone()))
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        RemoteMucMembershipLockGuard {
+            _guard: lock.lock_owned().await,
+        }
+    }
+
+    pub async fn lock_snapshot(
+        &self,
+        snapshot: &RemoteMucMembershipSnapshot,
+    ) -> RemoteMucMembershipLockGuard {
+        self.lock_membership(&snapshot.occupant, &snapshot.room)
+            .await
+    }
+
     pub fn record_join(&self, occupant: &FullJid, room: &BareJid, nick: &str) {
-        self.entries
-            .insert((occupant.clone(), room.clone()), nick.to_string());
+        let generation = self.next_generation();
+        self.entries.insert(
+            (occupant.clone(), room.clone()),
+            RemoteMucMembershipEntry::Active(RemoteMucMembership {
+                nick: nick.to_string(),
+                generation,
+            }),
+        );
     }
 
     pub fn record_leave(&self, occupant: &FullJid, room: &BareJid) {
-        self.entries.remove(&(occupant.clone(), room.clone()));
+        let generation = self.next_generation();
+        self.entries.insert(
+            (occupant.clone(), room.clone()),
+            RemoteMucMembershipEntry::Tombstone { generation },
+        );
     }
 
     pub fn contains(&self, occupant: &FullJid, room: &BareJid) -> bool {
-        self.entries.contains_key(&(occupant.clone(), room.clone()))
+        self.entries
+            .get(&(occupant.clone(), room.clone()))
+            .is_some_and(|entry| matches!(entry.value(), RemoteMucMembershipEntry::Active(_)))
     }
 
-    pub fn take_for_occupant(&self, occupant: &FullJid) -> Vec<(BareJid, String)> {
-        let keys: Vec<(FullJid, BareJid)> = self
+    pub fn nick_for(&self, occupant: &FullJid, room: &BareJid) -> Option<String> {
+        self.entries
+            .get(&(occupant.clone(), room.clone()))
+            .and_then(|entry| match entry.value() {
+                RemoteMucMembershipEntry::Active(membership) => Some(membership.nick.clone()),
+                RemoteMucMembershipEntry::Tombstone { .. } => None,
+            })
+    }
+
+    pub fn take_for_occupant(&self, occupant: &FullJid) -> Vec<RemoteMucMembershipSnapshot> {
+        let snapshots: Vec<RemoteMucMembershipSnapshot> = self
             .entries
             .iter()
             .filter_map(|entry| {
                 let (entry_occupant, room) = entry.key();
-                if entry_occupant == occupant {
-                    Some((entry_occupant.clone(), room.clone()))
-                } else {
-                    None
+                if entry_occupant != occupant {
+                    return None;
                 }
+                let RemoteMucMembershipEntry::Active(membership) = entry.value() else {
+                    return None;
+                };
+                Some(RemoteMucMembershipSnapshot {
+                    occupant: entry_occupant.clone(),
+                    room: room.clone(),
+                    nick: membership.nick.clone(),
+                    generation: membership.generation,
+                })
             })
             .collect();
-        keys.into_iter()
-            .filter_map(|key| {
-                let room = key.1.clone();
-                self.entries.remove(&key).map(|(_, nick)| (room, nick))
-            })
+        snapshots
+            .into_iter()
+            .filter_map(|snapshot| self.mark_snapshot_taken(snapshot))
             .collect()
+    }
+
+    pub fn restore_snapshot_if_current(&self, snapshot: &RemoteMucMembershipSnapshot) {
+        let key = (snapshot.occupant.clone(), snapshot.room.clone());
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) = self.entries.entry(key) {
+            if matches!(
+                entry.get(),
+                RemoteMucMembershipEntry::Tombstone { generation }
+                    if *generation == snapshot.generation
+            ) {
+                entry.insert(RemoteMucMembershipEntry::Active(RemoteMucMembership {
+                    nick: snapshot.nick.clone(),
+                    generation: snapshot.generation,
+                }));
+            }
+        }
+    }
+
+    pub fn forget_snapshot_if_current(&self, snapshot: &RemoteMucMembershipSnapshot) {
+        let key = (snapshot.occupant.clone(), snapshot.room.clone());
+        self.entries.remove_if(&key, |_, current| {
+            matches!(
+                current,
+                RemoteMucMembershipEntry::Tombstone { generation }
+                    if *generation == snapshot.generation
+            )
+        });
+    }
+
+    pub fn snapshot_is_current_tombstone(&self, snapshot: &RemoteMucMembershipSnapshot) -> bool {
+        let key = (snapshot.occupant.clone(), snapshot.room.clone());
+        self.entries.get(&key).is_some_and(|entry| {
+            matches!(
+                entry.value(),
+                RemoteMucMembershipEntry::Tombstone { generation }
+                    if *generation == snapshot.generation
+            )
+        })
+    }
+
+    fn mark_snapshot_taken(
+        &self,
+        snapshot: RemoteMucMembershipSnapshot,
+    ) -> Option<RemoteMucMembershipSnapshot> {
+        let key = (snapshot.occupant.clone(), snapshot.room.clone());
+        let mut entry = self.entries.get_mut(&key)?;
+        match entry.value() {
+            RemoteMucMembershipEntry::Active(membership)
+                if membership.generation == snapshot.generation =>
+            {
+                *entry = RemoteMucMembershipEntry::Tombstone {
+                    generation: snapshot.generation,
+                };
+                Some(snapshot)
+            }
+            RemoteMucMembershipEntry::Active(_) | RemoteMucMembershipEntry::Tombstone { .. } => {
+                None
+            }
+        }
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod remote_muc_membership_tests {
+    use super::*;
+
+    fn full_jid(s: &str) -> FullJid {
+        s.parse().expect("valid full jid")
+    }
+
+    fn room_bare_jid(local: &str) -> BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("bare jid")
+    }
+
+    #[test]
+    fn stale_snapshot_does_not_remove_newer_same_nick_join() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant = full_jid("alice@example.com/web");
+        let room = room_bare_jid("race");
+
+        memberships.record_join(&occupant, &room, "alice");
+        let stale_snapshots = memberships.take_for_occupant(&occupant);
+        assert_eq!(stale_snapshots.len(), 1);
+        assert!(memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
+
+        memberships.record_join(&occupant, &room, "alice");
+        assert!(!memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
+        memberships.restore_snapshot_if_current(&stale_snapshots[0]);
+
+        assert_eq!(
+            memberships.nick_for(&occupant, &room).as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn stale_snapshot_does_not_resurrect_after_newer_join_leaves() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant = full_jid("alice@example.com/web");
+        let room = room_bare_jid("race-left");
+
+        memberships.record_join(&occupant, &room, "alice");
+        let stale_snapshots = memberships.take_for_occupant(&occupant);
+        assert_eq!(stale_snapshots.len(), 1);
+        assert!(memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
+
+        memberships.record_join(&occupant, &room, "alice");
+        memberships.record_leave(&occupant, &room);
+        assert!(!memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
+        memberships.restore_snapshot_if_current(&stale_snapshots[0]);
+
+        assert_eq!(memberships.nick_for(&occupant, &room), None);
     }
 }
 
