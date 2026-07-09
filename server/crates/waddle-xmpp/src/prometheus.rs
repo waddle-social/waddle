@@ -119,13 +119,6 @@ static SM_SEND_WINDOW_PAUSES: AtomicU64 = AtomicU64::new(0);
 // into the normal detach-for-resume path with a capped replay queue.
 // Sustained non-zero hints at a widespread client-ack or network fault.
 static SM_SEND_WINDOW_PAUSE_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
-// `sm_send_window_frames_dropped`: countable frames dropped because a
-// no-wire replay-recording path hit the queue cap after a pause
-// timed out or the transport closed. Dropping the tail keeps the
-// retained queue ≤ cap so resume stays clean — strictly better than
-// evict-and-poison, but each dropped frame is a stanza the dead client
-// will not receive on resume.
-static SM_SEND_WINDOW_FRAMES_DROPPED: AtomicU64 = AtomicU64::new(0);
 // `sm_detached_unacked_evicted`: entries evicted from a DETACHED
 // session's unacked queue when it hit capacity while the stream was
 // awaiting resume. Previously silent (`session.rs`); a non-zero value
@@ -472,13 +465,6 @@ pub fn increment_sm_send_window_pause_timeout() {
     SM_SEND_WINDOW_PAUSE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Add to `waddle_sm_send_window_frames_dropped_total` — countable frames
-/// dropped at the queue cap on a no-wire replay-recording path so the
-/// retained queue stays ≤ cap and resume stays clean (issue #1219).
-pub fn add_sm_send_window_frames_dropped(n: u64) {
-    SM_SEND_WINDOW_FRAMES_DROPPED.fetch_add(n, Ordering::Relaxed);
-}
-
 /// Increment `waddle_sm_detached_unacked_evicted_total` — a detached
 /// session's unacked queue evicted an entry at capacity while awaiting
 /// resume (issue #1219; previously silent).
@@ -625,7 +611,6 @@ pub fn reset_metrics_for_test() {
     SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
     SM_SEND_WINDOW_PAUSES.store(0, Ordering::Release);
     SM_SEND_WINDOW_PAUSE_TIMEOUTS.store(0, Ordering::Release);
-    SM_SEND_WINDOW_FRAMES_DROPPED.store(0, Ordering::Release);
     SM_DETACHED_UNACKED_EVICTED.store(0, Ordering::Release);
     PENDING_FLUSH_BATCHES.store(0, Ordering::Release);
     PENDING_FLUSH_ROWS_PUSHED.store(0, Ordering::Release);
@@ -670,7 +655,6 @@ pub fn render_metrics() -> String {
     let sm_resume_window_clamped = SM_RESUME_WINDOW_CLAMPED.load(Ordering::Relaxed);
     let sm_send_window_pauses = SM_SEND_WINDOW_PAUSES.load(Ordering::Relaxed);
     let sm_send_window_pause_timeouts = SM_SEND_WINDOW_PAUSE_TIMEOUTS.load(Ordering::Relaxed);
-    let sm_send_window_frames_dropped = SM_SEND_WINDOW_FRAMES_DROPPED.load(Ordering::Relaxed);
     let sm_detached_unacked_evicted = SM_DETACHED_UNACKED_EVICTED.load(Ordering::Relaxed);
     let pending_flush_batches = PENDING_FLUSH_BATCHES.load(Ordering::Relaxed);
     let pending_flush_rows_pushed = PENDING_FLUSH_ROWS_PUSHED.load(Ordering::Relaxed);
@@ -755,9 +739,6 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_send_window_pause_timeouts_total Send-window pauses that outlived their deadline with no recovering ack; the connection closed into detach-for-resume with a capped replay queue (issue #1219).\n",
             "# TYPE waddle_sm_send_window_pause_timeouts_total counter\n",
             "waddle_sm_send_window_pause_timeouts_total {sm_send_window_pause_timeouts}\n",
-            "# HELP waddle_sm_send_window_frames_dropped_total Countable frames dropped at the queue cap by a no-wire replay-recording path (pause timeout / transport close) so the retained queue stays under cap and resume stays clean (issue #1219).\n",
-            "# TYPE waddle_sm_send_window_frames_dropped_total counter\n",
-            "waddle_sm_send_window_frames_dropped_total {sm_send_window_frames_dropped}\n",
             "# HELP waddle_sm_detached_unacked_evicted_total Entries evicted from a DETACHED session's unacked queue at capacity while awaiting resume; a resume with an older h for that session must fail rather than replay an incomplete window (issue #1219).\n",
             "# TYPE waddle_sm_detached_unacked_evicted_total counter\n",
             "waddle_sm_detached_unacked_evicted_total {sm_detached_unacked_evicted}\n",
@@ -811,7 +792,6 @@ pub fn render_metrics() -> String {
         sm_resume_window_clamped = sm_resume_window_clamped,
         sm_send_window_pauses = sm_send_window_pauses,
         sm_send_window_pause_timeouts = sm_send_window_pause_timeouts,
-        sm_send_window_frames_dropped = sm_send_window_frames_dropped,
         sm_detached_unacked_evicted = sm_detached_unacked_evicted,
         pending_flush_batches = pending_flush_batches,
         pending_flush_rows_pushed = pending_flush_rows_pushed,
@@ -987,7 +967,6 @@ mod tests {
         increment_sm_send_window_pause();
         increment_sm_send_window_pause();
         increment_sm_send_window_pause_timeout();
-        add_sm_send_window_frames_dropped(5);
         increment_sm_detached_unacked_evicted();
         add_pending_flush_batches(3);
         add_pending_flush_rows_pushed(42);
@@ -996,7 +975,6 @@ mod tests {
         for family in [
             "waddle_sm_send_window_pauses_total",
             "waddle_sm_send_window_pause_timeouts_total",
-            "waddle_sm_send_window_frames_dropped_total",
             "waddle_sm_detached_unacked_evicted_total",
             "waddle_pending_flush_batches_total",
             "waddle_pending_flush_rows_pushed_total",
@@ -1008,7 +986,6 @@ mod tests {
         }
         assert!(rendered.contains("waddle_sm_send_window_pauses_total 2"));
         assert!(rendered.contains("waddle_sm_send_window_pause_timeouts_total 1"));
-        assert!(rendered.contains("waddle_sm_send_window_frames_dropped_total 5"));
         assert!(rendered.contains("waddle_sm_detached_unacked_evicted_total 1"));
         assert!(rendered.contains("waddle_pending_flush_batches_total 3"));
         assert!(rendered.contains("waddle_pending_flush_rows_pushed_total 42"));

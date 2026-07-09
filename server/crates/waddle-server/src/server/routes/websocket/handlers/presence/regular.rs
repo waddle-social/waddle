@@ -387,9 +387,13 @@ fn spawn_session_recovery_delivery(
                 }
             }
             // RFC 6121 §3.1.3 queued inbound subscription requests, delivered on
-            // this resource's initial available presence.
+            // this resource's initial available presence. Owner-gated (Qodo
+            // review on PR #1234): `pending_subscription_stanzas` is
+            // non-draining, so if this session was superseded the
+            // replacement's own once-per-session flush delivers them —
+            // rerouting them to the replacement here would double-deliver.
             for stanza in subscribe_stanzas {
-                let _ = registry.send_to(&resource, stanza).await;
+                let _ = registry.send_to_if_owner(&resource, &owner, stanza).await;
             }
         }
         .instrument(flush_span),

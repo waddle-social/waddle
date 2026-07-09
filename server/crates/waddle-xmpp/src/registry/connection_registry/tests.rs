@@ -71,6 +71,40 @@ fn test_register_replaces_existing() {
 }
 
 #[tokio::test]
+async fn send_to_if_owner_delivers_only_to_the_owning_session() {
+    // Issue #1220 (Qodo review): `send_to_if_owner` must deliver only while
+    // the entry still belongs to the given owner token, and must NOT reroute
+    // to a replacement — unlike `send_to`.
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("user1");
+    let (tx, mut rx) = mpsc::channel(16);
+    let owner = registry.register(jid.clone(), tx);
+    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // A non-matching owner token delivers nothing.
+    let outcome = registry
+        .send_to_if_owner(
+            &jid,
+            &stale_owner,
+            Stanza::Message(make_test_message("user1@example.com")),
+        )
+        .await;
+    assert!(matches!(outcome, SendResult::NotConnected));
+    assert!(rx.try_recv().is_err());
+
+    // The live owner token delivers.
+    let outcome = registry
+        .send_to_if_owner(
+            &jid,
+            &owner,
+            Stanza::Message(make_test_message("user1@example.com")),
+        )
+        .await;
+    assert!(outcome.is_sent());
+    assert!(rx.try_recv().is_ok());
+}
+
+#[tokio::test]
 async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
     let registry = ConnectionRegistry::new();
     let jid: FullJid = "user@example.com/web".parse().unwrap();

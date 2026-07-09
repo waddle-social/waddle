@@ -134,6 +134,23 @@ where
     // fall back to the pre-#1219 evict-oldest behaviour. Latched so we don't
     // re-enter the pause (and re-send `<r/>`) on every remaining frame.
     let mut send_window_degraded = false;
+    // Pace on ENTRY too (Codex P2 review on PR #1234): if the batch is entered
+    // while the window is ALREADY latched — a `Record` batch after a resume
+    // restored a full unacked queue, or one dispatched from the inbound /
+    // handoff arms while the loop-level outbound gate holds the pause — the
+    // first frame must not be recorded before the window recovers, or
+    // `record_outbound` could evict from an already-full queue and re-poison
+    // resume. Await recovery before recording anything.
+    if pacing && conn.sm_state.needs_send_pause() {
+        match await_send_window_recovery(sender, reader, state, conn).await {
+            SendWindowOutcome::Recovered => {}
+            SendWindowOutcome::DeferredCapReached => send_window_degraded = true,
+            SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
+                record_remaining_for_replay(conn, frames, policy);
+                return BatchWriteOutcome::TransportClosed;
+            }
+        }
+    }
     while let Some(frame) = frames.next() {
         let request_ack = if should_record(conn, &frame, policy) {
             conn.sm_state.record_outbound(frame.clone()).request_ack
@@ -194,10 +211,11 @@ where
                     return BatchWriteOutcome::TransportClosed;
                 }
                 SendWindowOutcome::TimedOut => {
-                    // Dead/stalled peer: record the untransmitted tail up to
-                    // the remaining queue capacity (dropping any overflow so
-                    // the queue stays ≤ cap and resume stays clean), then
-                    // close into detach-for-resume via the loop break.
+                    // Dead/stalled peer: record the untransmitted tail for
+                    // replay (evicting + marking the replay gap if it no longer
+                    // fits, so a later resume fails loud rather than silently
+                    // omitting frames — Codex P1), then close into
+                    // detach-for-resume via the loop break.
                     record_remaining_for_replay(conn, frames, policy);
                     return BatchWriteOutcome::TransportClosed;
                 }
@@ -335,42 +353,33 @@ fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool
     conn.sm_state.enabled && matches!(policy, BatchSmPolicy::Record) && is_countable_stanza(frame)
 }
 
-/// The transport died mid-batch: record every not-yet-written
-/// countable frame so the resume replay window covers the rest of
-/// the batch. The cadence signal is moot (no wire), which mirrors the
-/// detach-drain contract in `replay.rs`.
+/// The transport died mid-batch (or a send-window pause timed out): record
+/// every not-yet-written countable frame so the resume replay window covers
+/// the rest of the batch. The cadence signal is moot (no wire), which mirrors
+/// the detach-drain contract in `replay.rs`.
 ///
 /// Also used by the connection loop's shutdown path for responses to
 /// frames the drain had deferred before the transport went away.
+///
+/// This records via [`StreamManagementState::record_outbound`], which — if
+/// the queue is genuinely over capacity — evicts the oldest entry and marks
+/// the replay gap. It deliberately does NOT silently drop the untransmitted
+/// tail (Codex P1 review on PR #1234): dropping without a replay gap would let
+/// a later `<resume/>` succeed against the client's old `h` while omitting
+/// those never-written stanzas, i.e. a silent message loss. Marking the gap
+/// instead makes the resume fail loud so the client fresh-binds and recovers
+/// via MAM catch-up. This only runs once the transport is already gone — the
+/// send-window pacing keeps the queue under cap during normal writing — so it
+/// does not reintroduce the #1219 routine-burst poison loop.
 pub(super) fn record_remaining_for_replay(
     conn: &mut WsConnState,
     frames: impl Iterator<Item = String>,
     policy: BatchSmPolicy,
 ) {
-    // Cap at the queue capacity instead of evicting (issue #1219). These
-    // frames were never written to the wire, so the departed client's `h`
-    // cannot cover them; recording past the cap would evict already-recorded
-    // stanzas and poison resume. Keeping the queue ≤ cap and dropping the
-    // untransmitted tail leaves resume clean — strictly better, since the
-    // dropped frames are ones a dead peer would never have acked anyway.
-    let mut dropped = 0u64;
     for frame in frames {
         if should_record(conn, &frame, policy) {
-            if conn.sm_state.unacked_queue_full() {
-                dropped += 1;
-                continue;
-            }
             let _ = conn.sm_state.record_outbound(frame);
         }
-    }
-    if dropped > 0 {
-        warn!(
-            stream_id = conn.sm_state.stream_id.as_deref().unwrap_or("<unset>"),
-            dropped,
-            queue_len = conn.sm_state.queue_len(),
-            "dropped untransmitted frames beyond SM unacked-queue capacity to keep resume clean"
-        );
-        waddle_xmpp::prometheus::add_sm_send_window_frames_dropped(dropped);
     }
 }
 

@@ -353,14 +353,6 @@ impl StreamManagementState {
         self.unacked_queue.len()
     }
 
-    /// Whether the retained unacked queue is at capacity. The no-wire
-    /// replay-recording paths (`record_remaining_for_replay`) consult this
-    /// to stop recording at the cap rather than evict-oldest — keeping the
-    /// queue ≤ cap so a subsequent resume stays clean (issue #1219).
-    pub fn unacked_queue_full(&self) -> bool {
-        self.unacked_queue.is_full()
-    }
-
     /// XEP-0198 send-window pause signal (issue #1219): `true` while the
     /// outstanding unacked count sits in the paced band (it crossed the high
     /// watermark and has not yet fallen back to the low watermark). The
@@ -904,17 +896,5 @@ mod tests {
                 "a non-resumable stream is never send-window paced (n={n})"
             );
         }
-    }
-
-    #[test]
-    fn unacked_queue_full_reports_capacity() {
-        let mut state = StreamManagementState::with_config(3, 100);
-        state.enable("full".to_string(), true, Some(300));
-        assert!(!state.unacked_queue_full());
-        let _ = state.record_outbound("<m id='1'/>".to_string());
-        let _ = state.record_outbound("<m id='2'/>".to_string());
-        assert!(!state.unacked_queue_full());
-        let _ = state.record_outbound("<m id='3'/>".to_string());
-        assert!(state.unacked_queue_full());
     }
 }

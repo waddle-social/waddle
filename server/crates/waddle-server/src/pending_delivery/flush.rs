@@ -5,7 +5,7 @@ use super::*;
 /// recipient outbound mpsc (`OUTBOUND_CHANNEL_SIZE`) so a single batch never
 /// fills the channel on its own; the batch loop backpressures on the mpsc
 /// between batches instead of materializing the whole offline backlog at once.
-pub const FLUSH_BATCH_SIZE: usize = 64;
+pub(crate) const FLUSH_BATCH_SIZE: usize = 64;
 
 /// Outcome of a flush attempt for one resource.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

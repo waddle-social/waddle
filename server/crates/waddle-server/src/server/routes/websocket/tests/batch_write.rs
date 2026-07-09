@@ -686,13 +686,22 @@ async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
     assert_eq!(texts.len(), 45, "40 stanzas + 5 pacing <r/>");
 }
 
-/// A dead/stalled peer never acks the window down. The pause deadline
-/// fires, the untransmitted tail is recorded only up to the remaining
-/// queue capacity (the overflow dropped, NOT evicted), and the batch
-/// closes into detach-for-resume. Keeping the queue ≤ cap leaves resume
-/// clean — strictly better than the evict-and-poison this replaces.
+/// A dead/stalled peer never acks the window down. The pause deadline fires
+/// and the untransmitted tail is recorded for replay via `record_outbound` —
+/// which, once the queue is over capacity, evicts the oldest entry AND marks
+/// the replay gap. That is deliberate (Codex P1 review on PR #1234): the tail
+/// must NOT be silently dropped, or a later resume against the client's old
+/// `h` would succeed while omitting never-written stanzas. Marking the gap
+/// makes such a resume fail loud so the client fresh-binds and recovers via
+/// MAM. This no-wire path only runs once the transport is already gone, so it
+/// does not reintroduce the #1219 routine-burst poison loop.
 #[tokio::test]
-async fn send_window_pause_timeout_records_capped_tail_and_closes() {
+async fn send_window_pause_timeout_records_tail_and_marks_replay_gap() {
+    // The over-capacity tail eviction bumps the process-global
+    // `waddle_sm_unacked_evicted_total`; hold the shared metrics lock so this
+    // serializes against `write_response_batch_drains_acks_between_chunks_so_nothing_evicts`,
+    // which asserts that counter's delta is zero under the same lock.
+    let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     conn.sm_state = StreamManagementState::with_config(10, 100);
@@ -720,16 +729,19 @@ async fn send_window_pause_timeout_records_capped_tail_and_closes() {
     assert_eq!(
         conn.sm_state.queue_len(),
         10,
-        "the tail was recorded only up to the queue cap"
+        "the retained queue stays at the cap"
     );
     assert_eq!(
-        conn.sm_state.outbound_count, 10,
-        "only the capped prefix advanced the counter; the overflow was dropped"
+        conn.sm_state.outbound_count, 30,
+        "every frame is recorded (its sequence advances the counter), not silently dropped"
     );
-    assert_eq!(
-        conn.sm_state.replay_gap_through(),
-        None,
-        "capping (not evicting) keeps resume clean for the dead peer's session"
+    assert!(
+        conn.sm_state.replay_gap_through().is_some(),
+        "the untransmitted tail that no longer fits marks a replay gap so resume fails loud"
+    );
+    assert!(
+        !conn.sm_state.can_resume_from(0),
+        "a resume that needs the evicted prefix must be rejected, not silently short-replayed"
     );
 }
 

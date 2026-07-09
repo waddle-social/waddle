@@ -54,6 +54,42 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Owner-gated [`Self::send_to`]: deliver a `DirectFrame` only while the
+    /// resource's current registry entry still belongs to `owner` (the carbons
+    /// ownership token). Unlike [`Self::send_to`], it does NOT retry on a
+    /// replacement sender — on an owner mismatch it returns `NotConnected`
+    /// without delivering.
+    ///
+    /// Used for the off-task RFC 6121 §3.1.3 pending-subscribe delivery (issue
+    /// #1220): those stanzas are dequeued non-destructively, so if this session
+    /// was superseded the replacement's own once-per-session flush will deliver
+    /// them — rerouting them to the replacement here (as `send_to` would) would
+    /// double-deliver (Qodo review on PR #1234).
+    #[instrument(skip(self, stanza), fields(to = %jid))]
+    pub async fn send_to_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        stanza: Stanza,
+    ) -> SendResult {
+        let sender = match self.connections.get(jid) {
+            Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
+                entry.value().sender.clone()
+            }
+            _ => {
+                debug!("Recipient not owned by this session; not delivering");
+                return SendResult::NotConnected;
+            }
+        };
+        match sender.send(OutboundStanza::new(stanza)).await {
+            Ok(()) => SendResult::Sent,
+            Err(_) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                SendResult::ChannelClosed
+            }
+        }
+    }
+
     /// Send a [`pending_delivery`](crate::pending_delivery) flush stanza
     /// to a recovering session. Identical to [`Self::send_to`] except
     /// the queued [`OutboundStanza`] carries the source row id so the

@@ -53,8 +53,13 @@ mod flush;
 pub use database::DatabasePendingDeliveryStorage;
 pub use flush::{
     flush_for_resource, ArchiveResolveError, ArchiveResolver, FlushContext, FlushOutcome,
-    MamArchiveResolver, NullArchiveResolver, FLUSH_BATCH_SIZE,
+    MamArchiveResolver, NullArchiveResolver,
 };
+// Crate-internal: an implementation constant the tests assert against, kept
+// out of the public API surface (Greptile review on PR #1234). Test-only, so
+// it never counts as an unused re-export in production builds.
+#[cfg(test)]
+pub(crate) use flush::FLUSH_BATCH_SIZE;
 
 /// Open the pending_delivery storage for cluster mode (ADR-0017 Phase 3
 /// Slice 5 FIX 3, council-adjudicated) — mirrors
