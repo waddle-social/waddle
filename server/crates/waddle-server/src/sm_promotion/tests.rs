@@ -199,6 +199,7 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
     async fn list_orphaned_claims(
         &self,
         _live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+        _claimed_before_ms: i64,
     ) -> Result<
         Vec<(
             waddle_xmpp::pending_delivery::PendingRowId,
@@ -1874,6 +1875,7 @@ impl PendingDeliveryStorage for RetractDuringInsertPending {
     async fn list_orphaned_claims(
         &self,
         live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+        claimed_before_ms: i64,
     ) -> Result<
         Vec<(
             waddle_xmpp::pending_delivery::PendingRowId,
@@ -1881,7 +1883,9 @@ impl PendingDeliveryStorage for RetractDuringInsertPending {
         )>,
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
-        self.inner.list_orphaned_claims(live_sessions).await
+        self.inner
+            .list_orphaned_claims(live_sessions, claimed_before_ms)
+            .await
     }
     async fn count(
         &self,
@@ -2088,6 +2092,7 @@ impl PendingDeliveryStorage for FlakyPending {
     async fn list_orphaned_claims(
         &self,
         live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+        claimed_before_ms: i64,
     ) -> Result<
         Vec<(
             waddle_xmpp::pending_delivery::PendingRowId,
@@ -2095,7 +2100,9 @@ impl PendingDeliveryStorage for FlakyPending {
         )>,
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
-        self.inner.list_orphaned_claims(live_sessions).await
+        self.inner
+            .list_orphaned_claims(live_sessions, claimed_before_ms)
+            .await
     }
     async fn count(
         &self,

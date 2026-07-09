@@ -14,12 +14,13 @@ use super::devices::{active_devices_with_subscription_for_node_tx, mark_device_d
 use super::dispatch;
 use super::nodes::get_node_tx;
 use super::publish_jobs::{
-    claim_publish_job_tx, get_publish_job_payload_xml_tx, get_publish_job_tx,
-    mark_publish_job_failed_tx, prune_delivery_attempts_tx, prune_publish_jobs_tx,
-    read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx, retry_at_ms,
-    MAX_DELIVERY_ATTEMPTS_PER_NODE, MAX_PUBLISH_JOBS_PER_NODE, PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES,
-    PUBLISH_JOB_MAX_RETRY_AFTER_MS, PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED,
-    PUBLISH_JOB_STATUS_IN_PROGRESS, PUBLISH_JOB_STATUS_PUBLISHED, PUBLISH_JOB_STATUS_QUEUED,
+    claim_publish_job_tx, delivered_device_ids_for_item_tx, get_publish_job_payload_xml_tx,
+    get_publish_job_tx, mark_publish_job_failed_tx, prune_delivery_attempts_tx,
+    prune_publish_jobs_tx, read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx,
+    retry_at_ms, MAX_DELIVERY_ATTEMPTS_PER_NODE, MAX_PUBLISH_JOBS_PER_NODE,
+    PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES, PUBLISH_JOB_MAX_RETRY_AFTER_MS,
+    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED, PUBLISH_JOB_STATUS_IN_PROGRESS,
+    PUBLISH_JOB_STATUS_PUBLISHED, PUBLISH_JOB_STATUS_QUEUED,
 };
 use super::registration::ensure_active_registration_tx;
 use super::secrets::PushSecretCipher;
@@ -570,6 +571,56 @@ impl DatabasePushServiceStore {
                     now_ms,
                     job.job_id().to_string(),
                     PUBLISH_JOB_STATUS_IN_PROGRESS,
+                ],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            return Ok(Phase1Outcome::ShortCircuit(Some(PushFanoutResult {
+                item_id: job.item_id().to_string(),
+                attempted_devices: 0,
+            })));
+        }
+        // #1123 per-device idempotency: a requeued job (one sibling
+        // failed transiently) must not fan out again to devices whose
+        // attempt for this same item already succeeded. Filter the
+        // dispatch set against the terminal-success attempts recorded
+        // by earlier passes.
+        let already_delivered =
+            delivered_device_ids_for_item_tx(&mut tx, job.node(), job.item_id()).await?;
+        let sealed_devices: Vec<_> = sealed_devices
+            .into_iter()
+            .filter(|device| !already_delivered.contains(&device.device_id))
+            .collect();
+        if sealed_devices.is_empty() {
+            // Every remaining active device already received this
+            // item (the failing sibling was disabled or unregistered
+            // between retries). The job is complete — finalize as
+            // PUBLISHED instead of spinning in the no-active-devices
+            // requeue loop. The `claim_token` predicate keeps the
+            // transition at-most-once (see `finalize_publish_job`).
+            tx.execute(
+                r#"
+                UPDATE push_publish_jobs
+                SET status = ?,
+                    attempt_count = attempt_count + 1,
+                    last_error = NULL,
+                    next_retry_at_ms = NULL,
+                    claimed_at_ms = NULL,
+                    claim_token = NULL,
+                    updated_at_ms = ?,
+                    published_at_ms = ?
+                WHERE job_id = ? AND status = ? AND claim_token = ?
+                "#,
+                crate::db_params![
+                    PUBLISH_JOB_STATUS_PUBLISHED,
+                    now_ms,
+                    now_ms,
+                    job.job_id().to_string(),
+                    PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    job.claim_token().to_string(),
                 ],
             )
             .await

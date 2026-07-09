@@ -177,6 +177,47 @@ pub(super) async fn get_publish_job_payload_xml_tx(
     Ok(Some(payload_xml))
 }
 
+/// Device ids that already recorded a terminal-success attempt for
+/// this `(node, item_id)` — `web-delivered` for real Web Push sends,
+/// `fake-sent` for the stubbed APNS/FCM platforms. A retried publish
+/// job filters its fan-out against this set so one transiently
+/// failing sibling does not turn into duplicate OS notifications on
+/// every device that already received the item (#1123).
+pub(super) async fn delivered_device_ids_for_item_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    node: &str,
+    item_id: &str,
+) -> Result<std::collections::HashSet<String>, XmppError> {
+    let mut rows = tx
+        .query(
+            r#"
+            SELECT DISTINCT device_id
+            FROM push_delivery_attempts
+            WHERE node = ? AND item_id = ? AND status IN (?, ?)
+            "#,
+            crate::db_params![
+                node,
+                item_id,
+                super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+                super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            ],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let mut delivered = std::collections::HashSet::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    {
+        let device_id: String = row
+            .get(0)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        delivered.insert(device_id);
+    }
+    Ok(delivered)
+}
+
 /// Read the row's current `claim_token` so phase 3 can verify the
 /// claim is still ours before persisting any side effects. Returns
 /// `None` when the row was recovered (token cleared) or deleted.
@@ -327,7 +368,14 @@ pub(super) async fn delete_retryable_publish_jobs_for_node_tx(
 }
 
 pub(super) fn retry_at_ms(now_ms: i64) -> i64 {
-    now_ms.saturating_add(PUBLISH_JOB_RETRY_DELAY_MS)
+    // #1126: ±25% jitter so publish jobs requeued by one relay outage
+    // do not all retry on the same 60s beat.
+    let jitter = {
+        use rand::RngExt as _;
+        let factor: f64 = rand::rng().random_range(0.75..=1.25);
+        ((PUBLISH_JOB_RETRY_DELAY_MS as f64) * factor) as i64
+    };
+    now_ms.saturating_add(jitter)
 }
 
 fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError> {
@@ -718,6 +766,27 @@ mod tests {
     use crate::push_service::dispatch;
     use crate::push_service::test_support::{notification_item, owner, scalar_i64, store};
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
+
+    // #1126: the requeue delay carries ±25% jitter so a relay outage
+    // does not produce synchronized retry waves on the 60s beat.
+    #[test]
+    fn retry_at_ms_is_jittered_within_bounds() {
+        let now_ms = 1_000_000;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let retry_at = retry_at_ms(now_ms);
+            let delay = retry_at - now_ms;
+            assert!(
+                (45_000..=75_000).contains(&delay),
+                "jittered delay {delay} outside ±25% of {PUBLISH_JOB_RETRY_DELAY_MS}"
+            );
+            seen.insert(delay);
+        }
+        assert!(
+            seen.len() > 1,
+            "200 samples produced a single delay — backoff is not jittered"
+        );
+    }
 
     #[tokio::test]
     async fn publish_job_claim_is_exclusive_after_first_claim_commits() {

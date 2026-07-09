@@ -193,6 +193,12 @@ pub(crate) enum SuppressedReason {
     /// this variant is never emitted — the audit shape is in
     /// place for the day one is added.
     Xep0357PushServiceDegraded,
+    /// The conversation's unread count was already 0 when the
+    /// outbox job reached publish — the recipient reconnected and
+    /// read the message inside the notification window, so an OS
+    /// push would be spurious (#1126). Emitted at publish time;
+    /// the job is dropped terminally instead of published.
+    UnreadZeroAtPublish,
 }
 
 impl SuppressedReason {
@@ -217,6 +223,7 @@ impl SuppressedReason {
         Self::ProviderRejected,
         Self::ProviderTokenExpired,
         Self::Xep0357PushServiceDegraded,
+        Self::UnreadZeroAtPublish,
     ];
 
     pub(crate) fn as_db_value(self) -> &'static str {
@@ -233,6 +240,7 @@ impl SuppressedReason {
             Self::ProviderRejected => "provider_rejected",
             Self::ProviderTokenExpired => "provider_token_expired",
             Self::Xep0357PushServiceDegraded => "xep0357_push_service_degraded",
+            Self::UnreadZeroAtPublish => "unread_zero_at_publish",
         }
     }
 
@@ -418,6 +426,12 @@ pub enum NotificationOutboxPublishOutcome {
         job_id: NotificationOutboxJobId,
     },
     Failed {
+        job_id: NotificationOutboxJobId,
+    },
+    /// The job was terminally dropped at publish time because the
+    /// recipient had already read the conversation (unread count 0)
+    /// — pushing would be spurious (#1126).
+    Suppressed {
         job_id: NotificationOutboxJobId,
     },
 }

@@ -89,6 +89,54 @@ impl WebPushSender for FixedOutcomeSender {
     }
 }
 
+/// A `WebPushSender` that picks its outcome by matching the request
+/// endpoint against a configured substring, and records every
+/// endpoint it was invoked for so tests can assert exactly which
+/// devices were (re-)dispatched.
+#[derive(Clone)]
+struct PerEndpointSender {
+    outcomes: Arc<Vec<(String, WebPushOutcome)>>,
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl PerEndpointSender {
+    fn new(outcomes: Vec<(String, WebPushOutcome)>) -> Self {
+        Self {
+            outcomes: Arc::new(outcomes),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls_matching(&self, endpoint_fragment: &str) -> usize {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .filter(|endpoint| endpoint.contains(endpoint_fragment))
+            .count()
+    }
+}
+
+impl WebPushSender for PerEndpointSender {
+    fn send(
+        &self,
+        request: WebPushRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = WebPushOutcome> + Send + '_>> {
+        let endpoint = request.endpoint.to_string();
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(endpoint.clone());
+        let outcome = self
+            .outcomes
+            .iter()
+            .find(|(fragment, _)| endpoint.contains(fragment.as_str()))
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(WebPushOutcome::Delivered { status: 201 });
+        Box::pin(async move { outcome })
+    }
+}
+
 /// Build a Web Push-shape `<notification>` payload with the typed
 /// `urn:waddle:push:context:0` element the chat publisher emits.
 /// `class` is the db-form value (e.g. `"dm"`, `"personal_mention"`).
@@ -165,6 +213,12 @@ fn fresh_subscription_material() -> (String, String) {
 async fn store_with_web_push_provider(
     outcome: WebPushOutcome,
 ) -> (DatabasePushServiceStore, FixedOutcomeSender) {
+    let sender = FixedOutcomeSender::new(outcome);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    (store, sender)
+}
+
+async fn store_with_web_push_sender(sender: Arc<dyn WebPushSender>) -> DatabasePushServiceStore {
     let db = Database::in_memory("push-service-web-push")
         .await
         .expect("db");
@@ -177,11 +231,8 @@ async fn store_with_web_push_provider(
     let signer = VapidStorage::load_or_provision(db, b"root-key")
         .await
         .expect("VAPID signer");
-    let sender = FixedOutcomeSender::new(outcome);
-    let sender_arc: Arc<dyn WebPushSender> = Arc::new(sender.clone());
     let sub = VapidSub::default_for_domain("example.com").expect("vapid sub");
-    let store = store.with_web_push_provider(signer, sender_arc, sub);
-    (store, sender)
+    store.with_web_push_provider(signer, sender, sub)
 }
 
 async fn device_status(store: &DatabasePushServiceStore, node: &str, device_id: &str) -> String {
@@ -334,6 +385,169 @@ async fn transient_outcome_keeps_device_active_and_requeues() {
         device_status(&store, node.node(), "web-1").await,
         DEVICE_STATUS_ACTIVE,
         "Transient outcomes must keep the device active — XEP-0357 §6 disable applies only to permanent failures"
+    );
+}
+
+/// Register a fresh active web device with valid subscription
+/// material whose endpoint contains `endpoint_fragment`.
+async fn register_web_device(
+    store: &DatabasePushServiceStore,
+    owner: &BareJid,
+    node: &str,
+    device_id: &str,
+    endpoint_fragment: &str,
+) {
+    let (p256dh, auth) = fresh_subscription_material();
+    store
+        .upsert_device(
+            owner,
+            PushDeviceRegistration::new(device_id, node, PushDevicePlatform::Web, "test")
+                .with_provider_endpoint(Some(format!(
+                    "https://push.example.com/{endpoint_fragment}"
+                )))
+                .with_provider_token(Some(auth))
+                .with_provider_key_material(Some(p256dh)),
+        )
+        .await
+        .expect("device");
+}
+
+/// Make every queued publish job immediately retry-eligible.
+async fn force_retry_eligibility(store: &DatabasePushServiceStore) {
+    let db = store.database();
+    let conn = db.guard().await.expect("db guard");
+    conn.execute("UPDATE push_publish_jobs SET next_retry_at_ms = 0", ())
+        .await
+        .expect("reset retry deadline");
+}
+
+// #1123: a retried publish job must not re-push to devices whose
+// previous attempt for the same item already succeeded — one
+// rate-limited sibling must not turn into duplicate OS notifications
+// on every other device sharing the node.
+#[tokio::test]
+async fn retried_job_skips_devices_already_delivered() {
+    let sender = PerEndpointSender::new(vec![
+        (
+            "delivered-device".to_string(),
+            WebPushOutcome::Delivered { status: 201 },
+        ),
+        (
+            "flaky-device".to_string(),
+            WebPushOutcome::Transient {
+                kind: waddle_xmpp::push::types::TransientFailure::Network,
+            },
+        ),
+    ]);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    register_web_device(&store, &owner, node.node(), "web-ok", "delivered-device").await;
+    register_web_device(&store, &owner, node.node(), "web-flaky", "flaky-device").await;
+    store
+        .publish_notification_from_user_server(
+            node.node(),
+            &web_push_notification_item("partial-item-1", "alice@example.com", "dm", 1),
+            &owner,
+        )
+        .await
+        .expect("publish");
+
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("first drain");
+    assert_eq!(sender.calls_matching("delivered-device"), 1);
+    assert_eq!(sender.calls_matching("flaky-device"), 1);
+
+    force_retry_eligibility(&store).await;
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("retry drain");
+
+    assert_eq!(
+        sender.calls_matching("delivered-device"),
+        1,
+        "#1123: the already-delivered device must not receive a duplicate web-push on retry"
+    );
+    assert_eq!(
+        sender.calls_matching("flaky-device"),
+        2,
+        "the transiently-failing device must still be retried"
+    );
+}
+
+// #1123 companion: when every remaining device for a requeued job has
+// already succeeded (e.g. the failing sibling was disabled between
+// retries), the job must finalize as published instead of spinning in
+// the no-active-devices retry loop.
+#[tokio::test]
+async fn retried_job_with_all_devices_delivered_finalizes_published() {
+    let sender = PerEndpointSender::new(vec![
+        (
+            "delivered-device".to_string(),
+            WebPushOutcome::Delivered { status: 201 },
+        ),
+        (
+            "gone-device".to_string(),
+            WebPushOutcome::Transient {
+                kind: waddle_xmpp::push::types::TransientFailure::Network,
+            },
+        ),
+    ]);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    register_web_device(&store, &owner, node.node(), "web-ok", "delivered-device").await;
+    register_web_device(&store, &owner, node.node(), "web-gone", "gone-device").await;
+    store
+        .publish_notification_from_user_server(
+            node.node(),
+            &web_push_notification_item("all-done-item-1", "alice@example.com", "dm", 1),
+            &owner,
+        )
+        .await
+        .expect("publish");
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("first drain");
+
+    // The flaky device disappears (user unregistered / device
+    // disabled) before the retry fires.
+    let db = store.database();
+    let conn = db.guard().await.expect("db guard");
+    conn.execute(
+        "UPDATE push_devices SET status = 'disabled' WHERE device_id = 'web-gone'",
+        (),
+    )
+    .await
+    .expect("disable flaky device");
+    drop(conn);
+    force_retry_eligibility(&store).await;
+
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("retry drain");
+
+    assert_eq!(
+        sender.calls_matching("delivered-device"),
+        1,
+        "#1123: no duplicate web-push when the retry has nothing left to send"
+    );
+    let mut rows = query(
+        &store,
+        "SELECT status FROM push_publish_jobs WHERE item_id = 'all-done-item-1'",
+        (),
+    )
+    .await;
+    let row = rows.next().await.expect("job row").expect("job present");
+    assert_eq!(
+        row.get::<String>(0).expect("status"),
+        "published",
+        "a fully-delivered job must finalize as published, not requeue forever"
     );
 }
 
