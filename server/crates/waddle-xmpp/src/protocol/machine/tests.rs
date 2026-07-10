@@ -729,3 +729,41 @@ fn oauth_bearer_completion_consumes_pending_op_without_logging() {
     });
     assert!(events2.is_empty());
 }
+
+/// RFC 6120 §10.3.1 / RFC 6121 §8.1.1.1: a client message with no
+/// 'to' is handled on behalf of the sender — treated as addressed to
+/// the sender's own bare JID and routed (other resources + archive),
+/// not discarded (#1266 item 2).
+#[test]
+fn rfc6120_to_less_message_routes_to_own_bare_jid() {
+    let mut dispatcher = StanzaDispatcher::new();
+    dispatcher.register_message(Arc::new(crate::protocol::handlers::route::RouteHandler));
+    let mut sm = ready_machine_with_dispatcher(dispatcher, "example.com", alice());
+
+    let mut message = Message::new(None);
+    message.type_ = MessageType::Chat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "note".to_string());
+
+    let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+        Stanza::Message(message),
+    ))));
+
+    let route = events
+        .iter()
+        .find_map(|event| match event {
+            OutboundEvent::RouteToConnection { jid, stanza } => Some((jid, stanza)),
+            _ => None,
+        })
+        .expect("to-less message must route, not be discarded");
+    assert_eq!(route.0.to_string(), "alice@example.com");
+    let Stanza::Message(routed) = route.1.as_ref() else {
+        panic!("expected message stanza");
+    };
+    assert_eq!(
+        routed.to.as_ref().map(ToString::to_string),
+        Some("alice@example.com".to_string()),
+        "delivered copy carries the sender's bare JID as 'to'"
+    );
+}

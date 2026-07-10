@@ -152,12 +152,18 @@ fn dispatch_message_blocked_sender_emits_no_archive_event() {
     let ctx = build_ctx(&local, &bl, &occ, &gen, &msg);
     let outcome = dispatcher.dispatch_message(&mut msg, &ctx);
 
-    // §3.1 silent drop: BlockingFilterHandler returns Halt with no events.
+    // XEP-0191 incoming rule: BlockingFilterHandler halts the chain and
+    // emits ONLY the <service-unavailable/> bounce routed back to the
+    // blocked sender — never an archive write.
     assert!(matches!(
         outcome.termination,
         MessageDispatchTermination::Halted { .. }
     ));
-    assert!(outcome.events.is_empty());
+    assert_eq!(outcome.events.len(), 1);
+    assert!(matches!(
+        outcome.events[0],
+        OutboundEvent::RouteToConnection { .. }
+    ));
     // Archive probe must NEVER have run.
     assert_eq!(archive_invocations.load(Ordering::SeqCst), 0);
     // No ArchiveDirect event present in the outcome.

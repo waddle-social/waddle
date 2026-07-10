@@ -320,6 +320,17 @@ impl XmppStateMachine {
                 // chain (blocking, archive, route, …) sees a
                 // canonical sender.
                 message.from = Some(jid::Jid::from(full_jid.clone()));
+                // RFC 6120 §10.3.1 / RFC 6121 §8.1.1.1: a stanza with
+                // no 'to' address is handled on behalf of the sending
+                // entity — for a message that means treating it as
+                // addressed to the sender's own bare JID (route to the
+                // account's resources + archive), not discarding it
+                // (#1266 item 2). Stamping the bare JID here keeps the
+                // pipeline's locality derivation and routing on the
+                // ordinary bare-JID path.
+                if message.to.is_none() {
+                    message.to = Some(jid::Jid::from(full_jid.to_bare()));
+                }
                 // Hot path: borrow `self.*` directly during the
                 // synchronous dispatch. The session-state snapshot is
                 // only materialized (cloned) when the pipeline parks

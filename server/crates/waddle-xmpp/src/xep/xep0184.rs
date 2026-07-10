@@ -167,22 +167,13 @@ pub fn build_receipt_received_element(id: &str) -> Element {
         .build()
 }
 
-/// Build a standalone delivery receipt message.
-///
-/// Creates a `<message type='chat'>` containing only a `<received/>` element.
-/// The `id` references the original message being acknowledged.
-pub fn build_receipt_message(
-    to: impl Into<Option<jid::Jid>>,
-    from: impl Into<Option<jid::Jid>>,
-    original_message_id: &str,
-) -> Message {
-    let mut msg = Message::new(to.into());
-    msg.from = from.into();
-    msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    msg.payloads
-        .push(build_receipt_received_element(original_message_id));
-    msg
-}
+// NOTE: there is deliberately no "build a complete receipt message"
+// helper here. XEP-0184 §7 ("Protocol Format") assigns ack generation
+// to the *receiving entity* — the recipient's client, not its server —
+// and an entity that does not support or has disabled receipts "MUST
+// NOT return a receipt". The server only routes `<request/>`-carrying
+// content messages and client-generated `<received/>` acks verbatim
+// (#1247 removed the server-side fabricator that used such a helper).
 
 // ── Mutation ─────────────────────────────────────────────────────────
 
@@ -230,7 +221,7 @@ impl From<xmpp_parsers::receipts::Received> for ReceiptKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Message, MessageType};
+    use xmpp_parsers::message::Message;
 
     #[test]
     fn test_is_receipt_request_element() {
@@ -334,19 +325,6 @@ mod tests {
         assert_eq!(elem.name(), "received");
         assert_eq!(elem.ns(), NS_RECEIPTS);
         assert_eq!(elem.attr("id"), Some("msg-99"));
-    }
-
-    #[test]
-    fn test_build_receipt_message() {
-        let to: jid::Jid = "juliet@example.com".parse().expect("valid jid");
-        let from: jid::Jid = "romeo@example.com".parse().expect("valid jid");
-        let msg = build_receipt_message(to.clone(), from.clone(), "original-1");
-
-        assert_eq!(msg.to, Some(to));
-        assert_eq!(msg.from, Some(from));
-        assert_eq!(msg.type_, MessageType::Chat);
-        assert!(msg.bodies.is_empty());
-        assert_eq!(extract_received_id(&msg), Some("original-1".to_owned()));
     }
 
     #[test]
