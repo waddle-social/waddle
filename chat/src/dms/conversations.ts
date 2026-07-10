@@ -102,8 +102,11 @@ export function useDirectMessageConversations(
         ...c,
         // #1256: MUC-PM conversations are keyed by the FULL occupant JID —
         // bare-folding on restore would re-key them to the room bare JID
-        // (a reply from that row would broadcast to the room).
-        peerJid: c.mucPm ? c.peerJid : barePeerJid(c.peerJid),
+        // (a reply from that row would broadcast to the room). The
+        // resource heuristic backstops the flag: normal DM rows are
+        // always persisted bare, so a resource-carrying key IS an
+        // occupant conversation even in a blob written without the flag.
+        peerJid: c.mucPm || c.peerJid.includes("/") ? c.peerJid : barePeerJid(c.peerJid),
         peerUsername: c.peerUsername || (c.mucPm ? mucPmDisplayName(c.peerJid) : peerUsername(c.peerJid)),
         unreadCount: c.unreadCount ?? 0,
         // Clear any idle age from an older persisted blob — it starts empty and
@@ -244,6 +247,10 @@ export function useDirectMessageConversations(
       // JID (it can't attribute the occupant yet — #1257). Merging that
       // entry would create a phantom room-bare "DM" alongside the
       // occupant-keyed conversation and double-count unread — skip it.
+      // Deliberately WITHOUT rememberInboxAccountedMessage: the live
+      // arrival must still increment the occupant conversation once
+      // (unread for offline-missed PMs stays server-unattributable
+      // until #1257 teaches the inbox about occupants).
       if (xmppClient.value?.isKnownMucRoom?.(bare)) continue;
       rememberInboxAccountedMessage(entry);
       merged.set(bare, mergeInboxEntry(merged.get(bare), entry));
