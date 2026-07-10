@@ -28,6 +28,16 @@ pub(super) async fn handle_push_iq(
                 bad_request_iq_error("Malformed IQ payload."),
             )];
         };
+        if enable.publish_options.is_invalid() {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                bad_request_iq_error(
+                    "XEP-0357 publish-options form requires FORM_TYPE='http://jabber.org/protocol/pubsub#publish-options'.",
+                ),
+            )];
+        }
         let service_jid = enable.jid.to_string();
         if service_jid == push_domain {
             let Some(node) = enable.node.as_deref() else {
@@ -46,7 +56,7 @@ pub(super) async fn handle_push_iq(
                     &bare_jid,
                     &service_jid,
                     node,
-                    enable.publish_options.as_ref(),
+                    enable.publish_options.as_element(),
                 )
                 .await
             {

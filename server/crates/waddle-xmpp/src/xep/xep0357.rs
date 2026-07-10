@@ -54,7 +54,33 @@ pub struct PushEnable {
     /// Key-value pairs from the XEP-0060 publish-options form.
     pub options: Vec<(String, String)>,
     /// The original XEP-0004 publish-options form for later PubSub publish.
-    pub publish_options: Option<Element>,
+    pub publish_options: PublishOptionsParse,
+}
+
+/// Parsed state for an optional XEP-0060 publish-options data form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishOptionsParse {
+    /// No submitted XEP-0004 form was present.
+    Absent,
+    /// A submitted XEP-0004 form was present, but its FORM_TYPE was missing or wrong.
+    Invalid,
+    /// A submitted XEP-0004 form with the required publish-options FORM_TYPE.
+    Valid(Element),
+}
+
+impl PublishOptionsParse {
+    /// Return the valid publish-options form, if present.
+    pub fn as_element(&self) -> Option<&Element> {
+        match self {
+            Self::Valid(form) => Some(form),
+            Self::Absent | Self::Invalid => None,
+        }
+    }
+
+    /// Whether the client submitted a malformed publish-options form.
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid)
+    }
 }
 
 /// A parsed push disable request.
@@ -103,7 +129,7 @@ pub fn parse_push_enable(iq: &Iq) -> Option<PushEnable> {
 
     let publish_options = parse_publish_options_form(elem);
     let options = publish_options
-        .as_ref()
+        .as_element()
         .map(parse_data_form_options)
         .unwrap_or_default();
 
@@ -155,16 +181,17 @@ fn parse_push_service_jid(raw: &str) -> Option<BareJid> {
     raw.parse::<BareJid>().ok()
 }
 
-fn parse_publish_options_form(parent: &Element) -> Option<Element> {
-    parent
-        .children()
-        .find(|child| {
-            child.name() == "x"
-                && child.ns() == NS_DATA_FORMS
-                && child.attr("type") == Some("submit")
-                && data_form_type(child).as_deref() == Some(NS_PUBSUB_PUBLISH_OPTIONS)
-        })
-        .cloned()
+fn parse_publish_options_form(parent: &Element) -> PublishOptionsParse {
+    let Some(form) = parent.children().find(|child| {
+        child.name() == "x" && child.ns() == NS_DATA_FORMS && child.attr("type") == Some("submit")
+    }) else {
+        return PublishOptionsParse::Absent;
+    };
+
+    match data_form_type(form).as_deref() {
+        Some(NS_PUBSUB_PUBLISH_OPTIONS) => PublishOptionsParse::Valid(form.clone()),
+        Some(_) | None => PublishOptionsParse::Invalid,
+    }
 }
 
 fn data_form_type(form: &Element) -> Option<String> {
