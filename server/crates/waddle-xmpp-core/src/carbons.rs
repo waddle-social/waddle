@@ -123,9 +123,10 @@ pub fn build_sent_carbon(
 
     let mut carbon_msg = Message::new(Some(to_jid.parse()?));
     carbon_msg.from = Some(from_jid.parse()?);
-    // XEP-0280 §11.2: the wrapping message SHOULD maintain the same
-    // 'type' attribute value as the forwarded original, so clients
-    // filtering carbons by type='chat' file them correctly.
+    // XEP-0280 §8 ("Sending Messages"): the wrapping message SHOULD
+    // maintain the same 'type' attribute value as the forwarded
+    // original, so clients filtering carbons by type='chat' file them
+    // correctly (§7 states the same rule for received carbons).
     carbon_msg.type_ = original_msg.type_.clone();
     carbon_msg.payloads.push(sent);
 
@@ -146,8 +147,8 @@ pub fn build_received_carbon(
 
     let mut carbon_msg = Message::new(Some(to_jid.parse()?));
     carbon_msg.from = Some(from_jid.parse()?);
-    // XEP-0280 §11.2: maintain the original 'type' on the wrapper —
-    // see `build_sent_carbon`.
+    // XEP-0280 §7 ("Receiving Messages"): maintain the original 'type'
+    // on the wrapper — see `build_sent_carbon`.
     carbon_msg.type_ = original_msg.type_.clone();
     carbon_msg.payloads.push(received);
 

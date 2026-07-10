@@ -168,11 +168,12 @@ pub fn build_receipt_received_element(id: &str) -> Element {
 }
 
 // NOTE: there is deliberately no "build a complete receipt message"
-// helper here. XEP-0184 §"When to Acknowledge Receipt of a Message"
-// assigns ack generation to the *receiving client*; the server only
-// routes `<request/>`-carrying content messages and client-generated
-// `<received/>` acks verbatim (#1247 removed the server-side
-// fabricator that used such a helper).
+// helper here. XEP-0184 §7 ("Protocol Format") assigns ack generation
+// to the *receiving entity* — the recipient's client, not its server —
+// and an entity that does not support or has disabled receipts "MUST
+// NOT return a receipt". The server only routes `<request/>`-carrying
+// content messages and client-generated `<received/>` acks verbatim
+// (#1247 removed the server-side fabricator that used such a helper).
 
 // ── Mutation ─────────────────────────────────────────────────────────
 

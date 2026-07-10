@@ -193,10 +193,23 @@ pub(crate) async fn route_to_connection(
 /// [`route_dm_to_full_jid`]; every other stanza keeps the legacy
 /// single-resource delivery (live channel → detached XEP-0198 buffer →
 /// drop, with a synthesized reply for undeliverable request IQs,
-/// #1130). MUC reflections (type `groupchat` addressed to occupant
-/// full JIDs) deliberately stay on the legacy path: falling back to
-/// bare-JID semantics would leak room traffic to resources that never
-/// joined the room.
+/// #1130). Two message classes deliberately stay on the legacy path
+/// instead of taking the §8.5.3.2.1 bare-JID fallback:
+///
+/// - **`groupchat`** (MUC reflections addressed to occupant full
+///   JIDs): falling back to bare-JID semantics would leak room
+///   traffic to resources that never joined the room.
+/// - **`headline`**: RFC 6121 §8.5.2.1.1 says headline messages to a
+///   bare JID with no available resources are silently ignored, and
+///   Waddle's headline traffic (PEP/notification fan-out) is
+///   deliberately per-resource (caps-gated), so redistributing a
+///   resource-targeted headline to sibling resources would deliver
+///   notifications the target never opted into.
+///
+/// RFC 6121 §8.5.1 still applies on this path: an undeliverable
+/// message (non-error) addressed to a full JID whose LOCAL account
+/// does not exist is bounced with `<service-unavailable/>` — the
+/// no-account rule is unconditional on message type.
 async fn route_to_full_jid(
     deps: &Deps<'_>,
     full: jid::FullJid,
@@ -220,6 +233,28 @@ async fn route_to_full_jid(
         None => deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await,
     };
     if delivery == FullJidDeliveryOutcome::Unavailable {
+        // RFC 6121 §8.5.1: a message to a nonexistent LOCAL account is
+        // bounced regardless of type (`groupchat` excluded — reflection
+        // targets are authenticated occupants, so §8.5.1 cannot apply
+        // and the existence lookup would land on the reflection
+        // hot path).
+        if matches!(
+            stanza.as_ref(),
+            Stanza::Message(message)
+                if !matches!(
+                    message.type_,
+                    xmpp_parsers::message::MessageType::Error
+                        | xmpp_parsers::message::MessageType::Groupchat,
+                )
+        ) {
+            let bare = full.to_bare();
+            if bare.domain().as_str() == deps.local_domain
+                && !local_account_exists_for(deps, &bare).await
+            {
+                return bounce_for_nonexistent_account(stanza.as_ref());
+            }
+            return Vec::new();
+        }
         fallback_reply_for_undeliverable_iq(stanza.as_ref())
             .into_iter()
             .collect()
@@ -236,9 +271,9 @@ async fn route_to_full_jid(
 /// 2. **Detached XEP-0198 resource** (#1245): run the shared fan-out
 ///    recipient pass (the #1106 machinery) targeted at just this
 ///    resource, so the queued replay copy carries the recipient
-///    `<stanza-id/>` (XEP-0359 §5), the recipient archive captures the
-///    message (XEP-0313 §5.1), received-carbons reach the recipient's
-///    other live resources (XEP-0280 §6.1), and the inbox projection
+///    `<stanza-id/>` (XEP-0359 §3), the recipient archive captures the
+///    message (XEP-0313 §6.1), received-carbons reach the recipient's
+///    other live resources (XEP-0280 §7), and the inbox projection
 ///    updates — then queue the PROCESSED stanza into the replay
 ///    buffer. This replaces the legacy pre-recipient-pass verbatim
 ///    queueing for full-JID DMs.
@@ -280,17 +315,21 @@ async fn route_dm_to_full_jid(
                 Some(_) => return Vec::new(),
                 None => {
                     // Local live-channel attempt with the detached
-                    // fallback SUPPRESSED (`sm_session_registry` =
-                    // `None`): a detached hit must go through the
-                    // recipient-pass path below (#1245), never queue
-                    // the raw pre-pass stanza. `Delivered` is done;
-                    // `Dropped` (full channel / ambiguous ask
-                    // failure) drops exactly like the legacy path;
-                    // only a confirmed `Unavailable` (no live
-                    // channel) falls through.
+                    // fallback SUPPRESSED: a detached hit must go
+                    // through the recipient-pass path below (#1245),
+                    // never queue the raw pre-pass stanza.
+                    // [`deliver_peer_to_live_only`] maps provably
+                    // never-delivered failures (no actor, GetUser ask
+                    // error, never-enqueued TrySend failures) to
+                    // `Unavailable` so the detached / §8.5.3.2.1
+                    // fallback below still runs for them — the legacy
+                    // path routed exactly those classes to the
+                    // detached buffer for the same losslessness
+                    // argument. `Dropped` (full channel /
+                    // maybe-enqueued failure) stays terminal to avoid
+                    // double delivery.
                     let live_outcome =
-                        deliver_peer_to_full(deps.user_registry, None, &full, stanza.as_ref())
-                            .await;
+                        deliver_peer_to_live_only(deps.user_registry, &full, stanza.as_ref()).await;
                     if live_outcome != FullJidDeliveryOutcome::Unavailable {
                         return Vec::new();
                     }
@@ -335,13 +374,14 @@ async fn route_dm_to_full_jid(
                 side_routes,
             } => {
                 if let Some(processed) = processed {
-                    queue_processed_for_detached(
+                    let not_queued = queue_processed_for_detached(
                         deps.sm_session_registry,
                         vec![full.clone()],
                         &std::collections::HashSet::new(),
                         &processed,
                     )
                     .await;
+                    retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
                 } else {
                     debug!(
                         jid = %full,
@@ -353,11 +393,25 @@ async fn route_dm_to_full_jid(
                 route_side_stanzas(deps, side_routes, recursion_depth).await;
                 return Vec::new();
             }
-            FanoutPassResult::Unavailable => {
+            FanoutPassResult::Unavailable { blocklist_failed } => {
+                if blocklist_failed {
+                    // Fail-closed: the XEP-0191 blocklist could not be
+                    // loaded and detached replay writes the stored XML
+                    // verbatim with no recipient pass, so raw queueing
+                    // would let a possibly-blocked sender's message
+                    // through on resume. Drop instead — mirroring the
+                    // headless pass's fail-closed rule.
+                    warn!(
+                        jid = %full,
+                        "RouteToConnection: blocklist load failed for detached \
+                         full-JID DM; dropping instead of queueing the \
+                         unfiltered stanza (XEP-0191 fail-closed)"
+                    );
+                    return Vec::new();
+                }
                 // Shared pass unavailable (no dispatcher in test
-                // fixtures, or blocklist load failed): fall back to
-                // the legacy verbatim queueing so the message is not
-                // lost while resumable.
+                // fixtures): fall back to the legacy verbatim queueing
+                // so the message is not lost while resumable.
                 deliver_to_detached(deps.sm_session_registry, &full, stanza.as_ref()).await;
                 return Vec::new();
             }
@@ -496,6 +550,11 @@ async fn route_to_bare_jid(
             let live_set: std::collections::HashSet<jid::FullJid> =
                 live_targets.iter().cloned().collect();
 
+            // XEP-0191 fail-closed marker for the legacy raw detached
+            // queueing below: set when the shared pass was skipped
+            // because the blocklist could not be loaded (replay has no
+            // per-connection snapshot to fall back on).
+            let mut skip_raw_detached_queueing = false;
             // #1106: a bare-JID DM with live targets runs the
             // recipient pass ONCE (shared, headless-style) and
             // fans the single processed stanza out to every
@@ -565,13 +624,14 @@ async fn route_to_bare_jid(
                             // <stanza-id/> (closes the
                             // stanza-id-parity gap documented on
                             // the legacy path).
-                            queue_processed_for_detached(
+                            let not_queued = queue_processed_for_detached(
                                 deps.sm_session_registry,
                                 detached_targets,
                                 &live_set,
                                 &processed,
                             )
                             .await;
+                            retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
                         } else {
                             debug!(
                                 bare_jid = %bare,
@@ -580,25 +640,30 @@ async fn route_to_bare_jid(
                                  dropping delivery"
                             );
                         }
-                        // Handler-generated side stanzas (XEP-0184
-                        // receipt back to the sender) route at the
-                        // OUTER depth — the old per-connection
-                        // pass routed them from the recipient's
-                        // own interpret loop at depth 0.
-                        // Receipts always target the sender's
-                        // full JID, so this cannot re-enter the
-                        // bare-JID fan-out.
+                        // Handler-generated side stanzas (the
+                        // XEP-0191 bounce back to a blocked
+                        // sender) route at the OUTER depth — the
+                        // old per-connection pass routed them
+                        // from the recipient's own interpret
+                        // loop at depth 0. Side routes target
+                        // the peer, and error stanzas are inert
+                        // in every persistence handler, so this
+                        // cannot re-enter the bare-JID fan-out.
                         route_side_stanzas(deps, side_routes, recursion_depth).await;
                         return Vec::new();
                     }
-                    FanoutPassResult::Unavailable => {
+                    FanoutPassResult::Unavailable { blocklist_failed } => {
                         // Shared pass unavailable (no dispatcher
                         // in test fixtures, or blocklist load
                         // failed): fall through to the legacy
                         // per-resource PeerStanza path below —
                         // each recipient connection's bind-time
                         // blocklist snapshot keeps XEP-0191
-                        // enforcement.
+                        // enforcement for LIVE delivery. Raw
+                        // detached queueing has no snapshot, so
+                        // it is skipped when the blocklist load
+                        // failed (fail-closed) — see below.
+                        skip_raw_detached_queueing = blocklist_failed;
                     }
                 }
             }
@@ -621,7 +686,14 @@ async fn route_to_bare_jid(
                     any_landed = true;
                 }
             }
-            if let Some(sm) = deps.sm_session_registry {
+            if skip_raw_detached_queueing {
+                debug!(
+                    bare_jid = %bare,
+                    "RouteToConnection: blocklist load failed; skipping raw \
+                     detached XEP-0198 queueing (fail-closed) — live \
+                     per-resource delivery above keeps its own snapshot"
+                );
+            } else if let Some(sm) = deps.sm_session_registry {
                 for full in detached_targets {
                     // Skip if this resource was just
                     // delivered live (race between
@@ -698,6 +770,13 @@ async fn route_to_bare_jid(
                          selected target turned out stale and none is \
                          local, dropping (s2s out of scope)"
                     );
+                } else if !local_account_exists_for(deps, &bare).await {
+                    // #1246 residual: every selected target was a stale
+                    // registry/SM leftover for an account that does not
+                    // (or no longer does) exist — bounce instead of
+                    // creating archive/inbox rows for it (RFC 6121
+                    // §8.5.1).
+                    return bounce_for_nonexistent_account(stanza.as_ref());
                 } else {
                     debug!(
                         bare_jid = %bare,
@@ -754,8 +833,12 @@ async fn local_account_exists_for(deps: &Deps<'_>, bare: &BareJid) -> bool {
 ///   are indistinguishable to the sender.
 /// - **IQ** `get`/`set`: `<service-unavailable/>` (via the shared
 ///   undeliverable-IQ builder; `result`/`error` IQs get nothing).
-/// - **presence** / error-typed messages: silently ignored (§8.5.1;
-///   RFC 6121 §8.3 forbids error-of-error).
+/// - **presence**: nothing is returned here — §8.5.1 silently ignores
+///   available/unavailable presence to a nonexistent account, and
+///   subscription stanzas are owned by the subscription module, not
+///   this routing path.
+/// - **error-typed messages**: silently ignored (RFC 6121 §8.3
+///   forbids replying to an error with another error).
 ///
 /// Returned stanzas are written back to the originating connection by
 /// the interpret loop, exactly like the undeliverable-IQ fallback.
@@ -972,18 +1055,26 @@ fn is_jingle_session_terminate(payload: &minidom::Element) -> bool {
 /// detached XEP-0198 replay buffers of `detached_targets`, skipping any
 /// resource that was just delivered live. Because the queued form is
 /// the shared recipient pass's wire output, resume replay carries the
-/// recipient-side `<stanza-id by='recipient'/>` (XEP-0359 §5) — the
+/// recipient-side `<stanza-id by='recipient'/>` (XEP-0359 §3) — the
 /// persistence side effects already ran exactly once in the shared
 /// pass, so replay is delivery-only.
+///
+/// Returns the targets whose queueing did NOT land (session expired or
+/// resumed between enumeration and record, or a storage error) so the
+/// caller can make a second-chance LIVE delivery attempt — the common
+/// cause of `Ok(false)` is the resource resuming mid-route, in which
+/// case a direct send reaches it (the persistence already happened, so
+/// the retry is delivery-only and cannot duplicate rows).
 async fn queue_processed_for_detached(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     detached_targets: Vec<jid::FullJid>,
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
-) {
+) -> Vec<jid::FullJid> {
     let Some(sm) = sm_session_registry else {
-        return;
+        return Vec::new();
     };
+    let mut not_queued = Vec::new();
     for full in detached_targets {
         if live_set.contains(&full) {
             continue;
@@ -1002,18 +1093,43 @@ async fn queue_processed_for_detached(
             Ok(false) => {
                 debug!(
                     jid = %full,
-                    "RouteToConnection: detached session expired between \
-                     enumeration and queue; dropping"
+                    "RouteToConnection: detached session gone between \
+                     enumeration and queue (resumed or expired); retrying \
+                     as live delivery"
                 );
+                not_queued.push(full);
             }
             Err(error) => {
                 warn!(
                     jid = %full,
                     %error,
                     "RouteToConnection: failed to record processed DM for \
-                     detached resource"
+                     detached resource; retrying as live delivery"
                 );
+                not_queued.push(full);
             }
         }
+    }
+    not_queued
+}
+
+/// Second-chance delivery for detached targets whose replay-buffer
+/// queueing did not land (see [`queue_processed_for_detached`]): try
+/// the live channel with the already-processed stanza. Best-effort —
+/// the shared pass already persisted archive/inbox, so a miss here
+/// degrades to MAM catch-up rather than loss.
+async fn retry_unqueued_detached_as_live(
+    deps: &Deps<'_>,
+    not_queued: Vec<jid::FullJid>,
+    processed: &Stanza,
+) {
+    for full in not_queued {
+        let outcome = deliver_direct_to_full_with_registered_remote(deps, &full, processed).await;
+        debug!(
+            jid = %full,
+            ?outcome,
+            "RouteToConnection: second-chance live delivery after failed \
+             detached queueing"
+        );
     }
 }

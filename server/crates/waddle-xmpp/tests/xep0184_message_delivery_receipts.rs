@@ -1,10 +1,12 @@
 //! XEP-0184: Message Delivery Receipts dedicated suite.
 //!
-//! #1247 conformance: XEP-0184 §"When to Acknowledge Receipt of a
-//! Message" assigns ack generation to the **receiving client** — a
-//! server MUST NOT fabricate `<received/>` acks on the recipient's
-//! behalf (dup receipts with conformant clients, false "delivered"
-//! confirmations, presence oracle). The server's whole role is to
+//! #1247 conformance: XEP-0184 §7 assigns ack generation to the
+//! **receiving entity** — the recipient's client — and an entity that
+//! does not support (or has disabled) receipts "MUST NOT return a
+//! receipt". A server fabricating `<received/>` on the recipient's
+//! behalf produces dup receipts with conformant clients, false
+//! "delivered" confirmations, and a presence oracle. The server's
+//! whole role is to
 //! route `<request/>`-carrying content messages and client-generated
 //! `<received/>` acks verbatim, which this suite pins:
 //!

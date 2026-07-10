@@ -463,12 +463,11 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
 /// - **Groupchat** rows stamp `by` = the room JID (`archived.to`).
 /// - **1:1** rows stamp the archive owner's `<stanza-id/>` recorded on
 ///   the row (`archived.stanza_id`, whose `by` is reconstructed from
-///   the archive JID at decode time). XEP-0359 §5 requires the
-///   archiving entity's id to survive replay; omitting it (the old
-///   groupchat-only behavior) left legacy 1:1 rows un-dedupable
-///   against live-delivered copies (#1266 item 8). Rows persisted with
-///   `stanza_xml` already carry the stamp inline and never reach this
-///   fallback.
+///   the archive JID at decode time). The live-delivered copy carries
+///   this stamp (XEP-0359 §3), so a reconstruction without it left
+///   legacy 1:1 rows un-dedupable against live copies (#1266 item 8).
+///   Rows persisted with `stanza_xml` already carry the stamp inline
+///   and never reach this fallback.
 fn append_reconstructed_stanza_id(
     builder: minidom::ElementBuilder,
     archived: &ArchivedMessage,

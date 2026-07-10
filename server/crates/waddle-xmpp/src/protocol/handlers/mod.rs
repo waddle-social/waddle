@@ -118,11 +118,12 @@ pub fn register_call_handlers(
 ///    route 1:1 to the destination connection, dispatch groupchat to
 ///    the room chain, or write to the local wire on the recipient pass.
 ///
-/// XEP-0184 delivery receipts are deliberately NOT generated here: the
-/// XEP assigns ack generation to the receiving *client*, so the server
-/// only routes `<request/>` content messages and client-generated
-/// `<received/>` acks verbatim (#1247 removed the server-side
-/// fabricator that used to run after [`route::RouteHandler`]).
+/// XEP-0184 delivery receipts are deliberately NOT generated here:
+/// XEP-0184 §7 assigns ack generation to the receiving *entity* (the
+/// recipient's client), so the server only routes `<request/>` content
+/// messages and client-generated `<received/>` acks verbatim (#1247
+/// removed the server-side fabricator that used to run after
+/// [`route::RouteHandler`]).
 pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(blocking_filter::BlockingFilterHandler));
     dispatcher.register_message(Arc::new(framework_envelope::FrameworkEnvelopeGuardHandler));
