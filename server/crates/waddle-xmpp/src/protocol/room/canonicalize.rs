@@ -96,10 +96,15 @@ impl RoomHandler for MucCanonicalizeHandler {
         //    anti-spoofing rewrite is unconditional: the invariant
         //    "nothing client-forgeable in a MUC service namespace ever
         //    reaches archive or reflection" must not depend on the
-        //    occupancy gate having run (defense-in-depth).
-        message
-            .payloads
-            .retain(|p| !crate::muc::is_muc_service_namespace(p.ns().as_str()));
+        //    occupancy gate having run (defense-in-depth). The
+        //    client-supplied XEP-0421 `<occupant-id/>` is stripped here
+        //    too: the snapshot-less early return below skips step 4's
+        //    strip-and-re-stamp, so without this a forged occupant-id
+        //    could otherwise survive on that defensive path.
+        message.payloads.retain(|p| {
+            !crate::muc::is_muc_service_namespace(p.ns().as_str())
+                && !crate::xep::xep0421::is_occupant_id_element(p)
+        });
 
         let Some(sender) = ctx.sender_snapshot() else {
             // OccupancyValidationHandler should have halted before us.
@@ -236,6 +241,73 @@ mod tests {
             RoomHandlerOutcome::Continue(e) => e,
             RoomHandlerOutcome::Halt(_) => panic!("canonicalize never halts"),
         }
+    }
+
+    /// Defense-in-depth (#1251 / Greptile P1): even on the snapshot-less
+    /// early-return path — where step 4's occupant-id strip-and-re-stamp
+    /// never runs — a client-forged MUC service payload AND a forged
+    /// XEP-0421 `<occupant-id/>` MUST be stripped before archive/reflection.
+    #[test]
+    fn anti_spoof_strip_runs_without_sender_snapshot() {
+        let room = bare("team@conf.example.com");
+        let sender = full("mallory@example.com/web");
+        let mut msg = groupchat(&room, &sender, "hi");
+        msg.payloads.push(
+            minidom::Element::builder("x", crate::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("item", crate::muc::presence::NS_MUC_USER)
+                        .attr(
+                            minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                            "owner",
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+        msg.payloads
+            .push(crate::xep::xep0421::build_occupant_id_element(
+                &crate::xep::xep0421::OccupantId::new("forged-id"),
+            ));
+
+        // Empty occupant list ⇒ `sender_snapshot()` is None ⇒ the
+        // handler takes the defensive early return after the strip.
+        let occupants: Vec<OccupantSnapshot> = Vec::new();
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let ctx = RoomContext {
+            room: &room,
+            sender_full: &sender,
+            occupants: &occupants,
+            durable_recipient_bare_jids: &[],
+            managed_room_forbidden: false,
+            room_moderated: false,
+            room_members_only: false,
+            pin_permission: crate::muc::PinPermission::default(),
+            id_gen: &id_gen,
+            occupant_id_secret: &secret,
+            sender_nickname_generation: 0,
+            project_sender_inbox: true,
+            synthetic_sender_authority: None,
+            dispatch_timestamp: 0,
+        };
+        assert!(ctx.sender_snapshot().is_none(), "test requires no snapshot");
+        match MucCanonicalizeHandler.handle(&mut msg, &ctx) {
+            RoomHandlerOutcome::Continue(_) => {}
+            RoomHandlerOutcome::Halt(_) => panic!("canonicalize never halts"),
+        }
+
+        assert!(
+            !msg.payloads
+                .iter()
+                .any(|p| p.ns() == crate::muc::presence::NS_MUC_USER),
+            "forged muc#user must be stripped even without a sender snapshot"
+        );
+        assert!(
+            !msg.payloads
+                .iter()
+                .any(crate::xep::xep0421::is_occupant_id_element),
+            "forged occupant-id must be stripped even without a sender snapshot"
+        );
     }
 
     #[test]
