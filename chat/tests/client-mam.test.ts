@@ -53,6 +53,13 @@ function createPager(xmpp: MamWasmClient, overrides: { currentXmpp?: () => MamWa
     roomJidForChannel: (channelId) => `${channelId}@muc.example.com`,
     isCurrentConnected: (candidate) =>
       overrides.currentXmpp ? overrides.currentXmpp() === candidate : xmpp === candidate,
+    // Mirrors BrowserXmppClient.mucPmOccupant for a known test room.
+    classifyMucPm: (message) => {
+      const counterpart = (message.from ?? "").startsWith(SELF) ? (message.to ?? "") : (message.from ?? "");
+      const [bare, nick] = [counterpart.split("/")[0], counterpart.split("/").slice(1).join("/")];
+      if (!nick || bare !== "room@muc.example.com") return undefined;
+      return { occupantJid: counterpart, nick };
+    },
   });
   return { pager, events, catchup, errors };
 }
@@ -183,6 +190,39 @@ describe("MamPager reconnect catch-up cursor handling", () => {
 
     expect(delivered).toEqual([]);
     expect(catchupInfos).toEqual([{ outcome: "aborted" }]);
+  });
+});
+
+describe("MUC-PM classification on the archive path (#1256)", () => {
+  test("catch-up re-emissions re-key MUC PMs by the occupant JID", async () => {
+    const pmFromOccupant: WasmArchivedMessage = {
+      mam_id: "pm-1",
+      id: "msg-pm-1",
+      from: "room@muc.example.com/juliet",
+      to: SELF,
+      body: "whispered",
+      message_type: "chat",
+      timestamp: "2026-07-01T10:00:01.000Z",
+    };
+    const xmpp: MamWasmClient = {
+      fetch_dm_history_page: async () => page([pmFromOccupant], { complete: true }),
+    };
+    const { pager, events } = createPager(xmpp);
+    const received: LiveDmMessage[] = [];
+    events.set("directMessage", (message) => received.push(message));
+
+    await pager.runReconnectCatchup(
+      xmpp,
+      [{ kind: "dm", key: "room@muc.example.com/juliet", since: "2026-07-01T09:00:00.000Z" }],
+      "fresh",
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      mucPm: true,
+      nick: "juliet",
+    });
   });
 });
 

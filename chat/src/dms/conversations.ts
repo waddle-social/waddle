@@ -250,8 +250,13 @@ export function useDirectMessageConversations(
       // Deliberately WITHOUT rememberInboxAccountedMessage: the live
       // arrival must still increment the occupant conversation once
       // (unread for offline-missed PMs stays server-unattributable
-      // until #1257 teaches the inbox about occupants).
-      if (xmppClient.value?.isKnownMucRoom?.(bare)) continue;
+      // until #1257 teaches the inbox about occupants). Also purge any
+      // phantom room-bare conversation an earlier session created
+      // before the room became known.
+      if (xmppClient.value?.isKnownMucRoom?.(bare)) {
+        merged.delete(bare);
+        continue;
+      }
       rememberInboxAccountedMessage(entry);
       merged.set(bare, mergeInboxEntry(merged.get(bare), entry));
     }
@@ -321,7 +326,11 @@ export function useDirectMessageConversations(
       const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
       mergeInboxConversations(directConversations);
       for (const conversation of directConversations) {
-        void currentClient.subscribeToPeerPresence(barePeerJid(conversation.partner)).catch(() => undefined);
+        const bare = barePeerJid(conversation.partner);
+        // #1256: never presence-subscribe to a MUC room bare JID (the
+        // server projects MUC PMs under the room until #1257).
+        if (xmppClient.value?.isKnownMucRoom?.(bare)) continue;
+        void currentClient.subscribeToPeerPresence(bare).catch(() => undefined);
       }
       void dmCallActivityHydration;
       return true;
@@ -433,6 +442,9 @@ export function useDirectMessageConversations(
       localReadAtByJid.value = {};
       restore();
       for (const c of conversations.value) {
+        // #1256: occupant rows have no presence identity of their own —
+        // subscribing would bare-fold to the room JID.
+        if (c.mucPm || c.peerJid.includes("/")) continue;
         xmppClient.value?.subscribeToPeerPresence(c.peerJid);
       }
       if (activePeerJid.value) hydratePeerDmCallActivity(activePeerJid.value);

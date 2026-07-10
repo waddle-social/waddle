@@ -345,6 +345,34 @@ describe("useDirectMessageConversations", () => {
     delete (globalThis as unknown as { window?: unknown }).window;
   });
 
+  test("restore keeps occupant keys even in blobs persisted before the mucPm flag", async () => {
+    const store = new Map<string, string>();
+    (globalThis as unknown as { window?: unknown }).window = {
+      sessionStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    };
+    // A blob written by an older build: occupant-keyed row without the
+    // flag. Normal DM rows are always persisted bare, so the resource
+    // heuristic must keep the key instead of folding it to the room.
+    store.set("waddle.chat.dms.alice@example.com", JSON.stringify({
+      conversations: [{
+        peerJid: "room@muc.example.com/juliet",
+        peerUsername: "juliet (room)",
+        unreadCount: 0,
+      }],
+      activePeerJid: null,
+    }));
+
+    const { composable } = makeComposable();
+    await nextTick();
+
+    expect(composable.conversations.value[0]?.peerJid).toBe("room@muc.example.com/juliet");
+    delete (globalThis as unknown as { window?: unknown }).window;
+  });
+
   test("inbox entries for known MUC rooms are skipped (no phantom room-bare DM)", async () => {
     const client = makeClient([
       {
@@ -368,6 +396,15 @@ describe("useDirectMessageConversations", () => {
       (jid: string) => jid === "room@muc.example.com";
     (client as unknown as { isMucPmPeer: (jid: string) => boolean }).isMucPmPeer = () => false;
     const { composable } = makeComposable({ client });
+
+    // A phantom room-bare conversation left over from before the room
+    // became known must be purged by the hydrate.
+    composable.receiveIncomingDm(makeDmMessage({
+      peerJid: "room@muc.example.com",
+      fromJid: "room@muc.example.com",
+      nick: "room",
+      body: "old misfiled row",
+    }));
 
     await composable.hydrateFromInbox();
 

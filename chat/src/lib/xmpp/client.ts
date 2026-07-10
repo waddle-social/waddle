@@ -2519,9 +2519,16 @@ export class BrowserXmppClient {
       }
     } else {
       const dedupeKey = this.carbonDedupKey(message);
-      if (dedupeKey && this.carbonDedupIds.has(dedupeKey)) {
-        this.carbonDedupIds.delete(dedupeKey);
-        return;
+      if (dedupeKey) {
+        if (this.carbonDedupIds.has(dedupeKey)) {
+          this.carbonDedupIds.delete(dedupeKey);
+          return;
+        }
+        // Remember direct deliveries too, so the pair collapses in
+        // BOTH orders (direct-then-carbon as well as carbon-then-
+        // direct) and an SM-replayed direct copy drops like a
+        // replayed carbon does.
+        this.rememberCarbonId(dedupeKey);
       }
     }
     if (message.call_event) {
