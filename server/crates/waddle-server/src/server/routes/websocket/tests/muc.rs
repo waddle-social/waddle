@@ -2698,6 +2698,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
             "muc#roomconfig_maxusers",
             "muc#roomconfig_enablelogging",
             waddle_xmpp::xep::FIELD_FORUM_MODE,
+            "muc#roomconfig_allowpm",
             waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
         ]
     );

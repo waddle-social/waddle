@@ -124,6 +124,14 @@ pub(super) async fn apply_muc_owner_config(
             if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
                 config.forum = forum;
             }
+            // XEP-0045 muc#roomconfig_allowpm (#1257): who may send
+            // §7.5 private messages. Unknown values keep the previous
+            // policy (mirrors the pin-permission fallback rule).
+            if let Some(value) = data_form_value(form, "muc#roomconfig_allowpm") {
+                if let Some(allow_pm) = waddle_xmpp::muc::AllowPm::from_form_value(&value) {
+                    config.allow_pm = allow_pm;
+                }
+            }
             // #415: per-room pin permission policy.
             if let Some(value) =
                 data_form_value(form, waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION)

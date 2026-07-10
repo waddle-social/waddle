@@ -6,6 +6,7 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::server::routes::websocket::WebSocketState;
+use tracing::warn;
 
 pub(super) async fn handle_muc_direct_message(
     incoming: &Message,
@@ -73,7 +74,7 @@ async fn handle_muc_private_message(
             "Internal server error.",
         )]);
     };
-    let Some(sender_nick) = snapshot.room.find_nick_by_real_jid(bound_jid) else {
+    let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
@@ -82,7 +83,19 @@ async fn handle_muc_private_message(
             "Only room occupants may send private messages.",
         )]);
     };
-    if snapshot.room.get_occupant(&target_nick).is_none() {
+    let sender_nick = sender_occupant.nick.clone();
+    // XEP-0045 `muc#roomconfig_allowpm` (#1257): honor the room's PM
+    // policy against the sender's current role.
+    if !snapshot.room.config.allow_pm.permits(sender_occupant.role) {
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            ErrorType::Cancel,
+            DefinedCondition::Forbidden,
+            "Private messages are not allowed for your role in this room.",
+        )]);
+    }
+    let Some(target_occupant) = snapshot.room.get_occupant(&target_nick) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
@@ -90,9 +103,11 @@ async fn handle_muc_private_message(
             DefinedCondition::ItemNotFound,
             "Requested occupant not found.",
         )]);
-    }
+    };
+    let recipient_bare = target_occupant.real_jid.to_bare();
+    let recipient_sessions = snapshot.room.get_occupant_sessions(&target_nick);
 
-    let from_room_jid = match room_jid.clone().with_resource_str(sender_nick) {
+    let from_room_jid = match room_jid.clone().with_resource_str(&sender_nick) {
         Ok(jid) => jid,
         Err(_) => {
             return Some(vec![message_error_frame(
@@ -113,19 +128,148 @@ async fn handle_muc_private_message(
         &room_jid,
         &state.deps.occupant_id_secret,
     );
-    for recipient in snapshot.room.get_occupant_sessions(&target_nick) {
-        let mut routed = incoming.clone();
-        routed.from = Some(jid::Jid::from(from_room_jid.clone()));
+
+    // Canonical relayed form (XEP-0045 §7.5): from the sender's occupant
+    // JID, client MUC-service payloads stripped, empty muc#user marker +
+    // server occupant-id stamped (#1251/#1268), plus the recipient
+    // archive's XEP-0359 stanza-id so the live copy and the MAM row
+    // share one id space.
+    let recipient_sid = waddle_xmpp_core::xep0359::StanzaId::new(
+        uuid::Uuid::new_v4().to_string(),
+        jid::Jid::from(recipient_bare.clone()),
+    );
+    let mut relayed = incoming.clone();
+    relayed.from = Some(jid::Jid::from(from_room_jid.clone()));
+    canonicalize_muc_private_payloads(&mut relayed, &sender_occupant_id);
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut relayed, &recipient_sid);
+
+    // #1257: reliable delivery. Replace the previous fire-and-forget
+    // live-only `try_send_to` (which silently lost the PM for a
+    // recipient mid-SM-resume, detached, backpressured, or on another
+    // node) with the same actor delivery path 1:1 direct frames use:
+    // live channel first, XEP-0198 detached replay buffer as fallback,
+    // clustered remote-resource relay for occupant sessions whose
+    // socket lives on another node.
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let mut any_session_handled = false;
+    for recipient in &recipient_sessions {
+        let mut routed = relayed.clone();
         routed.to = Some(jid::Jid::from(recipient.clone()));
-        canonicalize_muc_private_payloads(&mut routed, &sender_occupant_id);
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&recipient, Stanza::Message(routed));
+        let stanza = Stanza::Message(routed);
+        let outcome = deliver_pm_to_session(state, &deps, recipient, &stanza).await;
+        if outcome.suppresses_fallback() {
+            any_session_handled = true;
+        } else {
+            warn!(
+                room = %room_jid,
+                recipient = %recipient,
+                outcome = ?outcome,
+                "MUC private message: session delivery failed"
+            );
+        }
+    }
+    // XEP-0045 §7.5: the service is responsible for delivering the PM.
+    // If NO session of the target occupant could be reached (all
+    // confirmed-unavailable or dropped), tell the sender instead of
+    // silently losing the message.
+    if !any_session_handled {
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            ErrorType::Wait,
+            DefinedCondition::RecipientUnavailable,
+            "The occupant could not be reached; please retry.",
+        )]);
     }
 
-    Some(Vec::new())
+    // #1257: archive + carbons through the same interpreter arms the 1:1
+    // pipeline uses. Both user archives key the conversation by the room
+    // bare JID; body-less PMs (chat states etc.) follow XEP-0313 §5.1.3
+    // and are not archived. Per XEP-0280's MUC rules the OUTBOUND local
+    // PM is carbon-copied to the sender's other carbon-enabled resources
+    // (`<sent/>`), while inbound copies are NOT carboned — the service
+    // already replicated the PM to every session of the target nick.
+    let sender_bare = bound_jid.to_bare();
+    let sender_sid = waddle_xmpp_core::xep0359::StanzaId::new(
+        uuid::Uuid::new_v4().to_string(),
+        jid::Jid::from(sender_bare.clone()),
+    );
+    let mut sent_form = incoming.clone();
+    sent_form.from = Some(jid::Jid::from(bound_jid.clone()));
+    sent_form.to = Some(jid::Jid::from(target_occupant_jid.clone()));
+    canonicalize_muc_private_payloads(&mut sent_form, &sender_occupant_id);
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut sent_form, &sender_sid);
+
+    let mut events: Vec<waddle_xmpp::protocol::OutboundEvent> = Vec::new();
+    if !incoming.bodies.is_empty() {
+        let mut recipient_archive = relayed.clone();
+        recipient_archive.to = Some(jid::Jid::from(recipient_bare.clone()));
+        events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            archive_jid: recipient_bare.clone(),
+            from: room_jid.clone(),
+            to: recipient_bare.clone(),
+            message: Box::new(recipient_archive),
+        });
+        // A self-PM (own nick) would otherwise archive twice into the
+        // same owner's archive.
+        if recipient_bare != sender_bare {
+            events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: sender_bare.clone(),
+                from: sender_bare.clone(),
+                to: room_jid.clone(),
+                message: Box::new(sent_form.clone()),
+            });
+        }
+    }
+    events.push(waddle_xmpp::protocol::OutboundEvent::SendCarbons {
+        owner: sender_bare,
+        message: Box::new(sent_form),
+        kind: waddle_xmpp::protocol::CarbonKind::Sent,
+        exclude: vec![bound_jid.clone()],
+    });
+    let nested = crate::server::routes::interpret::interpret(events, &deps).await;
+    Some(nested.frames)
+}
+
+/// Deliver one MUC private-message wire copy to one occupant session
+/// (#1257): clustered remote-resource relay first (the session's socket
+/// may live on another node), then the actor path with its XEP-0198
+/// detached-buffer fallback — the same reliability envelope 1:1 direct
+/// frames get.
+async fn deliver_pm_to_session(
+    state: &WebSocketState,
+    deps: &crate::server::routes::interpret::Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> crate::server::routes::interpret::FullJidDeliveryOutcome {
+    #[cfg(feature = "clustering")]
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        if let Some(outcome) = bridge
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            )
+            .await
+        {
+            return outcome;
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    let _ = state;
+    crate::server::routes::interpret::deliver_direct_to_full(
+        deps.user_registry,
+        deps.sm_session_registry,
+        target,
+        stanza,
+    )
+    .await
 }
 
 async fn handle_muc_mediated_decline(
