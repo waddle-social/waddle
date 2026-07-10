@@ -256,6 +256,60 @@ impl InMemorySmSessionRegistry {
         .await
     }
 
+    /// Whether ANY resumable session exists for this exact full JID —
+    /// in this node's memory (detached or resume-claimed) OR in the
+    /// durable persistence shared across the cluster (#1249, SM-hunter
+    /// review on PR #1277). The remote-MUC reconciliation janitor gates
+    /// occupancy re-drives on this: a session that detached on this
+    /// node and was later resume-stolen by another node leaves no local
+    /// trace, but its durable row (owned by the stealing node) proves
+    /// the occupancy is still legitimately resumable and MUST NOT be
+    /// evicted. Fail-closed: a durable read error reports `true` so the
+    /// caller skips the eviction.
+    pub async fn any_resumable_session_for_full_jid(&self, jid: &FullJid) -> bool {
+        let in_memory = {
+            let matches_memory =
+                |sessions: &std::collections::HashMap<String, super::super::DetachedSession>| {
+                    sessions
+                        .values()
+                        .any(|session| !session.is_expired() && session.jid == *jid)
+                };
+            let sessions = self.sessions.read();
+            let claimed = self.claimed_sessions.read();
+            match (sessions, claimed) {
+                (Ok(sessions), Ok(claimed)) => {
+                    matches_memory(&sessions) || matches_memory(&claimed)
+                }
+                // Poisoned lock: fail closed.
+                _ => return true,
+            }
+        };
+        if in_memory {
+            return true;
+        }
+        let Some(persistence) = self.persistence.as_ref() else {
+            return false;
+        };
+        match persistence.list_all_sessions().await {
+            Ok(rows) => {
+                let now = chrono::Utc::now();
+                rows.iter().any(|row| {
+                    row.jid == *jid
+                        && now.signed_duration_since(row.detached_at).to_std().ok()
+                            <= Some(row.max_resume_duration)
+                })
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %jid,
+                    %error,
+                    "any_resumable_session_for_full_jid: durable read failed; failing closed"
+                );
+                true
+            }
+        }
+    }
+
     /// List all detached resources for a bare JID, including resources that
     /// were not available at detach time.
     pub async fn detached_resources_for_user(

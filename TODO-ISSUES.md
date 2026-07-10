@@ -138,11 +138,11 @@ in parallel; within a bundle, top-to-bottom.
 3. ✅ #1268 — XEP-0421 occupant-id gaps (PM, destroy presence, MAM real-JID for non-anon rooms). DONE (PR #1274)
 
 **J5 — MUC delivery / self-ping reliability `[bundle]`**
-1. #1249 — **High**: cross-node disconnect cleanup ghosts occupants — root cause of the recurring prod `failed to relay remote MUC unavailable during disconnect cleanup`. Relates #1195.
-2. #1253 — self-ping broken for multi-session nicks → rejoin loop (#1221 territory).
-3. #1254 — reaped/dormant room self-ping returns `item-not-found`, read by clients as still-joined → silently stop receiving.
-4. #1257 — MUC PM delivery fire-and-forget: no SM fallback/archive/carbon/occupant-id.
-5. #1263 — reflection/presence silently lost on `DroppedFull` / room-lookup failure.
+1. ✅ #1249 — **High**: cross-node disconnect cleanup ghosts occupants — typed `MucProxyRouteDecision` splits benign local-room from harmful origin-claim-elsewhere, remote-resource origin fixes the second-device case, reconciliation janitor re-drives failed relays. DONE (PR #1277)
+2. ✅ #1253 — self-ping now matches all `occupant_sessions` for the nick (multi-session rejoin loop fixed). DONE (PR #1277)
+3. ✅ #1254 — reaped/dormant room self-ping answers `<not-acceptable/>` (XEP-0410 not-joined) so clients rejoin. DONE (PR #1277)
+4. ✅ #1257 — MUC PMs route through the SM/detached delivery envelope + XEP-0313 archives + XEP-0280 sent-carbons + `muc#roomconfig_allowpm`. DONE (PR #1277)
+5. ✅ #1263 — `<item-not-found/>` bounce for nonexistent rooms, bounded `DroppedFull` retries + drop counter on reflection/presence fan-out. DONE (PR #1277)
 
 **J6 — Disco truthfulness**
 1. #1259 — duplicate feature + duplicate `muc#roominfo` FORM_TYPE make disco#info ill-formed (XEP-0115 §5.4).

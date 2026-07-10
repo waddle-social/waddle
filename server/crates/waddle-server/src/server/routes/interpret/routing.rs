@@ -320,6 +320,21 @@ pub(super) async fn run_fanout_recipient_pass(
 /// interpreter loop.
 const ACTOR_DELIVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// #1263: bounded in-line retry schedule for a `DroppedFull` actor-path
+/// delivery — the recipient's outbound channel was full, the frame was
+/// provably never enqueued, and a short pause usually lets the consumer
+/// drain. Kept deliberately tight (25 ms total worst case): the retries
+/// run inside the sender's interpreter, so across a sequential
+/// reflection fan-out with several backpressured recipients the added
+/// sender-loop latency stays far below the existing 2 s per-ask bound
+/// (SM review on PR #1277). The MUC presence fan-out does NOT use this
+/// schedule — its join/leave broadcast loops are non-blocking by
+/// contract and retry once without sleeping.
+const DROPPED_FULL_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(5),
+    std::time::Duration::from_millis(20),
+];
+
 /// Which recipient-pass semantics the actor should stamp on the queued frame.
 #[derive(Clone, Copy)]
 enum ActorSendKind {
@@ -509,35 +524,67 @@ async fn deliver_one_via_actor(
     // types; classify each terminal failure into the shared `ActorSendFailure`
     // disposition (plus a `String` rendering for the human-facing log below)
     // before unifying.
-    let outcome: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> =
-        match kind {
-            ActorSendKind::Direct => user_actor
-                .ask(waddle_xmpp::registry::TrySendDirect {
-                    jid: target.clone(),
-                    stanza: stanza.clone(),
-                })
-                .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
-                .reply_timeout(ACTOR_DELIVER_TIMEOUT)
-                .await
-                .map_err(|error| (classify_send_error(&error), error.to_string())),
-            ActorSendKind::Peer => user_actor
-                .ask(waddle_xmpp::registry::TrySendPeer {
-                    jid: target.clone(),
-                    stanza: stanza.clone(),
-                })
-                .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
-                .reply_timeout(ACTOR_DELIVER_TIMEOUT)
-                .await
-                .map_err(|error| (classify_send_error(&error), error.to_string())),
-        };
+    //
+    // #1263: a `DroppedFull` outcome means the recipient's 256-slot channel
+    // was momentarily full — the frame was provably NEVER enqueued, so an
+    // in-line retry cannot double-deliver and preserves per-sender ordering
+    // (this call blocks the sender's interpreter until it resolves). Retry
+    // on the bounded [`DROPPED_FULL_RETRY_DELAYS`] schedule before
+    // declaring the frame lost, so a recipient that is merely catching up
+    // (e.g. draining a MAM page) doesn't silently miss a groupchat
+    // reflection.
+    let mut retry_delays = DROPPED_FULL_RETRY_DELAYS.iter();
+    let outcome: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> = loop {
+        let attempt: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> =
+            match kind {
+                ActorSendKind::Direct => user_actor
+                    .ask(waddle_xmpp::registry::TrySendDirect {
+                        jid: target.clone(),
+                        stanza: stanza.clone(),
+                    })
+                    .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+                    .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+                    .await
+                    .map_err(|error| (classify_send_error(&error), error.to_string())),
+                ActorSendKind::Peer => user_actor
+                    .ask(waddle_xmpp::registry::TrySendPeer {
+                        jid: target.clone(),
+                        stanza: stanza.clone(),
+                    })
+                    .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+                    .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+                    .await
+                    .map_err(|error| (classify_send_error(&error), error.to_string())),
+            };
+        if matches!(
+            attempt,
+            Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull)
+        ) {
+            if let Some(delay) = retry_delays.next() {
+                tokio::time::sleep(*delay).await;
+                continue;
+            }
+        }
+        break attempt;
+    };
 
     match outcome {
         Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
             debug!(jid = %target, "actor delivery: queued for recipient");
             FullJidDeliveryOutcome::Delivered
         }
+        // Still full after every retry — surface the loss instead of the
+        // previous silent debug-level drop (#1263). The recipient stays
+        // registered: a wedged consumer is reaped by the send-stall
+        // backstop / closed-channel eviction, not by a transient full
+        // window.
         Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
-            debug!(jid = %target, "actor delivery: recipient channel full; dropped");
+            waddle_xmpp::prometheus::increment_delivery_retry_exhausted_drop();
+            warn!(
+                jid = %target,
+                retries = DROPPED_FULL_RETRY_DELAYS.len(),
+                "actor delivery: recipient channel still full after bounded retries; dropped"
+            );
             FullJidDeliveryOutcome::Dropped
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)

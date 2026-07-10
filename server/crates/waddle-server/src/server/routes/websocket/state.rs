@@ -142,6 +142,26 @@ impl RemoteMucMemberships {
             })
     }
 
+    /// Distinct occupant full JIDs that still hold at least one ACTIVE
+    /// remote-room membership (#1249). The reconciliation janitor scans
+    /// these to re-drive unavailable relays whose first attempt failed
+    /// (remote node unreachable, claim held elsewhere) — without this,
+    /// a failed cleanup ghosted the occupant on the remote node until
+    /// the same full JID happened to disconnect again.
+    pub fn occupants_with_active_memberships(&self) -> Vec<FullJid> {
+        let mut occupants: Vec<FullJid> = self
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.value() {
+                RemoteMucMembershipEntry::Active(_) => Some(entry.key().0.clone()),
+                RemoteMucMembershipEntry::Tombstone { .. } => None,
+            })
+            .collect();
+        occupants.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        occupants.dedup();
+        occupants
+    }
+
     pub fn take_for_occupant(&self, occupant: &FullJid) -> Vec<RemoteMucMembershipSnapshot> {
         let snapshots: Vec<RemoteMucMembershipSnapshot> = self
             .entries
@@ -245,6 +265,42 @@ mod remote_muc_membership_tests {
         format!("{local}@muc.example.com")
             .parse()
             .expect("bare jid")
+    }
+
+    /// #1249: the janitor enumeration surfaces occupants with ACTIVE
+    /// memberships only — tombstones (cleanup in flight) are invisible,
+    /// and restoring a snapshot makes the occupant visible again so the
+    /// re-drive loop converges.
+    #[test]
+    fn occupants_with_active_memberships_tracks_restore_and_forget() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant = full_jid("carol@example.com/web");
+        let room = room_bare_jid("reconcile");
+
+        assert!(memberships.occupants_with_active_memberships().is_empty());
+        memberships.record_join(&occupant, &room, "carol");
+        assert_eq!(
+            memberships.occupants_with_active_memberships(),
+            vec![occupant.clone()]
+        );
+
+        let snapshots = memberships.take_for_occupant(&occupant);
+        assert_eq!(snapshots.len(), 1);
+        assert!(
+            memberships.occupants_with_active_memberships().is_empty(),
+            "a tombstoned membership must not be re-driven concurrently"
+        );
+
+        memberships.restore_snapshot_if_current(&snapshots[0]);
+        assert_eq!(
+            memberships.occupants_with_active_memberships(),
+            vec![occupant.clone()],
+            "a restored (failed-relay) membership re-enters the janitor scan"
+        );
+
+        let snapshots = memberships.take_for_occupant(&occupant);
+        memberships.forget_snapshot_if_current(&snapshots[0]);
+        assert!(memberships.occupants_with_active_memberships().is_empty());
     }
 
     #[test]

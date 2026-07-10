@@ -2762,3 +2762,204 @@ mod user_reaper_tests {
         assert_eq!(counts.remaining, 1);
     }
 }
+
+/// Interval for the remote-MUC-membership reconciliation janitor
+/// (#1249). 30s bounds how long a ghost occupant survives a failed
+/// disconnect-cleanup relay while keeping the sweep trivially cheap
+/// (an in-memory DashMap scan; the relay only runs for entries whose
+/// occupant has no local presence at all).
+#[cfg(feature = "clustering")]
+const REMOTE_MUC_MEMBERSHIP_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Collect the occupants whose remote MUC memberships need a cleanup
+/// re-drive (#1249): an ACTIVE membership entry whose occupant full JID
+/// has no live connection-registry entry here and no resumable
+/// XEP-0198 session anywhere (this node's memory OR the shared durable
+/// store). Such an entry can only be the residue
+/// of a failed (or missed) disconnect cleanup — the join path records
+/// memberships strictly while the connection is registered, and both
+/// graceful-leave and successful cleanup forget them.
+///
+/// A detached-but-resumable session keeps its occupancy on purpose
+/// (XEP-0198 resume re-attaches to the same room state), so it is NOT a
+/// candidate; SM expiry runs its own cleanup pass which restores the
+/// membership on failure and thereby feeds this janitor.
+#[cfg(feature = "clustering")]
+async fn collect_remote_muc_reconcile_candidates(state: &WebSocketState) -> Vec<jid::FullJid> {
+    let mut candidates = Vec::new();
+    for occupant in state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .occupants_with_active_memberships()
+    {
+        if state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&occupant)
+            .is_some()
+        {
+            continue;
+        }
+        // Cross-node guard (SM review P1 on PR #1277): a session that
+        // detached HERE and was resume-stolen by another node leaves no
+        // local trace, but its durable row (now owned by the stealing
+        // node) proves the occupancy is still legitimately resumable.
+        // The probe checks this node's memory AND the shared durable
+        // store, and fails closed on read errors.
+        if state
+            .deps
+            .protocol
+            .sm_session_registry
+            .any_resumable_session_for_full_jid(&occupant)
+            .await
+        {
+            continue;
+        }
+        candidates.push(occupant);
+    }
+    candidates
+}
+
+/// #1249: periodically re-drive remote MUC unavailable relays whose
+/// disconnect-time attempt failed (remote node unreachable, claim
+/// lookup failure, origin `UserActor` claim held by another node).
+/// `cleanup_remote_muc_presence` restores the membership snapshot on
+/// every failed relay, so this janitor retries until the remote side
+/// recovers — making cross-node occupancy cleanup convergent instead of
+/// one-shot (the root cause of the recurring production error
+/// `failed to relay remote MUC unavailable during disconnect cleanup`).
+#[cfg(feature = "clustering")]
+pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(REMOTE_MUC_MEMBERSHIP_RECONCILE_INTERVAL);
+        // A sweep slower than the interval (serial relays against an
+        // unreachable node) must not burst-fire missed ticks into a
+        // continuous retry loop (race review P2 on PR #1277).
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            let candidates = collect_remote_muc_reconcile_candidates(&state).await;
+            if candidates.is_empty() {
+                continue;
+            }
+            info!(
+                candidates = candidates.len(),
+                "remote MUC reconciler: re-driving unavailable relays for departed occupants"
+            );
+            for occupant in candidates {
+                // Re-check liveness IMMEDIATELY before the re-drive
+                // (codex review P1 on PR #1277): the candidate list was
+                // collected before earlier awaited re-drives, and the
+                // same full JID may have reconnected in that gap. A
+                // registered connection means the occupancy is
+                // legitimate again; the membership-generation guards
+                // inside the cleanup protect the map but cannot undo a
+                // relayed remote leave.
+                if state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_entry(&occupant)
+                    .is_some()
+                {
+                    continue;
+                }
+                routes::websocket::redrive_remote_muc_cleanup(&state, &occupant).await;
+            }
+        }
+    });
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod remote_muc_reconciler_tests {
+    use super::collect_remote_muc_reconcile_candidates;
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+    fn room(local: &str) -> jid::BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("room jid")
+    }
+
+    fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
+        DetachedSession {
+            stream_id: stream_id.to_string(),
+            user_id: jid.to_bare().to_string(),
+            jid,
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(120),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        }
+    }
+
+    /// #1249: an ACTIVE remote membership whose occupant has neither a
+    /// live connection nor a detached SM session is a re-drive
+    /// candidate; live and detached occupants are skipped (their
+    /// occupancy is legitimate), and a tombstoned membership (cleanup
+    /// in flight) is not re-driven.
+    #[tokio::test]
+    async fn reconciler_targets_only_fully_departed_occupants() {
+        let state = create_test_websocket_state().await;
+        let memberships = &state.deps.protocol.remote_muc_memberships;
+
+        // Fully departed: candidate.
+        let ghost: jid::FullJid = "ghost@example.com/web".parse().unwrap();
+        memberships.record_join(&ghost, &room("ghost-room"), "ghost");
+
+        // Live connection: not a candidate.
+        let live: jid::FullJid = "live@example.com/web".parse().unwrap();
+        memberships.record_join(&live, &room("live-room"), "live");
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let _owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(live.clone(), tx);
+
+        // Detached-but-resumable session: not a candidate.
+        let detached: jid::FullJid = "detached@example.com/web".parse().unwrap();
+        memberships.record_join(&detached, &room("detached-room"), "detached");
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(detached_session("stream-detached", detached.clone()))
+            .await
+            .expect("store detached session");
+
+        // Tombstoned membership (cleanup already in flight): no ACTIVE
+        // entry, so not a candidate.
+        let tombstoned: jid::FullJid = "tombstoned@example.com/web".parse().unwrap();
+        memberships.record_join(&tombstoned, &room("tomb-room"), "tombstoned");
+        let taken = memberships.take_for_occupant(&tombstoned);
+        assert_eq!(taken.len(), 1);
+
+        let candidates = collect_remote_muc_reconcile_candidates(&state).await;
+        assert_eq!(
+            candidates,
+            vec![ghost],
+            "only the fully departed occupant is re-driven"
+        );
+    }
+}

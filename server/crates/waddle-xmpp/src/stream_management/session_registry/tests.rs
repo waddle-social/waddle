@@ -2900,3 +2900,96 @@ async fn invalidate_sessions_for_jid_defers_claim_release_to_confirm_drained() {
         .await
         .expect("invalidated session's claim must be released once confirm_drained runs");
 }
+
+/// #1249 cross-node guard: `any_resumable_session_for_full_jid` must
+/// see sessions that exist ONLY in the shared durable store (this
+/// node's memory has no trace after a cross-node resume-steal), honor
+/// row expiry, and fail closed when the durable read errors.
+#[tokio::test]
+async fn any_resumable_session_probe_covers_durable_rows_and_fails_closed() {
+    use super::super::persistence::{InMemorySmPersistence, PersistedSession};
+
+    let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "roamer@example.com/laptop".parse().expect("jid");
+
+    // No memory, no durable row: not resumable.
+    assert!(!registry.any_resumable_session_for_full_jid(&jid).await);
+
+    // Durable-only row (as left behind by a cross-node steal): resumable.
+    let durable_row = |stream_id: &str, detached_at| PersistedSession {
+        stream_id: crate::pending_delivery::SmSessionId::new(stream_id),
+        user_id: jid.to_bare().to_string(),
+        jid: jid.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        max_resume_time: Some(120),
+        detached_at,
+        max_resume_duration: std::time::Duration::from_secs(120),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+    };
+    storage
+        .upsert_session(durable_row("stream-durable", Utc::now()))
+        .await
+        .expect("upsert durable row");
+    assert!(
+        registry.any_resumable_session_for_full_jid(&jid).await,
+        "a durable-only row proves the occupancy is still resumable"
+    );
+
+    // Expired durable row: no longer resumable.
+    storage
+        .delete_session(&crate::pending_delivery::SmSessionId::new("stream-durable"))
+        .await
+        .expect("remove fresh row");
+    storage
+        .upsert_session(durable_row(
+            "stream-expired",
+            Utc::now() - chrono::Duration::seconds(600),
+        ))
+        .await
+        .expect("upsert expired row");
+    assert!(
+        !registry.any_resumable_session_for_full_jid(&jid).await,
+        "an expired durable row must not block reconciliation"
+    );
+
+    // A clock-skewed row (detached_at in the future → negative elapsed)
+    // counts as resumable: fail closed.
+    storage
+        .delete_session(&crate::pending_delivery::SmSessionId::new("stream-expired"))
+        .await
+        .expect("remove expired row");
+    storage
+        .upsert_session(durable_row(
+            "stream-skewed",
+            Utc::now() + chrono::Duration::seconds(60),
+        ))
+        .await
+        .expect("upsert skewed row");
+    assert!(
+        registry.any_resumable_session_for_full_jid(&jid).await,
+        "clock skew must fail closed (treated as resumable)"
+    );
+
+    // Different full JID never matches.
+    let other: FullJid = "roamer@example.com/phone".parse().expect("jid");
+    storage
+        .delete_session(&crate::pending_delivery::SmSessionId::new("stream-skewed"))
+        .await
+        .expect("remove skewed row");
+    storage
+        .upsert_session(durable_row("stream-mine", Utc::now()))
+        .await
+        .expect("upsert row");
+    assert!(!registry.any_resumable_session_for_full_jid(&other).await);
+}

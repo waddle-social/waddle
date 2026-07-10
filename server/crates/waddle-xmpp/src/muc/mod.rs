@@ -49,7 +49,7 @@ pub use presence::{
     parse_muc_presence, DestroyRequest, HistoryRequest, MucJoinRequest, MucLeaveRequest,
     MucPresenceAction, MucPresenceStatus, MucPresenceUpdateRequest, OutboundMucPresence,
 };
-pub use room::{is_remote_jid, MucRoom, Occupant, RoomConfig};
+pub use room::{is_remote_jid, AllowPm, MucRoom, Occupant, RoomConfig};
 pub use room_actor::RoomActorError;
 pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
 pub use room_registry_actor::RoomRegistryError;
