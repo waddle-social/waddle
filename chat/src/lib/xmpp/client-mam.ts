@@ -12,7 +12,7 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import { buildDmCallOutcomeAnchor, type DmCallOutcomeAnchor } from "@/lib/calls/dm-call-anchor";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
-import { bareJidKey, barePeerJid } from "./jid";
+import { bareJidKey, barePeerJid, jidDomain } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { classifyMamError, isMamCursorNotFound } from "./mam";
 import type { ReconnectCatchup } from "./reconnect-catchup";
@@ -235,13 +235,17 @@ export class MamPager {
     return barePeerJid(this.deps.sessionJid());
   }
 
-  /** XEP-0359 archiving authorities for a DM. §Business Rules: "for
-   * one-on-one messages the assigning entity is the account" — the
-   * server stamps `by=<own bare>` and only strips spoofed elements
-   * claiming that bare, so nothing else (not even the server domain)
-   * may be trusted for dedupe. */
+  /** XEP-0359 archiving authorities for a DM: the user's own account
+   * bare JID (what the Waddle server stamps) plus its server domain —
+   * the SAME set the DM decode path (`assignedStanzaIdBy`) adopts as
+   * the row identity/wireIds, so catch-up seen-ids can never diverge
+   * from the ids the timeline rows carry (a divergence would re-emit
+   * or strand rows). Sender-spoofed `by=<domain>` elements are a
+   * pre-existing server-side strip gap tracked in #1275; both layers
+   * tighten together when the server strips them. */
   private dmStanzaIdAuthorities(): string[] {
-    return [this.selfBare()];
+    const selfBare = this.selfBare();
+    return [selfBare, jidDomain(selfBare)];
   }
 
   private roomPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {

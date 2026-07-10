@@ -430,7 +430,11 @@ export class BrowserXmppClient {
     string,
     { promise: Promise<void>; requestedNick: string; resolve: () => void; reject: (error: Error) => void }
   >();
-  private readonly carbonDedupIds = new Set<string>();
+  // XEP-0280 dedupe memory: key → which representation was seen first
+  // ("carbon" or "direct"). The source disambiguates a replayed carbon
+  // (drop) from a carbon completing a direct-first pair (pass through
+  // for its authoritative forwarded <delay/>).
+  private readonly carbonDedupIds = new Map<string, "carbon" | "direct">();
   readonly catchup: ReconnectCatchup;
   private readonly resumePersistence: ResumePersistence;
   // Per-resume gate: non-zero while `handleSessionReady` is draining
@@ -2514,8 +2518,20 @@ export class BrowserXmppClient {
       // the set.
       const dedupeKey = this.carbonDedupKey(message);
       if (dedupeKey) {
-        if (this.carbonDedupIds.has(dedupeKey)) return; // SM-replayed carbon
-        this.rememberCarbonId(dedupeKey);
+        const seenAs = this.carbonDedupIds.get(dedupeKey);
+        if (seenAs === "carbon") return; // SM-replayed carbon copy
+        if (seenAs === "direct") {
+          // The DIRECT copy arrived first and rendered with a live
+          // fallback timestamp. If this carbon carries the forwarded
+          // <delay/>, let it through: the merge layer collapses it by
+          // wire id and `pickAuthoritativeTimestamp` upgrades the
+          // fallback stamp — dropping it would strand the row on
+          // `Date.now()` (#1267 item 6). Timestamp-less duplicates drop.
+          this.rememberCarbonId(dedupeKey, "carbon");
+          if (!message.timestamp) return;
+        } else {
+          this.rememberCarbonId(dedupeKey, "carbon");
+        }
       }
     } else {
       const dedupeKey = this.carbonDedupKey(message);
@@ -2528,7 +2544,7 @@ export class BrowserXmppClient {
         // BOTH orders (direct-then-carbon as well as carbon-then-
         // direct) and an SM-replayed direct copy drops like a
         // replayed carbon does.
-        this.rememberCarbonId(dedupeKey);
+        this.rememberCarbonId(dedupeKey, "direct");
       }
     }
     if (message.call_event) {
@@ -2616,11 +2632,10 @@ export class BrowserXmppClient {
         converted.mucPm = true;
         if (barePeerJid(message.from ?? "") !== selfBare) converted.nick = occupant.nick;
       }
-      // XEP-0359: for 1:1 the assigning entity is the ACCOUNT — the
-      // server stamps by=<own bare> and only strips spoofed elements
-      // claiming that same bare, so a by=<domain> element is
-      // sender-controlled and must not feed dedupe.
-      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message, [selfBare]));
+      // XEP-0359: the DM authorities mirror the decode path
+      // (`assignedStanzaIdBy`): account bare + server domain. Seen-ids
+      // and row wireIds must never diverge (see dmStanzaIdAuthorities).
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message, [selfBare, jidDomain(selfBare)]));
       this.events.emit("directMessage", converted);
     }
   }
@@ -2643,16 +2658,26 @@ export class BrowserXmppClient {
   private carbonDedupKey(message: InboundWasmMessage): string | undefined {
     if (message.is_muc || !message.id) return undefined;
     if (message.chat_state && !message.body) return undefined;
-    return `${bareJidKey(message.from ?? "")}|${message.id}`;
+    // Sender scope keeps the folded bare (case-insensitive per RFC 7622)
+    // but preserves the resource verbatim: MUC-PM senders are occupant
+    // JIDs, and two occupants of the same room must never share a key —
+    // with direct deliveries remembered too, a bare-folded key would let
+    // one occupant's id swallow another occupant's message.
+    const from = message.from ?? "";
+    const slash = from.indexOf("/");
+    const sender = slash >= 0 ? `${bareJidKey(from)}/${from.slice(slash + 1)}` : bareJidKey(from);
+    return `${sender}|${message.id}`;
   }
 
-  /** Bounded XEP-0280 dedupe memory: a carbon's sender-scoped wire id is
-   * remembered so a duplicate direct delivery of the same stanza drops;
-   * capped so the set cannot grow monotonically over a long session. */
-  private rememberCarbonId(key: string) {
-    this.carbonDedupIds.add(key);
+  /** Bounded XEP-0280 dedupe memory: a sender-scoped wire id is
+   * remembered (tagged with which representation arrived) so the
+   * carbon/direct pair collapses; capped so the map cannot grow
+   * monotonically over a long session. */
+  private rememberCarbonId(key: string, source: "carbon" | "direct") {
+    this.carbonDedupIds.delete(key);
+    this.carbonDedupIds.set(key, source);
     if (this.carbonDedupIds.size > 512) {
-      const oldest = this.carbonDedupIds.values().next().value;
+      const oldest = this.carbonDedupIds.keys().next().value;
       if (oldest !== undefined) this.carbonDedupIds.delete(oldest);
     }
   }

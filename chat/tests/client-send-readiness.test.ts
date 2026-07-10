@@ -3102,6 +3102,73 @@ describe("carbon forwarding", () => {
     expect(dmHandler).toHaveBeenCalledTimes(1);
   });
 
+  test("a delay-carrying carbon after a direct delivery passes through to re-stamp the row", () => {
+    // #1267 item 6 / Greptile P1: the direct copy rendered with a live
+    // fallback timestamp; the carbon's forwarded <delay/> is the only
+    // authoritative stamp, so it must reach the merge layer (which
+    // collapses by wire id) instead of being dropped by the dedupe.
+    const client = new BrowserXmppClient(session());
+    const received: Array<{ createdAtSource?: string }> = [];
+    client.setDirectMessageHandler((msg) => received.push(msg));
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    const direct = {
+      id: "d-delay-1",
+      type: "chat",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/tablet",
+      body: "needs a real stamp",
+    };
+    xmpp.emit("message", direct);
+    xmpp.emit("message", {
+      ...direct,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      carbon: { sent: false, received: true },
+    });
+    // A replayed copy of that carbon still drops.
+    xmpp.emit("message", {
+      ...direct,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      carbon: { sent: false, received: true },
+    });
+
+    expect(received).toHaveLength(2);
+    expect(received[0]?.createdAtSource).toBe("fallback");
+    expect(received[1]?.createdAtSource).toBe("delay");
+  });
+
+  test("carbon dedupe keys MUC-PM senders by the full occupant JID (#1256)", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids =
+      new Set(["room@muc.example.com"]);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    // Two occupants of the SAME room pick the same sender-chosen stanza
+    // id; a bare-folded dedupe key would let juliet's PM swallow iago's.
+    xmpp.emit("message", {
+      id: "pm-id",
+      type: "chat",
+      from: "room@muc.example.com/juliet",
+      to: "alice@example.com/desktop",
+      body: "from juliet",
+    });
+    xmpp.emit("message", {
+      id: "pm-id",
+      type: "chat",
+      from: "room@muc.example.com/iago",
+      to: "alice@example.com/desktop",
+      body: "from iago",
+    });
+
+    expect(dmHandler).toHaveBeenCalledTimes(2);
+  });
+
   test("drops carbon-sent chat states and displayed markers (own activity elsewhere)", () => {
     const client = new BrowserXmppClient(session());
     const chatStateHandler = mock(() => undefined);
