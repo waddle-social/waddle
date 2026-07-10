@@ -2578,7 +2578,11 @@ async fn broadcast_admin_config_change(
     if status_codes.is_empty() {
         return;
     }
-    let Ok(snapshot) = actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot).await else {
+    let Ok(snapshot) = actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await
+    else {
         tracing::warn!(room = %room_jid, "Failed to snapshot room for config-change broadcast");
         return;
     };

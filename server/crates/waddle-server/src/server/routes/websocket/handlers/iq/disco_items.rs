@@ -1,6 +1,10 @@
 use super::*;
 use waddle_xmpp::xep::xep0059::{build_rsm_response_element, extract_rsm_request};
 
+/// Snapshot-ask deadline for the instant-room scan: a wedged room
+/// actor must not stall service discovery.
+const DISCO_ITEMS_SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 enum RoomCommandTarget {
     GroupDm,
     NotGroupDm,
@@ -228,11 +232,11 @@ pub(super) async fn handle_disco_items_iq(
                     )];
                 }
             };
-            let mut items =
+            let (mut items, channel_backed_jids) =
                 match canonical_channel_disco_items(state, muc_domain, MUC_DISCO_ITEMS_FETCH_BOUND)
                     .await
                 {
-                    Ok(items) => items,
+                    Ok(listing) => listing,
                     Err(_) => {
                         return vec![build_iq_error_xml_typed(
                             id,
@@ -245,10 +249,8 @@ pub(super) async fn handle_disco_items_iq(
             // XEP-0045 §6.3 (#1265 item 11): public live instant rooms
             // are part of the service's item list too, not only
             // channel-backed persistent rooms.
-            let listed_channel_jids: std::collections::HashSet<String> =
-                items.iter().map(|item| item.jid.clone()).collect();
             items.extend(
-                live_public_instant_room_items(state, muc_domain, &listed_channel_jids).await,
+                live_public_instant_room_items(state, muc_domain, &channel_backed_jids).await,
             );
             items.sort_by(|a, b| a.jid.cmp(&b.jid));
             items.dedup_by(|a, b| a.jid == b.jid);
@@ -614,7 +616,7 @@ fn page_disco_items<'a>(
 async fn live_public_instant_room_items(
     state: &WebSocketState,
     muc_domain: &str,
-    listed_channel_jids: &std::collections::HashSet<String>,
+    channel_backed_jids: &std::collections::HashSet<String>,
 ) -> Vec<DiscoItem> {
     let room_jids =
         match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -628,25 +630,28 @@ async fn live_public_instant_room_items(
             }
         };
     // Bound the per-request work: this runs on the client's
-    // connect-time topology discovery, so it must stay cheap. Rooms
-    // already listed from the channel catalog are skipped in memory
-    // (no per-room DB query), and only the remaining candidates — true
-    // instant rooms, normally zero to a handful — cost one snapshot
-    // ask each, capped hard.
+    // connect-time topology discovery, so it must stay cheap. Every
+    // catalog-backed room (public or private) is skipped in memory —
+    // no per-room DB query — so only true instant rooms, normally zero
+    // to a handful, cost one snapshot ask each, capped hard.
     const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
     let mut items = Vec::new();
     for room_jid in room_jids
         .into_iter()
         .filter(|room_jid| {
             room_jid.domain().as_str() == muc_domain
-                && !listed_channel_jids.contains(&room_jid.to_string())
+                && !channel_backed_jids.contains(&room_jid.to_string())
         })
         .take(MAX_INSTANT_ROOM_SCAN)
     {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };
-        let Ok(snapshot) = room_actor.ask(GetSnapshot).await else {
+        let Ok(snapshot) = room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(DISCO_ITEMS_SNAPSHOT_TIMEOUT)
+            .await
+        else {
             continue;
         };
         let config = &snapshot.room.config;
@@ -679,11 +684,14 @@ fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -
         .collect()
 }
 
+/// The publicly-listable channel disco items PLUS the JID set of EVERY
+/// catalog-backed room (public or not) so the instant-room scan can
+/// classify channel-backed rooms in memory without per-room DB reads.
 async fn canonical_channel_disco_items(
     state: &WebSocketState,
     muc_domain: &str,
     limit: usize,
-) -> Result<Vec<DiscoItem>, String> {
+) -> Result<(Vec<DiscoItem>, std::collections::HashSet<String>), String> {
     match list_xmpp_channels(
         state.deps.app_state.db_pool.global_actor().clone(),
         limit,
@@ -691,7 +699,20 @@ async fn canonical_channel_disco_items(
     )
     .await
     {
-        Ok(channels) => Ok(channels_to_disco_items(channels, muc_domain)),
+        Ok(channels) => {
+            let channel_backed_jids: std::collections::HashSet<String> = channels
+                .iter()
+                .filter_map(|channel| {
+                    waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
+                        .ok()
+                        .map(|room_jid| room_jid.to_string())
+                })
+                .collect();
+            Ok((
+                channels_to_disco_items(channels, muc_domain),
+                channel_backed_jids,
+            ))
+        }
         Err(error) => {
             warn!(error = %error, "Failed to list canonical channels for MUC discovery");
             Err(error)

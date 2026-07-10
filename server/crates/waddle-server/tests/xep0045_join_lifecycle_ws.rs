@@ -427,6 +427,56 @@ async fn xep_0045_fresh_bind_after_unclean_drop_cleans_detached_occupancy() {
     let _ = alice_fresh.close().await;
 }
 
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML");
+    String::from_utf8(buf).expect("xmpp_parsers serializes UTF-8")
+}
+
+fn disco_info_get_xml(to: &str, id: &str) -> String {
+    element_to_xml(
+        Element::builder("iq", "jabber:client")
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+                id,
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+                "get",
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+                to,
+            )
+            .append(Element::builder("query", "http://jabber.org/protocol/disco#info").build())
+            .build(),
+    )
+}
+
+fn groupchat_message_xml(to: &str, id: &str, body: &str) -> String {
+    element_to_xml(
+        Element::builder("message", "jabber:client")
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+                id,
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+                "groupchat",
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+                to,
+            )
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append(body)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
 /// XEP-0045 §7.4 stable-id (#1265 item 14): the service and rooms
 /// advertise `http://jabber.org/protocol/muc#stable_id`, and the
 /// reflected groupchat message keeps the sender's original `id`.
@@ -449,8 +499,9 @@ async fn xep_0045_stable_id_advertised_and_reflected_id_preserved() {
 
     // Service-level advertisement.
     alice
-        .send(&format!(
-            r#"<iq to="muc.{DOMAIN}" id="disco-svc-stable" type="get"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
+        .send(&disco_info_get_xml(
+            &format!("muc.{DOMAIN}"),
+            "disco-svc-stable",
         ))
         .await
         .expect("send service disco");
@@ -465,9 +516,7 @@ async fn xep_0045_stable_id_advertised_and_reflected_id_preserved() {
 
     // Room-level advertisement.
     alice
-        .send(&format!(
-            r#"<iq to="{room}" id="disco-room-stable" type="get"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
-        ))
+        .send(&disco_info_get_xml(&room, "disco-room-stable"))
         .await
         .expect("send room disco");
     let room_disco = alice
@@ -484,9 +533,7 @@ async fn xep_0045_stable_id_advertised_and_reflected_id_preserved() {
     let original_id = format!("stable-{}", uuid::Uuid::new_v4());
     let body = format!("stable-id-body-{}", uuid::Uuid::new_v4());
     alice
-        .send(&format!(
-            r#"<message to="{room}" type="groupchat" id="{original_id}"><body>{body}</body></message>"#
-        ))
+        .send(&groupchat_message_xml(&room, &original_id, &body))
         .await
         .expect("alice sends groupchat message");
     let bob_copy = bob

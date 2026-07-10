@@ -2161,6 +2161,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
             sender_full: &bot,
             room_actor: None,
             room_moderated: false,
+            room_occupants_may_change_subject: false,
             room_members_only: false,
             pin_permission: waddle_xmpp::muc::PinPermission::default(),
             dispatch_timestamp: 1777629203,

@@ -50,12 +50,14 @@ pub(super) async fn muc_occupant_disco_error(
                         .any(|occupant| occupant.real_jid.to_bare() == requester_bare)
                 }
                 Err(error) => {
+                    // A wedged/timed-out room actor is a server fault,
+                    // not evidence the requester is a non-occupant.
                     warn!(
                         room = %room_jid,
                         error = ?error,
                         "Failed to load room snapshot for occupant-JID disco"
                     );
-                    false
+                    return Some(internal_server_error_iq_error("Internal server error."));
                 }
             },
         },
