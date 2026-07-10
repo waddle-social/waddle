@@ -100,18 +100,25 @@ pub(super) async fn handle_command_iq(
             command.actions = actions;
             command
         }
-        CommandResult::Completed { form, notes } => {
+        CommandResult::Completed {
+            session_id: response_session_id,
+            form,
+            notes,
+        } => {
             let mut command = Command::new(node.clone());
             command.status = Some(CommandStatus::Completed);
-            command.session_id = session_id;
+            command.session_id = response_session_id.or(session_id);
             command.form = form;
             command.notes = notes;
             command
         }
-        CommandResult::Canceled { notes } => {
+        CommandResult::Canceled {
+            session_id: response_session_id,
+            notes,
+        } => {
             let mut command = Command::new(node.clone());
             command.status = Some(CommandStatus::Canceled);
-            command.session_id = session_id;
+            command.session_id = response_session_id.or(session_id);
             command.notes = notes;
             command
         }

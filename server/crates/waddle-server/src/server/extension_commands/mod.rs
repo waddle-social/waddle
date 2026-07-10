@@ -149,6 +149,7 @@ pub(crate) async fn register_extension_commands(
                         Ok(value) => value,
                         Err(error) => {
                             return waddle_xmpp::commands::CommandResult::Completed {
+                                session_id: None,
                                 form: None,
                                 notes: vec![waddle_xmpp::commands::Note::error(format!(
                                     "Invalid requester JID: {error}"
@@ -173,6 +174,7 @@ pub(crate) async fn register_extension_commands(
                                 Ok(value) => value,
                                 Err(error) => {
                                     return waddle_xmpp::commands::CommandResult::Completed {
+                                        session_id: None,
                                         form: None,
                                         notes: vec![waddle_xmpp::commands::Note::error(format!(
                                             "Invalid requester JID: {error}"
@@ -256,6 +258,7 @@ fn extension_field_value(
 
 fn extension_warning_result(message: &str) -> waddle_xmpp::commands::CommandResult {
     waddle_xmpp::commands::CommandResult::Completed {
+        session_id: None,
         form: None,
         notes: vec![waddle_xmpp::commands::Note::error(message.to_string())],
     }

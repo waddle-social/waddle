@@ -140,6 +140,7 @@ async fn handle(
     };
 
     CommandResult::Completed {
+        session_id: None,
         form: Some(build_result_form(&page)),
         notes: vec![],
     }

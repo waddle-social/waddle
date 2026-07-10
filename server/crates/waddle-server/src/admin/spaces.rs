@@ -341,6 +341,7 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
     };
     match run_list(&state, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_list_form(&result)),
             notes: vec![],
         },
@@ -358,6 +359,7 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_create(&state, &args).await {
         Ok(space) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_space_form(NODE_CREATE, &space)),
             notes: vec![],
         },
@@ -375,6 +377,7 @@ async fn handle_update(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_update(&state, &args).await {
         Ok(space) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_space_form(NODE_UPDATE, &space)),
             notes: vec![],
         },
@@ -392,6 +395,7 @@ async fn handle_delete(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_delete(&state, &args).await {
         Ok(()) => CommandResult::Completed {
+            session_id: None,
             form: None,
             notes: vec![],
         },
@@ -409,6 +413,7 @@ async fn handle_members(ctx: CommandContext, state: Arc<AppState>) -> CommandRes
     };
     match run_members(&state, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_members_form(&result)),
             notes: vec![],
         },
@@ -426,6 +431,7 @@ async fn handle_set_role(ctx: CommandContext, state: Arc<AppState>) -> CommandRe
     };
     match run_set_role(&state, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_set_role_form(&result)),
             notes: vec![],
         },

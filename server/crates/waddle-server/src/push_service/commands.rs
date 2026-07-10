@@ -285,6 +285,7 @@ async fn handle_register_device(
     };
 
     CommandResult::Completed {
+        session_id: None,
         form: Some(build_register_device_result_form(
             device.node(),
             device.device_id(),
@@ -348,6 +349,7 @@ async fn handle_disable_device(
         // typed IQ stanza error — so a stale/typo'd device-id is reported
         // honestly instead of as a false success.
         Ok(()) => CommandResult::Completed {
+            session_id: None,
             form: None,
             notes: vec![],
         },
