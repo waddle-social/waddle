@@ -276,25 +276,48 @@ pub(super) async fn handle_muc_disco_info<'a>(
             // A dormant channel-backed room exists but has no occupants,
             // so the requester has no reserved nick: empty query per
             // XEP-0030. A room with neither actor nor channel record
-            // does not exist (#1260).
-            if let Ok(Some(_)) = get_managed_channel_for_room(state, &room_jid).await {
-                let response =
-                    build_disco_info_response(req.request_iq, &[], &[], Some(NODE_ROOMUSER_ITEM));
-                return Some(DiscoInfoResponse::iq(response));
-            }
-            return Some(DiscoInfoResponse::error(
-                req.id,
-                req.response_from,
-                req.response_to,
-                item_not_found_iq_error("Requested item not found."),
-            ));
+            // does not exist (#1260); a catalog FAILURE is a server
+            // error, never a definitive "no such room".
+            return Some(match get_managed_channel_for_room(state, &room_jid).await {
+                Ok(Some(_)) => DiscoInfoResponse::iq(build_disco_info_response(
+                    req.request_iq,
+                    &[],
+                    &[],
+                    Some(NODE_ROOMUSER_ITEM),
+                )),
+                Ok(None) => DiscoInfoResponse::error(
+                    req.id,
+                    req.response_from,
+                    req.response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                ),
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = %error,
+                        "Failed to load persisted room for reserved-nick disco"
+                    );
+                    DiscoInfoResponse::error(
+                        req.id,
+                        req.response_from,
+                        req.response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )
+                }
+            });
         };
         let reserved_nick = match room_actor.ask(GetSnapshot).await {
+            // Nicknames are locked to the user IDENTITY (bare JID), so
+            // any of the user's resources sees the same reserved nick —
+            // not only the session that joined.
             Ok(snapshot) => req.requester.and_then(|requester| {
+                let requester_bare = requester.to_bare();
                 snapshot
                     .room
-                    .find_nick_by_real_jid(requester)
-                    .map(str::to_string)
+                    .occupants
+                    .values()
+                    .find(|occupant| occupant.real_jid.to_bare() == requester_bare)
+                    .map(|occupant| occupant.nick.clone())
             }),
             Err(error) => {
                 warn!(
@@ -480,7 +503,22 @@ pub(super) async fn handle_muc_disco_info<'a>(
         return None;
     }
 
-    if let Ok(Some(channel)) = get_managed_channel_for_room(state, &room_jid).await {
+    let channel = match get_managed_channel_for_room(state, &room_jid).await {
+        Ok(channel) => channel,
+        Err(error) => {
+            // A transient catalog failure must NOT read as a definitive
+            // "room does not exist" (#1260 would otherwise turn DB
+            // blips into 404s that clients act on).
+            warn!(room = %room_jid, error = %error, "Failed to load persisted room for disco#info");
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                req.response_from,
+                req.response_to,
+                internal_server_error_iq_error("Internal server error."),
+            ));
+        }
+    };
+    if let Some(channel) = channel {
         let room_name = if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
             group_dm_shared_name(&channel.name)
         } else {

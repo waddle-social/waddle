@@ -5712,6 +5712,25 @@ async fn xep0045_reserved_nick_discovery_returns_locked_nick() {
     assert_eq!(identity.attr("category"), Some("conference"));
     assert_eq!(identity.attr("name"), Some("alice"));
 
+    // A different resource of the SAME account sees the same reserved
+    // nick — the lock is on the identity, not the joining session.
+    let alice_other: FullJid = "alice@example.com/other".parse().expect("alice other jid");
+    let frame = disco_info_iq_frame("nick-1b", &room_jid.to_string(), Some("x-roomuser-item"));
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_other),
+    )
+    .await;
+    let query = disco_query_from_response(responses.first().expect("sibling resource response"));
+    let identity = query
+        .get_child("identity", waddle_xmpp::disco::DISCO_INFO_NS)
+        .expect("sibling resource sees the reserved nick");
+    assert_eq!(identity.attr("name"), Some("alice"));
+
     let frame = disco_info_iq_frame("nick-2", &room_jid.to_string(), Some("x-roomuser-item"));
     let responses = handle_iq(
         &frame,

@@ -245,7 +245,11 @@ pub(super) async fn handle_disco_items_iq(
             // XEP-0045 §6.3 (#1265 item 11): public live instant rooms
             // are part of the service's item list too, not only
             // channel-backed persistent rooms.
-            items.extend(live_public_instant_room_items(state, muc_domain).await);
+            let listed_channel_jids: std::collections::HashSet<String> =
+                items.iter().map(|item| item.jid.clone()).collect();
+            items.extend(
+                live_public_instant_room_items(state, muc_domain, &listed_channel_jids).await,
+            );
             items.sort_by(|a, b| a.jid.cmp(&b.jid));
             items.dedup_by(|a, b| a.jid == b.jid);
             let Some(rsm_request) = rsm_request else {
@@ -565,6 +569,13 @@ fn rsm_request_from_iq(iq: &xmpp_parsers::iq::Iq) -> Result<Option<RsmRequest>, 
 ///
 /// Supports `max`, `after`, `index`, and both `<before/>` forms (a JID
 /// for backward paging, empty for the last page).
+///
+/// The item list is sorted by JID (a stable UID ordering per XEP-0059
+/// §2.2), so an `after`/`before` anchor that has vanished between
+/// pages (room destroyed mid-pagination) resolves to its ordered
+/// insertion point via `partition_point` — the client seamlessly
+/// continues with no items skipped, instead of getting a silent empty
+/// page or a hard <item-not-found/> restart.
 fn page_disco_items<'a>(
     items: &'a [DiscoItem],
     request: &RsmRequest,
@@ -574,18 +585,11 @@ fn page_disco_items<'a>(
     let (start, end) = match (&request.before, &request.after, request.index) {
         (Some(before), _, _) if before.is_empty() => (total.saturating_sub(max), total),
         (Some(before), _, _) => {
-            let end = items
-                .iter()
-                .position(|item| &item.jid == before)
-                .unwrap_or(0);
+            let end = items.partition_point(|item| item.jid.as_str() < before.as_str());
             (end.saturating_sub(max), end)
         }
         (None, Some(after), _) => {
-            let start = items
-                .iter()
-                .position(|item| &item.jid == after)
-                .map(|position| position + 1)
-                .unwrap_or(total);
+            let start = items.partition_point(|item| item.jid.as_str() <= after.as_str());
             (start, (start + max).min(total))
         }
         (None, None, Some(index)) => {
@@ -610,6 +614,7 @@ fn page_disco_items<'a>(
 async fn live_public_instant_room_items(
     state: &WebSocketState,
     muc_domain: &str,
+    listed_channel_jids: &std::collections::HashSet<String>,
 ) -> Vec<DiscoItem> {
     let room_jids =
         match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -622,22 +627,22 @@ async fn live_public_instant_room_items(
                 return Vec::new();
             }
         };
+    // Bound the per-request work: this runs on the client's
+    // connect-time topology discovery, so it must stay cheap. Rooms
+    // already listed from the channel catalog are skipped in memory
+    // (no per-room DB query), and only the remaining candidates — true
+    // instant rooms, normally zero to a handful — cost one snapshot
+    // ask each, capped hard.
+    const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
     let mut items = Vec::new();
-    for room_jid in room_jids {
-        if room_jid.domain().as_str() != muc_domain {
-            continue;
-        }
-        // Channel-backed rooms (a channels-catalog row exists) are
-        // already listed from the database; only true instant rooms
-        // are added here.
-        if get_managed_channel_for_room(state, &room_jid)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            continue;
-        }
+    for room_jid in room_jids
+        .into_iter()
+        .filter(|room_jid| {
+            room_jid.domain().as_str() == muc_domain
+                && !listed_channel_jids.contains(&room_jid.to_string())
+        })
+        .take(MAX_INSTANT_ROOM_SCAN)
+    {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };

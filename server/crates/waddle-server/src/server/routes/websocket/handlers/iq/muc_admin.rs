@@ -201,8 +201,12 @@ pub(super) async fn handle_muc_admin_iq(
     // member list — even when not currently an occupant. Every other
     // list GET and all admin sets remain admin+ (#1265 item 12).
     let member_list_get = query.is_get
+        && !query.items.is_empty()
         && !query.items.iter().any(admin_item_has_role_shape)
-        && query.items.iter().find_map(|item| item.affiliation) == Some(Affiliation::Member)
+        && query
+            .items
+            .iter()
+            .all(|item| item.affiliation == Some(Affiliation::Member))
         && context.affiliation >= Affiliation::Member;
     if !is_admin && !member_list_get {
         return vec![build_iq_error_xml_typed(
@@ -600,15 +604,24 @@ pub(super) async fn handle_muc_admin_iq(
     // response frames AFTER the IQ result so the order is deterministic
     // on the moderator's stream.
     let mut remaining_broadcasts = Vec::new();
+    let mut self_kick_frames = Vec::new();
     let mut moderator_frames = Vec::new();
     for (recipient, presence) in applied.presence_updates {
         if applied.removed_by_moderation.contains(&recipient) {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(&recipient, Stanza::Presence(presence))
-                .await;
+            if recipient == *sender_jid {
+                // Self-kick: the kickee IS this connection, so its
+                // presence must ride the response frames BEFORE the IQ
+                // result — a registry send could otherwise land after
+                // the frame write and invert the §8.2 order.
+                self_kick_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+            } else {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .send_to(&recipient, Stanza::Presence(presence))
+                    .await;
+            }
         } else if recipient == *sender_jid {
             moderator_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
         } else {
@@ -634,11 +647,12 @@ pub(super) async fn handle_muc_admin_iq(
             .send_to(&recipient, Stanza::Presence(presence))
             .await;
     }
-    let mut frames = vec![iq_to_xml(build_admin_set_result(
+    let mut frames = self_kick_frames;
+    frames.push(iq_to_xml(build_admin_set_result(
         iq.id(),
         &room_jid,
         &Jid::from(sender_jid.clone()),
-    ))];
+    )));
     frames.extend(moderator_frames);
     frames
 }

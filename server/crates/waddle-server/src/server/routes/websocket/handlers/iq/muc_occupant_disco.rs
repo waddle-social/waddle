@@ -1,6 +1,10 @@
 use super::*;
 use xmpp_parsers::stanza_error::StanzaError;
 
+/// Snapshot-ask deadline: a wedged room actor must not stall the
+/// requester's whole IQ pipeline (mirrors `ADMIN_ROOM_ASK_TIMEOUT`).
+const OCCUPANT_DISCO_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// XEP-0045 §6.6: a disco request addressed to an occupant JID
 /// (`room@service/nick`) must not be answered with room information.
 ///
@@ -29,8 +33,22 @@ pub(super) async fn muc_occupant_disco_error(
         None => false,
         Some(requester) => match get_room_actor(state, &room_jid).await {
             None => false,
-            Some(room_actor) => match room_actor.ask(GetSnapshot).await {
-                Ok(snapshot) => snapshot.room.find_nick_by_real_jid(requester).is_some(),
+            Some(room_actor) => match room_actor
+                .ask(GetSnapshot)
+                .reply_timeout(OCCUPANT_DISCO_ASK_TIMEOUT)
+                .await
+            {
+                // Occupancy is an identity property: any resource of
+                // the same bare JID counts as the occupant, not only
+                // the session that joined.
+                Ok(snapshot) => {
+                    let requester_bare = requester.to_bare();
+                    snapshot
+                        .room
+                        .occupants
+                        .values()
+                        .any(|occupant| occupant.real_jid.to_bare() == requester_bare)
+                }
                 Err(error) => {
                     warn!(
                         room = %room_jid,

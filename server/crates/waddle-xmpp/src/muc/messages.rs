@@ -189,6 +189,7 @@ fn has_non_privacy_config_change(previous: &RoomConfig, next: &RoomConfig) -> bo
         || previous.public_room != next.public_room
         || previous.moderated != next.moderated
         || previous.max_occupants != next.max_occupants
+        || previous.occupants_may_change_subject != next.occupants_may_change_subject
         || previous.forum != next.forum
         || previous.group_dm != next.group_dm
         || previous.pin_permission != next.pin_permission
