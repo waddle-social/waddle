@@ -119,11 +119,11 @@ in parallel; within a bundle, top-to-bottom.
 5. ✅ **#1267 — client 1:1 minor cluster: 0424 fallback marker, `by`-verified catch-up dedupe (#466 residual), first-stanza-id consumers fixed, resumed catch-up budget-gap affordance, correction guards (no tombstone resurrection, occupant-JID match); `Date.now` item = forwarded-`<delay>` propagation (residual merge-window documented in PR #1273). DONE (PR #1273).**
 
 **J2 — Server 1:1 routing / MAM / receipts `[bundle]`**
-1. #1244 — **Critical**: full-JID chat to an offline resource silently dropped (no bare-JID fallback / offline store / error; RFC 6121 §8.5.3.2.1).
-2. #1245 — full-JID DM to a detached SM resource bypasses recipient MAM/stanza-id/carbons (#1106 fixed bare-JID only).
-3. #1246 — message to nonexistent local user persisted instead of `<service-unavailable/>` (RFC 6121 §8.5.1).
-4. #1247 — server fabricates XEP-0184 receipts (dup/false receipts; presence oracle).
-5. #1266 — 1:1 minor cluster (8 items). Coordinate with Lane D #1173 (to-less MAM) — same read path.
+1. ✅ #1244 — **Critical**: full-JID chat to an offline resource silently dropped (no bare-JID fallback / offline store / error; RFC 6121 §8.5.3.2.1). DONE (PR #1272)
+2. ✅ #1245 — full-JID DM to a detached SM resource bypasses recipient MAM/stanza-id/carbons (#1106 fixed bare-JID only). DONE (PR #1272)
+3. ✅ #1246 — message to nonexistent local user persisted instead of `<service-unavailable/>` (RFC 6121 §8.5.1). DONE (PR #1272)
+4. ✅ #1247 — server fabricates XEP-0184 receipts (dup/false receipts; presence oracle). DONE (PR #1272)
+5. ✅ #1266 — 1:1 minor cluster (8 items). Coordinate with Lane D #1173 (to-less MAM) — same read path. DONE (PR #1272)
 
 **J3 — MUC invites / lifecycle `[bundle]`**
 1. #1248 — **High**: mediated invitations (§7.8) unimplemented for non-group-DM rooms → "invite" silently no-ops. Relates #945.

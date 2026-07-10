@@ -79,22 +79,28 @@ impl MessageHandler for ArchiveHandler {
             }
         }
 
-        // Recipient-side write — fires on `Locality::Recipient` (which
-        // includes cross-resource self-chat like alice/web -> alice/phone
-        // on alice/phone's connection, where alice's archive captures the
-        // incoming copy distinct from the sender-side outgoing copy).
+        // Recipient-side write — fires on `Locality::Recipient`.
         // Suppressed for `Locality::Both` because the sender branch
         // above already wrote the single event for that degenerate
-        // self-loop case.
+        // self-loop case, and suppressed for self-DMs (`from` bare ==
+        // this archive: alice → alice bare, or cross-resource
+        // alice/web → alice/phone) because the sender pass on the
+        // originating connection already wrote the identical
+        // `(alice, alice)` row into the SAME archive — a second
+        // recipient-side write duplicated it under a divergent
+        // XEP-0359 id (#1266 item 7). The gate is spoof-safe: `from`
+        // is server-stamped at intake.
         if matches!(ctx.locality, Locality::Recipient) {
             if let Some(from) = from_bare {
-                let to = to_bare.unwrap_or_else(|| local_bare.clone());
-                events.push(OutboundEvent::ArchiveDirect {
-                    archive_jid: to.clone(),
-                    from,
-                    to,
-                    message: Box::new(message.clone()),
-                });
+                if from != local_bare {
+                    let to = to_bare.unwrap_or_else(|| local_bare.clone());
+                    events.push(OutboundEvent::ArchiveDirect {
+                        archive_jid: to.clone(),
+                        from,
+                        to,
+                        message: Box::new(message.clone()),
+                    });
+                }
             }
         }
 
@@ -346,14 +352,13 @@ mod tests {
     }
 
     #[test]
-    fn xep_0313_cross_resource_self_chat_emits_recipient_side_archive() {
+    fn xep_0313_cross_resource_self_chat_skips_recipient_side_archive() {
         // alice/web -> alice/phone, observed from alice/phone's
-        // connection. Locality::Recipient (the asymmetric derive in
-        // PR1 ensures cross-resource self-chat is NOT classified as
-        // Both). The recipient-side write must fire so alice's
-        // archive captures the incoming copy on alice/phone — earlier
-        // versions of this handler suppressed the write whenever the
-        // bare JIDs matched, losing the entry.
+        // connection (Locality::Recipient). The sender pass on
+        // alice/web's connection already wrote the (alice, alice) row
+        // into alice's archive — the ONLY archive this message
+        // touches — so a recipient-side write here would duplicate it
+        // under a divergent XEP-0359 id (#1266 item 7).
         let local = full("alice@example.com/phone");
         let mut msg = chat_with_body(
             "alice@example.com/web",
@@ -361,10 +366,22 @@ mod tests {
             "ping yourself",
         );
         let outcome = run(&local, &mut msg);
-        let archives = extract_archive_events(&outcome);
-        assert_eq!(archives.len(), 1);
-        assert_eq!(archives[0].0, bare("alice@example.com"));
-        assert_eq!(archives[0].1, bare("alice@example.com"));
+        assert!(
+            extract_archive_events(&outcome).is_empty(),
+            "self-DM recipient pass must not re-archive the sender-pass row"
+        );
+    }
+
+    #[test]
+    fn xep_0313_bare_jid_self_dm_recipient_pass_skips_archive() {
+        // alice/web -> alice (bare), observed on the recipient pass.
+        // Same rule as cross-resource self-chat: the sender pass
+        // already archived (alice, alice) — one row per message per
+        // archive (#1266 item 7).
+        let local = full("alice@example.com/phone");
+        let mut msg = chat_with_body("alice@example.com/web", "alice@example.com", "note to self");
+        let outcome = run(&local, &mut msg);
+        assert!(extract_archive_events(&outcome).is_empty());
     }
 
     // -----------------------------------------------------------------
