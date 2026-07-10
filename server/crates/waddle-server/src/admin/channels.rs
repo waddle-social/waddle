@@ -2887,6 +2887,18 @@ pub(crate) async fn rollback_group_dm_member_tuple(
     let _ = delete_group_dm_member_tuple(state, group_dm_id, member_jid).await;
 }
 
+/// Fallible group-DM member-tuple removal for callers that must
+/// propagate the failure — the XEP-0045 §10.9 destroy wipe (#1261)
+/// refuses to acknowledge a destruction whose durable authorization
+/// survived.
+pub(crate) async fn remove_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
+    delete_group_dm_member_tuple(state, group_dm_id, member_jid).await
+}
+
 pub(crate) async fn validate_group_dm_invitee(
     state: &AppState,
     inviter_jid: &BareJid,

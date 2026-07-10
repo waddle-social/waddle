@@ -231,7 +231,15 @@ pub(super) async fn handle_group_dm_mediated_invite(
     .await
     .is_err()
     {
-        rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee).await;
+        rollback_group_dm_invite_grant(
+            state,
+            room_actor,
+            &channel_id,
+            &room_jid,
+            &invitee,
+            &bound_jid.to_bare(),
+        )
+        .await;
         return Some(vec![error_reply(
             incoming,
             bound_jid,
@@ -259,7 +267,15 @@ pub(super) async fn handle_group_dm_mediated_invite(
             error = %error,
             "Failed to record outstanding group-DM invite; rolling back grant"
         );
-        rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee).await;
+        rollback_group_dm_invite_grant(
+            state,
+            room_actor,
+            &channel_id,
+            &room_jid,
+            &invitee,
+            &bound_jid.to_bare(),
+        )
+        .await;
         return Some(vec![error_reply(
             incoming,
             bound_jid,
@@ -287,8 +303,15 @@ pub(super) async fn handle_group_dm_mediated_invite(
                 error = %error,
                 "Failed to queue offline group-DM invite; rolling back member grant"
             );
-            rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee)
-                .await;
+            rollback_group_dm_invite_grant(
+                state,
+                room_actor,
+                &channel_id,
+                &room_jid,
+                &invitee,
+                &bound_jid.to_bare(),
+            )
+            .await;
             let error_kind = match error {
                 OfflineGroupDmInviteError::QuotaExceeded => GroupDmInviteError::ServiceUnavailable,
                 OfflineGroupDmInviteError::Storage(_) => GroupDmInviteError::InternalServerError,
@@ -365,6 +388,7 @@ async fn rollback_group_dm_invite_grant(
     channel_id: &str,
     room_jid: &jid::BareJid,
     invitee: &jid::BareJid,
+    inviter: &jid::BareJid,
 ) {
     crate::admin::channels::rollback_group_dm_member_tuple(
         &state.deps.app_state,
@@ -373,12 +397,17 @@ async fn rollback_group_dm_invite_grant(
     )
     .await;
     let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
-    // #1264: a rolled-back invite is not declinable — drop its ledger
-    // rows (harmless no-op on paths that failed before recording one).
-    let _ = crate::server::routes::websocket::muc_invites::delete_invitee_invites(
+    // #1264: a rolled-back invite is not declinable — drop exactly the
+    // ledger row this flow recorded (harmless no-op on paths that
+    // failed before recording it); another inviter's outstanding
+    // invitation is left alone.
+    let _ = crate::server::routes::websocket::muc_invites::claim_invite(
         state.deps.app_state.db_pool.global_actor().clone(),
-        room_jid,
-        invitee,
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: invitee.clone(),
+            inviter: inviter.clone(),
+        },
     )
     .await;
     let _ =
@@ -489,8 +518,16 @@ mod tests {
             "precondition: the granted invitee hydrates into the mirror"
         );
 
-        rollback_group_dm_invite_grant(&state, room_actor.clone(), channel_id, &room_jid, &invitee)
-            .await;
+        let inviter: jid::BareJid = "inviter@example.com".parse().expect("inviter jid");
+        rollback_group_dm_invite_grant(
+            &state,
+            room_actor.clone(),
+            channel_id,
+            &room_jid,
+            &invitee,
+            &inviter,
+        )
+        .await;
 
         assert!(
             !durable_recipients(&room_actor).await.contains(&invitee),

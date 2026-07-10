@@ -34,7 +34,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
 use crate::server::routes::websocket::muc_invites::{
-    delete_invitee_invites, record_invite, OutstandingInvite, RecordOutcome,
+    claim_invite, record_invite, OutstandingInvite, RecordOutcome,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -319,10 +319,13 @@ pub(super) async fn handle_muc_mediated_invite(
             error = %error,
             "Mediated invite could not be delivered or queued; rolling back"
         );
-        if let Err(error) = delete_invitee_invites(
+        if let Err(error) = claim_invite(
             state.deps.app_state.db_pool.global_actor().clone(),
-            &room_jid,
-            &invitee,
+            &OutstandingInvite {
+                room: room_jid.clone(),
+                invitee: invitee.clone(),
+                inviter: inviter_bare.clone(),
+            },
         )
         .await
         {

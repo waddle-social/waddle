@@ -622,18 +622,29 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         // subject, affiliations incl. bans) so the room cannot
         // resurrect from storage on the next join. Runs BEFORE the
         // claim release below: the delete is epoch-fenced against this
-        // node's still-held claim. Best-effort — a fencing loss means
-        // another node owns the room now and this node must not wipe
-        // the new owner's rows.
+        // node's still-held claim (a fencing loss means another node
+        // owns the room now and this node must not wipe the new
+        // owner's rows). A failed delete FAILS the destroy: the entry
+        // is restored and `false` returned, so a caller never
+        // acknowledges a destruction whose durable state survived.
+        // `LocalEviction` (deposed-node teardown) never wipes — the
+        // room lives on under its new owner.
         if (removed_room || removed_poison) && msg.reason == DestroyRoomReason::Destroy {
             if let Some(store) = &self.durable_store {
                 if let Err(error) = store.delete_room_state(&msg.room_jid).await {
                     warn!(
                         room = %msg.room_jid,
                         %error,
-                        "Failed to delete durable room state on destroy; \
-                         the room may resurrect from storage"
+                        "Failed to delete durable room state; refusing the destroy so it \
+                         can be retried instead of resurrecting from storage"
                     );
+                    if let Some(entry) = removed_entry {
+                        self.rooms.insert(msg.room_jid.clone(), entry);
+                    }
+                    if removed_poison {
+                        self.poisoned_rooms.insert(msg.room_jid.clone());
+                    }
+                    return false;
                 }
             }
         }

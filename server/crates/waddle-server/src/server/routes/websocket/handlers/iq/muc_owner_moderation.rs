@@ -37,29 +37,57 @@ fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
 
 /// XEP-0045 §10.9 (#1261): "The room ... destroys the room, even if it
 /// was defined as persistent." Delete every waddle-side durable row the
-/// join path would otherwise rematerialize the destroyed room from:
+/// join path would otherwise rematerialize the destroyed room from,
+/// ordered least-consequential-first so a mid-sequence failure leaves
+/// the room maximally intact for a retry (every step is an idempotent
+/// delete, so retrying the destroy re-runs the sequence safely):
 ///
-/// - the managed-channel catalog row (`channels`) — `handle_muc_join`
-///   rebuilds a managed room's config/name/policy from it;
-/// - for group DMs, each member's permission tuple and XEP-0402
-///   bookmark (those are otherwise only cleaned by the admin group-DM
-///   deletion flow and would strand durable authorization);
-/// - group-DM per-member archive-visibility boundaries;
-/// - the outstanding mediated-invite ledger (#1264) — a destroyed room
-///   has nothing left to decline.
+/// 1. group-DM per-member archive-visibility boundaries;
+/// 2. the outstanding mediated-invite ledger (#1264);
+/// 3. for group DMs, each member's permission tuple (fail-hard — a
+///    surviving tuple is durable authorization for a dead room) and
+///    XEP-0402 bookmark (best-effort — a stale bookmark is cosmetic);
+/// 4. the managed-channel catalog row (`channels`) LAST — it is the
+///    resurrection vector `handle_muc_join` rebuilds managed rooms
+///    from, so it only falls once everything else committed.
 ///
 /// Runs BEFORE occupants are notified and before the actor is torn
 /// down: a destroy that cannot durably destroy fails as a whole (the
-/// caller returns `internal-server-error` and the room stays intact)
+/// caller returns `internal-server-error` and the room stays live)
 /// instead of acknowledging a destruction that will resurrect.
-/// Bookmark retraction alone stays best-effort — a stale bookmark is
-/// cosmetic, not an authorization leak.
 async fn wipe_destroyed_room_durable_state(
     state: &WebSocketState,
     room_jid: &BareJid,
     room: &waddle_xmpp::muc::MucRoom,
 ) -> Result<(), ()> {
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
+    if let Err(error) = db_actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
+            params: vec![room_jid.to_string().into()],
+        })
+        .await
+    {
+        warn!(
+            room = %room_jid,
+            error = %error,
+            "Failed to delete archive boundaries for destroyed room"
+        );
+        return Err(());
+    }
+    if let Err(error) = crate::server::routes::websocket::muc_invites::delete_room_invites(
+        db_actor.clone(),
+        room_jid,
+    )
+    .await
+    {
+        warn!(
+            room = %room_jid,
+            error = %error,
+            "Failed to delete outstanding invites for destroyed room"
+        );
+        return Err(());
+    }
     if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
         let channel = match crate::server::xmpp_state::get_xmpp_channel(
             db_actor.clone(),
@@ -89,12 +117,21 @@ async fn wipe_destroyed_room_durable_state(
                 if entry.affiliation < waddle_xmpp::Affiliation::Member {
                     continue;
                 }
-                crate::admin::channels::rollback_group_dm_member_tuple(
+                if let Err(error) = crate::admin::channels::remove_group_dm_member_tuple(
                     &state.deps.app_state,
                     &channel_id,
                     &entry.jid,
                 )
-                .await;
+                .await
+                {
+                    warn!(
+                        room = %room_jid,
+                        member = %entry.jid,
+                        error = %error,
+                        "Failed to revoke group-DM member tuple for destroyed room"
+                    );
+                    return Err(());
+                }
                 if crate::admin::channels::retract_group_dm_bookmark(
                     &state.deps.app_state,
                     &entry.jid,
@@ -122,30 +159,6 @@ async fn wipe_destroyed_room_durable_state(
             );
             return Err(());
         }
-    }
-    if let Err(error) = db_actor
-        .ask(crate::db::actor::DbExecute {
-            sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
-            params: vec![room_jid.to_string().into()],
-        })
-        .await
-    {
-        warn!(
-            room = %room_jid,
-            error = %error,
-            "Failed to delete archive boundaries for destroyed room"
-        );
-        return Err(());
-    }
-    if let Err(error) =
-        crate::server::routes::websocket::muc_invites::delete_room_invites(db_actor, room_jid).await
-    {
-        warn!(
-            room = %room_jid,
-            error = %error,
-            "Failed to delete outstanding invites for destroyed room"
-        );
-        return Err(());
     }
     Ok(())
 }

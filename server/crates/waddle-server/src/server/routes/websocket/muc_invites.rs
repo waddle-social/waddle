@@ -25,7 +25,7 @@
 
 use jid::BareJid;
 
-use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
+use crate::db::actor::{DbActor, DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
 use kameo::actor::ActorRef;
 
@@ -62,43 +62,53 @@ pub(crate) enum RecordOutcome {
 /// An identical unexpired invitation reports `AlreadyOutstanding`
 /// (and keeps its original timestamp); an expired one is refreshed
 /// and reported as `New`.
+///
+/// The dedup decision is a SINGLE conditional-upsert statement whose
+/// affected-row count is the answer, so two concurrent identical
+/// invites racing through the serialized [`DbActor`] resolve to
+/// exactly one `New` — there is no check-then-insert window.
 pub(crate) async fn record_invite(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
 ) -> Result<RecordOutcome, String> {
-    let existing = actor
-        .ask(DbQueryOne {
-            sql: "SELECT 1 FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND \
-                  inviter_jid = ? AND created_at > ?"
+    // Opportunistic hygiene: expired rows for this (room, invitee) are
+    // dead weight the reads already ignore — drop them here so the
+    // ledger stays bounded without a dedicated janitor.
+    actor
+        .ask(DbExecute {
+            sql: "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND \
+                  created_at <= ?"
                 .to_string(),
             params: vec![
                 invite.room.to_string().into(),
                 invite.invitee.to_string().into(),
-                invite.inviter.to_string().into(),
                 expiry_cutoff().into(),
             ],
         })
         .await
         .map_err(|error| error.to_string())?;
-    if existing.is_some() {
-        return Ok(RecordOutcome::AlreadyOutstanding);
-    }
-    actor
+    let affected = actor
         .ask(DbExecute {
             sql: "INSERT INTO muc_pending_invites (room_jid, invitee_jid, inviter_jid, \
                   created_at) VALUES (?, ?, ?, ?) ON CONFLICT(room_jid, invitee_jid, \
-                  inviter_jid) DO UPDATE SET created_at = excluded.created_at"
+                  inviter_jid) DO UPDATE SET created_at = excluded.created_at WHERE \
+                  muc_pending_invites.created_at <= ?"
                 .to_string(),
             params: vec![
                 invite.room.to_string().into(),
                 invite.invitee.to_string().into(),
                 invite.inviter.to_string().into(),
                 chrono::Utc::now().to_rfc3339().into(),
+                expiry_cutoff().into(),
             ],
         })
         .await
         .map_err(|error| error.to_string())?;
-    Ok(RecordOutcome::New)
+    if affected > 0 {
+        Ok(RecordOutcome::New)
+    } else {
+        Ok(RecordOutcome::AlreadyOutstanding)
+    }
 }
 
 /// List every unexpired outstanding invite for `(room, invitee)`.
@@ -161,25 +171,6 @@ pub(crate) async fn claim_invite(
         .await
         .map_err(|error| error.to_string())?;
     Ok(affected > 0)
-}
-
-/// Remove every outstanding invite for `(room, invitee)` regardless of
-/// inviter — the invite-flow rollback path: a grant that failed to
-/// stick must not leave a declinable ledger row behind.
-pub(crate) async fn delete_invitee_invites(
-    actor: ActorRef<DbActor>,
-    room: &BareJid,
-    invitee: &BareJid,
-) -> Result<(), String> {
-    actor
-        .ask(DbExecute {
-            sql: "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ?"
-                .to_string(),
-            params: vec![room.to_string().into(), invitee.to_string().into()],
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(())
 }
 
 /// Wipe every outstanding invite for `room` — the room-destroy path
