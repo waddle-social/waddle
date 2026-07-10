@@ -181,6 +181,27 @@ pub struct ArchivedRichMessage {
     pub muc_sender: Option<ArchivedMucSender>,
 }
 
+impl ArchivedRichMessage {
+    /// Return a clone with the server-derived MUC identity fields
+    /// cleared. These fields ([`Self::occupant_id`],
+    /// [`Self::muc_sender`]) are stamped by the room service per
+    /// dispatch, not authored by the client — in particular
+    /// `muc_sender.jid` carries the sender's *per-session* full JID
+    /// (a fresh random resource each reconnect). They MUST be excluded
+    /// from XEP-0359 origin-id retry-dedup comparisons: a client that
+    /// resends the same origin-id from a fresh session is the same
+    /// logical message even though its resource (and possibly its
+    /// affiliation/role) changed. Comparing the identity fields would
+    /// break dedup and duplicate the row in the archive.
+    pub fn content_only(&self) -> Self {
+        Self {
+            occupant_id: None,
+            muc_sender: None,
+            ..self.clone()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadId(String);
 

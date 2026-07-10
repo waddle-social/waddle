@@ -266,7 +266,14 @@ fn canonicalize_muc_private_payloads(
     sender_occupant_id: &waddle_xmpp::xep::xep0421::OccupantId,
 ) {
     message.payloads.retain(|payload| {
-        if payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        // XEP-0313 §Security "MUC message spoofing" + XEP-0045
+        // anti-spoofing: strip every client-supplied payload in a MUC
+        // *service* namespace (muc / muc#user / muc#admin / muc#owner)
+        // so an occupant cannot forge affiliation/role/status/invite
+        // signalling on a PM that the server then relays from
+        // `room/nick`. Namespace-only, sharing the exact set with the
+        // groupchat canonicalizer (#1251, #1268).
+        if waddle_xmpp::muc::is_muc_service_namespace(payload.ns().as_str())
             || payload.is("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
         {
             return false;
@@ -395,5 +402,59 @@ mod tests {
             0,
             "the PM marker is empty — forged items must not survive"
         );
+    }
+
+    /// XEP-0313 §Security / XEP-0045 anti-spoofing (#1251): a PM must
+    /// not launder client-supplied payloads in ANY MUC service
+    /// namespace (muc / muc#admin / muc#owner), not just muc#user —
+    /// including non-`<x>` element names.
+    #[test]
+    fn xep0045_pm_strips_all_muc_service_namespaces() {
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let sender_bare: jid::BareJid = "alice@example.com".parse().expect("sender");
+        let secret = secret();
+        let server_id = generate_occupant_id(&sender_bare, &room, &secret);
+
+        let mut msg = pm();
+        // A non-`<x>` element in muc#user (status code), plus payloads
+        // in muc / muc#admin / muc#owner.
+        msg.payloads.push(
+            minidom::Element::builder("status", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(minidom::rxml::xml_ncname!("code").to_owned(), "110")
+                .build(),
+        );
+        msg.payloads
+            .push(minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC).build());
+        msg.payloads
+            .push(minidom::Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN).build());
+        msg.payloads
+            .push(minidom::Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER).build());
+
+        canonicalize_muc_private_payloads(&mut msg, &server_id);
+
+        // Only the single server-authored empty muc#user marker remains
+        // in MUC service namespaces; nothing else.
+        for ns in [
+            waddle_xmpp::muc::presence::NS_MUC,
+            waddle_xmpp::muc::NS_MUC_ADMIN,
+            waddle_xmpp::muc::NS_MUC_OWNER,
+        ] {
+            assert!(
+                !msg.payloads.iter().any(|p| p.ns() == ns),
+                "client payloads in `{ns}` must be stripped from a MUC PM"
+            );
+        }
+        let muc_user: Vec<_> = msg
+            .payloads
+            .iter()
+            .filter(|p| p.ns() == waddle_xmpp::muc::presence::NS_MUC_USER)
+            .collect();
+        assert_eq!(
+            muc_user.len(),
+            1,
+            "only the server-authored empty muc#user marker survives"
+        );
+        assert_eq!(muc_user[0].name(), "x");
+        assert_eq!(muc_user[0].children().count(), 0);
     }
 }

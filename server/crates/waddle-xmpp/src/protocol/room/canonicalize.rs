@@ -48,23 +48,6 @@ use xmpp_parsers::message::Message;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MucCanonicalizeHandler;
 
-/// True when `payload` lives in a MUC service namespace a client must
-/// not inject into a groupchat message: `http://jabber.org/protocol/muc`
-/// and its `#user` / `#admin` / `#owner` fragments. These namespaces
-/// carry service-authored room signalling (affiliation/role items,
-/// status codes, invites, admin/owner payloads); XEP-0313 §Security
-/// "MUC message spoofing" requires stripping them from occupant
-/// messages before reflection/archiving.
-fn is_client_forgeable_muc_payload(payload: &minidom::Element) -> bool {
-    matches!(
-        payload.ns().as_str(),
-        crate::muc::presence::NS_MUC
-            | crate::muc::presence::NS_MUC_USER
-            | crate::muc::NS_MUC_ADMIN
-            | crate::muc::NS_MUC_OWNER
-    )
-}
-
 fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
     let thread_id = thread_id.into();
     // An empty `thread_id` would emit a malformed `<thread></thread>`
@@ -98,12 +81,6 @@ impl RoomHandler for MucCanonicalizeHandler {
     }
 
     fn handle(&self, message: &mut Message, ctx: &RoomContext<'_>) -> RoomHandlerOutcome {
-        let Some(sender) = ctx.sender_snapshot() else {
-            // OccupancyValidationHandler should have halted before us.
-            // Be defensive: skip canonicalization if somehow not.
-            return RoomHandlerOutcome::Continue(Vec::new());
-        };
-
         // 0. Strip client-supplied MUC-namespace payloads. XEP-0313
         //    §Security "MUC message spoofing": "the archiving entity
         //    MUST strip any existing <x> element in the
@@ -114,9 +91,22 @@ impl RoomHandler for MucCanonicalizeHandler {
         //    service. The presence path (`muc_update.rs`) and the PM
         //    path (`muc_direct.rs`) already strip these — this closes
         //    the groupchat-message gap (#1251).
+        //
+        //    Done BEFORE the `sender_snapshot()` guard so the
+        //    anti-spoofing rewrite is unconditional: the invariant
+        //    "nothing client-forgeable in a MUC service namespace ever
+        //    reaches archive or reflection" must not depend on the
+        //    occupancy gate having run (defense-in-depth).
         message
             .payloads
-            .retain(|p| !is_client_forgeable_muc_payload(p));
+            .retain(|p| !crate::muc::is_muc_service_namespace(p.ns().as_str()));
+
+        let Some(sender) = ctx.sender_snapshot() else {
+            // OccupancyValidationHandler should have halted before us.
+            // Be defensive: skip the rest of canonicalization if
+            // somehow not — the anti-spoofing strip above already ran.
+            return RoomHandlerOutcome::Continue(Vec::new());
+        };
 
         // 1. Strip same-`by=room` stanza-id siblings (typed BareJid
         //    equality so case-folded variants strip; mirrors the 1:1
