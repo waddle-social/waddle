@@ -104,11 +104,20 @@ async fn handle_muc_private_message(
             )]);
         }
     };
+    // XEP-0421 §Business Rules: "The <occupant-id/> element MUST be
+    // attached to every message ... sent by a MUC" — private messages
+    // included. Derive the sender's stable occupant-id the same way
+    // the groupchat canonicalize handler does (#1268).
+    let sender_occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
+        &bound_jid.to_bare(),
+        &room_jid,
+        &state.deps.occupant_id_secret,
+    );
     for recipient in snapshot.room.get_occupant_sessions(&target_nick) {
         let mut routed = incoming.clone();
         routed.from = Some(jid::Jid::from(from_room_jid.clone()));
         routed.to = Some(jid::Jid::from(recipient.clone()));
-        canonicalize_muc_private_payloads(&mut routed);
+        canonicalize_muc_private_payloads(&mut routed, &sender_occupant_id);
         let _ = state
             .deps
             .protocol
@@ -252,7 +261,10 @@ fn build_mediated_decline_payload(
         .build()
 }
 
-fn canonicalize_muc_private_payloads(message: &mut Message) {
+fn canonicalize_muc_private_payloads(
+    message: &mut Message,
+    sender_occupant_id: &waddle_xmpp::xep::xep0421::OccupantId,
+) {
     message.payloads.retain(|payload| {
         if payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER)
             || payload.is("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
@@ -271,6 +283,9 @@ fn canonicalize_muc_private_payloads(message: &mut Message) {
     message
         .payloads
         .push(minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER).build());
+    // XEP-0421: re-stamp the server-derived occupant-id after stripping
+    // any client-supplied one (#1268).
+    waddle_xmpp::xep::xep0421::set_occupant_id_on_message(message, sender_occupant_id);
 }
 
 fn message_error_frame(
@@ -287,4 +302,98 @@ fn message_error_frame(
         StanzaError::new(error_type, condition, "en", text),
     );
     stanza_to_string(reply).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waddle_xmpp::xep::xep0421::{
+        extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
+        NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
+    };
+
+    fn secret() -> OccupantIdSecret {
+        OccupantIdSecret::new(vec![3u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
+    }
+
+    fn pm() -> Message {
+        let mut m = Message::new(Some(
+            "room@muc.example.com/bob".parse::<jid::Jid>().expect("jid"),
+        ));
+        m.type_ = MessageType::Chat;
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "psst".to_string());
+        m
+    }
+
+    /// XEP-0421 Business Rules (#1268): MUC private messages MUST carry
+    /// the server-derived occupant-id — stripping the client's forgery
+    /// and re-stamping the canonical value.
+    #[test]
+    fn xep0421_pm_carries_server_stamped_occupant_id() {
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let sender_bare: jid::BareJid = "alice@example.com".parse().expect("sender");
+        let secret = secret();
+        let server_id = generate_occupant_id(&sender_bare, &room, &secret);
+
+        let mut msg = pm();
+        // Client tries to spoof someone else's occupant-id.
+        msg.payloads
+            .push(waddle_xmpp::xep::xep0421::build_occupant_id_element(
+                &OccupantId::new("forged-id"),
+            ));
+
+        canonicalize_muc_private_payloads(&mut msg, &server_id);
+
+        let stamped = extract_occupant_id_from_message(&msg).expect("occupant-id stamped on PM");
+        assert_eq!(stamped, server_id);
+        assert_ne!(stamped, OccupantId::new("forged-id"));
+        // Exactly one occupant-id element.
+        let count = msg
+            .payloads
+            .iter()
+            .filter(|p| p.is("occupant-id", NS_OCCUPANT_ID))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    /// XEP-0045 §7.5: the PM keeps exactly one empty muc#user `<x/>`
+    /// marker (client-supplied ones are stripped) alongside the
+    /// occupant-id.
+    #[test]
+    fn xep0421_pm_keeps_single_empty_muc_user_marker() {
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let sender_bare: jid::BareJid = "alice@example.com".parse().expect("sender");
+        let secret = secret();
+        let server_id = generate_occupant_id(&sender_bare, &room, &secret);
+
+        let mut msg = pm();
+        // Forged muc#user x with an item claiming an affiliation.
+        msg.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("item", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .attr(
+                            minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                            "owner",
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+
+        canonicalize_muc_private_payloads(&mut msg, &server_id);
+
+        let markers: Vec<_> = msg
+            .payloads
+            .iter()
+            .filter(|p| p.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))
+            .collect();
+        assert_eq!(markers.len(), 1, "exactly one muc#user marker");
+        assert_eq!(
+            markers[0].children().count(),
+            0,
+            "the PM marker is empty — forged items must not survive"
+        );
+    }
 }

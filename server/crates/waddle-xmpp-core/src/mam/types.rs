@@ -123,12 +123,62 @@ pub enum ArchivedRichPayload {
     Tombstone(ArchivedTombstone),
 }
 
+/// XEP-0421 occupant-id captured for an archived groupchat row.
+///
+/// Typed newtype (not a raw `String` field) per the typed-payloads
+/// hard rule. Carried in the `rich_payload` projection so the
+/// non-`stanza_xml` fallback reconstruction can re-emit the
+/// `<occupant-id/>` element XEP-0421 Business Rules require on every
+/// message sent by a MUC — including MAM history (#1268).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedOccupantId(String);
+
+impl ArchivedOccupantId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// XEP-0313 §MUC Archives real-JID disclosure for an archived
+/// groupchat row: "In the case of non-anonymous rooms … the archive
+/// message will use extended message information in an `<x/>` element
+/// qualified by the 'http://jabber.org/protocol/muc#user' namespace
+/// and containing an `<item/>` child with a 'jid' attribute
+/// specifying the occupant's full JID."
+///
+/// The room chain captures the sender's authority at dispatch time so
+/// MAM replay (both the `stanza_xml` path and the typed fallback) can
+/// reproduce the room-authored `<x/>` without re-resolving room state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedMucSender {
+    /// The sender's real JID (full JID for live occupants).
+    pub jid: Jid,
+    /// XEP-0045 affiliation at message time.
+    pub affiliation: crate::types::Affiliation,
+    /// XEP-0045 role at message time.
+    pub role: crate::types::Role,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ArchivedRichMessage {
     pub payload: Option<ArchivedRichPayload>,
     pub reply: Option<ArchivedReply>,
     pub references: Vec<ArchivedReference>,
     pub mentions: Vec<ArchivedMention>,
+    /// XEP-0421 occupant-id of the sender (groupchat rows only).
+    /// `#[serde(default)]` keeps previously-serialized rich payloads
+    /// decodable.
+    #[serde(default)]
+    pub occupant_id: Option<ArchivedOccupantId>,
+    /// XEP-0313 §MUC Archives non-anonymous real-JID item
+    /// (groupchat rows only).
+    #[serde(default)]
+    pub muc_sender: Option<ArchivedMucSender>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

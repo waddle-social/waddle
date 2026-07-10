@@ -108,7 +108,10 @@ pub(super) async fn broadcast_room_system_message_event(
     // "not archived, not fanned out" contract.
     if let Some(mam_storage) = deps.mam_storage {
         let fence = resolve_room_claim_fence(deps, &room);
-        match archive_groupchat_message(mam_storage, &room, &message, 0, fence.as_ref()).await {
+        // Room-authored system messages have no occupant sender, so
+        // there is no real-JID `<x xmlns='muc#user'/>` to disclose.
+        match archive_groupchat_message(mam_storage, &room, &message, 0, fence.as_ref(), None).await
+        {
             ArchiveGroupchatOutcome::Stored(result) => debug!(
                 room = %room,
                 stanza_id = %result.stored_id,

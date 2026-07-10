@@ -635,6 +635,11 @@ pub(super) async fn replace_with_tombstone(
         reply: None,
         references: Vec::new(),
         mentions: Vec::new(),
+        // XEP-0424 §Tombstones: the occupant-id and real-JID item
+        // identify the original sender and MUST NOT survive the
+        // tombstone replacement.
+        occupant_id: None,
+        muc_sender: None,
     };
     let encoded = serde_json::to_string(&payload)
         .map_err(|error| MamStorageError::Serialization(error.to_string()))?;

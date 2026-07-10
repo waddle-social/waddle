@@ -4,8 +4,16 @@
 //! Mutates the in-flight message so subsequent room handlers (archive,
 //! reflector) and the eventual wire write see the canonicalized form.
 //!
-//! Four rewrites in order:
+//! Five rewrites in order:
 //!
+//! 0. **Strip client-supplied MUC-namespace payloads** (`muc`,
+//!    `muc#user`, `muc#admin`, `muc#owner`). XEP-0313 §Security "MUC
+//!    message spoofing" + XEP-0045 anti-spoofing: an occupant could
+//!    otherwise forge `<x xmlns='muc#user'>` affiliation/role/status
+//!    signalling that appears to come from `room/nick`, and the
+//!    forgery would be reflected live AND persisted into the room
+//!    archive (#1251). Canonicalize runs before the archive and
+//!    reflector handlers, so this single strip covers both paths.
 //! 1. **Strip same-`by=room`** XEP-0359 `<stanza-id>` siblings (XEP-0359
 //!    §5 strip rule, room scope). Defends against client spoofing of a
 //!    stamp claiming to come from the room archive.
@@ -39,6 +47,23 @@ use xmpp_parsers::message::Message;
 /// chain.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MucCanonicalizeHandler;
+
+/// True when `payload` lives in a MUC service namespace a client must
+/// not inject into a groupchat message: `http://jabber.org/protocol/muc`
+/// and its `#user` / `#admin` / `#owner` fragments. These namespaces
+/// carry service-authored room signalling (affiliation/role items,
+/// status codes, invites, admin/owner payloads); XEP-0313 §Security
+/// "MUC message spoofing" requires stripping them from occupant
+/// messages before reflection/archiving.
+fn is_client_forgeable_muc_payload(payload: &minidom::Element) -> bool {
+    matches!(
+        payload.ns().as_str(),
+        crate::muc::presence::NS_MUC
+            | crate::muc::presence::NS_MUC_USER
+            | crate::muc::NS_MUC_ADMIN
+            | crate::muc::NS_MUC_OWNER
+    )
+}
 
 fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
     let thread_id = thread_id.into();
@@ -78,6 +103,20 @@ impl RoomHandler for MucCanonicalizeHandler {
             // Be defensive: skip canonicalization if somehow not.
             return RoomHandlerOutcome::Continue(Vec::new());
         };
+
+        // 0. Strip client-supplied MUC-namespace payloads. XEP-0313
+        //    §Security "MUC message spoofing": "the archiving entity
+        //    MUST strip any existing <x> element in the
+        //    'http://jabber.org/protocol/muc#user' namespace from
+        //    messages before archiving them"; XEP-0045 likewise
+        //    reserves room signalling (`muc#user` items/statuses/
+        //    invites, `muc#admin`/`muc#owner` payloads) to the
+        //    service. The presence path (`muc_update.rs`) and the PM
+        //    path (`muc_direct.rs`) already strip these — this closes
+        //    the groupchat-message gap (#1251).
+        message
+            .payloads
+            .retain(|p| !is_client_forgeable_muc_payload(p));
 
         // 1. Strip same-`by=room` stanza-id siblings (typed BareJid
         //    equality so case-folded variants strip; mirrors the 1:1
@@ -426,5 +465,104 @@ mod tests {
         let from = msg.from.as_ref().expect("from set");
         assert_eq!(from.to_string(), "team@conf.example.com/alice-nick");
         assert!(msg.to.is_none(), "to is dropped for fan-out");
+    }
+
+    /// XEP-0313 §Security "MUC message spoofing" + XEP-0045
+    /// anti-spoofing (#1251): a client-supplied
+    /// `<x xmlns='http://jabber.org/protocol/muc#user'>` carrying
+    /// forged `<item/>` / `<status/>` room signalling MUST be
+    /// stripped before the message is reflected or archived.
+    #[test]
+    fn xep_0045_strips_client_supplied_muc_user_x() {
+        let room = bare("team@conf.example.com");
+        let sender = full("mallory@example.com/web");
+        let mut msg = groupchat(&room, &sender, "hi");
+        let ns_user = crate::muc::presence::NS_MUC_USER;
+        msg.payloads.push(
+            minidom::Element::builder("x", ns_user)
+                .append(
+                    minidom::Element::builder("item", ns_user)
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "victim@example.com",
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                            "owner",
+                        )
+                        .attr(minidom::rxml::xml_ncname!("role").to_owned(), "moderator")
+                        .build(),
+                )
+                .append(
+                    minidom::Element::builder("status", ns_user)
+                        .attr(minidom::rxml::xml_ncname!("code").to_owned(), "110")
+                        .build(),
+                )
+                .build(),
+        );
+
+        run(&room, &sender, "mallory", &mut msg, "stamp-1");
+
+        assert!(
+            !msg.payloads.iter().any(|p| p.ns() == ns_user),
+            "client-supplied muc#user <x> must be stripped before reflect/archive"
+        );
+        // The legitimate body survives.
+        assert!(!msg.bodies.is_empty());
+    }
+
+    /// The other MUC service namespaces (`muc`, `muc#admin`,
+    /// `muc#owner`) are equally service-authored; a client must not be
+    /// able to smuggle payloads in them through a groupchat message.
+    #[test]
+    fn xep_0045_strips_all_client_supplied_muc_service_namespaces() {
+        let room = bare("team@conf.example.com");
+        let sender = full("mallory@example.com/web");
+        let mut msg = groupchat(&room, &sender, "hi");
+        for ns in [
+            crate::muc::presence::NS_MUC,
+            crate::muc::NS_MUC_ADMIN,
+            crate::muc::NS_MUC_OWNER,
+        ] {
+            msg.payloads
+                .push(minidom::Element::builder("x", ns).build());
+        }
+
+        run(&room, &sender, "mallory", &mut msg, "stamp-1");
+
+        for ns in [
+            crate::muc::presence::NS_MUC,
+            crate::muc::presence::NS_MUC_USER,
+            crate::muc::NS_MUC_ADMIN,
+            crate::muc::NS_MUC_OWNER,
+        ] {
+            assert!(
+                !msg.payloads.iter().any(|p| p.ns() == ns),
+                "payloads in `{ns}` must be stripped from occupant groupchat messages"
+            );
+        }
+    }
+
+    /// Non-MUC payloads (the message's own extensions) must survive
+    /// the anti-spoofing strip untouched.
+    #[test]
+    fn xep_0045_strip_preserves_non_muc_payloads() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "hi");
+        msg.payloads
+            .push(minidom::Element::builder("x", crate::muc::presence::NS_MUC_USER).build());
+        msg.payloads.push(
+            minidom::Element::builder("active", "http://jabber.org/protocol/chatstates").build(),
+        );
+
+        run(&room, &sender, "alice-nick", &mut msg, "stamp-1");
+
+        assert!(
+            msg.payloads
+                .iter()
+                .any(|p| p.name() == "active" && p.ns() == "http://jabber.org/protocol/chatstates"),
+            "non-MUC payloads must survive the anti-spoofing strip"
+        );
     }
 }

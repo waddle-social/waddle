@@ -18,6 +18,7 @@ pub(super) async fn archive_groupchat_event(
     sender: FullJid,
     message: Box<Message>,
     sender_nickname_generation: u64,
+    sender_item: Option<waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatEventOutcome {
     let Some(mam_storage) = deps.mam_storage else {
         debug!(
@@ -48,6 +49,7 @@ pub(super) async fn archive_groupchat_event(
         &message,
         sender_nickname_generation,
         fence.as_ref(),
+        sender_item.as_ref(),
     )
     .await
     {
