@@ -2880,7 +2880,10 @@ describe("room activity adapter", () => {
 });
 
 describe("carbon forwarding", () => {
-  test("ignores carbon-wrapped payloads on generic message event", () => {
+  test("delivers carbon-marked received messages to the DM handler (#1243)", () => {
+    // The WASM core unwraps the XEP-0280 envelope (after the §11 own-
+    // bare-JID check) and surfaces the INNER message with a `carbon`
+    // marker — it must render like any live DM, keyed by the peer.
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
@@ -2889,14 +2892,19 @@ describe("carbon forwarding", () => {
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
     xmpp.emit("message", {
+      id: "c-recv-render",
       type: "chat",
-      from: "alice@example.com",
-      to: "bob@example.com",
-      body: "wrapper should be ignored here",
-      carbon: { sent: true },
+      from: "bob@example.com/phone",
+      to: "alice@example.com/tablet",
+      body: "carbon copy renders live",
+      carbon: { sent: false, received: true },
     });
 
-    expect(dmHandler).toHaveBeenCalledTimes(0);
+    expect(dmHandler).toHaveBeenCalledTimes(1);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
+      peerJid: "bob@example.com",
+      body: "carbon copy renders live",
+    }));
   });
 
   test("applies carbon-wrapped call activity on generic message events", () => {
@@ -2928,30 +2936,27 @@ describe("carbon forwarding", () => {
     });
   });
 
-  test("applies call activity from carbon:sent events", () => {
+  test("applies call activity from carbon-marked sent messages", () => {
     const client = new BrowserXmppClient(session());
     const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("carbon:sent", {
-      carbon: {
-        forward: {
-          message: {
-            id: "call-carbon-sent",
-            type: "chat",
-            from: "alice@example.com/phone",
-            to: "bob@example.com/desktop",
-            timestamp: new Date().toISOString(),
-            call_event: {
-              kind: "propose",
-              from: "alice@example.com/phone",
-              to: "bob@example.com/desktop",
-              sid: "call-carbon-sent",
-              media: { audio: true, video: true },
-            },
-          },
-        },
+    // #1243: the WASM core unwraps the carbon envelope and delivers the
+    // inner message on the normal path with a `carbon` direction marker.
+    xmpp.emit("message", {
+      id: "call-carbon-sent",
+      type: "chat",
+      from: "alice@example.com/phone",
+      to: "bob@example.com/desktop",
+      timestamp: new Date().toISOString(),
+      carbon: { sent: true, received: false },
+      call_event: {
+        kind: "propose",
+        from: "alice@example.com/phone",
+        to: "bob@example.com/desktop",
+        sid: "call-carbon-sent",
+        media: { audio: true, video: true },
       },
     });
 
@@ -2962,7 +2967,7 @@ describe("carbon forwarding", () => {
     });
   });
 
-  test("deduplicates carbon:received call activity against the forwarded message event", () => {
+  test("deduplicates carbon-marked call activity against a duplicate direct delivery", () => {
     const client = new BrowserXmppClient(session());
     const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
@@ -2981,13 +2986,7 @@ describe("carbon forwarding", () => {
         media: { audio: true, video: false },
       },
     };
-    xmpp.emit("carbon:received", {
-      carbon: {
-        forward: {
-          message: forwarded,
-        },
-      },
-    });
+    xmpp.emit("message", { ...forwarded, carbon: { sent: false, received: true } });
     xmpp.emit("message", {
       ...forwarded,
       call_event: {
@@ -3005,7 +3004,7 @@ describe("carbon forwarding", () => {
     });
   });
 
-  test("forwards carbon:sent messages to the DM handler", () => {
+  test("forwards carbon-marked sent messages to the DM handler", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
@@ -3013,18 +3012,13 @@ describe("carbon forwarding", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("carbon:sent", {
-      carbon: {
-        forward: {
-          message: {
-            id: "c-sent-1",
-            type: "chat",
-            from: "alice@example.com/phone",
-            to: "bob@example.com/desktop",
-            body: "hello from sibling sender",
-          },
-        },
-      },
+    xmpp.emit("message", {
+      id: "c-sent-1",
+      type: "chat",
+      from: "alice@example.com/phone",
+      to: "bob@example.com/desktop",
+      body: "hello from sibling sender",
+      carbon: { sent: true, received: false },
     });
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
@@ -3035,7 +3029,81 @@ describe("carbon forwarding", () => {
     }));
   });
 
-  test("does not double-process carbon:received + forwarded message events", () => {
+  test("drops carbon-sent chat states and displayed markers (own activity elsewhere)", () => {
+    const client = new BrowserXmppClient(session());
+    const chatStateHandler = mock(() => undefined);
+    const displayedHandler = mock(() => undefined);
+    client.setDmChatStateHandler(chatStateHandler);
+    client.setDmDisplayedHandler(displayedHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    // Our own typing indicator on another device must not surface as
+    // peer state.
+    xmpp.emit("message", {
+      type: "chat",
+      from: "alice@example.com/phone",
+      to: "bob@example.com",
+      chat_state: "composing",
+      carbon: { sent: true, received: false },
+    });
+    xmpp.emit("message", {
+      id: "marker-1",
+      type: "chat",
+      from: "alice@example.com/phone",
+      to: "bob@example.com",
+      displayed_marker_id: "some-message",
+      carbon: { sent: true, received: false },
+    });
+    expect(chatStateHandler).not.toHaveBeenCalled();
+    expect(displayedHandler).not.toHaveBeenCalled();
+
+    // A carbon-RECEIVED chat state is the peer typing to another of our
+    // devices — same conversation, so it does surface.
+    xmpp.emit("message", {
+      type: "chat",
+      from: "bob@example.com/desktop",
+      to: "alice@example.com/phone",
+      chat_state: "composing",
+      carbon: { sent: false, received: true },
+    });
+    expect(chatStateHandler).toHaveBeenCalledWith(expect.objectContaining({
+      peerJid: "bob@example.com",
+      state: "composing",
+    }));
+  });
+
+  test("files MUC private messages under the full occupant JID (#1256)", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids =
+      new Set(["room@muc.example.com"]);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", {
+      id: "muc-pm-1",
+      type: "chat",
+      from: "room@muc.example.com/juliet",
+      to: "alice@example.com/desktop",
+      body: "psst — occupant to occupant",
+    });
+
+    expect(dmHandler).toHaveBeenCalledTimes(1);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
+      // XEP-0045 §7.5: conversation identity = occupant JID, so replies
+      // address room@service/nick, never the room bare JID (broadcast).
+      peerJid: "room@muc.example.com/juliet",
+      mucPm: true,
+      nick: "juliet",
+      body: "psst — occupant to occupant",
+    }));
+  });
+
+  test("does not double-process a carbon copy plus a duplicate direct delivery", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
@@ -3050,15 +3118,9 @@ describe("carbon forwarding", () => {
       to: "alice@example.com/desktop",
       body: "hello from another resource path",
     };
-    // stanza emits both `carbon:received` and a synthetic `message` event for
-    // the same forwarded stanza.
-    xmpp.emit("carbon:received", {
-      carbon: {
-        forward: {
-          message: forwarded,
-        },
-      },
-    });
+    // The unwrapped carbon copy and a direct delivery of the same
+    // stanza (bare-JID fan-out race) must collapse to one dispatch.
+    xmpp.emit("message", { ...forwarded, carbon: { sent: false, received: true } });
     xmpp.emit("message", forwarded);
 
     expect(dmHandler).toHaveBeenCalledTimes(1);

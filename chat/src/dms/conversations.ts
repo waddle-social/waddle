@@ -107,16 +107,26 @@ export function useDirectMessageConversations(
     }
   }
 
-  function ensureConversation(peerJid: string): DmConversation {
-    const bare = barePeerJid(peerJid);
-    const existing = conversations.value.find((c) => c.peerJid === bare);
+  /**
+   * Canonical store key for a peer: MUC-PM conversations (#1256) are
+   * keyed by the FULL occupant JID (`room@service/nick`), so an exact
+   * match on an existing conversation wins before bare-JID folding.
+   */
+  function conversationKeyFor(peerJid: string): string {
+    const trimmed = peerJid.trim();
+    if (conversations.value.some((c) => c.peerJid === trimmed)) return trimmed;
+    return barePeerJid(trimmed);
+  }
+
+  function ensureConversation(key: string, username?: string): DmConversation {
+    const existing = conversations.value.find((c) => c.peerJid === key);
     if (existing) return existing;
     const created: DmConversation = {
-      peerJid: bare,
-      peerUsername: peerUsername(bare),
+      peerJid: key,
+      peerUsername: username ?? peerUsername(key),
       unreadCount: 0,
-      presenceShow: presenceByJid.value[bare] ?? "offline",
-      presenceIdleSince: presenceIdleByJid.value[bare],
+      presenceShow: presenceByJid.value[key] ?? "offline",
+      presenceIdleSince: presenceIdleByJid.value[key],
     };
     conversations.value = sortByRecent([...conversations.value, created]);
     return created;
@@ -286,7 +296,7 @@ export function useDirectMessageConversations(
   }
 
   function markRead(peerJid: string, opts: { forceSync?: boolean } = {}) {
-    const bare = barePeerJid(peerJid);
+    const bare = conversationKeyFor(peerJid);
     const conversation = ensureConversation(bare);
     rememberRead(bare, conversation.lastMessageAt);
 
@@ -303,7 +313,7 @@ export function useDirectMessageConversations(
   }
 
   async function openDm(peerJid: string) {
-    const bare = barePeerJid(peerJid);
+    const bare = conversationKeyFor(peerJid);
     ensureConversation(bare);
     activePeerJid.value = bare;
     hydratePeerDmCallActivity(bare);
@@ -319,8 +329,11 @@ export function useDirectMessageConversations(
   }
 
   function receiveIncomingDm(msg: LiveDmMessage) {
-    const bare = barePeerJid(msg.peerJid);
-    const existing = ensureConversation(bare);
+    // XEP-0045 §7.5 (#1256): MUC PMs file under the full occupant JID —
+    // never the room bare JID, where a reply would broadcast.
+    const bare = msg.mucPm ? msg.peerJid : barePeerJid(msg.peerJid);
+    const mucPmNick = msg.mucPm ? msg.peerJid.split("/")[1] : undefined;
+    const existing = ensureConversation(bare, mucPmNick);
     const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
     const isActiveConversation = activePeerJid.value === bare;
     // Archive-decoded arrivals are MAM catch-up re-emissions: the message

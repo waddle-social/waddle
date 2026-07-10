@@ -246,6 +246,13 @@ export interface LiveDmMessage {
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
+  /**
+   * XEP-0045 §7.5 (#1256): this is a MUC private message. `peerJid` is
+   * the FULL occupant JID (`room@service/nick`) — the conversation
+   * identity — and replies MUST address it verbatim; stripping the
+   * resource would broadcast to the whole room.
+   */
+  mucPm?: boolean;
   peerJid: string;
   fromJid: string;
   nick: string;

@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
-import { MamPager, type MamWasmClient } from "../src/lib/xmpp/client-mam";
+import { MamPager, rawMessageSeenIds, type MamWasmClient } from "../src/lib/xmpp/client-mam";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import type { LiveDmMessage, XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { WasmArchivedMessage, WasmMamPage } from "../src/lib/xmpp/wasm-types";
@@ -183,5 +183,64 @@ describe("MamPager reconnect catch-up cursor handling", () => {
 
     expect(delivered).toEqual([]);
     expect(catchupInfos).toEqual([{ outcome: "aborted" }]);
+  });
+});
+
+describe("rawMessageSeenIds stanza-id verification (#1267 item 2)", () => {
+  test("keeps only stanza-ids stamped by a trusted archiving authority", () => {
+    const ids = rawMessageSeenIds(
+      {
+        id: "wire-1",
+        origin_id: "origin-1",
+        stanza_id: "spoofed-sid",
+        stanza_id_by: "mallory@evil.example",
+        stanza_ids: [
+          { id: "spoofed-sid-2", by: "mallory@evil.example" },
+          { id: "server-sid", by: "example.com" },
+          { id: "account-sid", by: SELF },
+        ],
+        message_type: "chat",
+        reaction_emojis: [],
+        markup_spans: [],
+        mention_uris: [],
+        references: [],
+        is_muc: false,
+        is_sticker: false,
+        shared_files: [],
+        link_previews: [],
+        is_retracted: false,
+        displayed_marker_requested: false,
+      },
+      [SELF, "example.com"],
+    );
+
+    // Sender-owned ids always count; XEP-0359 stanza-ids only when their
+    // `by` matches an expected authority (§Security Considerations).
+    expect(ids.sort()).toEqual(["account-sid", "origin-1", "server-sid", "wire-1"].sort());
+    expect(ids).not.toContain("spoofed-sid");
+    expect(ids).not.toContain("spoofed-sid-2");
+  });
+
+  test("accepts the singular stanza-id when its by matches the authority", () => {
+    const ids = rawMessageSeenIds(
+      {
+        id: "wire-2",
+        stanza_id: "room-sid",
+        stanza_id_by: "room@muc.example.com",
+        message_type: "groupchat",
+        reaction_emojis: [],
+        markup_spans: [],
+        mention_uris: [],
+        references: [],
+        is_muc: true,
+        is_sticker: false,
+        shared_files: [],
+        link_previews: [],
+        is_retracted: false,
+        displayed_marker_requested: false,
+      },
+      ["room@muc.example.com"],
+    );
+    expect(ids.sort()).toEqual(["room-sid", "wire-2"].sort());
   });
 });

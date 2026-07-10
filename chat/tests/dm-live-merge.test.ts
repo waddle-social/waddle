@@ -121,6 +121,56 @@ describe("handleIncomingMessage typed dispatch", () => {
     expect(h.messages.value[0]?.isEdited).toBe(true);
   });
 
+  test("correction never resurrects a retracted message (#1267 item 5)", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "",
+        nick: "bob",
+        authorJid: "bob@example.com",
+        isRetracted: true,
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.handleIncomingMessage(makeLive({
+      replacesId: "m1",
+      body: "resurrected content",
+      fromJid: "bob@example.com",
+    }));
+    expect(h.messages.value[0]?.body).toBe("");
+    expect(h.messages.value[0]?.isEdited).toBeUndefined();
+  });
+
+  test("MUC-PM correction requires the full occupant JID to match (#1256)", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "pm1",
+        body: "original",
+        nick: "juliet",
+        authorJid: "room@muc.example.com/juliet",
+        authorOccupantJid: "room@muc.example.com/juliet",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    // A different occupant of the SAME room shares the bare JID — the
+    // full occupant JID must gate the edit (XEP-0308 business rules).
+    h.liveMerge.handleIncomingMessage(makeLive({
+      replacesId: "pm1",
+      body: "hijacked",
+      fromJid: "room@muc.example.com/iago",
+    }));
+    expect(h.messages.value[0]?.body).toBe("original");
+
+    h.liveMerge.handleIncomingMessage(makeLive({
+      replacesId: "pm1",
+      body: "legit edit",
+      fromJid: "room@muc.example.com/juliet",
+    }));
+    expect(h.messages.value[0]?.body).toBe("legit edit");
+  });
+
   test("correction replaces stale link preview state", () => {
     const h = harness();
     h.messages.value = [

@@ -30,6 +30,12 @@ export function fromLiveDmMessage(
     createdAtSource: msg.createdAtSource,
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
   };
+  // XEP-0045 §7.5 / XEP-0308 (#1256): a MUC-PM row from the occupant
+  // peer keeps the full occupant JID so protocol checks (correction /
+  // retraction sender match) compare full JIDs, not the room bare JID.
+  if (msg.mucPm && barePeerJid(msg.fromJid) === barePeerJid(msg.peerJid)) {
+    tm.authorOccupantJid = msg.fromJid;
+  }
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.replyableId) tm.replyableId = msg.replyableId;
   if (msg.stanzaId) tm.stanzaId = msg.stanzaId;
@@ -103,6 +109,10 @@ export function queuedDmMessageToTimeline(
 }
 
 export function isSameDmCorrectionSender(target: TimelineMessage, correctionFromJid: string): boolean {
+  // XEP-0308 business rules: in MUC-PMs the correction's FULL occupant
+  // JID must match the original's — a different occupant (same room)
+  // must never edit or retract this row (#1267 item 5).
+  if (target.authorOccupantJid) return target.authorOccupantJid === correctionFromJid;
   return barePeerJid(target.authorJid ?? "") === barePeerJid(correctionFromJid);
 }
 

@@ -488,7 +488,9 @@ export function roomMessageFromArchived(
   // it looking like a normal user post.
   if (message.pin_event) {
     return {
-      id: message.id ?? message.stanza_id ?? message.mam_id,
+      // #1267 item 3: only trust a stanza-id whose `by` is the room
+      // (XEP-0359 §Security) — never the unverified first-listed one.
+      id: message.id ?? stampedByRoom ?? message.mam_id,
       archiveId: message.mam_id,
       roomJid,
       nick: "",
@@ -594,7 +596,9 @@ export function roomMessageFromArchived(
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
     ...(message.moderated_by ? { moderatedBy: message.moderated_by } : {}),
     ...(message.moderation_reason ? { moderationReason: message.moderation_reason } : {}),
-    ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
+    // #1267 item 3: gate on ids the sender actually owns (origin/wire id)
+    // or the room-verified stanza-id — not the unverified first-listed one.
+    ...(stampedByRoom ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
     ...(stampedByRoom ? { replyableId: stampedByRoom } : {}),
     // XEP-0490 needs the room-injected stanza-id (by=room) so the
     // MDS publish carries the spec-correct stanza-id for group chats.

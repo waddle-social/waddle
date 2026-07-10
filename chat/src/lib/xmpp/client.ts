@@ -186,10 +186,8 @@ import type { StatusPreferenceWire } from "@/presence/status-preference";
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
 type InboundWasmMessage = WasmMessage & {
-  carbon?: { sent?: boolean; received?: boolean };
   inboxPush?: InboxEntry;
   inbox_push?: WasmInboxConversation;
-  _fromCarbon?: boolean;
 };
 
 // Safety-net ceiling for a MUC join. XEP-0045 §7.2.2 has the service
@@ -292,11 +290,11 @@ type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
 };
 
 
-/** XEP-0280 carbon envelope as surfaced by the compat emitter. */
-type WasmCarbonEvent = { carbon?: { forward?: { message?: WasmMessage } } };
-
 /** Per-event handler signatures for the legacy emitter surface some
- * wasm builds expose alongside the `set_on_*` registration methods. */
+ * wasm builds expose alongside the `set_on_*` registration methods.
+ * XEP-0280 carbons are NOT a separate event: the WASM core unwraps the
+ * envelope and delivers the inner message through the normal `message`
+ * path with a `carbon` direction marker (#1243). */
 type CompatEmitterEvents = {
   "session:started": () => void;
   "stream:management:resumed": () => void;
@@ -304,8 +302,6 @@ type CompatEmitterEvents = {
   "message:acked": (msg: { id?: string }) => void;
   "message:failed": (msg: { id?: string }) => void;
   message: (message: WasmMessage) => void;
-  "carbon:sent": (event: WasmCarbonEvent) => void;
-  "carbon:received": (event: WasmCarbonEvent) => void;
   presence: (presence: WasmPresence) => void;
 };
 
@@ -1446,9 +1442,20 @@ export class BrowserXmppClient {
     );
   }
 
+  /** XEP-0045 §7.5 (#1256): a MUC PM conversation is keyed by the full
+   * occupant JID and replies MUST go to `room@service/nick` — sending to
+   * the room bare JID would broadcast. Everything else addresses the
+   * bare peer JID. */
+  private directMessageAddress(peerJid: string): string {
+    const hasResource = peerJid.includes("/");
+    return hasResource && this.isKnownMucRoomBare(barePeerJid(peerJid))
+      ? peerJid
+      : barePeerJid(peerJid);
+  }
+
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
     if (!body.trim() && !opts.files?.length) return null;
-    const normalizedPeerJid = barePeerJid(peerJid);
+    const normalizedPeerJid = this.directMessageAddress(peerJid);
     if (this.canUseConnectedSession() && this.xmpp) {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId };
@@ -1561,17 +1568,17 @@ export class BrowserXmppClient {
     if (thread?.parent) opts.parentThreadId = thread.parent;
     return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);
   }
-  async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, barePeerJid(peerJid), "chat", state, thread); }
-  async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, barePeerJid(peerJid), "chat", messageId, thread); }
-  async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, barePeerJid(peerJid), "chat", messageId, thread); }
+  async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, this.directMessageAddress(peerJid), "chat", state, thread); }
+  async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, this.directMessageAddress(peerJid), "chat", messageId, thread); }
+  async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, this.directMessageAddress(peerJid), "chat", messageId, thread); }
   async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"], preview?: Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, thread?: { id: string; parent?: string }): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
     const opts: SendDirectMessageOptions = { markup, references, ...preview };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
-    return await this.compatSendCorrection(xmpp, barePeerJid(peerJid), "chat", body, replacesId, opts);
+    return await this.compatSendCorrection(xmpp, this.directMessageAddress(peerJid), "chat", body, replacesId, opts);
   }
-  async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, barePeerJid(peerJid), "chat", messageId, emojis, thread); }
+  async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, this.directMessageAddress(peerJid), "chat", messageId, emojis, thread); }
   async sendDmInCallReaction(peerJid: string, sid: string, emoji: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendInCallReaction(xmpp, peerJid, "chat", sid, emoji); }
 
   /**
@@ -2482,7 +2489,18 @@ export class BrowserXmppClient {
   private handleMessage(message: InboundWasmMessage) {
     const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);
     if (inboxPush) { this.events.emit("inboxPush", inboxPush); return; }
-    if (message.id && this.carbonDedupIds.has(message.id) && !message._fromCarbon) {
+    if (message.carbon?.sent || message.carbon?.received) {
+      // XEP-0280 (#1243): the WASM core unwrapped a verified carbon and
+      // this IS the inner message. Remember its id so a duplicate direct
+      // delivery of the same stanza (e.g. bare-JID fan-out racing the
+      // carbon) drops below, then continue through the normal pipeline.
+      if (message.id) this.rememberCarbonId(message.id);
+      // A carbon-SENT chat state or displayed marker mirrors OUR OWN
+      // activity on another device; surfacing it as peer state would
+      // render "peer is typing" / "peer read this" for ourselves.
+      // (Cross-device read sync travels via XEP-0490 MDS instead.)
+      if (message.carbon.sent && ((message.chat_state && !message.body) || message.displayed_marker_id)) return;
+    } else if (message.id && this.carbonDedupIds.has(message.id)) {
       this.carbonDedupIds.delete(message.id);
       return;
     }
@@ -2496,10 +2514,15 @@ export class BrowserXmppClient {
       });
       if (!message.body && !message.subject) return;
     }
-    if (message.carbon?.sent || message.carbon?.received) return;
     if (message.chat_state && !message.body) {
       if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
-      else this.events.emit("dmChatState", { peerJid: barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
+      else {
+        // XEP-0045 §7.5 (#1256): a chat state from a joined room's
+        // occupant JID belongs to that occupant's PM conversation, not
+        // to a phantom DM keyed by the room bare JID.
+        const occupant = this.mucPmOccupant(message);
+        this.events.emit("dmChatState", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
+      }
       return;
     }
     if (message.in_call?.kind === "reaction") {
@@ -2536,8 +2559,8 @@ export class BrowserXmppClient {
    * in `completeResumeBarrier` — it never re-enters the buffer.
    */
   private dispatchLiveMessage(message: InboundWasmMessage) {
-    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else this.events.emit("dmDisplayed", { peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
-    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
+    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
+    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
     this.dispatchLiveBodyMessage(message);
   }
 
@@ -2549,13 +2572,24 @@ export class BrowserXmppClient {
       // cannot prove delivery continuity (MUC gap during a kick/rejoin,
       // SM replay-window eviction), so catch-up re-fetches from the last
       // archive-CONFIRMED cursor and filters via `seenIds` instead.
-      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
+      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message, [converted.roomJid]));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.events.emit("activity", roomActivityEventFromMessage(converted)); return; }
       this.events.emit("message", converted); return;
     }
-    const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid), "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
+    const selfBare = barePeerJid(this.session.jid);
+    const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, selfBare, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
     if (converted) {
-      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message));
+      // XEP-0045 §7.5 (#1256): a `type='chat'` message whose counterpart
+      // is `room@service/nick` for a known room is a MUC private message.
+      // Re-key the conversation to the occupant JID so it never misfiles
+      // under the room bare JID (where a reply would broadcast).
+      const occupant = this.mucPmOccupant(message);
+      if (occupant) {
+        converted.peerJid = occupant.occupantJid;
+        converted.mucPm = true;
+        if (barePeerJid(message.from ?? "") !== selfBare) converted.nick = occupant.nick;
+      }
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message, [selfBare, jidDomain(selfBare)]));
       this.events.emit("directMessage", converted);
     }
   }
@@ -2565,6 +2599,46 @@ export class BrowserXmppClient {
     const fromBare = barePeerJid(message.from ?? "");
     const toBare = barePeerJid(message.to ?? "");
     return fromBare === selfBare ? toBare : fromBare;
+  }
+
+  /** Bounded XEP-0280 dedupe memory: a carbon's wire id is remembered so
+   * a duplicate direct delivery of the same stanza drops; capped so the
+   * set cannot grow monotonically over a long-lived session. */
+  private rememberCarbonId(id: string) {
+    this.carbonDedupIds.add(id);
+    if (this.carbonDedupIds.size > 512) {
+      const oldest = this.carbonDedupIds.values().next().value;
+      if (oldest !== undefined) this.carbonDedupIds.delete(oldest);
+    }
+  }
+
+  /** Whether `bareJid` is a MUC room this session knows about (joined,
+   * retained across reconnect, or discovered via space topology). */
+  private isKnownMucRoomBare(bareJid: string): boolean {
+    const key = this.roomJoinKey(bareJid);
+    if (!key) return false;
+    if (this.joinedMucs.has(key) || this.retainedJoinedRoomJids.has(key)) return true;
+    for (const roomJid of this.discoveredRoomJids.values()) {
+      if (this.roomJoinKey(roomJid) === key) return true;
+    }
+    return false;
+  }
+
+  /**
+   * XEP-0045 §7.5 (#1256): detect a MUC private message — a non-groupchat
+   * message whose conversation counterpart is `room@service/nick` for a
+   * known room. Returns the occupant JID (the conversation identity a
+   * reply must address) and the occupant nick, or `undefined` for a
+   * normal 1:1 message.
+   */
+  private mucPmOccupant(message: InboundWasmMessage): { occupantJid: string; nick: string } | undefined {
+    if (message.is_muc) return undefined;
+    const selfBare = barePeerJid(this.session.jid);
+    const from = message.from ?? "";
+    const counterpart = barePeerJid(from) === selfBare ? (message.to ?? "") : from;
+    const nick = counterpart.split("/")[1] ?? "";
+    if (!nick || !this.isKnownMucRoomBare(barePeerJid(counterpart))) return undefined;
+    return { occupantJid: counterpart, nick };
   }
   private runReconnectCatchup(
     xmpp: XmppClientInstance,
@@ -2708,14 +2782,6 @@ export class BrowserXmppClient {
     xmpp.on?.("message", (message: WasmMessage) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handleMessage(message);
-    });
-    xmpp.on?.("carbon:sent", (event: { carbon?: { forward?: { message?: WasmMessage } } }) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
-      const forwarded = event.carbon?.forward?.message; if (forwarded?.id) this.carbonDedupIds.add(forwarded.id); if (forwarded) this.handleMessage({ ...forwarded, _fromCarbon: true });
-    });
-    xmpp.on?.("carbon:received", (event: { carbon?: { forward?: { message?: WasmMessage } } }) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
-      const forwarded = event.carbon?.forward?.message; if (forwarded?.id) this.carbonDedupIds.add(forwarded.id); if (forwarded) this.handleMessage({ ...forwarded, _fromCarbon: true });
     });
     xmpp.on?.("presence", (presence: WasmPresence) => {
       if (!this.isCurrentXmpp(xmpp)) return;

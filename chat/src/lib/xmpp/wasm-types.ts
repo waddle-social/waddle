@@ -162,6 +162,13 @@ export interface WasmMessage {
   /** urn:waddle:pin:0 pin/unpin event surfaced by the room (#414). */
   pin_event?: WasmPinEvent;
   inbox_push?: WasmInboxConversation;
+  /**
+   * XEP-0280: present when the WASM core unwrapped this message from a
+   * verified carbon envelope (#1243). Exactly one flag is true. The §11
+   * own-bare-JID forgery check already happened in the core — a message
+   * carrying this marker is always a trustworthy carbon copy.
+   */
+  carbon?: { sent: boolean; received: boolean };
 }
 
 export interface WasmLinkPreview {

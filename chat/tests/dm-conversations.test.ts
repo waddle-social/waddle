@@ -276,6 +276,32 @@ describe("useDirectMessageConversations", () => {
     expect(composable.totalUnreadCount.value).toBe(1);
   });
 
+  test("receiveIncomingDm files a MUC PM under the full occupant JID (#1256)", async () => {
+    const { composable } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({
+      mucPm: true,
+      peerJid: "room@muc.example.com/juliet",
+      fromJid: "room@muc.example.com/juliet",
+      nick: "juliet",
+      body: "occupant whisper",
+    }));
+
+    expect(composable.conversations.value).toHaveLength(1);
+    // XEP-0045 §7.5: the conversation identity is the occupant JID —
+    // keying by the room bare JID would make a reply broadcast.
+    expect(composable.conversations.value[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      peerUsername: "juliet",
+      lastMessageBody: "occupant whisper",
+    });
+
+    // Opening/marking the occupant conversation must not fold it back
+    // into a room-bare-keyed sibling.
+    await composable.openDm("room@muc.example.com/juliet");
+    expect(composable.activePeerJid.value).toBe("room@muc.example.com/juliet");
+    expect(composable.conversations.value).toHaveLength(1);
+  });
+
   test("receiveIncomingDm does not increment unread for active conversation", async () => {
     const { composable } = makeComposable();
     await composable.openDm("bob@example.com");
