@@ -12,7 +12,7 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import { buildDmCallOutcomeAnchor, type DmCallOutcomeAnchor } from "@/lib/calls/dm-call-anchor";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
-import { bareJidKey, barePeerJid, jidDomain } from "./jid";
+import { barePeerJid, jidDomain } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { classifyMamError, isMamCursorNotFound } from "./mam";
 import type { ReconnectCatchup } from "./reconnect-catchup";
@@ -26,7 +26,7 @@ import type {
   RoomActivityEvent,
   XmppErrorEvent,
 } from "./types";
-import { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
+import { dmMessageFromArchived, roomMessageFromArchived, stanzaIdAuthorityKey } from "./wasm-message-codecs";
 import type { WasmArchivedMessage, WasmMamPage, WasmMessage } from "./wasm-types";
 
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
@@ -118,14 +118,24 @@ export function rawMessageSeenIds(
   message: WasmMessage,
   stanzaIdAuthorities: ReadonlyArray<string>,
 ): string[] {
-  const authorities = new Set(stanzaIdAuthorities.map(bareJidKey).filter(Boolean));
+  // `stanzaIdAuthorityKey` (shared with the decode path) case-folds the
+  // bare and rejects resource-carrying `by` values — the seen-id path
+  // and the row-identity path MUST accept exactly the same ids, or a
+  // mixed-case authority is recorded as seen while the row omits it
+  // (duplicate on reconnect).
+  const authorities = new Set(
+    stanzaIdAuthorities.map(stanzaIdAuthorityKey).filter((value): value is string => !!value),
+  );
   const verifiedStanzaIds = [
     ...(message.stanza_ids ?? []),
     ...(message.stanza_id && message.stanza_id_by
       ? [{ id: message.stanza_id, by: message.stanza_id_by }]
       : []),
   ]
-    .filter((stanzaId) => !!stanzaId.id && authorities.has(bareJidKey(stanzaId.by)))
+    .filter((stanzaId) => {
+      const key = stanzaIdAuthorityKey(stanzaId.by);
+      return !!stanzaId.id && !!key && authorities.has(key);
+    })
     .map((stanzaId) => stanzaId.id);
   return Array.from(new Set([
     message.id,
