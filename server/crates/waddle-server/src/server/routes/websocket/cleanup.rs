@@ -86,7 +86,7 @@ pub(crate) async fn broadcast_muc_leave_to_remaining(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(false, true),
+            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
             &identity,
         );
         super::handlers::presence::route_room_presence_to_occupant(
@@ -140,7 +140,7 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
                 occupant_jid,
                 outcome.affiliation,
                 outcome.role,
-                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
                 &identity,
             );
             if !muji.is_empty() {

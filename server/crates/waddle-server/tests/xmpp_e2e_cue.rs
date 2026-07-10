@@ -120,6 +120,9 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:bookmarks:1#compat-pep", "XEP-0402"),
     ("msgoffline", "XEP-0160"),
     ("http://jabber.org/protocol/muc", "XEP-0045"),
+    // XEP-0045 §7.4 stable-id: reflected groupchat messages keep the
+    // sender's original id (#1265 item 14).
+    ("http://jabber.org/protocol/muc#stable_id", "XEP-0045"),
     (
         "http://jabber.org/protocol/muc#self-ping-optimization",
         "XEP-0410",
@@ -184,6 +187,10 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
     },
     FeatureCoverageExemption {
         feature: "muc_temporary",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_unsecured",
         reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
     },
     FeatureCoverageExemption {

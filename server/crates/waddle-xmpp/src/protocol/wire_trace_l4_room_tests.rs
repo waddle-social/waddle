@@ -91,6 +91,7 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -178,6 +179,7 @@ fn xep_0045_non_occupant_halts_chain_with_typed_not_acceptable() {
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -245,6 +247,7 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -307,6 +310,7 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -386,6 +390,7 @@ fn xep_0430_groupchat_message_emits_durable_recipient_inbox_projection() {
         durable_recipient_bare_jids: &durable_recipients,
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -472,6 +477,7 @@ fn xep_0045_section_8_1_live_subject_change_chain_stamps_occupant_id() {
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -567,6 +573,7 @@ fn xep_0045_section_8_1_visitor_subject_change_halts_with_forbidden_no_broadcast
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -630,9 +637,10 @@ fn xep_0045_section_8_1_visitor_subject_change_halts_with_forbidden_no_broadcast
 }
 
 #[test]
-fn xep_0045_section_8_1_participant_in_unmoderated_room_subject_change_allowed() {
-    // §8.1 default policy: in an unmoderated room, any participant may
-    // change the subject. Chain Continues; PersistRoomSubject emitted.
+fn xep_0045_section_8_1_participant_allowed_via_changesubject_knob() {
+    // §8.1: with `muc#roomconfig_changesubject` enabled, a mere
+    // participant may change the subject (#1265 item 8). Chain
+    // Continues; PersistRoomSubject emitted.
     let room = bare("team@conf.example.com");
     let bob = full("bob@example.com/desk");
     let alice = full("alice@example.com/web");
@@ -649,6 +657,7 @@ fn xep_0045_section_8_1_participant_in_unmoderated_room_subject_change_allowed()
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: true,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,
@@ -666,7 +675,7 @@ fn xep_0045_section_8_1_participant_in_unmoderated_room_subject_change_allowed()
             .events
             .iter()
             .any(|e| matches!(e, OutboundEvent::PersistRoomSubject { .. })),
-        "participant in unmoderated room is allowed to change subject"
+        "participant with changesubject knob is allowed to change subject"
     );
 }
 
@@ -693,6 +702,7 @@ fn xep_0045_section_8_1_subject_with_body_is_not_a_subject_change() {
         durable_recipient_bare_jids: &[],
         managed_room_forbidden: false,
         room_moderated: false,
+        room_occupants_may_change_subject: false,
         room_members_only: false,
         pin_permission: crate::muc::PinPermission::default(),
         id_gen: &id_gen,

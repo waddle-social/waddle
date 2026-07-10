@@ -145,9 +145,9 @@ in parallel; within a bundle, top-to-bottom.
 5. ✅ #1263 — `<item-not-found/>` bounce for nonexistent rooms, bounded `DroppedFull` retries + drop counter on reflection/presence fan-out. DONE (PR #1277)
 
 **J6 — Disco truthfulness**
-1. #1259 — duplicate feature + duplicate `muc#roominfo` FORM_TYPE make disco#info ill-formed (XEP-0115 §5.4).
-2. #1260 — disco#info on a nonexistent room fabricates an open room (should be `item-not-found`).
-3. #1265 — XEP-0045 MUC minor conformance cluster (16 items, incl. `muc#stable_id` advertise, history-knob, member-list access). Relates Lane D #1170 (extended-MAM), #1258.
+1. ✅ #1259 — duplicate feature + duplicate `muc#roominfo` FORM_TYPE make disco#info ill-formed (XEP-0115 §5.4). DONE (PR #1271)
+2. ✅ #1260 — disco#info on a nonexistent room fabricates an open room (should be `item-not-found`). DONE (PR #1271)
+3. ✅ #1265 — XEP-0045 MUC minor conformance cluster (16 items, incl. `muc#stable_id` advertise, history-knob, member-list access). Relates Lane D #1170 (extended-MAM), #1258. DONE (PR #1271; items 3 → #232 and 5 deferred with justification in the PR)
 
 _Cross-refs (already-lane'd, referenced not re-filed): #1173/#1171/#1170 (Lane D), #1118 (Lane E), #984 (Lane G), #466 (Tier 0 close — residual → #1267)._
 

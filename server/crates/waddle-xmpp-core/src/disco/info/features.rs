@@ -255,6 +255,20 @@ impl Feature {
         Self::new("muc_persistent")
     }
 
+    pub fn muc_temporary() -> Self {
+        Self::new("muc_temporary")
+    }
+
+    pub fn muc_unsecured() -> Self {
+        Self::new("muc_unsecured")
+    }
+
+    /// XEP-0045 §7.4 stable-id support: the service reflects groupchat
+    /// messages with the original `id` intact.
+    pub fn muc_stable_id() -> Self {
+        Self::new("http://jabber.org/protocol/muc#stable_id")
+    }
+
     pub fn muc_open() -> Self {
         Self::new("muc_open")
     }

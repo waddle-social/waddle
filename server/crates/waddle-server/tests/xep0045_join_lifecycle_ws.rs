@@ -427,6 +427,129 @@ async fn xep_0045_fresh_bind_after_unclean_drop_cleans_detached_occupancy() {
     let _ = alice_fresh.close().await;
 }
 
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML");
+    String::from_utf8(buf).expect("xmpp_parsers serializes UTF-8")
+}
+
+fn disco_info_get_xml(to: &str, id: &str) -> String {
+    element_to_xml(
+        Element::builder("iq", "jabber:client")
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+                id,
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+                "get",
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+                to,
+            )
+            .append(Element::builder("query", "http://jabber.org/protocol/disco#info").build())
+            .build(),
+    )
+}
+
+fn groupchat_message_xml(to: &str, id: &str, body: &str) -> String {
+    element_to_xml(
+        Element::builder("message", "jabber:client")
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+                id,
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+                "groupchat",
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+                to,
+            )
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append(body)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+/// XEP-0045 §7.4 stable-id (#1265 item 14): the service and rooms
+/// advertise `http://jabber.org/protocol/muc#stable_id`, and the
+/// reflected groupchat message keeps the sender's original `id`.
+#[tokio::test]
+async fn xep_0045_stable_id_advertised_and_reflected_id_preserved() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_pass = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(ALICE, &alice_pass), (BOB, &bob_pass)]);
+
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "stable-admin").await;
+    let mut alice = connect(&server, ALICE, &alice_pass, "stable-alice").await;
+    let mut bob = connect(&server, BOB, &bob_pass, "stable-bob").await;
+
+    let room = format!("stable-id-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room, ADMIN).await;
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    // Service-level advertisement.
+    alice
+        .send(&disco_info_get_xml(
+            &format!("muc.{DOMAIN}"),
+            "disco-svc-stable",
+        ))
+        .await
+        .expect("send service disco");
+    let service_disco = alice
+        .recv_matching(|frame| frame.contains("disco-svc-stable"))
+        .await
+        .expect("service disco result");
+    assert!(
+        service_disco.contains("http://jabber.org/protocol/muc#stable_id"),
+        "MUC service must advertise stable_id (§7.4): {service_disco}"
+    );
+
+    // Room-level advertisement.
+    alice
+        .send(&disco_info_get_xml(&room, "disco-room-stable"))
+        .await
+        .expect("send room disco");
+    let room_disco = alice
+        .recv_matching(|frame| frame.contains("disco-room-stable"))
+        .await
+        .expect("room disco result");
+    assert!(
+        room_disco.contains("http://jabber.org/protocol/muc#stable_id"),
+        "room must advertise stable_id (§7.4): {room_disco}"
+    );
+
+    // Behavior backing the advertisement: the reflected groupchat
+    // message keeps the sender's original id.
+    let original_id = format!("stable-{}", uuid::Uuid::new_v4());
+    let body = format!("stable-id-body-{}", uuid::Uuid::new_v4());
+    alice
+        .send(&groupchat_message_xml(&room, &original_id, &body))
+        .await
+        .expect("alice sends groupchat message");
+    let bob_copy = bob
+        .recv_matching(|frame| frame.contains(&body))
+        .await
+        .expect("bob receives reflection");
+    assert!(
+        bob_copy.contains(&format!("id='{original_id}'")),
+        "reflected message must keep the sender's original id (§7.4): {bob_copy}"
+    );
+
+    let _ = admin.close().await;
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
 /// XEP-0045 §7.4 (#1263): a groupchat message to a room that does not
 /// exist must be answered with a message error carrying
 /// `<item-not-found/>` — the previous behavior silently dropped the

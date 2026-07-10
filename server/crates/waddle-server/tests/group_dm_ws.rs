@@ -1063,8 +1063,11 @@ async fn group_dm_member_renames_room_with_status_104_config_broadcast() {
         Some(NODE_GROUP_DM_RENAME),
     )
     .await;
+    // XEP-0045 §6.6 (#1265 item 10): disco to an occupant JID is
+    // rejected uniformly; alice IS an occupant, and pass-through is
+    // unsupported, so the reply is <feature-not-implemented/>.
     assert!(
-        is_error(&full_jid_disco) && full_jid_disco.contains("item-not-found"),
+        is_error(&full_jid_disco) && full_jid_disco.contains("feature-not-implemented"),
         "full room JID command disco must be rejected, not fall through: {full_jid_disco}"
     );
 
@@ -1075,8 +1078,9 @@ async fn group_dm_member_renames_room_with_status_104_config_broadcast() {
         NS_COMMANDS,
     )
     .await;
+    // §6.6 again: occupant requester → <feature-not-implemented/>.
     assert!(
-        is_error(&full_jid_items) && full_jid_items.contains("item-not-found"),
+        is_error(&full_jid_items) && full_jid_items.contains("feature-not-implemented"),
         "full room JID command items must be rejected, not fall through: {full_jid_items}"
     );
 }

@@ -188,45 +188,6 @@ pub fn build_space_parent_form(spaces_service: &str, node: &str) -> Element {
         .to_element()
 }
 
-/// Build the MUC roominfo compatibility form for room disco metadata.
-pub fn build_muc_roominfo_form(
-    spaces_service: &str,
-    node: &str,
-    description: Option<&str>,
-) -> Element {
-    let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type("http://jabber.org/protocol/muc#roominfo"))
-        .add_field(Field::text_single(
-            "muc#roomconfig_pubsub",
-            build_space_node_iri(spaces_service, node),
-        ));
-    if let Some(description) = description.filter(|value| !value.trim().is_empty()) {
-        form = form.add_field(Field::text_single("muc#roominfo_description", description));
-    }
-    form.to_element()
-}
-
-/// Build the MUC roominfo compatibility form for XEP-0503 parent metadata.
-pub fn build_muc_roominfo_pubsub_form(spaces_service: &str, node: &str) -> Element {
-    build_muc_roominfo_form(spaces_service, node, None)
-}
-
-/// Build all XEP-0503 room disco extension forms for a room linked to a space.
-pub fn build_room_space_metadata_forms(spaces_service: &str, node: &str) -> Vec<Element> {
-    build_room_space_metadata_forms_with_description(spaces_service, node, None)
-}
-
-pub fn build_room_space_metadata_forms_with_description(
-    spaces_service: &str,
-    node: &str,
-    description: Option<&str>,
-) -> Vec<Element> {
-    vec![
-        build_space_parent_form(spaces_service, node),
-        build_muc_roominfo_form(spaces_service, node, description),
-    ]
-}
-
 /// Build Waddle-specific room metadata for values not standardized by XEP-0045.
 ///
 /// `pin_permission` carries the room's current
@@ -370,30 +331,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_room_space_metadata_forms() {
-        let forms = build_room_space_metadata_forms("spaces.example.com", "general & ops");
+    fn test_build_space_parent_form() {
+        let form = build_space_parent_form("spaces.example.com", "general & ops");
 
-        assert_eq!(forms.len(), 2);
-        assert_eq!(forms[0].ns(), "jabber:x:data");
-        assert_eq!(forms[1].ns(), "jabber:x:data");
-
-        let parent = forms[0]
+        assert_eq!(form.ns(), "jabber:x:data");
+        let parent = form
             .children()
             .find(|field| field.attr("var") == Some("parent"))
             .expect("parent field");
         let parent_value: String = parent.children().next().unwrap().texts().collect();
         assert_eq!(
             parent_value,
-            "xmpp:spaces.example.com?;node=general%20%26%20ops"
-        );
-
-        let roominfo = forms[1]
-            .children()
-            .find(|field| field.attr("var") == Some("muc#roomconfig_pubsub"))
-            .expect("muc roominfo pubsub field");
-        let roominfo_value: String = roominfo.children().next().unwrap().texts().collect();
-        assert_eq!(
-            roominfo_value,
             "xmpp:spaces.example.com?;node=general%20%26%20ops"
         );
     }

@@ -108,6 +108,38 @@ async fn persist_managed_channel_affiliation(
     }
 }
 
+/// Roll back optimistically-persisted affiliation changes after the room
+/// actor rejected an admin set.
+async fn rollback_admin_affiliations(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    managed_channel_id: Option<&str>,
+    durable_previous_affiliations: &[(BareJid, Affiliation)],
+    actor_previous_affiliations: &[(BareJid, Affiliation)],
+) {
+    let Some(channel_id) = managed_channel_id else {
+        return;
+    };
+    for (previous_jid, previous_affiliation) in durable_previous_affiliations {
+        let _ = persist_managed_channel_affiliation(
+            state,
+            channel_id,
+            previous_jid,
+            *previous_affiliation,
+        )
+        .await;
+    }
+    for (previous_jid, previous_affiliation) in actor_previous_affiliations {
+        let _ = room_actor
+            .ask(ChangeAffiliation {
+                jid: previous_jid.clone(),
+                affiliation: *previous_affiliation,
+            })
+            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+            .await;
+    }
+}
+
 pub(super) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
@@ -164,7 +196,19 @@ pub(super) async fn handle_muc_admin_iq(
     let has_admin_affiliation =
         matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
     let is_admin = has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
-    if !is_admin {
+    // XEP-0045 §9.5: in a non-anonymous room (all Waddle rooms are
+    // muc_nonanonymous) any member SHOULD be able to retrieve the
+    // member list — even when not currently an occupant. Every other
+    // list GET and all admin sets remain admin+ (#1265 item 12).
+    let member_list_get = query.is_get
+        && !query.items.is_empty()
+        && !query.items.iter().any(admin_item_has_role_shape)
+        && query
+            .items
+            .iter()
+            .all(|item| item.affiliation == Some(Affiliation::Member))
+        && context.affiliation >= Affiliation::Member;
+    if !is_admin && !member_list_get {
         return vec![build_iq_error_xml_typed(
             iq.id(),
             response_from,
@@ -211,7 +255,7 @@ pub(super) async fn handle_muc_admin_iq(
                 &items,
             ))];
         }
-        if !has_admin_affiliation {
+        if !has_admin_affiliation && !member_list_get {
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -444,26 +488,14 @@ pub(super) async fn handle_muc_admin_iq(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
             warn!(room = %room_jid, "MUC admin set rejected because it would remove the last owner");
-            if let Some(channel_id) = managed_channel_id.as_deref() {
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
-                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
-                    let _ = room_actor
-                        .ask(ChangeAffiliation {
-                            jid: previous_jid.clone(),
-                            affiliation: *previous_affiliation,
-                        })
-                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-                        .await;
-                }
-            }
+            rollback_admin_affiliations(
+                state,
+                &room_actor,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+                &actor_previous_affiliations,
+            )
+            .await;
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -475,26 +507,14 @@ pub(super) async fn handle_muc_admin_iq(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotAdminModifyOwner,
         )) => {
             warn!(room = %room_jid, "MUC admin set rejected because an admin tried to change an owner affiliation");
-            if let Some(channel_id) = managed_channel_id.as_deref() {
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
-                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
-                    let _ = room_actor
-                        .ask(ChangeAffiliation {
-                            jid: previous_jid.clone(),
-                            affiliation: *previous_affiliation,
-                        })
-                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-                        .await;
-                }
-            }
+            rollback_admin_affiliations(
+                state,
+                &room_actor,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+                &actor_previous_affiliations,
+            )
+            .await;
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -506,26 +526,14 @@ pub(super) async fn handle_muc_admin_iq(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotModifyPrivilegedRole,
         )) => {
             warn!(room = %room_jid, "MUC admin set rejected because a non-owner tried to change an owner/admin role");
-            if let Some(channel_id) = managed_channel_id.as_deref() {
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
-                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
-                    let _ = room_actor
-                        .ask(ChangeAffiliation {
-                            jid: previous_jid.clone(),
-                            affiliation: *previous_affiliation,
-                        })
-                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-                        .await;
-                }
-            }
+            rollback_admin_affiliations(
+                state,
+                &room_actor,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+                &actor_previous_affiliations,
+            )
+            .await;
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -533,28 +541,37 @@ pub(super) async fn handle_muc_admin_iq(
                 not_allowed_iq_error("Admins and moderators cannot change an owner or admin role."),
             )];
         }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(nick),
+        )) => {
+            // XEP-0045 §8.2: kicking a nick that is not in the room is
+            // <item-not-found/>, not <forbidden/> (#1265 item 16).
+            warn!(room = %room_jid, nick = %nick, "MUC admin set targeted an absent occupant");
+            rollback_admin_affiliations(
+                state,
+                &room_actor,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+                &actor_previous_affiliations,
+            )
+            .await;
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                item_not_found_iq_error("No such occupant in this room."),
+            )];
+        }
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
-            if let Some(channel_id) = managed_channel_id.as_deref() {
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
-                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
-                    let _ = room_actor
-                        .ask(ChangeAffiliation {
-                            jid: previous_jid.clone(),
-                            affiliation: *previous_affiliation,
-                        })
-                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-                        .await;
-                }
-            }
+            rollback_admin_affiliations(
+                state,
+                &room_actor,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+                &actor_previous_affiliations,
+            )
+            .await;
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -564,26 +581,14 @@ pub(super) async fn handle_muc_admin_iq(
         }
         Err(error) => {
             warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
-            if let Some(channel_id) = managed_channel_id.as_deref() {
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
-                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
-                    let _ = room_actor
-                        .ask(ChangeAffiliation {
-                            jid: previous_jid.clone(),
-                            affiliation: *previous_affiliation,
-                        })
-                        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-                        .await;
-                }
-            }
+            rollback_admin_affiliations(
+                state,
+                &room_actor,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+                &actor_previous_affiliations,
+            )
+            .await;
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -592,13 +597,36 @@ pub(super) async fn handle_muc_admin_iq(
             )];
         }
     };
+    // XEP-0045 §8.2/§9.1 stanza ordering (#1265 item 6): the kicked/
+    // banned occupant's unavailable presence goes out first, then the
+    // moderator's IQ result, then the broadcast to remaining occupants.
+    // The moderator's own broadcast copy rides this connection's
+    // response frames AFTER the IQ result so the order is deterministic
+    // on the moderator's stream.
+    let mut remaining_broadcasts = Vec::new();
+    let mut self_kick_frames = Vec::new();
+    let mut moderator_frames = Vec::new();
     for (recipient, presence) in applied.presence_updates {
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to(&recipient, Stanza::Presence(presence))
-            .await;
+        if applied.removed_by_moderation.contains(&recipient) {
+            if recipient == *sender_jid {
+                // Self-kick: the kickee IS this connection, so its
+                // presence must ride the response frames BEFORE the IQ
+                // result — a registry send could otherwise land after
+                // the frame write and invert the §8.2 order.
+                self_kick_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+            } else {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .send_to(&recipient, Stanza::Presence(presence))
+                    .await;
+            }
+        } else if recipient == *sender_jid {
+            moderator_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+        } else {
+            remaining_broadcasts.push((recipient, presence));
+        }
     }
     // Membership-scoped visibility (#935): a kick (307) or ban (301)
     // ends the occupant's room membership, so their live SFU call
@@ -611,9 +639,20 @@ pub(super) async fn handle_muc_admin_iq(
             state, &room_jid, removed,
         );
     }
-    vec![iq_to_xml(build_admin_set_result(
+    for (recipient, presence) in remaining_broadcasts {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
+    }
+    let mut frames = self_kick_frames;
+    frames.push(iq_to_xml(build_admin_set_result(
         iq.id(),
         &room_jid,
         &Jid::from(sender_jid.clone()),
-    ))]
+    )));
+    frames.extend(moderator_frames);
+    frames
 }

@@ -919,21 +919,22 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     )];
                 }
                 if let kameo::error::SendError::HandlerError(
-                    waddle_xmpp::muc::room_actor::RoomActorError::JoinForbidden { members_only },
+                    waddle_xmpp::muc::room_actor::RoomActorError::JoinForbidden { reason },
                 ) = &error
                 {
-                    let (error_type, condition, message) = if *members_only {
-                        (
+                    // XEP-0045 §7.2.8: bans map to <forbidden/> even in
+                    // members-only rooms (#1265 item 1).
+                    let (error_type, condition, message) = match reason {
+                        waddle_xmpp::muc::room_actor::JoinDenialReason::MembersOnly => (
                             ErrorType::Auth,
                             DefinedCondition::RegistrationRequired,
                             "Membership required to join this room.",
-                        )
-                    } else {
-                        (
+                        ),
+                        waddle_xmpp::muc::room_actor::JoinDenialReason::Banned => (
                             ErrorType::Auth,
                             DefinedCondition::Forbidden,
-                            "You are not allowed to join this room.",
-                        )
+                            "You are banned from this room.",
+                        ),
                     };
                     return vec![build_muc_presence_error_xml(
                         room_jid,
@@ -1085,7 +1086,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 disclose_real_jid: true,
                 include_self_status: false,
                 room_created: false,
-                include_nonanonymous_status: true,
+                warn_nonanonymous_join: false,
                 muji: existing.muji.as_ref(),
                 in_call: existing.in_call,
             }));
@@ -1106,7 +1107,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     disclose_real_jid: true,
                     include_self_status: false,
                     room_created: false,
-                    include_nonanonymous_status: true,
+                    warn_nonanonymous_join: false,
                     muji: extra.muji.as_ref(),
                     in_call: extra.in_call,
                 }));
@@ -1133,7 +1134,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     disclose_real_jid: true,
                     include_self_status: false,
                     room_created: false,
-                    include_nonanonymous_status: true,
+                    warn_nonanonymous_join: false,
                     muji: None,
                     in_call: waddle_xmpp::xep::InCallPresenceState::default(),
                 });
@@ -1154,7 +1155,9 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             disclose_real_jid: true,
             include_self_status: true,
             room_created: created_instant_room,
-            include_nonanonymous_status: true,
+            // XEP-0045 §7.2.3: status 100 rides ONLY on the joiner's
+            // initial self-presence (#1265 item 4).
+            warn_nonanonymous_join: true,
             muji: self_muji,
             in_call: self_in_call,
         }));
@@ -1182,7 +1185,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 disclose_real_jid: true,
                 include_self_status: true,
                 room_created: false,
-                include_nonanonymous_status: true,
+                warn_nonanonymous_join: false,
                 muji: existing.muji.as_ref(),
                 in_call: existing.in_call,
             }));
@@ -1325,7 +1328,11 @@ pub async fn handle_muc_leave(
             state, room_jid, sender_jid,
         );
         return vec![build_muc_self_unavailable_xml(
-            state, room_jid, nick, sender_jid, true,
+            state,
+            room_jid,
+            nick,
+            sender_jid,
+            Affiliation::None,
         )];
     };
 
@@ -1344,13 +1351,21 @@ pub async fn handle_muc_leave(
                 state, room_jid, sender_jid,
             );
             return vec![build_muc_self_unavailable_xml(
-                state, room_jid, nick, sender_jid, true,
+                state,
+                room_jid,
+                nick,
+                sender_jid,
+                Affiliation::None,
             )];
         }
         Err(error) => {
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
             return vec![build_muc_self_unavailable_xml(
-                state, room_jid, nick, sender_jid, true,
+                state,
+                room_jid,
+                nick,
+                sender_jid,
+                Affiliation::None,
             )];
         }
     };
@@ -1385,7 +1400,7 @@ pub async fn handle_muc_leave(
         room_jid,
         &outcome.nick,
         sender_jid,
-        true,
+        outcome.affiliation,
     )];
     super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
     response

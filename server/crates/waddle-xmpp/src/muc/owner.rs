@@ -32,6 +32,13 @@ pub const MUC_ROOMCONFIG_NS: &str = "http://jabber.org/protocol/muc#roomconfig";
 /// Build a room configuration form (XEP-0004) for GET requests.
 ///
 /// Creates a data form with the current room settings for the owner to modify.
+///
+/// `muc#roomconfig_persistentroom` is deliberately NOT offered
+/// (#1265 item 7): configuring a room through this form persists it
+/// into the channel catalog, so every configured room is persistent by
+/// construction. Offering a knob the service force-overwrites would be
+/// untruthful; per XEP-0045 §10.1.2 a service only offers the fields
+/// it supports.
 pub fn build_config_form(room: &MucRoom) -> Element {
     DataForm::new(FormType::Form)
         .add_field(Field::form_type(MUC_ROOMCONFIG_NS))
@@ -45,10 +52,6 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                 room.config.description.as_deref().unwrap_or(""),
             )
             .with_label("Room Description"),
-        )
-        .add_field(
-            Field::boolean("muc#roomconfig_persistentroom", room.config.persistent)
-                .with_label("Make Room Persistent"),
         )
         .add_field(
             Field::boolean("muc#roomconfig_membersonly", room.config.members_only)
@@ -72,6 +75,13 @@ pub fn build_config_form(room: &MucRoom) -> Element {
         .add_field(
             Field::boolean("muc#roomconfig_enablelogging", room.config.enable_logging)
                 .with_label("Enable Room Logging"),
+        )
+        .add_field(
+            Field::boolean(
+                "muc#roomconfig_changesubject",
+                room.config.occupants_may_change_subject,
+            )
+            .with_label("Allow Occupants to Change Subject"),
         )
         .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
         .add_field(

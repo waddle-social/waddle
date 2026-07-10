@@ -94,6 +94,12 @@ pub struct RoomContext<'a> {
     /// chain didn't, until this field landed (Copilot review on
     /// PR #279).
     pub room_moderated: bool,
+    /// XEP-0045 §8.1 `muc#roomconfig_changesubject` (#1265 item 8):
+    /// frozen at dispatch start from
+    /// `RoomConfig.occupants_may_change_subject`; read by
+    /// [`super::subject::MucSubjectHandler`] to decide whether
+    /// non-moderator occupants may change the subject.
+    pub room_occupants_may_change_subject: bool,
     /// True when the room is configured as members-only. This is
     /// carried into projection events so the server-side notification
     /// gate can apply XEP-0492's private/public group defaults from the

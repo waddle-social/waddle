@@ -40,7 +40,11 @@ fn muc_status_codes(
     status: MucPresenceStatus,
 ) -> Vec<&'static str> {
     let mut statuses = Vec::new();
-    if occupant_real_jid.is_some() && status.include_nonanonymous_status {
+    // XEP-0045 registrar: status 100 belongs to the "Entering a room"
+    // context only — it warns the ENTERING user, with their initial
+    // (self) presence, that the room discloses full JIDs. Stamping it
+    // on kicks/bans/leaves/broadcasts was over-stamping (#1265 item 4).
+    if occupant_real_jid.is_some() && status.is_self && status.warn_nonanonymous_join {
         statuses.push("100");
     }
     if status.is_self {
@@ -56,23 +60,25 @@ fn muc_status_codes(
 pub struct MucPresenceStatus {
     pub is_self: bool,
     pub room_created: bool,
-    pub include_nonanonymous_status: bool,
+    /// True only for the joiner's initial self-presence: adds the
+    /// XEP-0045 §7.2.3 status 100 non-anonymous warning.
+    pub warn_nonanonymous_join: bool,
 }
 
 impl MucPresenceStatus {
-    pub const fn new(is_self: bool, include_nonanonymous_status: bool) -> Self {
+    pub const fn new(is_self: bool, warn_nonanonymous_join: bool) -> Self {
         Self {
             is_self,
             room_created: false,
-            include_nonanonymous_status,
+            warn_nonanonymous_join,
         }
     }
 
-    pub const fn created_self(include_nonanonymous_status: bool) -> Self {
+    pub const fn created_self(warn_nonanonymous_join: bool) -> Self {
         Self {
             is_self: true,
             room_created: true,
-            include_nonanonymous_status,
+            warn_nonanonymous_join,
         }
     }
 }
@@ -245,9 +251,6 @@ pub fn build_leave_presence(
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut status_codes: Vec<&str> = Vec::new();
-    if identity.real_jid.is_some() && status.include_nonanonymous_status {
-        status_codes.push("100");
-    }
     if status.is_self {
         status_codes.push("110");
     }
@@ -329,9 +332,6 @@ pub fn build_kick_presence(
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut status_codes: Vec<&str> = vec!["307"];
-    if identity.real_jid.is_some() && status.include_nonanonymous_status {
-        status_codes.push("100");
-    }
     if status.is_self {
         status_codes.push("110");
     }
@@ -377,9 +377,6 @@ pub fn build_ban_presence(
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut status_codes: Vec<&str> = vec!["301"];
-    if identity.real_jid.is_some() && status.include_nonanonymous_status {
-        status_codes.push("100");
-    }
     if status.is_self {
         status_codes.push("110");
     }
@@ -417,9 +414,6 @@ pub fn build_membership_removal_presence(
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut status_codes: Vec<&str> = vec![status_code];
-    if identity.real_jid.is_some() && status.include_nonanonymous_status {
-        status_codes.push("100");
-    }
     if status.is_self {
         status_codes.push("110");
     }
