@@ -334,6 +334,19 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        /// Destroy a room whose durable rows were already wiped by a
+        /// successful [`prepare_destroy_wipe`](Self::prepare_destroy_wipe)
+        /// — no durable delete runs, so this cannot return
+        /// [`DestroyRoomOutcome::DurableWipeFailed`].
+        destroy_room_prepared(room_jid: BareJid) -> DestroyRoomOutcome,
+        "destroy_room_prepared",
+        DestroyRoom {
+            room_jid,
+            reason: DestroyRoomReason::DestroyPrepared
+        }
+    );
+
+    registry_method!(
         /// Destroy a room only if it is still inactive at the expected
         /// occupancy revision (#1108). Returns whether it was destroyed.
         destroy_room_if_inactive(

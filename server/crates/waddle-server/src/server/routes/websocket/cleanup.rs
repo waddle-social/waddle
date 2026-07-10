@@ -1300,17 +1300,20 @@ pub(crate) async fn prepare_destroy_wipe(state: &WebSocketState, room_jid: &Bare
     }
 }
 
-pub(crate) async fn destroy_room_actor(
+/// Destroy a room whose durable rows were already wiped by a
+/// successful [`prepare_destroy_wipe`] — the registry performs no
+/// durable delete, so `DurableWipeFailed` cannot occur (#1276).
+pub(crate) async fn destroy_room_actor_prepared(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome {
     match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .destroy_room(room_jid.clone())
+        .destroy_room_prepared(room_jid.clone())
         .await
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            warn!(room = %room_jid, error = %error, "Failed to destroy room actor");
+            warn!(room = %room_jid, error = %error, "Failed to destroy prepared room actor");
             waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered
         }
     }

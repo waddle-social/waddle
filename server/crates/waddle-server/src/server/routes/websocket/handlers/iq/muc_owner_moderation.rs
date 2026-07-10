@@ -323,7 +323,11 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // waddle-side rows wiped above are idempotent deletes a
             // retried destroy re-runs (and their absence only narrows
             // access — see `wipe_destroyed_room_durable_state`).
-            match destroy_room_actor(state, &room_jid).await {
+            // The durable rows were wiped by PrepareDestroyWipe above,
+            // so the prepared destroy performs no fallible delete —
+            // after a successful prepare, nothing can leave a live
+            // room with half-removed durable state.
+            match super::super::super::destroy_room_actor_prepared(state, &room_jid).await {
                 waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed => {}
                 waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered => {
                     return vec![build_iq_error_xml_typed(
@@ -333,11 +337,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         item_not_found_iq_error("Requested item not found."),
                     )];
                 }
-                // The registry refused because its fenced clustering
-                // wipe failed and it kept the room alive — surface a
-                // retryable error, never a success (#1261). No destroy
-                // presence was sent and no SFU participant was
-                // unregistered.
+                // Unreachable for a prepared destroy (no durable
+                // delete runs), kept for the enum's totality: surface
+                // a retryable error, never a success (#1261).
                 waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed => {
                     return vec![build_iq_error_xml_typed(
                         id,

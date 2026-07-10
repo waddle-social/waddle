@@ -107,7 +107,7 @@ pub use state::{
 };
 
 pub(crate) use cleanup::{
-    destroy_room_actor, get_or_create_room_actor, get_room_actor, is_muc_room_jid,
+    destroy_room_actor_prepared, get_or_create_room_actor, get_room_actor, is_muc_room_jid,
     prepare_destroy_wipe,
 };
 pub(crate) use muc_call_sfu::{

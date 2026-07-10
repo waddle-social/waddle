@@ -590,6 +590,13 @@ pub enum DestroyRoomReason {
     /// ceases to exist, so its durable rows (config, subject,
     /// affiliations incl. bans) are deleted with it.
     Destroy,
+    /// The caller already ran [`PrepareDestroyWipe`] successfully: the
+    /// durable rows are gone, so this removal performs NO durable
+    /// delete and therefore cannot fail — after a successful prepare
+    /// there is no remaining fallible step that could leave a live
+    /// room with its durable state half-removed (Greptile P1 on
+    /// #1276).
+    DestroyPrepared,
     /// This node merely lost the room (fenced ownership check saw a
     /// steal): evict the LOCAL actor only. The room lives on under its
     /// new owner — its durable rows MUST survive. Without this split,
