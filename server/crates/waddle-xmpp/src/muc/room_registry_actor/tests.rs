@@ -163,6 +163,7 @@ async fn test_destroy_room() {
     let removed: bool = registry
         .ask(DestroyRoom {
             room_jid: jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await
         .expect("destroy");
@@ -384,7 +385,10 @@ async fn test_destroy_non_existent_room_returns_false() {
     let jid = test_room_jid("ghost");
 
     let removed: bool = registry
-        .ask(DestroyRoom { room_jid: jid })
+        .ask(DestroyRoom {
+            room_jid: jid,
+            reason: DestroyRoomReason::Destroy,
+        })
         .await
         .expect("destroy");
     assert!(!removed);
@@ -477,6 +481,7 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
     let destroyed = registry
         .ask(DestroyRoom {
             room_jid: room_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await
         .expect("destroy poisoned room");
@@ -888,6 +893,7 @@ mod ownership_claims_tests {
         registry
             .ask(DestroyRoom {
                 room_jid: jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await
             .expect("destroy");
@@ -937,6 +943,7 @@ mod ownership_claims_tests {
         registry
             .ask(DestroyRoom {
                 room_jid: jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await
             .expect("destroy");
@@ -945,6 +952,52 @@ mod ownership_claims_tests {
             *durable_store.deleted_rooms.lock().expect("lock"),
             vec![jid.to_string()],
             "DestroyRoom must delete the durable room state exactly once"
+        );
+    }
+
+    /// The deposed-node eviction path (fenced fan-out check observed a
+    /// steal) evicts the LOCAL actor only — the room lives on under
+    /// its new owner, so `DestroyRoomReason::LocalEviction` MUST NOT
+    /// wipe the durable rows. Without the split, a same-node re-claim
+    /// racing the queued eviction could pass the write fence and wipe
+    /// a legitimately re-claimed room's config/subject/ban list.
+    #[tokio::test]
+    async fn local_eviction_does_not_delete_durable_room_state() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("deposed-evict");
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room");
+
+        registry
+            .ask(DestroyRoom {
+                room_jid: jid.clone(),
+                reason: DestroyRoomReason::LocalEviction,
+            })
+            .await
+            .expect("evict");
+
+        assert!(
+            durable_store.deleted_rooms.lock().expect("lock").is_empty(),
+            "a local eviction must never delete the room's durable state"
         );
     }
 

@@ -1,25 +1,42 @@
 //! Outstanding mediated-invite ledger (XEP-0045 §7.8.2, #1264).
 //!
-//! Every server-relayed mediated invitation records a `(room, invitee)
-//! → inviter` row. A later `<decline/>` is only honoured when a
-//! matching row exists — without the ledger, any authenticated user
-//! could make the room deliver a "declined your invitation" message to
-//! an arbitrary occupant. The row also names the inviter the decline
-//! must reach, so declines route durably (offline inviters get a
-//! pending-delivery row) instead of only to currently-connected
-//! occupants.
+//! Every server-relayed mediated invitation records a
+//! `(room, invitee, inviter)` row. A later `<decline/>` is only
+//! honoured when a matching row exists — without the ledger, any
+//! authenticated user could make the room deliver a "declined your
+//! invitation" message to an arbitrary user. The row also names the
+//! inviter the decline must reach, so declines route durably (offline
+//! inviters get a pending-delivery row) instead of only to
+//! currently-connected occupants.
 //!
-//! Rows are consumed by a decline and wiped wholesale when the room is
-//! destroyed (#1261). A row for an invitee who simply joins stays
-//! behind harmlessly: the invitee was genuinely invited, so a later
-//! decline from them is authentic (if unusual), and the room-destroy
-//! wipe bounds the table's lifetime.
+//! Rows are keyed per inviter: two occupants may each have a live
+//! invitation out to the same person, and a decline answers exactly
+//! one of them (selected via the decline's `to` attribute). This also
+//! prevents a second inviter from silently rerouting an earlier
+//! invitation's decline to themselves.
+//!
+//! Rows are claimed atomically by a decline (a keyed `DELETE` whose
+//! affected-row count is the claim, so concurrent declines from two
+//! devices forward exactly one), expire after [`INVITE_TTL`], and are
+//! wiped wholesale when the room is destroyed (#1261). A row for an
+//! invitee who simply joins stays behind until it expires: the invitee
+//! was genuinely invited, so a late decline from them is authentic
+//! (if unusual).
 
 use jid::BareJid;
 
-use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 use kameo::actor::ActorRef;
+
+/// How long a mediated invitation stays declinable. Bounds both ledger
+/// growth for never-answered invites and the window in which a stale
+/// "declined your invitation" can reach an inviter.
+const INVITE_TTL: chrono::Duration = chrono::Duration::days(30);
+
+fn expiry_cutoff() -> String {
+    (chrono::Utc::now() - INVITE_TTL).to_rfc3339()
+}
 
 /// One outstanding mediated invitation: `inviter` invited `invitee`
 /// to `room` and the room relayed the invite (§7.8.2).
@@ -30,18 +47,47 @@ pub(crate) struct OutstandingInvite {
     pub inviter: BareJid,
 }
 
-/// Record (or refresh) the outstanding invite for `(room, invitee)`.
-/// A re-invite by a different inviter replaces the previous row — the
-/// most recent mediated invite is the one a decline answers.
+/// Outcome of [`record_invite`]: whether this `(room, invitee,
+/// inviter)` invitation is new or was already outstanding. Callers use
+/// `AlreadyOutstanding` as the anti-spam dedup signal — an identical
+/// re-invite is answered with silent success instead of another
+/// delivery (and, for offline invitees, another pending-delivery row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordOutcome {
+    New,
+    AlreadyOutstanding,
+}
+
+/// Record the outstanding invite for `(room, invitee, inviter)`.
+/// An identical unexpired invitation reports `AlreadyOutstanding`
+/// (and keeps its original timestamp); an expired one is refreshed
+/// and reported as `New`.
 pub(crate) async fn record_invite(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
-) -> Result<(), String> {
+) -> Result<RecordOutcome, String> {
+    let existing = actor
+        .ask(DbQueryOne {
+            sql: "SELECT 1 FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND \
+                  inviter_jid = ? AND created_at > ?"
+                .to_string(),
+            params: vec![
+                invite.room.to_string().into(),
+                invite.invitee.to_string().into(),
+                invite.inviter.to_string().into(),
+                expiry_cutoff().into(),
+            ],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    if existing.is_some() {
+        return Ok(RecordOutcome::AlreadyOutstanding);
+    }
     actor
         .ask(DbExecute {
             sql: "INSERT INTO muc_pending_invites (room_jid, invitee_jid, inviter_jid, \
-                  created_at) VALUES (?, ?, ?, ?) ON CONFLICT(room_jid, invitee_jid) DO UPDATE \
-                  SET inviter_jid = excluded.inviter_jid, created_at = excluded.created_at"
+                  created_at) VALUES (?, ?, ?, ?) ON CONFLICT(room_jid, invitee_jid, \
+                  inviter_jid) DO UPDATE SET created_at = excluded.created_at"
                 .to_string(),
             params: vec![
                 invite.room.to_string().into(),
@@ -52,48 +98,75 @@ pub(crate) async fn record_invite(
         })
         .await
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(RecordOutcome::New)
 }
 
-/// Look up the outstanding invite for `(room, invitee)` without
-/// consuming it. Returns `None` when no invite is outstanding — the
-/// caller MUST NOT forward a decline in that case (#1264 spoofing
-/// hardening). Consumption is a separate step ([`consume_invite`]) so
-/// a decline whose delivery could not even be queued leaves the ledger
-/// row intact for a retry.
-pub(crate) async fn find_invite(
+/// List every unexpired outstanding invite for `(room, invitee)`.
+/// Empty means the caller MUST NOT forward a decline (#1264 spoofing
+/// hardening).
+pub(crate) async fn list_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
     invitee: &BareJid,
-) -> Result<Option<OutstandingInvite>, String> {
-    let row = actor
-        .ask(DbQueryOne {
+) -> Result<Vec<OutstandingInvite>, String> {
+    let rows = actor
+        .ask(DbQuery {
             sql: "SELECT inviter_jid FROM muc_pending_invites WHERE room_jid = ? AND \
-                  invitee_jid = ?"
+                  invitee_jid = ? AND created_at > ? ORDER BY inviter_jid"
                 .to_string(),
-            params: vec![room.to_string().into(), invitee.to_string().into()],
+            params: vec![
+                room.to_string().into(),
+                invitee.to_string().into(),
+                expiry_cutoff().into(),
+            ],
         })
         .await
         .map_err(|error| error.to_string())?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let inviter = row_value(&row, 0)
-        .map_err(|error| error.to_string())?
-        .as_string()
-        .map_err(|error| error.to_string())?
-        .parse::<BareJid>()
-        .map_err(|error| format!("stored inviter JID is unparseable: {error}"))?;
-    Ok(Some(OutstandingInvite {
-        room: room.clone(),
-        invitee: invitee.clone(),
-        inviter,
-    }))
+    let mut invites = Vec::new();
+    for row in rows {
+        let inviter = row_value(&row, 0)
+            .map_err(|error| error.to_string())?
+            .as_string()
+            .map_err(|error| error.to_string())?
+            .parse::<BareJid>()
+            .map_err(|error| format!("stored inviter JID is unparseable: {error}"))?;
+        invites.push(OutstandingInvite {
+            room: room.clone(),
+            invitee: invitee.clone(),
+            inviter,
+        });
+    }
+    Ok(invites)
 }
 
-/// Consume the outstanding invite for `(room, invitee)` after its
-/// decline has been delivered or durably queued.
-pub(crate) async fn consume_invite(
+/// Atomically claim (delete) one outstanding invite. Returns `false`
+/// when the row was already gone — a concurrent decline from another
+/// device claimed it first, so the caller must not forward a second
+/// decline for it.
+pub(crate) async fn claim_invite(
+    actor: ActorRef<DbActor>,
+    invite: &OutstandingInvite,
+) -> Result<bool, String> {
+    let affected = actor
+        .ask(DbExecute {
+            sql: "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND \
+                  inviter_jid = ?"
+                .to_string(),
+            params: vec![
+                invite.room.to_string().into(),
+                invite.invitee.to_string().into(),
+                invite.inviter.to_string().into(),
+            ],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(affected > 0)
+}
+
+/// Remove every outstanding invite for `(room, invitee)` regardless of
+/// inviter — the invite-flow rollback path: a grant that failed to
+/// stick must not leave a declinable ledger row behind.
+pub(crate) async fn delete_invitee_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
     invitee: &BareJid,

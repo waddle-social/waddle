@@ -33,7 +33,9 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
-use crate::server::routes::websocket::muc_invites::{record_invite, OutstandingInvite};
+use crate::server::routes::websocket::muc_invites::{
+    delete_invitee_invites, record_invite, OutstandingInvite, RecordOutcome,
+};
 use crate::server::routes::websocket::WebSocketState;
 
 /// Handle a mediated invitation to a non-group-DM room. Returns `None`
@@ -253,7 +255,11 @@ pub(super) async fn handle_muc_mediated_invite(
 
     // #1264: record the outstanding invite BEFORE relaying so a
     // decline arriving immediately after delivery always verifies.
-    if let Err(error) = record_invite(
+    // `AlreadyOutstanding` doubles as the anti-spam dedup: an
+    // identical unexpired re-invite is a silent success with NO second
+    // delivery — repeated invites can neither flood the invitee nor
+    // exhaust their offline pending-delivery quota.
+    match record_invite(
         state.deps.app_state.db_pool.global_actor().clone(),
         &OutstandingInvite {
             room: room_jid.clone(),
@@ -263,31 +269,32 @@ pub(super) async fn handle_muc_mediated_invite(
     )
     .await
     {
-        warn!(
-            room = %room_jid,
-            invitee = %invitee,
-            error = %error,
-            "Failed to record outstanding mediated invite"
-        );
-        if granted_membership {
-            if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) {
-                let _ = super::super::iq::persist_managed_channel_affiliation(
-                    state,
-                    &channel_id,
-                    &invitee,
-                    previous_invitee_affiliation,
-                )
-                .await;
-            }
-            rollback_membership_grant(&room_actor, &invitee, previous_invitee_affiliation).await;
+        Ok(RecordOutcome::New) => {}
+        Ok(RecordOutcome::AlreadyOutstanding) => return Some(vec![]),
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                invitee = %invitee,
+                error = %error,
+                "Failed to record outstanding mediated invite"
+            );
+            rollback_invite_grant(
+                state,
+                &room_actor,
+                &room_jid,
+                &invitee,
+                granted_membership,
+                previous_invitee_affiliation,
+            )
+            .await;
+            return Some(vec![error_frame(
+                incoming,
+                bound_jid,
+                ErrorType::Wait,
+                DefinedCondition::InternalServerError,
+                "Internal server error.",
+            )]);
         }
-        return Some(vec![error_frame(
-            incoming,
-            bound_jid,
-            ErrorType::Wait,
-            DefinedCondition::InternalServerError,
-            "Internal server error.",
-        )]);
     }
 
     // XEP-0045 §7.8.2: the room adds `from` (the inviter) to the
@@ -301,9 +308,86 @@ pub(super) async fn handle_muc_mediated_invite(
         &inbound_invite,
     ));
 
-    deliver_muc_user_message(state, &invitee, invite).await;
+    if let Err(error) = deliver_muc_user_message(state, &invitee, invite).await {
+        // Neither a live socket nor the durable queue accepted the
+        // invitation — undo everything (ledger row, membership grant)
+        // and tell the inviter, instead of reporting a success that
+        // never happened.
+        warn!(
+            room = %room_jid,
+            invitee = %invitee,
+            error = %error,
+            "Mediated invite could not be delivered or queued; rolling back"
+        );
+        if let Err(error) = delete_invitee_invites(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &room_jid,
+            &invitee,
+        )
+        .await
+        {
+            warn!(
+                room = %room_jid,
+                invitee = %invitee,
+                error = %error,
+                "Failed to remove ledger row for undeliverable invite"
+            );
+        }
+        rollback_invite_grant(
+            state,
+            &room_actor,
+            &room_jid,
+            &invitee,
+            granted_membership,
+            previous_invitee_affiliation,
+        )
+        .await;
+        return Some(vec![error_frame(
+            incoming,
+            bound_jid,
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
 
     Some(vec![])
+}
+
+/// Compensation for a members-only auto-add after a later step in the
+/// invite flow failed. Rollback failures are logged loudly — they
+/// leave the invitee durably authorized without a delivered
+/// invitation, which an operator must be able to see.
+async fn rollback_invite_grant(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &jid::BareJid,
+    invitee: &jid::BareJid,
+    granted_membership: bool,
+    previous_affiliation: waddle_xmpp::Affiliation,
+) {
+    if !granted_membership {
+        return;
+    }
+    if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+        if let Err(error) = super::super::iq::persist_managed_channel_affiliation(
+            state,
+            &channel_id,
+            invitee,
+            previous_affiliation,
+        )
+        .await
+        {
+            warn!(
+                room = %room_jid,
+                invitee = %invitee,
+                error = %error,
+                "Failed to roll back managed-channel membership tuple after invite failure; \
+                 the invitee remains durably authorized without an invitation"
+            );
+        }
+    }
+    rollback_membership_grant(room_actor, invitee, previous_affiliation).await;
 }
 
 /// Best-effort revert of a members-only auto-add after a later step in
@@ -329,30 +413,33 @@ pub(super) async fn deliver_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: Message,
-) {
+) -> Result<(), String> {
     let resources = waddle_xmpp::registry::get_resources_for_user(
         &state.deps.protocol.user_registry,
         recipient,
     )
     .await;
-    if resources.is_empty() {
-        if let Err(error) = queue_offline_muc_user_message(state, recipient, &message).await {
-            warn!(
-                recipient = %recipient,
-                error = %error,
-                "Failed to queue offline MUC invite/decline message"
-            );
-        }
-        return;
-    }
-    for resource in resources {
-        let _ = state
+    let mut delivered = false;
+    for resource in &resources {
+        if state
             .deps
             .protocol
             .connection_registry
-            .send_to(&resource, Stanza::Message(message.clone()))
-            .await;
+            .send_to(resource, Stanza::Message(message.clone()))
+            .await
+            .is_sent()
+        {
+            delivered = true;
+        }
     }
+    if delivered {
+        return Ok(());
+    }
+    // Offline — or every registered session refused the write (a
+    // half-closed socket is indistinguishable from offline here):
+    // fall back to the durable queue rather than reporting success
+    // for a message nobody received.
+    queue_offline_muc_user_message(state, recipient, &message).await
 }
 
 /// Queue a room-authored invite/decline for an offline recipient in

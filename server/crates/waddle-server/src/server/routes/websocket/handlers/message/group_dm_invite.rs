@@ -374,8 +374,8 @@ async fn rollback_group_dm_invite_grant(
     .await;
     let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
     // #1264: a rolled-back invite is not declinable — drop its ledger
-    // row (harmless no-op on paths that failed before recording it).
-    let _ = crate::server::routes::websocket::muc_invites::consume_invite(
+    // rows (harmless no-op on paths that failed before recording one).
+    let _ = crate::server::routes::websocket::muc_invites::delete_invitee_invites(
         state.deps.app_state.db_pool.global_actor().clone(),
         room_jid,
         invitee,

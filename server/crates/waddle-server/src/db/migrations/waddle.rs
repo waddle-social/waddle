@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS muc_pending_invites (
     invitee_jid TEXT NOT NULL,
     inviter_jid TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    PRIMARY KEY (room_jid, invitee_jid)
+    PRIMARY KEY (room_jid, invitee_jid, inviter_jid)
 );
 "#;
 
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS muc_pending_invites (
     invitee_jid TEXT NOT NULL,
     inviter_jid TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    PRIMARY KEY (room_jid, invitee_jid)
+    PRIMARY KEY (room_jid, invitee_jid, inviter_jid)
 );
 "#;
 

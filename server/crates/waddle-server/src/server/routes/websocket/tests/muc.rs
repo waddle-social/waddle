@@ -1563,6 +1563,20 @@ async fn native_muc_admin_admin_cannot_kick_another_admin_role() {
     assert_eq!(responses.len(), 1, "admin response: {responses:?}");
     assert!(responses[0].contains("type='error'"));
     assert!(responses[0].contains("not-allowed"));
+    // XEP-0045 §8.4/§9.7: the denial returns <not-allowed/> "along
+    // with the offending item(s)" — the error IQ echoes the muc#admin
+    // query with the item the sender tried to apply.
+    {
+        let error_iq = Element::from_str(&responses[0]).expect("error IQ XML");
+        let echoed = error_iq
+            .get_child("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .expect("denial echoes the muc#admin query");
+        let item = echoed
+            .get_child("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .expect("denial echoes the offending item");
+        assert_eq!(item.attr("nick"), Some("carol"));
+        assert_eq!(item.attr("role"), Some("none"));
+    }
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
     let carol = snapshot.get_occupant("carol").expect("carol occupant");
@@ -5794,14 +5808,14 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         channel.is_none(),
         "destroy must delete the channel catalog row (resurrection vector)"
     );
-    let invite = crate::server::routes::websocket::muc_invites::find_invite(
+    let invite = crate::server::routes::websocket::muc_invites::list_invites(
         state.deps.app_state.db_pool.global_actor().clone(),
         &room_jid,
         &"hecate@example.com".parse().expect("invitee"),
     )
     .await
     .expect("ledger lookup");
-    assert!(invite.is_none(), "destroy must wipe the invite ledger");
+    assert!(invite.is_empty(), "destroy must wipe the invite ledger");
 
     // And the room actor itself is gone from the registry.
     let room_after = state
@@ -5895,4 +5909,129 @@ async fn xep0045_destroy_then_rejoin_yields_fresh_room_without_old_bans() {
         Affiliation::None,
         "a destroyed room's ban list must not resurrect on rejoin"
     );
+}
+
+/// §10.9 destroy of a group DM must also revoke each member's durable
+/// permission tuple — those are otherwise only cleaned by the admin
+/// group-DM deletion flow, leaving members durably authorized for a
+/// room that no longer exists.
+#[tokio::test]
+async fn xep0045_destroy_group_dm_revokes_member_permission_tuples() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-gdm@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: BareJid = "bob@example.com".parse().expect("bob jid");
+
+    crate::server::xmpp_channels::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_channels::XmppChannelUpsert {
+            id: "destroy-gdm".to_string(),
+            name: "Doomed DM".to_string(),
+            description: None,
+            channel_type: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: Default::default(),
+            members_only: false,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("seed group-DM channel row");
+    crate::admin::channels::persist_group_dm_member_tuple(
+        &state.deps.app_state,
+        "destroy-gdm",
+        &bob,
+    )
+    .await
+    .expect("seed bob member tuple");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: bob.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("grant bob member");
+
+    let member_before = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(bob.to_string()),
+            permission: Permission::Member,
+            object: Object::new(ObjectType::Channel, "destroy-gdm"),
+        })
+        .await
+        .expect("permission check before");
+    assert!(
+        member_before.allowed,
+        "precondition: bob is a durable member"
+    );
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("result")),
+        "group-DM destroy must succeed: {responses:?}"
+    );
+
+    let member_after = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(bob.to_string()),
+            permission: Permission::Member,
+            object: Object::new(ObjectType::Channel, "destroy-gdm"),
+        })
+        .await
+        .expect("permission check after");
+    assert!(
+        !member_after.allowed,
+        "destroying a group DM must revoke members' durable permission tuples"
+    );
+    let channel = crate::server::xmpp_state::get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        "destroy-gdm",
+    )
+    .await
+    .expect("channel lookup");
+    assert!(channel.is_none(), "group-DM channel row wiped");
 }

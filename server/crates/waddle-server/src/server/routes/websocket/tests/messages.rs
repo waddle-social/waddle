@@ -4175,14 +4175,14 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
     );
 
     // The ledger row is consumed: a second decline is refused.
-    let leftover = crate::server::routes::websocket::muc_invites::find_invite(
+    let leftover = crate::server::routes::websocket::muc_invites::list_invites(
         state.deps.app_state.db_pool.global_actor().clone(),
         &room_jid,
         &decliner_jid.to_bare(),
     )
     .await
     .expect("ledger lookup");
-    assert!(leftover.is_none(), "delivered decline consumes the invite");
+    assert!(leftover.is_empty(), "delivered decline consumes the invite");
 }
 
 /// #1264: the ledger-recorded inviter is authoritative for decline
@@ -4389,14 +4389,14 @@ async fn muc_mediated_decline_to_offline_inviter_is_queued_durably() {
         "offline inviter must get a durable pending-delivery row"
     );
 
-    let leftover = crate::server::routes::websocket::muc_invites::find_invite(
+    let leftover = crate::server::routes::websocket::muc_invites::list_invites(
         state.deps.app_state.db_pool.global_actor().clone(),
         &room_jid,
         &decliner_jid.to_bare(),
     )
     .await
     .expect("ledger lookup");
-    assert!(leftover.is_none(), "queued decline consumes the invite");
+    assert!(leftover.is_empty(), "queued decline consumes the invite");
 }
 
 #[tokio::test]
@@ -5430,15 +5430,19 @@ async fn xep0045_mediated_invite_relayed_from_room_to_invitee() {
         Some("dark rites".to_string())
     );
 
-    let ledger = crate::server::routes::websocket::muc_invites::find_invite(
+    let ledger = crate::server::routes::websocket::muc_invites::list_invites(
         state.deps.app_state.db_pool.global_actor().clone(),
         &room_jid,
         &invitee,
     )
     .await
-    .expect("ledger lookup")
-    .expect("relayed invite recorded in the ledger");
-    assert_eq!(ledger.inviter, alice_jid.to_bare());
+    .expect("ledger lookup");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "relayed invite recorded in the ledger exactly once"
+    );
+    assert_eq!(ledger[0].inviter, alice_jid.to_bare());
 }
 
 /// §7.8: mediated invitations are an occupant action — a non-occupant
@@ -5661,4 +5665,146 @@ async fn xep0045_mediated_invite_offline_invitee_queued_durably() {
         1,
         "offline invitee must get a durable pending-delivery row"
     );
+
+    // Anti-spam dedup (#1264 hardening): re-sending the identical
+    // invite while one is outstanding is a silent success and MUST NOT
+    // insert another pending-delivery row — repeated invites cannot
+    // exhaust the invitee's offline quota.
+    let repeat = mediated_invite_message(&room_jid, &invitee, "invite-5b", None);
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), repeat).await;
+    assert!(responses.is_empty(), "duplicate invite: {responses:?}");
+    let pending = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&invitee)
+        .await
+        .expect("pending list after duplicate");
+    assert_eq!(
+        pending.len(),
+        1,
+        "a duplicate invite must not add a second pending-delivery row"
+    );
+}
+
+/// #1264: with invitations from SEVERAL inviters outstanding, the
+/// decline's `to` selects which one is declined — and only that
+/// inviter's row is consumed.
+#[tokio::test]
+async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "decline-multi-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice");
+    let bob: BareJid = "bob@example.com".parse().expect("bob");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+    let alice_full: FullJid = "alice@example.com/web".parse().expect("alice full");
+
+    let (alice_tx, mut alice_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &alice_full, alice_tx).await;
+
+    for inviter in [&alice, &bob] {
+        crate::server::routes::websocket::muc_invites::record_invite(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+                room: room_jid.clone(),
+                invitee: decliner_jid.to_bare(),
+                inviter: inviter.clone(),
+            },
+        )
+        .await
+        .expect("seed invite");
+    }
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    alice.to_string(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-multi-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert!(responses.is_empty(), "decline routes: {responses:?}");
+
+    let outbound = alice_rx.try_recv().expect("alice receives her decline");
+    let xml = stanza_to_xml(&outbound.stanza);
+    assert!(xml.contains("decline"), "decline payload delivered: {xml}");
+
+    let remaining = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &decliner_jid.to_bare(),
+    )
+    .await
+    .expect("ledger lookup");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the declined inviter's row is consumed"
+    );
+    assert_eq!(remaining[0].inviter, bob, "bob's invitation stays live");
+}
+
+/// #1264: with several invitations outstanding, a decline that names
+/// none of the inviters is ambiguous — <bad-request/>, nothing
+/// forwarded, nothing consumed.
+#[tokio::test]
+async fn muc_mediated_decline_ambiguous_target_is_bad_request() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "decline-ambiguous-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    for inviter in ["alice@example.com", "bob@example.com"] {
+        crate::server::routes::websocket::muc_invites::record_invite(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+                room: room_jid.clone(),
+                invitee: decliner_jid.to_bare(),
+                inviter: inviter.parse().expect("inviter"),
+            },
+        )
+        .await
+        .expect("seed invite");
+    }
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    "mallory@example.com",
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-ambiguous-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert_eq!(responses.len(), 1, "ambiguous decline: {responses:?}");
+    assert!(
+        responses[0].contains("bad-request"),
+        "ambiguous decline must be <bad-request/>: {responses:?}"
+    );
+
+    let remaining = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &decliner_jid.to_bare(),
+    )
+    .await
+    .expect("ledger lookup");
+    assert_eq!(remaining.len(), 2, "nothing consumed on ambiguity");
 }

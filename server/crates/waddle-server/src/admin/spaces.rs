@@ -1303,6 +1303,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             .room_registry
             .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {
                 room_jid: room_jid.clone(),
+                reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::Destroy,
             })
             .await
         {

@@ -41,16 +41,76 @@ fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
 ///
 /// - the managed-channel catalog row (`channels`) — `handle_muc_join`
 ///   rebuilds a managed room's config/name/policy from it;
+/// - for group DMs, each member's permission tuple and XEP-0402
+///   bookmark (those are otherwise only cleaned by the admin group-DM
+///   deletion flow and would strand durable authorization);
 /// - group-DM per-member archive-visibility boundaries;
 /// - the outstanding mediated-invite ledger (#1264) — a destroyed room
 ///   has nothing left to decline.
 ///
-/// Best-effort per row class: destruction already committed (the actor
-/// is gone and occupants were notified), so a failed delete is logged
-/// rather than surfacing an error for an already-destroyed room.
-async fn wipe_destroyed_room_durable_state(state: &WebSocketState, room_jid: &BareJid) {
+/// Runs BEFORE occupants are notified and before the actor is torn
+/// down: a destroy that cannot durably destroy fails as a whole (the
+/// caller returns `internal-server-error` and the room stays intact)
+/// instead of acknowledging a destruction that will resurrect.
+/// Bookmark retraction alone stays best-effort — a stale bookmark is
+/// cosmetic, not an authorization leak.
+async fn wipe_destroyed_room_durable_state(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room: &waddle_xmpp::muc::MucRoom,
+) -> Result<(), ()> {
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
     if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+        let channel = match crate::server::xmpp_state::get_xmpp_channel(
+            db_actor.clone(),
+            &channel_id,
+        )
+        .await
+        {
+            Ok(channel) => channel,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    channel = %channel_id,
+                    error = %error,
+                    "Failed to look up channel row while destroying room"
+                );
+                return Err(());
+            }
+        };
+        if channel.is_some_and(|channel| {
+            channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+        }) {
+            // Group-DM membership is durably authorized via permission
+            // tuples and surfaced via XEP-0402 bookmarks; both must go
+            // with the room or the members stay durably entitled to a
+            // room that no longer exists.
+            for entry in room.get_all_affiliations() {
+                if entry.affiliation < waddle_xmpp::Affiliation::Member {
+                    continue;
+                }
+                crate::admin::channels::rollback_group_dm_member_tuple(
+                    &state.deps.app_state,
+                    &channel_id,
+                    &entry.jid,
+                )
+                .await;
+                if crate::admin::channels::retract_group_dm_bookmark(
+                    &state.deps.app_state,
+                    &entry.jid,
+                    room_jid,
+                )
+                .await
+                .is_err()
+                {
+                    warn!(
+                        room = %room_jid,
+                        member = %entry.jid,
+                        "Failed to retract group-DM bookmark for destroyed room"
+                    );
+                }
+            }
+        }
         if let Err(error) =
             crate::server::xmpp_channels::delete_xmpp_channel(db_actor.clone(), &channel_id).await
         {
@@ -58,8 +118,9 @@ async fn wipe_destroyed_room_durable_state(state: &WebSocketState, room_jid: &Ba
                 room = %room_jid,
                 channel = %channel_id,
                 error = %error,
-                "Failed to delete channel catalog row for destroyed room; it may resurrect"
+                "Failed to delete channel catalog row for destroyed room"
             );
+            return Err(());
         }
     }
     if let Err(error) = db_actor
@@ -74,6 +135,7 @@ async fn wipe_destroyed_room_durable_state(state: &WebSocketState, room_jid: &Ba
             error = %error,
             "Failed to delete archive boundaries for destroyed room"
         );
+        return Err(());
     }
     if let Err(error) =
         crate::server::routes::websocket::muc_invites::delete_room_invites(db_actor, room_jid).await
@@ -83,7 +145,9 @@ async fn wipe_destroyed_room_durable_state(state: &WebSocketState, room_jid: &Ba
             error = %error,
             "Failed to delete outstanding invites for destroyed room"
         );
+        return Err(());
     }
+    Ok(())
 }
 
 pub(super) async fn handle_muc_owner_and_moderation_iq(
@@ -177,9 +241,47 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // alongside the IQ result so it lands on the same socket;
             // others are routed via the connection registry.
             let destroy_request = parse_destroy_request(iq).unwrap_or_default();
+            let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                )];
+            };
+            let Ok(snapshot) = room_actor.ask(GetSnapshot).await else {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            };
+            // XEP-0045 §10.9 (#1261): destroy removes the room even if
+            // persistent. Wipe the durable resurrection vectors FIRST —
+            // the managed-channel catalog row (config/name/policy),
+            // group-DM member tuples/bookmarks and archive-visibility
+            // boundaries, and the outstanding mediated-invite ledger —
+            // and fail the whole destroy (no notifications, room
+            // intact) if the wipe does not stick, instead of
+            // acknowledging a destruction that would resurrect from
+            // storage. The clustering durable store (config/subject/
+            // affiliations) is wiped by the registry's `DestroyRoom`
+            // handler under the same claim fence.
+            if wipe_destroyed_room_durable_state(state, &room_jid, &snapshot.room)
+                .await
+                .is_err()
+            {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
             let mut frames = Vec::new();
-            if let Some(room_actor) = get_room_actor(state, &room_jid).await {
-                if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
+            {
+                {
                     for occupant in snapshot.room.occupants.values() {
                         // XEP-0045 §10.9 (#1261): the service sends one
                         // unavailable presence with `<destroy/>` to EACH
@@ -234,15 +336,6 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 
             if destroy_room_actor(state, &room_jid).await {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-                // XEP-0045 §10.9 (#1261): destroy removes the room even
-                // if persistent. Wipe the durable rows the join path
-                // would otherwise rematerialize the room from — the
-                // managed-channel catalog row (config/name/policy), any
-                // group-DM archive-visibility boundaries, and the
-                // outstanding mediated-invite ledger. The clustering
-                // durable store (config/subject/affiliations) is wiped
-                // by the registry's `DestroyRoom` handler itself.
-                wipe_destroyed_room_durable_state(state, &room_jid).await;
                 let room_jid_string = room_jid.to_string();
                 frames.push(build_iq_result_xml(
                     id,

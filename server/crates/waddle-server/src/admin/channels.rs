@@ -31,7 +31,7 @@ use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
-    CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, ListRooms,
+    CreateRoom, DestroyRoom, DestroyRoomReason, GetOrCreateRoom, GetRoom, ListRooms,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
@@ -1875,6 +1875,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
             .room_registry
             .ask(DestroyRoom {
                 room_jid: channel_jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await;
         return Err(error);
@@ -1902,6 +1903,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                     .room_registry
                     .ask(DestroyRoom {
                         room_jid: channel_jid.clone(),
+                        reason: DestroyRoomReason::Destroy,
                     })
                     .await;
                 return Err(error);
@@ -1946,6 +1948,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                             .room_registry
                             .ask(DestroyRoom {
                                 room_jid: channel_jid.clone(),
+                                reason: DestroyRoomReason::Destroy,
                             })
                             .await;
                     }
@@ -2017,6 +2020,7 @@ async fn run_group_dm_create(
             .room_registry
             .ask(DestroyRoom {
                 room_jid: room_jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await;
         return Err(error);
@@ -2730,6 +2734,7 @@ async fn rollback_group_dm_create(
         .room_registry
         .ask(DestroyRoom {
             room_jid: room_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await;
 }
@@ -3314,6 +3319,7 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         .room_registry
         .ask(DestroyRoom {
             room_jid: args.channel_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await
     {

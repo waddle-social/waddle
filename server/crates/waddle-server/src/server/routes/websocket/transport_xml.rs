@@ -114,6 +114,33 @@ pub(crate) fn build_iq_result_xml(
 /// boundaries, never as `&str`. Serialization uses the upstream
 /// `From<StanzaError> for Element` impl so the wire shape is identical
 /// to the previous manual builder.
+/// Like [`build_iq_error_xml_typed`], but echoing the request payload
+/// ahead of the `<error/>` child — XEP-0045 §8.4/§9.7 require role/
+/// affiliation denials to return the error "along with the offending
+/// item(s)" (RFC 6120 §8.3.1 sender-echo form).
+pub(crate) fn build_iq_error_xml_with_payload(
+    id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    payload: xmpp_parsers::minidom::Element,
+    error: xmpp_parsers::stanza_error::StanzaError,
+) -> String {
+    let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error");
+    if let Some(from) = from {
+        iq = iq.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
+    }
+    if let Some(to) = to {
+        iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
+    }
+    let iq = iq
+        .append(payload)
+        .append(xmpp_parsers::minidom::Element::from(error))
+        .build();
+    element_to_xml(iq)
+}
+
 pub(crate) fn build_iq_error_xml_typed(
     id: &str,
     from: Option<&str>,

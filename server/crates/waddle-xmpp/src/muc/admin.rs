@@ -271,6 +271,47 @@ pub fn build_admin_result(
     }
 }
 
+/// Rebuild the request's `<query xmlns='muc#admin'>` from its typed
+/// items — XEP-0045 §8.4/§9.7 error flows return `<not-allowed/>`
+/// "along with the offending item(s)", so denial IQs echo the items
+/// the sender tried to apply.
+pub fn build_admin_items_query(items: &[AdminItem]) -> Element {
+    let mut query = Element::builder("query", NS_MUC_ADMIN);
+    for item in items {
+        let mut element = Element::builder("item", NS_MUC_ADMIN);
+        if let Some(jid) = &item.jid {
+            element = element.attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                jid.to_string(),
+            );
+        }
+        if let Some(nick) = &item.nick {
+            element = element.attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick.clone());
+        }
+        if let Some(affiliation) = item.affiliation {
+            element = element.attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                affiliation_to_str(affiliation),
+            );
+        }
+        if let Some(role) = item.role {
+            element = element.attr(
+                minidom::rxml::xml_ncname!("role").to_owned(),
+                role_to_str(role),
+            );
+        }
+        if let Some(reason) = &item.reason {
+            element = element.append(
+                Element::builder("reason", NS_MUC_ADMIN)
+                    .append(reason.clone())
+                    .build(),
+            );
+        }
+        query = query.append(element.build());
+    }
+    query.build()
+}
+
 /// Build an empty admin set result (success).
 pub fn build_admin_set_result(iq_id: &str, from_room_jid: &BareJid, to_jid: &Jid) -> Iq {
     Iq::Result {

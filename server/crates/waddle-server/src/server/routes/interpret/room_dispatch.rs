@@ -183,6 +183,11 @@ pub(super) async fn dispatch_to_room(
                 let _ = room_registry
                     .ask(DestroyRoom {
                         room_jid: room_jid.clone(),
+                        // Eviction, not destruction: the room now lives
+                        // on the stealing node — its durable rows MUST
+                        // survive this local teardown.
+                        reason:
+                            waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::LocalEviction,
                     })
                     .await;
                 let reply = build_message_error_reply(

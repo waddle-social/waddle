@@ -202,7 +202,7 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 
 // `build_iq_error_xml_typed` is re-exported via `pub(super) use` so
 // submodules wildcard-importing this module's namespace see it.
-pub(super) use super::super::build_iq_error_xml_typed;
+pub(super) use super::super::{build_iq_error_xml_typed, build_iq_error_xml_with_payload};
 
 use super::super::{
     build_iq_result_xml, destroy_room_actor, element_to_xml, get_room_actor, iq_to_xml,

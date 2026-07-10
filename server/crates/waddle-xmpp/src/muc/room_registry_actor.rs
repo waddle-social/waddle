@@ -582,11 +582,28 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
     }
 }
 
+/// Why a room is being removed from the registry — decides whether the
+/// durable rows go with it (#1261 vs. the deposed-node eviction race).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestroyRoomReason {
+    /// XEP-0045 §10.9 destroy or an administrative deletion: the room
+    /// ceases to exist, so its durable rows (config, subject,
+    /// affiliations incl. bans) are deleted with it.
+    Destroy,
+    /// This node merely lost the room (fenced ownership check saw a
+    /// steal): evict the LOCAL actor only. The room lives on under its
+    /// new owner — its durable rows MUST survive. Without this split,
+    /// a same-node re-claim racing the queued eviction could pass the
+    /// write fence and wipe a legitimately re-claimed room's state.
+    LocalEviction,
+}
+
 /// Destroy a room, removing it from the registry.
 ///
 /// Returns `true` if the room existed and was removed.
 pub struct DestroyRoom {
     pub room_jid: BareJid,
+    pub reason: DestroyRoomReason,
 }
 
 impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
@@ -608,7 +625,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         // node's still-held claim. Best-effort — a fencing loss means
         // another node owns the room now and this node must not wipe
         // the new owner's rows.
-        if removed_room || removed_poison {
+        if (removed_room || removed_poison) && msg.reason == DestroyRoomReason::Destroy {
             if let Some(store) = &self.durable_store {
                 if let Err(error) = store.delete_room_state(&msg.room_jid).await {
                     warn!(
