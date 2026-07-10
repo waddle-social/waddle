@@ -4407,6 +4407,10 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
 #[tokio::test]
 async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resource() {
     let state = create_test_websocket_state().await;
+    // #1246: an unregistered recipient would bounce with
+    // <service-unavailable/>; this test is about the sender-side
+    // carbon, so give the offline recipient a real account.
+    crate::server::routes::websocket::tests::seed_local_account(state.as_ref(), "ghost").await;
     let sender_jid: FullJid = "alice@example.com/phone".parse().expect("sender jid");
     let sibling_jid: FullJid = "alice@example.com/desktop".parse().expect("sibling jid");
 

@@ -1539,6 +1539,10 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
 async fn message_carbons_record_for_detached_enabled_resources() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
     let state = create_test_websocket_state().await;
+    // #1246: an unregistered recipient would bounce with
+    // <service-unavailable/>; this test is about carbons for the
+    // sender's detached sibling, so give bob a real account.
+    crate::server::routes::websocket::tests::seed_local_account(state.as_ref(), "bob").await;
 
     let alice_phone: FullJid = "alice@example.com/phone".parse().expect("alice phone");
     let alice_laptop: FullJid = "alice@example.com/laptop".parse().expect("alice laptop");

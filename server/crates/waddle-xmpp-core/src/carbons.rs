@@ -123,6 +123,11 @@ pub fn build_sent_carbon(
 
     let mut carbon_msg = Message::new(Some(to_jid.parse()?));
     carbon_msg.from = Some(from_jid.parse()?);
+    // XEP-0280 §8 ("Sending Messages"): the wrapping message SHOULD
+    // maintain the same 'type' attribute value as the forwarded
+    // original, so clients filtering carbons by type='chat' file them
+    // correctly (§7 states the same rule for received carbons).
+    carbon_msg.type_ = original_msg.type_.clone();
     carbon_msg.payloads.push(sent);
 
     Ok(carbon_msg)
@@ -142,6 +147,9 @@ pub fn build_received_carbon(
 
     let mut carbon_msg = Message::new(Some(to_jid.parse()?));
     carbon_msg.from = Some(from_jid.parse()?);
+    // XEP-0280 §7 ("Receiving Messages"): maintain the original 'type'
+    // on the wrapper — see `build_sent_carbon`.
+    carbon_msg.type_ = original_msg.type_.clone();
     carbon_msg.payloads.push(received);
 
     Ok(carbon_msg)
@@ -394,6 +402,43 @@ mod tests {
             .iter()
             .find(|p| p.name() == "received" && p.ns() == CARBONS_NS);
         assert!(received.is_some());
+    }
+
+    #[test]
+    fn xep_0280_sent_carbon_preserves_original_message_type() {
+        let mut original = Message::new(Some("recipient@example.com".parse().unwrap()));
+        original.from = Some("sender@example.com/resource1".parse().unwrap());
+        original.type_ = MessageType::Chat;
+
+        let carbon = build_sent_carbon(
+            &original,
+            "sender@example.com",
+            "sender@example.com/resource2",
+        )
+        .expect("valid JIDs should succeed");
+
+        assert_eq!(
+            carbon.type_,
+            MessageType::Chat,
+            "XEP-0280: wrapper SHOULD maintain the original 'type'"
+        );
+    }
+
+    #[test]
+    fn xep_0280_received_carbon_preserves_original_message_type() {
+        let mut original = Message::new(Some("user@example.com/resource1".parse().unwrap()));
+        original.from = Some("sender@example.com".parse().unwrap());
+        original.type_ = MessageType::Chat;
+
+        let carbon =
+            build_received_carbon(&original, "user@example.com", "user@example.com/resource2")
+                .expect("valid JIDs should succeed");
+
+        assert_eq!(
+            carbon.type_,
+            MessageType::Chat,
+            "XEP-0280: wrapper SHOULD maintain the original 'type'"
+        );
     }
 
     #[test]

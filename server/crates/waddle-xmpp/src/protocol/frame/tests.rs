@@ -317,3 +317,44 @@ fn rejects_oversized_frame_with_whitespace_padding() {
     let huge = format!("{}<iq id='x'/>", " ".repeat(MAX_FRAME_SIZE));
     assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
 }
+
+/// RFC 6121 §5.2.2: a message whose 'type' value is not understood
+/// MUST be treated as type 'normal' — not rejected as a parse failure
+/// (which silently dropped the stanza, #1266 item 6).
+#[test]
+fn rfc6121_unknown_message_type_normalizes_to_normal() {
+    let frame = r#"<message to="bob@example.com" type="subscribe"><body>hi</body></message>"#;
+    let parsed = parse_frame(frame).expect("unknown message type must parse");
+    let InboundFrame::Stanza(stanza) = parsed else {
+        panic!("expected stanza frame");
+    };
+    let Stanza::Message(message) = *stanza else {
+        panic!("expected message stanza");
+    };
+    assert_eq!(message.type_, xmpp_parsers::message::MessageType::Normal);
+    assert_eq!(
+        message.bodies.values().next().map(String::as_str),
+        Some("hi"),
+        "payload survives normalization"
+    );
+}
+
+/// Known types are untouched by the normalization.
+#[test]
+fn rfc6121_known_message_types_are_preserved() {
+    for (wire, expected) in [
+        ("chat", xmpp_parsers::message::MessageType::Chat),
+        ("headline", xmpp_parsers::message::MessageType::Headline),
+        ("error", xmpp_parsers::message::MessageType::Error),
+    ] {
+        let frame = format!(r#"<message to="bob@example.com" type="{wire}"/>"#);
+        let parsed = parse_frame(&frame).expect("known message type must parse");
+        let InboundFrame::Stanza(stanza) = parsed else {
+            panic!("expected stanza frame");
+        };
+        let Stanza::Message(message) = *stanza else {
+            panic!("expected message stanza");
+        };
+        assert_eq!(message.type_, expected);
+    }
+}

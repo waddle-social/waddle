@@ -65,12 +65,37 @@ pub(super) async fn run_headless_recipient_pass(
 
     let events = transient.handle(InboundEvent::StanzaFromPeer(Box::new(stanza)));
 
+    // Handler-generated side stanzas addressed to OTHER parties (the
+    // XEP-0191 <service-unavailable/> bounce back to a blocked sender)
+    // must route at the depth of the interpret loop that invoked this
+    // pass: interpreting them at `depth` (the headless depth itself)
+    // would trip the recursion guard and silently swallow them.
+    // Mirrors the fanout pass's `side_routes` partition. Side routes
+    // always target the peer's JID, so they cannot re-enter the pass
+    // that produced them.
+    let mut side_routes: Vec<OutboundEvent> = Vec::new();
+    let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
+    for event in events {
+        match event {
+            OutboundEvent::RouteToConnection { .. } => side_routes.push(event),
+            other => remaining.push(other),
+        }
+    }
+    if !side_routes.is_empty() {
+        let _ = Box::pin(interpret_with_depth(
+            side_routes,
+            deps,
+            depth.saturating_sub(1),
+        ))
+        .await;
+    }
+
     // Recursively interpret with the depth bumped. The inner outcome
     // is *discarded*: the transient SM is ephemeral so any frames
     // (SendStanza) have no wire to write to and any feedback events
     // (callback completions) belong to a state machine that goes out
     // of scope at function return.
-    let nested = Box::pin(interpret_with_depth(events, deps, depth)).await;
+    let nested = Box::pin(interpret_with_depth(remaining, deps, depth)).await;
     let InterpretOutcome {
         frames,
         close,
@@ -99,8 +124,9 @@ pub(super) enum FanoutPassResult {
     /// recipient-stamped stanza the pipeline emitted for the wire
     /// (`None` when the pass dropped the message, e.g. XEP-0191
     /// incoming block). `side_routes` are handler-generated stanzas
-    /// addressed to OTHER parties (XEP-0184 delivery receipt back to
-    /// the sender) that must still be routed by the caller.
+    /// addressed to OTHER parties (the XEP-0191 <service-unavailable/>
+    /// bounce back to a blocked sender) that must still be routed by
+    /// the caller.
     Ran {
         processed: Option<Box<Stanza>>,
         side_routes: Vec<(Jid, Box<Stanza>)>,
@@ -108,13 +134,21 @@ pub(super) enum FanoutPassResult {
     /// The shared pass could not run — no `message_dispatcher` in
     /// `Deps` (unit-test fixtures), the static synthetic resource
     /// literal was rejected (should not happen), or the XEP-0191
-    /// blocklist load failed. The caller falls back to per-resource
-    /// `PeerStanza` delivery: each recipient connection's own state
-    /// machine carries a bind-time blocklist snapshot, so XEP-0191
-    /// enforcement holds on the fallback path — unlike the OFFLINE
-    /// headless pass, which has no per-connection snapshot to fall
-    /// back on and must stay fail-closed.
-    Unavailable,
+    /// blocklist load failed (`blocklist_failed = true`). The caller
+    /// falls back to per-resource `PeerStanza` delivery: each
+    /// recipient connection's own state machine carries a bind-time
+    /// blocklist snapshot, so XEP-0191 enforcement holds for LIVE
+    /// fallback delivery. Detached XEP-0198 raw queueing has no such
+    /// snapshot — replay writes the stored XML verbatim — so callers
+    /// MUST NOT queue to detached buffers when `blocklist_failed` is
+    /// set (fail-closed, mirroring the headless pass).
+    Unavailable {
+        /// True when the pass was skipped because the XEP-0191
+        /// blocklist could not be loaded — recipient-side filtering
+        /// is unverified, so only per-connection-snapshot-guarded
+        /// delivery may proceed.
+        blocklist_failed: bool,
+    },
 }
 
 /// #1106: run the recipient pass ONCE for a bare-JID DM delivered to
@@ -125,8 +159,7 @@ pub(super) enum FanoutPassResult {
 /// differences:
 ///
 /// - `has_live_transport` stays `true`: the recipient IS live, so the
-///   XEP-0160 offline intake must not queue pending-delivery rows and
-///   the XEP-0184 receipt fires (once, instead of once per resource).
+///   XEP-0160 offline intake must not queue pending-delivery rows.
 /// - The pass's wire output is NOT discarded: the final
 ///   [`OutboundEvent::SendStanza`] carries the recipient-stamped
 ///   message; the caller delivers that one processed stanza to every
@@ -153,7 +186,9 @@ pub(super) async fn run_fanout_recipient_pass(
             "fanout recipient-pass: no message_dispatcher in Deps; \
              falling back to per-resource delivery (test fixture)"
         );
-        return FanoutPassResult::Unavailable;
+        return FanoutPassResult::Unavailable {
+            blocklist_failed: false,
+        };
     };
 
     let synthetic_resource =
@@ -167,7 +202,9 @@ pub(super) async fn run_fanout_recipient_pass(
                      falling back to per-resource delivery (should not happen — \
                      static literal)"
                 );
-                return FanoutPassResult::Unavailable;
+                return FanoutPassResult::Unavailable {
+                    blocklist_failed: false,
+                };
             }
         };
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
@@ -187,7 +224,9 @@ pub(super) async fn run_fanout_recipient_pass(
                      connection's bind-time blocklist snapshot keeps XEP-0191 \
                      enforcement)"
                 );
-                return FanoutPassResult::Unavailable;
+                return FanoutPassResult::Unavailable {
+                    blocklist_failed: true,
+                };
             }
         },
         None => Blocklist::empty(),
@@ -641,6 +680,102 @@ pub(crate) async fn deliver_direct_to_full(
     }
 }
 
+/// Live-channel-only `PeerStanza` delivery attempt for the full-JID DM
+/// path (#1244/#1245): the detached XEP-0198 fallback is deliberately
+/// NOT taken here — a detached hit must go through the shared
+/// recipient pass so the replay copy is the processed (stamped)
+/// stanza, and a fully-missing resource must fall back to bare-JID
+/// semantics. The outcome mapping therefore differs from
+/// [`deliver_peer_to_full`] on the failure classes:
+///
+/// - `Delivered` → delivered; terminal.
+/// - `DroppedFull` → the recipient is CONNECTED but its channel is
+///   full; terminal drop (issue #699 semantics — queueing to detached
+///   would replay out of band next resume).
+/// - `NotConnected` / `DroppedClosed` / no actor → `Unavailable`; the
+///   caller falls through to the detached / §8.5.3.2.1 fallback.
+/// - `GetUser` ask error and never-enqueued `TrySendPeer` failures
+///   (`ActorNotRunning`, `MailboxFull`, mailbox `Timeout(Some)`) →
+///   `Unavailable` too: provably nothing was delivered, so letting the
+///   caller's detached/bare fallback run is lossless and cannot
+///   duplicate — the legacy path routed exactly these classes to the
+///   detached buffer for the same reason.
+/// - Maybe-enqueued failures (`ActorStopped`, reply `Timeout(None)`,
+///   `HandlerError`) → `Dropped`; kameo does not cancel an enqueued
+///   handler, so any fallback delivery could double-deliver.
+pub(super) async fn deliver_peer_to_live_only(
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    let Some(user_registry) = user_registry else {
+        return FullJidDeliveryOutcome::Unavailable;
+    };
+    let user_actor = match user_registry
+        .ask(waddle_xmpp::registry::GetUser {
+            bare_jid: target.to_bare(),
+        })
+        .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+        .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return FullJidDeliveryOutcome::Unavailable,
+        Err(error) => {
+            warn!(
+                jid = %target,
+                %error,
+                "live-only delivery: GetUser failed; treating as unavailable \
+                 so the detached/bare fallback runs"
+            );
+            return FullJidDeliveryOutcome::Unavailable;
+        }
+    };
+    match user_actor
+        .ask(waddle_xmpp::registry::TrySendPeer {
+            jid: target.clone(),
+            stanza: stanza.clone(),
+        })
+        .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
+        .reply_timeout(ACTOR_DELIVER_TIMEOUT)
+        .await
+    {
+        Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
+            debug!(jid = %target, "live-only delivery: queued for recipient");
+            FullJidDeliveryOutcome::Delivered
+        }
+        Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
+            debug!(jid = %target, "live-only delivery: recipient channel full; dropped");
+            FullJidDeliveryOutcome::Dropped
+        }
+        Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
+        | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => {
+            FullJidDeliveryOutcome::Unavailable
+        }
+        Err(error) => match classify_send_error(&error) {
+            ActorSendFailure::NeverEnqueued => {
+                warn!(
+                    jid = %target,
+                    error = %error,
+                    "live-only delivery: TrySendPeer failed before enqueue; \
+                     treating as unavailable so the detached/bare fallback runs"
+                );
+                FullJidDeliveryOutcome::Unavailable
+            }
+            ActorSendFailure::MaybeEnqueued => {
+                waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
+                warn!(
+                    jid = %target,
+                    error = %error,
+                    "live-only delivery: TrySendPeer failed terminally (possibly \
+                     enqueued); dropping to avoid double-delivery"
+                );
+                FullJidDeliveryOutcome::Dropped
+            }
+        },
+    }
+}
+
 /// Shared "live target unavailable" fallback. Queues the stanza
 /// into the recipient's detached XEP-0198 replay buffer if a
 /// resumable session exists, otherwise drops with a debug log.
@@ -938,6 +1073,55 @@ mod tests {
             unacked_len(&sm, "s-closed").await,
             1,
             "DroppedClosed must route to detached replay"
+        );
+    }
+
+    /// Live-only delivery (#1244/#1245 full-JID DM path): the healthy
+    /// outcomes map like the actor path, but every provably
+    /// never-delivered failure maps to `Unavailable` so the caller's
+    /// detached / bare-JID fallback still runs.
+    #[tokio::test]
+    async fn live_only_delivery_maps_absent_user_to_unavailable() {
+        let registry = UserRegistryActor::spawn(UserRegistryActor::new());
+        let target = full("ghost@example.com/web");
+        let outcome =
+            deliver_peer_to_live_only(Some(&registry), &target, &sample_message(&target)).await;
+        assert_eq!(outcome, FullJidDeliveryOutcome::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn live_only_delivery_maps_missing_resource_to_unavailable() {
+        let registered = full("alice@example.com/web");
+        let (registry, _rx) = registry_with_resource(&registered, 4).await;
+        let missing = full("alice@example.com/desktop");
+        let outcome =
+            deliver_peer_to_live_only(Some(&registry), &missing, &sample_message(&missing)).await;
+        assert_eq!(outcome, FullJidDeliveryOutcome::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn live_only_delivery_delivers_to_live_channel() {
+        let target = full("alice@example.com/web");
+        let (registry, mut rx) = registry_with_resource(&target, 4).await;
+        let outcome =
+            deliver_peer_to_live_only(Some(&registry), &target, &sample_message(&target)).await;
+        assert_eq!(outcome, FullJidDeliveryOutcome::Delivered);
+        assert!(rx.try_recv().is_ok(), "frame reached the live channel");
+    }
+
+    #[tokio::test]
+    async fn live_only_delivery_maps_full_channel_to_dropped() {
+        let target = full("alice@example.com/web");
+        let (registry, _rx) = registry_with_resource(&target, 1).await;
+        // Fill the single slot.
+        deliver_peer_to_live_only(Some(&registry), &target, &sample_message(&target)).await;
+        let outcome =
+            deliver_peer_to_live_only(Some(&registry), &target, &sample_message(&target)).await;
+        assert_eq!(
+            outcome,
+            FullJidDeliveryOutcome::Dropped,
+            "DroppedFull is terminal (issue #699): the recipient is connected, \
+             so fallback delivery would double-deliver"
         );
     }
 

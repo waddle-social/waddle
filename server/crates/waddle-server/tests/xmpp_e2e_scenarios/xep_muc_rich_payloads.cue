@@ -496,10 +496,11 @@ scenario: #Scenario & {
 			target:   adminPhone
 			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
-		#DrainFrames & {
-			target:   adminPhone
-			contains: ["urn:xmpp:receipts", "cue-receipt-request"]
-		},
+		// NOTE (#1247): there used to be a #DrainFrames here for a SECOND
+		// ["urn:xmpp:receipts", "cue-receipt-request"] frame — the
+		// server-fabricated duplicate receipt. XEP-0184 assigns ack
+		// generation to the receiving client, so only bobPhone's ack
+		// (already consumed above) exists now.
 		#DrainFrames & {
 			target:   adminPhone
 			contains: ["urn:xmpp:inbox:1", "cue-fulltext-nonmatch"]
