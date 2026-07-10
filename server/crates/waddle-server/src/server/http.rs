@@ -300,6 +300,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     spawn_auth_state_janitor(&websocket_state);
     spawn_room_dormancy_janitor(&websocket_state);
     spawn_user_actor_reaper(&websocket_state);
+    #[cfg(feature = "clustering")]
+    crate::server::session_janitors::spawn_remote_muc_membership_reconciler(&websocket_state);
     crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),

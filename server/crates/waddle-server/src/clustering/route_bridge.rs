@@ -416,6 +416,57 @@ pub(crate) enum OrderedRelayMucProxyOutcome {
     JoinMaybeCommitted,
 }
 
+/// Typed routing decision for a MUC proxy attempt (#1249). The old
+/// `Option<OrderedRelayMucProxyOutcome>` API collapsed six distinct
+/// "no relay attempted" conditions into one `None`, forcing the
+/// disconnect-cleanup caller to treat the benign "room claim is locally
+/// owned" case (the local room loop handles the leave moments later)
+/// exactly like the harmful "origin `UserActor` claim held by another
+/// node" case (which recurs whenever the disconnecting user has a
+/// second device on another node and previously ghosted the occupant
+/// forever). Callers that only need the legacy semantics keep using
+/// [`OrderedRelayDeliveryBridge::try_proxy_muc_remote`]; the cleanup
+/// path consumes this decision directly.
+#[derive(Debug, Clone)]
+pub(crate) enum MucProxyRouteDecision {
+    /// An ordered-relay send was attempted; the payload is its result.
+    Attempted(OrderedRelayMucProxyOutcome),
+    /// The room claim is owned by THIS node — the local room path is
+    /// authoritative and handles the stanza. Benign for cleanup: the
+    /// local `LeaveByRealJid` loop converges the occupancy.
+    LocalRoom,
+    /// Definitive: no claim row exists for the room, so no node holds a
+    /// live `RoomActor` (occupancy is in-memory on the claim owner).
+    /// There is no remote occupancy left to clean up.
+    RoomUnclaimed,
+    /// The room claim could not be used right now: the claim lookup
+    /// errored, the owner's lease is stale (owner crash / renewal lag),
+    /// or the bridge services are not wired. Retryable.
+    RoomClaimUnavailable,
+    /// The origin/sender claim needed to sequence the relay is not
+    /// usable from this node (typically: the origin `UserActor` claim
+    /// is held by the node hosting the user's other device). Retryable;
+    /// disconnect cleanup avoids this case up-front by preferring the
+    /// remote-resource origin when the socket was registered against a
+    /// foreign `UserActor` owner.
+    OriginUnavailable,
+}
+
+impl MucProxyRouteDecision {
+    /// Legacy adapter: `Some(outcome)` iff a relay send was attempted;
+    /// `None` means "keep the existing local path" (all non-attempt
+    /// variants), exactly matching the pre-#1249 `Option` contract.
+    fn into_attempted(self) -> Option<OrderedRelayMucProxyOutcome> {
+        match self {
+            MucProxyRouteDecision::Attempted(outcome) => Some(outcome),
+            MucProxyRouteDecision::LocalRoom
+            | MucProxyRouteDecision::RoomUnclaimed
+            | MucProxyRouteDecision::RoomClaimUnavailable
+            | MucProxyRouteDecision::OriginUnavailable => None,
+        }
+    }
+}
+
 impl OrderedRelayDeliveryBridge {
     pub fn new(stop_token: CancellationToken, messaging: &ClusteringMessagingConfig) -> Arc<Self> {
         Arc::new(Self {
@@ -729,8 +780,23 @@ impl OrderedRelayDeliveryBridge {
         kind: OrderedRelayMucProxyKind,
         origin: &OrderedRelayRouteOrigin,
     ) -> Option<OrderedRelayMucProxyOutcome> {
+        self.try_proxy_muc_remote_decision(room_jid, stanza, kind, origin)
+            .await
+            .into_attempted()
+    }
+
+    /// Typed variant of [`Self::try_proxy_muc_remote`] (#1249): reports
+    /// WHY no relay was attempted instead of a flat `None`, so the
+    /// disconnect-cleanup path can converge (forget vs retry) per case.
+    pub(crate) async fn try_proxy_muc_remote_decision(
+        self: &Arc<Self>,
+        room_jid: &jid::BareJid,
+        stanza: &Stanza,
+        kind: OrderedRelayMucProxyKind,
+        origin: &OrderedRelayRouteOrigin,
+    ) -> MucProxyRouteDecision {
         if let Some(remote_origin) = remote_resource_origin(origin) {
-            return Arc::clone(self)
+            return match Arc::clone(self)
                 .route_remote_resource_origin_muc(
                     remote_origin,
                     RemoteResourceRouteTarget::MucProxy {
@@ -741,9 +807,15 @@ impl OrderedRelayDeliveryBridge {
                     stanza,
                     origin,
                 )
-                .await;
+                .await
+            {
+                Some(outcome) => MucProxyRouteDecision::Attempted(outcome),
+                // Only `services.get()` misses produce `None` on the
+                // remote-resource path — the bridge is not wired yet.
+                None => MucProxyRouteDecision::RoomClaimUnavailable,
+            };
         }
-        self.try_proxy_muc_remote_from_local_origin(room_jid, stanza, kind, origin)
+        self.try_proxy_muc_remote_from_local_origin_decision(room_jid, stanza, kind, origin)
             .await
     }
 
@@ -754,19 +826,49 @@ impl OrderedRelayDeliveryBridge {
         kind: OrderedRelayMucProxyKind,
         origin: &OrderedRelayRouteOrigin,
     ) -> Option<OrderedRelayMucProxyOutcome> {
-        let services = self.services.get()?.clone();
+        self.try_proxy_muc_remote_from_local_origin_decision(room_jid, stanza, kind, origin)
+            .await
+            .into_attempted()
+    }
+
+    async fn try_proxy_muc_remote_from_local_origin_decision(
+        self: &Arc<Self>,
+        room_jid: &jid::BareJid,
+        stanza: &Stanza,
+        kind: OrderedRelayMucProxyKind,
+        origin: &OrderedRelayRouteOrigin,
+    ) -> MucProxyRouteDecision {
+        let Some(services) = self.services.get().cloned() else {
+            return MucProxyRouteDecision::RoomClaimUnavailable;
+        };
         let target_entity = room_entity(room_jid);
-        let target_snapshot = current_claim(&services, &target_entity).await?;
+        // Distinguish "no claim row exists" (definitive: no live
+        // RoomActor anywhere, nothing to relay to) from "claim lookup
+        // errored" (retryable) — `current_claim` conflates them (#1249).
+        let target_snapshot = match services.claim_store.current_claim(&target_entity).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return MucProxyRouteDecision::RoomUnclaimed,
+            Err(error) => {
+                tracing::warn!(
+                    entity = %target_entity,
+                    %error,
+                    "ordered relay: claim lookup failed"
+                );
+                return MucProxyRouteDecision::RoomClaimUnavailable;
+            }
+        };
         if !target_snapshot.owner_lease_fresh {
-            return None;
+            return MucProxyRouteDecision::RoomClaimUnavailable;
         }
         let me = services.node_identity.current();
         if target_snapshot.owner == me {
-            return None;
+            return MucProxyRouteDecision::LocalRoom;
         }
 
         let (origin_entity, channel_origin) = route_origin_claim(&origin.kind);
-        let origin_snapshot = current_claim(&services, &origin_entity).await?;
+        let Some(origin_snapshot) = current_claim(&services, &origin_entity).await else {
+            return MucProxyRouteDecision::OriginUnavailable;
+        };
         if !origin_snapshot.owner_lease_fresh || origin_snapshot.owner != me {
             tracing::debug!(
                 room = %room_jid,
@@ -774,11 +876,13 @@ impl OrderedRelayDeliveryBridge {
                 "ordered relay: MUC origin entity is not currently owned locally; \
                  keeping local fallback path"
             );
-            return None;
+            return MucProxyRouteDecision::OriginUnavailable;
         }
-        let sender_claim =
-            current_fresh_local_relay_claim(&services, &origin.sender_entity, &me, "sender")
-                .await?;
+        let Some(sender_claim) =
+            current_fresh_local_relay_claim(&services, &origin.sender_entity, &me, "sender").await
+        else {
+            return MucProxyRouteDecision::OriginUnavailable;
+        };
 
         let payload = OrderedRelayPayload::MucProxy {
             room_jid: room_jid.clone(),
@@ -816,7 +920,12 @@ impl OrderedRelayDeliveryBridge {
             is_iq: matches!(stanza, Stanza::Iq(_)),
         };
 
-        let outcome = Arc::clone(self).deliver_seeded_remote(seed, true).await?;
+        let Some(outcome) = Arc::clone(self).deliver_seeded_remote(seed, true).await else {
+            // `deliver_seeded_remote` yields `None` only when the target
+            // claim refreshed to LOCAL ownership mid-flight — the caller's
+            // local room path is now authoritative.
+            return MucProxyRouteDecision::LocalRoom;
+        };
         if outcome.maybe_committed {
             if kind == OrderedRelayMucProxyKind::JoinPresence && outcome.join_repair_allowed {
                 self.forget_channel(&retry_channel).await;
@@ -844,9 +953,9 @@ impl OrderedRelayDeliveryBridge {
                     match retry.delivery {
                         FullJidDeliveryOutcome::Delivered
                         | FullJidDeliveryOutcome::QueuedDetached => {
-                            return Some(OrderedRelayMucProxyOutcome::Delivered(
-                                retry.client_replies,
-                            ));
+                            return MucProxyRouteDecision::Attempted(
+                                OrderedRelayMucProxyOutcome::Delivered(retry.client_replies),
+                            );
                         }
                         FullJidDeliveryOutcome::Unavailable
                         | FullJidDeliveryOutcome::Dropped
@@ -861,9 +970,9 @@ impl OrderedRelayDeliveryBridge {
                         match repair.delivery {
                             FullJidDeliveryOutcome::Delivered
                             | FullJidDeliveryOutcome::QueuedDetached => {
-                                return Some(OrderedRelayMucProxyOutcome::Delivered(
-                                    repair.client_replies,
-                                ));
+                                return MucProxyRouteDecision::Attempted(
+                                    OrderedRelayMucProxyOutcome::Delivered(repair.client_replies),
+                                );
                             }
                             FullJidDeliveryOutcome::Unavailable
                             | FullJidDeliveryOutcome::Dropped
@@ -871,12 +980,14 @@ impl OrderedRelayDeliveryBridge {
                         }
                     }
                 }
-                return Some(OrderedRelayMucProxyOutcome::JoinMaybeCommitted);
+                return MucProxyRouteDecision::Attempted(
+                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                );
             }
-            return Some(OrderedRelayMucProxyOutcome::MaybeCommitted);
+            return MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted);
         }
 
-        Some(match outcome.delivery {
+        MucProxyRouteDecision::Attempted(match outcome.delivery {
             FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                 OrderedRelayMucProxyOutcome::Delivered(outcome.client_replies)
             }

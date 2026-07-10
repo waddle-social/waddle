@@ -3801,15 +3801,36 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
         Some("spoofed-occupant"),
         "routed MUC PM must not preserve caller-supplied occupant-id: {xml}"
     );
-    // Strongest invariant: the server strips ALL client-supplied stanza-ids
-    // (bare-JID, full-JID, and unparseable `by` were all injected above), so
-    // no <stanza-id/> may remain regardless of its attributes.
-    assert!(
-        !routed
-            .children()
-            .any(|child| child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)),
-        "routed MUC PM must strip every caller-supplied stanza-id: {xml}"
+    // The server strips ALL client-supplied stanza-ids (bare-JID,
+    // full-JID, and unparseable `by` were all injected above) and then
+    // stamps exactly ONE of its own (#1257): the recipient archive's
+    // XEP-0359 stanza-id (`by` = bob's bare JID), so the live copy and
+    // the MAM row share one id space.
+    let stanza_ids: Vec<_> = routed
+        .children()
+        .filter(|child| child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID))
+        .collect();
+    assert_eq!(
+        stanza_ids.len(),
+        1,
+        "routed MUC PM carries exactly the server-stamped recipient stanza-id: {xml}"
     );
+    assert_eq!(
+        stanza_ids[0].attr("by"),
+        Some(bob_jid.to_bare().to_string().as_str()),
+        "the stamped stanza-id is attributed to the recipient archive: {xml}"
+    );
+    for spoofed in [
+        "spoofed-room-stanza",
+        "spoofed-room-fulljid-stanza",
+        "spoofed-malformed-stanza",
+    ] {
+        assert_ne!(
+            stanza_ids[0].attr("id"),
+            Some(spoofed),
+            "caller-supplied stanza-ids must not survive: {xml}"
+        );
+    }
 }
 
 #[tokio::test]
