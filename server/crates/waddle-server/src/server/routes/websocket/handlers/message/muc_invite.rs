@@ -412,11 +412,22 @@ async fn rollback_membership_grant(
 /// `recipient`, falling back to a durable pending-delivery row when
 /// the user is offline — mediated invites and declines must not be
 /// dropped just because the recipient is away (#1248/#1264).
+/// Typed failure of [`deliver_muc_user_message`]: nothing accepted the
+/// message — neither a live socket nor the durable pending-delivery
+/// queue.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MucUserDeliveryError {
+    #[error("pending_delivery quota exceeded")]
+    QuotaExceeded,
+    #[error("pending_delivery storage failed: {0}")]
+    Storage(String),
+}
+
 pub(super) async fn deliver_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: Message,
-) -> Result<(), String> {
+) -> Result<(), MucUserDeliveryError> {
     let resources = waddle_xmpp::registry::get_resources_for_user(
         &state.deps.protocol.user_registry,
         recipient,
@@ -449,11 +460,11 @@ pub(super) async fn deliver_muc_user_message(
 /// the pending-delivery store (same transient shape the group-DM
 /// invite path uses — flushed verbatim at the recipient's next
 /// session).
-pub(super) async fn queue_offline_muc_user_message(
+async fn queue_offline_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: &Message,
-) -> Result<(), String> {
+) -> Result<(), MucUserDeliveryError> {
     let row = PendingRow {
         id: PendingRowId::fresh(),
         recipient: recipient.clone(),
@@ -470,8 +481,8 @@ pub(super) async fn queue_offline_muc_user_message(
         .await
     {
         Ok(InsertOutcome::Inserted) => Ok(()),
-        Ok(InsertOutcome::QuotaExceeded) => Err("pending_delivery quota exceeded".to_string()),
-        Err(error) => Err(error.to_string()),
+        Ok(InsertOutcome::QuotaExceeded) => Err(MucUserDeliveryError::QuotaExceeded),
+        Err(error) => Err(MucUserDeliveryError::Storage(error.to_string())),
     }
 }
 

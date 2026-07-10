@@ -5,9 +5,7 @@ use waddle_xmpp::{
     muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
-    pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
     protocol::handlers::errors::message_error_reply,
-    Stanza,
 };
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -293,82 +291,42 @@ pub(super) async fn handle_group_dm_mediated_invite(
         &inbound_invite,
         access,
     )];
-    let resources =
-        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &invitee)
-            .await;
-    if resources.is_empty() {
-        if let Err(error) = queue_offline_group_dm_invite(state, &invitee, &invite).await {
-            warn!(
-                invitee = %invitee,
-                error = %error,
-                "Failed to queue offline group-DM invite; rolling back member grant"
-            );
-            rollback_group_dm_invite_grant(
-                state,
-                room_actor,
-                &channel_id,
-                &room_jid,
-                &invitee,
-                &bound_jid.to_bare(),
-            )
-            .await;
-            let error_kind = match error {
-                OfflineGroupDmInviteError::QuotaExceeded => GroupDmInviteError::ServiceUnavailable,
-                OfflineGroupDmInviteError::Storage(_) => GroupDmInviteError::InternalServerError,
-            };
-            return Some(vec![error_reply(
-                incoming,
-                bound_jid,
-                error_kind,
-                "Internal server error.",
-            )]);
-        }
-    } else {
-        for resource in resources {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(&resource, Stanza::Message(invite.clone()))
-                .await;
-        }
+    // Shared delivery path (#1248/#1264): sends to every connected
+    // resource and falls back to the durable pending-delivery queue
+    // when the invitee is offline OR every listed session refused the
+    // write — a stale resource list must not lose the invitation.
+    if let Err(error) = super::muc_invite::deliver_muc_user_message(state, &invitee, invite).await {
+        warn!(
+            invitee = %invitee,
+            error = %error,
+            "Group-DM invite could not be delivered or queued; rolling back member grant"
+        );
+        let error_kind = match error {
+            super::muc_invite::MucUserDeliveryError::QuotaExceeded => {
+                GroupDmInviteError::ServiceUnavailable
+            }
+            super::muc_invite::MucUserDeliveryError::Storage(_) => {
+                GroupDmInviteError::InternalServerError
+            }
+        };
+        rollback_group_dm_invite_grant(
+            state,
+            room_actor,
+            &channel_id,
+            &room_jid,
+            &invitee,
+            &bound_jid.to_bare(),
+        )
+        .await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            error_kind,
+            "Internal server error.",
+        )]);
     }
 
     Some(vec![])
-}
-
-#[derive(Debug, thiserror::Error)]
-enum OfflineGroupDmInviteError {
-    #[error("pending_delivery quota exceeded")]
-    QuotaExceeded,
-    #[error("{0}")]
-    Storage(String),
-}
-
-async fn queue_offline_group_dm_invite(
-    state: &WebSocketState,
-    invitee: &jid::BareJid,
-    invite: &xmpp_parsers::message::Message,
-) -> Result<(), OfflineGroupDmInviteError> {
-    let row = PendingRow {
-        id: PendingRowId::fresh(),
-        recipient: invitee.clone(),
-        original_receipt_at: chrono::Utc::now(),
-        payload: PendingPayload::Transient(Box::new(invite.clone())),
-        flushed_in_session: None,
-        outbound_sequence: None,
-    };
-    match state
-        .deps
-        .protocol
-        .pending_delivery_storage
-        .insert(row)
-        .await
-    {
-        Ok(InsertOutcome::Inserted) => Ok(()),
-        Ok(InsertOutcome::QuotaExceeded) => Err(OfflineGroupDmInviteError::QuotaExceeded),
-        Err(error) => Err(OfflineGroupDmInviteError::Storage(error.to_string())),
-    }
 }
 
 /// Undo a partially granted group-DM invite.
