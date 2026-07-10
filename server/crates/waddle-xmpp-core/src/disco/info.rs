@@ -313,12 +313,8 @@ pub fn build_disco_info_response_with_extensions(
     // caps-verifying clients MUST discard it (#1259). Dedupe here so no
     // call site can compose an ill-formed response; first occurrence wins,
     // preserving caller ordering.
-    let mut seen_identities: std::collections::HashSet<(
-        &str,
-        &str,
-        Option<&str>,
-        Option<&str>,
-    )> = std::collections::HashSet::new();
+    let mut seen_identities: std::collections::HashSet<(&str, &str, Option<&str>, Option<&str>)> =
+        std::collections::HashSet::new();
     let mut seen_features: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for identity in identities {

@@ -333,6 +333,18 @@ enum DurableRestoreState {
     Pending,
 }
 
+/// Why a join was refused, so the presence-error mapping can pick the
+/// XEP-0045 §7.2 condition: §7.2.8 bans (outcast) are `<forbidden/>`
+/// even in members-only rooms, while a plain non-member hitting a
+/// members-only room is `<registration-required/>` (#1265 item 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinDenialReason {
+    /// The user is banned (affiliation = outcast).
+    Banned,
+    /// The room is members-only and the user is not a member.
+    MembersOnly,
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RoomActorError {
     #[error("room is full")]
@@ -341,8 +353,8 @@ pub enum RoomActorError {
     NickAlreadyInUse(String),
     #[error("no occupant with nick '{0}'")]
     OccupantNotFound(String),
-    #[error("join is forbidden (members_only={members_only})")]
-    JoinForbidden { members_only: bool },
+    #[error("join is forbidden ({reason:?})")]
+    JoinForbidden { reason: JoinDenialReason },
     #[error("join admission snapshot is stale")]
     StaleAdmissionRevision,
     /// #1108: this room actor was sealed by the registry's guarded

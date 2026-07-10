@@ -518,11 +518,13 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
             .expect("muc user item");
 
         assert_eq!(item.attr("jid"), Some(full_jid));
+        // XEP-0045 registrar (#1265 item 4): status 100 rides only on
+        // the joiner's initial SELF-presence, never on occupant replays.
         assert!(
-            user_x
+            !user_x
                 .children()
                 .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
-            "non-anonymous replay must disclose status 100 for {nick}"
+            "occupant replay must not carry status 100 for {nick}"
         );
         assert!(
             !user_x
@@ -3583,11 +3585,13 @@ async fn muc_join_broadcast_includes_real_occupant_jid() {
     assert_eq!(item.attr("jid"), Some("bob@example.com/phone"));
     assert_eq!(item.attr("affiliation"), Some("none"));
     assert_eq!(item.attr("role"), Some("participant"));
+    // XEP-0045 registrar (#1265 item 4): status 100 belongs to the
+    // joiner's self-presence only, not to broadcasts to other occupants.
     assert!(
-        user_x
+        !user_x
             .children()
             .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
-        "non-anonymous room presence must advertise status 100: {broadcast_xml}"
+        "join broadcast to others must not carry status 100: {broadcast_xml}"
     );
 }
 
@@ -3737,11 +3741,13 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
         .get_child("item", "http://jabber.org/protocol/muc#user")
         .expect("muc user item");
     assert_eq!(item.attr("jid"), Some(alice.to_string().as_str()));
+    // XEP-0045 registrar (#1265 item 4): leave broadcasts are not an
+    // "entering a room" context — no status 100.
     assert!(
-        user_x
+        !user_x
             .children()
             .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
-        "non-anonymous leave broadcast must advertise status 100: {xml}"
+        "leave broadcast must not carry status 100: {xml}"
     );
 }
 
@@ -4051,11 +4057,13 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         .get_child("item", "http://jabber.org/protocol/muc#user")
         .expect("muc user item");
     assert_eq!(item.attr("jid"), Some(alice.to_string().as_str()));
+    // XEP-0045 registrar (#1265 item 4): presence-update reflections are
+    // not an "entering a room" context — no status 100.
     assert!(
-        user_x
+        !user_x
             .children()
             .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
-        "non-anonymous Muji-clear broadcast must advertise status 100: {xml}"
+        "Muji-clear broadcast must not carry status 100: {xml}"
     );
     assert!(
         presence

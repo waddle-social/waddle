@@ -111,7 +111,11 @@ fn test_build_disco_info_response_dedupes_features_and_identities() {
     assert_eq!(parsed.identities.len(), 1);
     assert_eq!(
         parsed.features,
-        vec![Feature::mam(), Feature::mam_extended(), Feature::disco_info()],
+        vec![
+            Feature::mam(),
+            Feature::mam_extended(),
+            Feature::disco_info()
+        ],
         "first occurrence wins; order preserved"
     );
 }

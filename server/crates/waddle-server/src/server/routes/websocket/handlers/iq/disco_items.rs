@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::xep::xep0059::{build_rsm_response_element, extract_rsm_request};
 
 enum RoomCommandTarget {
     GroupDm,
@@ -6,13 +7,6 @@ enum RoomCommandTarget {
     NotMember,
     Missing,
     Failed,
-}
-
-fn full_muc_room_target(target_to: Option<&str>, muc_domain: &str) -> bool {
-    target_to
-        .and_then(|target| target.split_once('/').map(|(bare, _)| bare))
-        .and_then(|bare| bare.parse::<BareJid>().ok())
-        .is_some_and(|room_jid| room_jid.domain().as_str() == muc_domain)
 }
 
 async fn classify_room_command_target(
@@ -193,33 +187,84 @@ pub(super) async fn handle_disco_items_iq(
             }
         };
 
-        if target_to == Some(muc_domain) {
-            debug!("Disco items query on MUC service");
-            let items = match canonical_channel_disco_items(state, muc_domain, 500).await {
-                Ok(items) => items,
-                Err(_) => {
-                    return vec![build_iq_error_xml_typed(
-                        id,
-                        None,
-                        None,
-                        internal_server_error_iq_error("Failed to list MUC rooms."),
-                    )];
-                }
-            };
-
-            let response = build_disco_items_response(request_iq, &items, None);
-            return vec![iq_to_xml(response)];
+        // XEP-0045 §6.6 (#1265 item 10): disco to an occupant JID.
+        if let Some(error) = muc_occupant_disco::muc_occupant_disco_error(
+            state,
+            target_to,
+            muc_domain,
+            phase.bound_jid(),
+        )
+        .await
+        {
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                error,
+            )];
         }
 
-        if query.node.as_deref() == Some(NODE_COMMANDS) {
-            if full_muc_room_target(target_to, muc_domain) {
+        if target_to == Some(muc_domain) {
+            debug!("Disco items query on MUC service");
+            // XEP-0030 §3.2 (#1265 item 11): the MUC service hosts no
+            // disco#items nodes; an unknown node is <item-not-found/>,
+            // never the room list.
+            if query.node.is_some() {
                 return vec![build_iq_error_xml_typed(
                     id,
                     response_from,
                     response_to,
-                    item_not_found_iq_error("Requested item not found."),
+                    item_not_found_iq_error("Unknown disco#items node."),
                 )];
             }
+            let rsm_request = match rsm_request_from_iq(request_iq) {
+                Ok(rsm_request) => rsm_request,
+                Err(_) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        bad_request_iq_error("Malformed RSM <set/> element."),
+                    )];
+                }
+            };
+            let mut items =
+                match canonical_channel_disco_items(state, muc_domain, MUC_DISCO_ITEMS_FETCH_BOUND)
+                    .await
+                {
+                    Ok(items) => items,
+                    Err(_) => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            None,
+                            None,
+                            internal_server_error_iq_error("Failed to list MUC rooms."),
+                        )];
+                    }
+                };
+            // XEP-0045 §6.3 (#1265 item 11): public live instant rooms
+            // are part of the service's item list too, not only
+            // channel-backed persistent rooms.
+            items.extend(live_public_instant_room_items(state, muc_domain).await);
+            items.sort_by(|a, b| a.jid.cmp(&b.jid));
+            items.dedup_by(|a, b| a.jid == b.jid);
+            let Some(rsm_request) = rsm_request else {
+                let response = build_disco_items_response(request_iq, &items, None);
+                return vec![iq_to_xml(response)];
+            };
+            let (page, rsm_response) = page_disco_items(&items, &rsm_request);
+            let mut response = build_disco_items_response(request_iq, page, None);
+            if let xmpp_parsers::iq::Iq::Result {
+                payload: Some(query),
+                ..
+            } = &mut response
+            {
+                query.append_child(build_rsm_response_element(&rsm_response));
+            }
+            return vec![iq_to_xml(response)];
+        }
+
+        if query.node.as_deref() == Some(NODE_COMMANDS) {
             if let Some(room_jid) = target_to
                 .filter(|target| !target.contains('/'))
                 .and_then(|target| target.parse::<BareJid>().ok())
@@ -496,6 +541,115 @@ pub(super) async fn handle_disco_items_iq(
         return vec![iq_to_xml(response)];
     }
     Vec::new()
+}
+
+/// Practical fetch bound for the MUC room list. RSM paging (#1265
+/// item 11) means clients are no longer silently truncated at the old
+/// hard 500 cap; this bound only protects the server from an unbounded
+/// DB read.
+const MUC_DISCO_ITEMS_FETCH_BOUND: usize = 10_000;
+
+/// Extract an optional XEP-0059 `<set/>` from a disco#items query.
+fn rsm_request_from_iq(iq: &xmpp_parsers::iq::Iq) -> Result<Option<RsmRequest>, ()> {
+    let xmpp_parsers::iq::Iq::Get { payload, .. } = iq else {
+        return Ok(None);
+    };
+    match extract_rsm_request(payload) {
+        None => Ok(None),
+        Some(Ok(request)) => Ok(Some(request)),
+        Some(Err(_)) => Err(()),
+    }
+}
+
+/// XEP-0059 paging over the sorted room list, keyed by item JID.
+///
+/// Supports `max`, `after`, `index`, and both `<before/>` forms (a JID
+/// for backward paging, empty for the last page).
+fn page_disco_items<'a>(
+    items: &'a [DiscoItem],
+    request: &RsmRequest,
+) -> (&'a [DiscoItem], RsmResponse) {
+    let total = items.len();
+    let max = request.max.map(|max| max as usize).unwrap_or(total);
+    let (start, end) = match (&request.before, &request.after, request.index) {
+        (Some(before), _, _) if before.is_empty() => (total.saturating_sub(max), total),
+        (Some(before), _, _) => {
+            let end = items
+                .iter()
+                .position(|item| &item.jid == before)
+                .unwrap_or(0);
+            (end.saturating_sub(max), end)
+        }
+        (None, Some(after), _) => {
+            let start = items
+                .iter()
+                .position(|item| &item.jid == after)
+                .map(|position| position + 1)
+                .unwrap_or(total);
+            (start, (start + max).min(total))
+        }
+        (None, None, Some(index)) => {
+            let start = (index as usize).min(total);
+            (start, (start + max).min(total))
+        }
+        (None, None, None) => (0, max.min(total)),
+    };
+    let page = &items[start..end];
+    let mut response = RsmResponse::new().with_count(u32::try_from(total).unwrap_or(u32::MAX));
+    if let (Some(first), Some(last)) = (page.first(), page.last()) {
+        response = response
+            .with_first(first.jid.clone(), u32::try_from(start).ok())
+            .with_last(last.jid.clone());
+    }
+    (page, response)
+}
+
+/// Live rooms created ad hoc through the MUC protocol (no managed
+/// channel record) that are public and not group DMs. Channel-backed
+/// rooms are already listed from the database.
+async fn live_public_instant_room_items(
+    state: &WebSocketState,
+    muc_domain: &str,
+) -> Vec<DiscoItem> {
+    let room_jids =
+        match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+            .list_rooms()
+            .await
+        {
+            Ok(room_jids) => room_jids,
+            Err(error) => {
+                warn!(error = %error, "Failed to list live MUC rooms for disco#items");
+                return Vec::new();
+            }
+        };
+    let mut items = Vec::new();
+    for room_jid in room_jids {
+        if room_jid.domain().as_str() != muc_domain
+            || waddle_xmpp::parse_managed_room_jid(&room_jid).is_some()
+        {
+            continue;
+        }
+        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+            continue;
+        };
+        let Ok(snapshot) = room_actor.ask(GetSnapshot).await else {
+            continue;
+        };
+        let config = &snapshot.room.config;
+        if !config.public_room || config.group_dm {
+            continue;
+        }
+        let name = if config.name.trim().is_empty() {
+            room_jid
+                .node()
+                .map(|node| node.to_string())
+                .unwrap_or_else(|| room_jid.to_string())
+        } else {
+            config.name.clone()
+        };
+        items.push(DiscoItem::muc_room(&room_jid.to_string(), &name));
+    }
+    items
 }
 
 fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {

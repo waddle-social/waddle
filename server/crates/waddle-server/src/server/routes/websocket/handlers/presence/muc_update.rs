@@ -330,7 +330,7 @@ pub(crate) async fn try_handle_muc_presence_update(
                 recipient,
                 outcome.update.sender_affiliation,
                 outcome.update.sender_role,
-                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
                 &identity,
             );
 

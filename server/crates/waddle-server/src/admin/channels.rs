@@ -2460,7 +2460,7 @@ fn broadcast_group_dm_leave(
             &from_jid,
             leaving_real_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(true, true),
+            waddle_xmpp::muc::MucPresenceStatus::new(true, false),
             &identity,
         );
         let _ = connections.try_send_to(leaving_real_jid, Stanza::Presence(presence));
@@ -2473,7 +2473,7 @@ fn broadcast_group_dm_leave(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(false, true),
+            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
             &identity,
         );
         let _ = connections.try_send_to(occupant_jid, Stanza::Presence(presence));

@@ -189,7 +189,7 @@ fn test_build_occupant_presence_created_room_self_includes_201() {
         MucPresenceStatus {
             is_self: false,
             room_created: true,
-            include_nonanonymous_status: true,
+            warn_nonanonymous_join: false,
         },
         &identity,
     );

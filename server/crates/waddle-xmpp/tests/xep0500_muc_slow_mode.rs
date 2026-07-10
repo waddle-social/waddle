@@ -6,8 +6,8 @@
 //! moderator exemption, per-occupant isolation, leave/clear resets).
 //!
 use std::time::Duration;
-use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::muc::roominfo::MucRoomInfo;
+use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0500::{
     build_roominfo_slow_mode_duration_field, parse_slow_mode_duration, SlowModeCheck,
     SlowModeConfig, SlowModeTracker, FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION,

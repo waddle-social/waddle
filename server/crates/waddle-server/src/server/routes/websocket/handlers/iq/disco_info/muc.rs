@@ -2,6 +2,9 @@ use super::*;
 
 use waddle_xmpp::muc::roominfo::MucRoomInfo;
 
+/// XEP-0045 §7.12 well-known disco node for reserved-nick discovery.
+const NODE_ROOMUSER_ITEM: &str = "x-roomuser-item";
+
 /// XEP-0030 routing classification for a disco#info target as seen by the
 /// MUC dispatcher.
 ///
@@ -46,13 +49,6 @@ fn bare_group_dm_room_target(target_to: Option<&str>, muc_domain: &str) -> Optio
         .filter(|target| !target.contains('/'))
         .and_then(|target| target.parse::<BareJid>().ok())
         .filter(|room_jid| room_jid.domain().as_str() == muc_domain)
-}
-
-fn full_muc_room_target(target_to: Option<&str>, muc_domain: &str) -> bool {
-    target_to
-        .and_then(|target| target.split_once('/').map(|(bare, _)| bare))
-        .and_then(|bare| bare.parse::<BareJid>().ok())
-        .is_some_and(|room_jid| room_jid.domain().as_str() == muc_domain)
 }
 
 fn group_dm_shared_name(name: &str) -> Option<&str> {
@@ -244,19 +240,91 @@ pub(super) async fn handle_muc_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
 ) -> Option<DiscoInfoResponse<'a>> {
+    // XEP-0045 §6.6 (#1265 item 10): disco addressed to an occupant JID
+    // (`room@service/nick`) is rejected — <bad-request/> for
+    // non-occupants (MUST), <feature-not-implemented/> for occupants
+    // (pass-through unsupported) — instead of leaking room info by
+    // silently stripping the resource.
+    if let Some(error) = super::super::muc_occupant_disco::muc_occupant_disco_error(
+        state,
+        req.target_to,
+        req.muc_domain,
+        req.requester,
+    )
+    .await
+    {
+        return Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            error,
+        ));
+    }
+
+    // XEP-0045 §7.12 (#1265 item 9): reserved-nick discovery. Waddle
+    // locks nicknames to identity, so a user's "reserved" nick is the
+    // nick they currently occupy the room under; with no occupancy
+    // there is no registered nickname and the query element is empty
+    // per XEP-0030.
+    if req.node == Some(NODE_ROOMUSER_ITEM) {
+        let MucDiscoTarget::Room(room_jid) =
+            classify_muc_disco_target(req.target_to, req.muc_domain)
+        else {
+            return None;
+        };
+        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+            // A dormant channel-backed room exists but has no occupants,
+            // so the requester has no reserved nick: empty query per
+            // XEP-0030. A room with neither actor nor channel record
+            // does not exist (#1260).
+            if let Ok(Some(_)) = get_managed_channel_for_room(state, &room_jid).await {
+                let response =
+                    build_disco_info_response(req.request_iq, &[], &[], Some(NODE_ROOMUSER_ITEM));
+                return Some(DiscoInfoResponse::iq(response));
+            }
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                req.response_from,
+                req.response_to,
+                item_not_found_iq_error("Requested item not found."),
+            ));
+        };
+        let reserved_nick = match room_actor.ask(GetSnapshot).await {
+            Ok(snapshot) => req.requester.and_then(|requester| {
+                snapshot
+                    .room
+                    .find_nick_by_real_jid(requester)
+                    .map(str::to_string)
+            }),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Failed to load room snapshot for reserved-nick disco"
+                );
+                return Some(DiscoInfoResponse::error(
+                    req.id,
+                    req.response_from,
+                    req.response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                ));
+            }
+        };
+        let identities: Vec<Identity> = reserved_nick
+            .as_deref()
+            .map(|nick| vec![Identity::muc_room(Some(nick))])
+            .unwrap_or_default();
+        let response =
+            build_disco_info_response(req.request_iq, &identities, &[], Some(NODE_ROOMUSER_ITEM));
+        return Some(DiscoInfoResponse::iq(response));
+    }
+
     if matches!(
         req.node,
         Some(NODE_COMMANDS) | Some(waddle_xmpp::admin::NS_GROUP_DM_RENAME)
     ) {
         let Some(room_jid) = bare_group_dm_room_target(req.target_to, req.muc_domain) else {
-            return full_muc_room_target(req.target_to, req.muc_domain).then(|| {
-                DiscoInfoResponse::error(
-                    req.id,
-                    req.response_from,
-                    req.response_to,
-                    item_not_found_iq_error("Requested item not found."),
-                )
-            });
+            return None;
         };
         match classify_room_command_target(state, &room_jid, req.requester).await {
             RoomCommandTarget::GroupDm => {}
@@ -398,10 +466,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             &mut features,
             space_link,
             description,
-            build_room_metadata_form(
-                channel_type,
-                snapshot.config.pin_permission.as_form_value(),
-            ),
+            build_room_metadata_form(channel_type, snapshot.config.pin_permission.as_form_value()),
         );
         let response = build_disco_info_response_with_extensions(
             req.request_iq,
