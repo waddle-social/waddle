@@ -100,12 +100,21 @@ impl MessageHandler for CanonicalizeHandler {
         // different string forms (case-folded localpart, IDN, …) still
         // strip — string equality on `by=` would let those slip
         // through and leak through into downstream archive lookups.
+        //
+        // #1275: the server's own DOMAIN is also an authority it owns —
+        // clients treat `by=<domain>` as a trusted DM stanza-id
+        // authority alongside the account bare, so a sender-supplied
+        // `<stanza-id by='<domain>'/>` is equally spoofable and MUST be
+        // stripped, even though the server never stamps under it.
+        let server_domain: Option<BareJid> = ctx.domain.parse().ok();
         message.payloads.retain(|p| {
             if !is_stanza_id_element(p) {
                 return true;
             }
             match p.attr("by").and_then(|raw| raw.parse::<BareJid>().ok()) {
-                Some(parsed) => parsed != local_archive,
+                Some(parsed) => {
+                    parsed != local_archive && Some(&parsed) != server_domain.as_ref()
+                }
                 // Malformed `by=` — leave the element alone; the
                 // server can't claim ownership of an unparseable bare.
                 None => true,
@@ -189,6 +198,42 @@ mod tests {
         let alice_stamps: Vec<_> = stamps.iter().filter(|s| s.by == alice).collect();
         assert_eq!(alice_stamps.len(), 1);
         assert_eq!(alice_stamps[0].id, "fresh-id-1");
+    }
+
+    /// #1275: a sender-supplied `<stanza-id by='<server-domain>'/>` is a
+    /// spoof of an authority the server owns (clients trust the domain
+    /// as a DM stanza-id authority) and MUST be stripped — including
+    /// case variants, which parse to the same [`BareJid`].
+    #[test]
+    fn xep_0359_strips_spoofed_domain_claimed_stanza_ids() {
+        let local = full("alice@example.com/web");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
+        msg.payloads
+            .push(build_stanza_id_element("spoofed-domain", &jid("example.com")));
+        msg.payloads.push(build_stanza_id_element(
+            "spoofed-domain-case",
+            &jid("Example.COM"),
+        ));
+        msg.payloads
+            .push(build_stanza_id_element("spoofed-bare", &jid("alice@example.com")));
+
+        run_with_id(&local, &mut msg, "fresh-id-2");
+
+        let stamps = extract_stanza_ids(&msg);
+        let domain = jid("example.com");
+        assert!(
+            !stamps.iter().any(|s| s.by == domain),
+            "domain-claimed stanza-ids must be stripped, got {stamps:?}"
+        );
+        assert!(
+            !stamps.iter().any(|s| s.id.contains("spoofed")),
+            "every spoofed id must be gone, got {stamps:?}"
+        );
+        // The single fresh server stamp under the account bare survives.
+        let alice = jid("alice@example.com");
+        let alice_stamps: Vec<_> = stamps.iter().filter(|s| s.by == alice).collect();
+        assert_eq!(alice_stamps.len(), 1);
+        assert_eq!(alice_stamps[0].id, "fresh-id-2");
     }
 
     #[test]

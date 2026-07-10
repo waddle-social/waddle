@@ -250,9 +250,11 @@ export class MamPager {
    * the SAME set the DM decode path (`assignedStanzaIdBy`) adopts as
    * the row identity/wireIds, so catch-up seen-ids can never diverge
    * from the ids the timeline rows carry (a divergence would re-emit
-   * or strand rows). Sender-spoofed `by=<domain>` elements are a
-   * pre-existing server-side strip gap tracked in #1275; both layers
-   * tighten together when the server strips them. */
+   * or strand rows). Both authorities are safe to trust: the server
+   * strips sender-spoofed `<stanza-id/>` elements claiming either its
+   * account-bare OR its domain authority on the inbound DM path
+   * (XEP-0359 §5; #1275, fixed alongside this in PR #1273 —
+   * `protocol/handlers/canonicalize.rs`). */
   private dmStanzaIdAuthorities(): string[] {
     const selfBare = this.selfBare();
     return [selfBare, jidDomain(selfBare)];
