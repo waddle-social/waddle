@@ -252,7 +252,7 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
 const MAX_RECIPIENT_PASS_DEPTH: u8 = 1;
 
 #[derive(Clone, Debug)]
-pub(super) struct ArchiveIdRewrite {
+pub(crate) struct ArchiveIdRewrite {
     by: Jid,
     from_id: String,
     to_id: String,
@@ -332,7 +332,7 @@ fn rewrite_stanza_archive_ids(stanza: &mut Stanza, rewrites: &[ArchiveIdRewrite]
     }
 }
 
-fn rewrite_message_archive_ids(message: &mut Message, rewrites: &[ArchiveIdRewrite]) {
+pub(crate) fn rewrite_message_archive_ids(message: &mut Message, rewrites: &[ArchiveIdRewrite]) {
     for rewrite in rewrites {
         if extract_stanza_id_by(message, &rewrite.by).as_deref() == Some(rewrite.from_id.as_str()) {
             replace_stanza_id(

@@ -440,10 +440,29 @@ async fn xep_0045_groupchat_to_nonexistent_room_bounces_item_not_found() {
 
     let ghost_room = format!("never-created-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     let msg_id = format!("ghost-{}", uuid::Uuid::new_v4());
+    let message = Element::builder("message", "jabber:client")
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+            ghost_room.clone(),
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+            "groupchat",
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+            msg_id.clone(),
+        )
+        .append(
+            Element::builder("body", "jabber:client")
+                .append("hello?")
+                .build(),
+        )
+        .build();
+    let mut bytes = Vec::new();
+    message.write_to(&mut bytes).expect("serialize message");
     admin
-        .send(&format!(
-            r#"<message to="{ghost_room}" type="groupchat" id="{msg_id}"><body>hello?</body></message>"#
-        ))
+        .send(&String::from_utf8(bytes).expect("utf8 message"))
         .await
         .expect("send groupchat to nonexistent room");
 

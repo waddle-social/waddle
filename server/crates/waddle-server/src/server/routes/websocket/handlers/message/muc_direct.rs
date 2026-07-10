@@ -134,17 +134,92 @@ async fn handle_muc_private_message(
 
     // Canonical relayed form (XEP-0045 §7.5): from the sender's occupant
     // JID, client MUC-service payloads stripped, empty muc#user marker +
-    // server occupant-id stamped (#1251/#1268), plus the recipient
-    // archive's XEP-0359 stanza-id so the live copy and the MAM row
-    // share one id space.
-    let recipient_sid = waddle_xmpp_core::xep0359::StanzaId::new(
-        uuid::Uuid::new_v4().to_string(),
-        jid::Jid::from(recipient_bare.clone()),
-    );
+    // server occupant-id stamped (#1251/#1268).
     let mut relayed = incoming.clone();
     relayed.from = Some(jid::Jid::from(from_room_jid.clone()));
     canonicalize_muc_private_payloads(&mut relayed, &sender_occupant_id);
-    waddle_xmpp_core::xep0359::add_stanza_id(&mut relayed, &recipient_sid);
+
+    let sender_bare = bound_jid.to_bare();
+    let mut sent_form = incoming.clone();
+    sent_form.from = Some(jid::Jid::from(bound_jid.clone()));
+    sent_form.to = Some(jid::Jid::from(target_occupant_jid.clone()));
+    canonicalize_muc_private_payloads(&mut sent_form, &sender_occupant_id);
+
+    // #1257: archive + carbons through the same interpreter arms the 1:1
+    // pipeline uses — and BEFORE the wire copies go out (review P1/P2 on
+    // PR #1277): stanza-ids are stamped ONLY on copies that are actually
+    // archived (body-less chat-state PMs get none — an id with no MAM
+    // row behind it is a lie), and interpreting the archive first lets
+    // an origin-id dedupe's ArchiveIdRewrite land on the wire copy, so
+    // live/MAM id parity holds under retries. Both user archives key
+    // the conversation by the room bare JID.
+    let should_archive = !incoming.bodies.is_empty();
+    let mut events: Vec<waddle_xmpp::protocol::OutboundEvent> = Vec::new();
+    if should_archive {
+        let recipient_sid = waddle_xmpp_core::xep0359::StanzaId::new(
+            uuid::Uuid::new_v4().to_string(),
+            jid::Jid::from(recipient_bare.clone()),
+        );
+        waddle_xmpp_core::xep0359::add_stanza_id(&mut relayed, &recipient_sid);
+        let sender_sid = waddle_xmpp_core::xep0359::StanzaId::new(
+            uuid::Uuid::new_v4().to_string(),
+            jid::Jid::from(sender_bare.clone()),
+        );
+        waddle_xmpp_core::xep0359::add_stanza_id(&mut sent_form, &sender_sid);
+
+        let mut recipient_archive = relayed.clone();
+        recipient_archive.to = Some(jid::Jid::from(recipient_bare.clone()));
+        events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            archive_jid: recipient_bare.clone(),
+            from: room_jid.clone(),
+            to: recipient_bare.clone(),
+            message: Box::new(recipient_archive),
+        });
+        // A self-PM (own nick) would otherwise archive twice into the
+        // same owner's archive.
+        if recipient_bare != sender_bare {
+            events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: sender_bare.clone(),
+                from: sender_bare.clone(),
+                to: room_jid.clone(),
+                message: Box::new(sent_form.clone()),
+            });
+        }
+    }
+    // XEP-0280 eligibility (review P2 on PR #1277): honor §6.1
+    // `<private/>` and XEP-0334 `<no-copy/>` suppression — the shared
+    // `should_copy_message` rule the 1:1 CarbonsMessageHandler applies —
+    // since this path emits SendCarbons directly. The exclusion set is
+    // the original delivery set per §6.3: every session of the target
+    // nick PLUS the originating resource, so a self-PM (own nick) never
+    // double-delivers to a sibling resource that already got the live
+    // relayed copy. Ordered AFTER the archive events so the interpreter
+    // applies any ArchiveIdRewrite to the carbon inner message too.
+    // Deliberate SHOULD-level deviation: the copy goes to ALL other
+    // carbon-enabled resources, not only Multi-Session-Nick clients in
+    // this room — XEP-0280's note allows this (clients not joined
+    // "SHOULD either ignore such carbon copies, or provide a way for
+    // the user to join the MUC before answering").
+    if waddle_xmpp_core::carbons::should_copy_message(incoming) {
+        let mut exclude = recipient_sessions.clone();
+        if !exclude.contains(bound_jid) {
+            exclude.push(bound_jid.clone());
+        }
+        events.push(waddle_xmpp::protocol::OutboundEvent::SendCarbons {
+            owner: sender_bare,
+            message: Box::new(sent_form),
+            kind: waddle_xmpp::protocol::CarbonKind::Sent,
+            exclude,
+        });
+    }
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let nested = crate::server::routes::interpret::interpret(events, &deps).await;
+    if !nested.archive_id_rewrites.is_empty() {
+        crate::server::routes::interpret::rewrite_message_archive_ids(
+            &mut relayed,
+            &nested.archive_id_rewrites,
+        );
+    }
 
     // #1257: reliable delivery. Replace the previous fire-and-forget
     // live-only `try_send_to` (which silently lost the PM for a
@@ -153,7 +228,6 @@ async fn handle_muc_private_message(
     // live channel first, XEP-0198 detached replay buffer as fallback,
     // clustered remote-resource relay for occupant sessions whose
     // socket lives on another node.
-    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
     let mut any_session_handled = false;
     for recipient in &recipient_sessions {
         let mut routed = relayed.clone();
@@ -184,83 +258,29 @@ async fn handle_muc_private_message(
         }
     }
     // XEP-0045 §7.5: the service is responsible for delivering the PM.
-    // If NO session of the target occupant could be reached (all
-    // confirmed-unavailable or dropped), tell the sender instead of
-    // silently losing the message.
+    // An ARCHIVED PM that reached no live/detached session is still
+    // durable — the occupant sees it via MAM — so only an unarchivable
+    // (body-less) PM that reached nobody bounces to the sender; a
+    // wait-class error after the archive committed would misreport a
+    // message the recipient will in fact see.
     if !any_session_handled {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            ErrorType::Wait,
-            DefinedCondition::RecipientUnavailable,
-            "The occupant could not be reached; please retry.",
-        )]);
-    }
-
-    // #1257: archive + carbons through the same interpreter arms the 1:1
-    // pipeline uses. Both user archives key the conversation by the room
-    // bare JID; body-less PMs (chat states etc.) follow XEP-0313 §5.1.3
-    // and are not archived. Per XEP-0280's MUC rules the OUTBOUND local
-    // PM is carbon-copied to the sender's other carbon-enabled resources
-    // (`<sent/>`), while inbound copies are NOT carboned — the service
-    // already replicated the PM to every session of the target nick.
-    let sender_bare = bound_jid.to_bare();
-    let sender_sid = waddle_xmpp_core::xep0359::StanzaId::new(
-        uuid::Uuid::new_v4().to_string(),
-        jid::Jid::from(sender_bare.clone()),
-    );
-    let mut sent_form = incoming.clone();
-    sent_form.from = Some(jid::Jid::from(bound_jid.clone()));
-    sent_form.to = Some(jid::Jid::from(target_occupant_jid.clone()));
-    canonicalize_muc_private_payloads(&mut sent_form, &sender_occupant_id);
-    waddle_xmpp_core::xep0359::add_stanza_id(&mut sent_form, &sender_sid);
-
-    let mut events: Vec<waddle_xmpp::protocol::OutboundEvent> = Vec::new();
-    if !incoming.bodies.is_empty() {
-        let mut recipient_archive = relayed.clone();
-        recipient_archive.to = Some(jid::Jid::from(recipient_bare.clone()));
-        events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
-            archive_jid: recipient_bare.clone(),
-            from: room_jid.clone(),
-            to: recipient_bare.clone(),
-            message: Box::new(recipient_archive),
-        });
-        // A self-PM (own nick) would otherwise archive twice into the
-        // same owner's archive.
-        if recipient_bare != sender_bare {
-            events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
-                archive_jid: sender_bare.clone(),
-                from: sender_bare.clone(),
-                to: room_jid.clone(),
-                message: Box::new(sent_form.clone()),
-            });
+        if should_archive {
+            warn!(
+                room = %room_jid,
+                target_nick = %target_nick,
+                "MUC private message: no session reachable; archived copy remains durable"
+            );
+        } else {
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                ErrorType::Wait,
+                DefinedCondition::RecipientUnavailable,
+                "The occupant could not be reached; please retry.",
+            )]);
         }
     }
-    // XEP-0280 eligibility (review P2 on PR #1277): honor §6.1
-    // `<private/>` and XEP-0334 `<no-copy/>` suppression — the shared
-    // `should_copy_message` rule the 1:1 CarbonsMessageHandler applies —
-    // since this path emits SendCarbons directly. The exclusion set is
-    // the original delivery set per §6.3: every session of the target
-    // nick PLUS the originating resource, so a self-PM (own nick) never
-    // double-delivers to a sibling resource that already got the live
-    // relayed copy. Deliberate SHOULD-level deviation: the copy goes to
-    // ALL other carbon-enabled resources, not only Multi-Session-Nick
-    // clients in this room — XEP-0280's note allows this (clients not
-    // joined "SHOULD either ignore such carbon copies, or provide a way
-    // for the user to join the MUC before answering").
-    if waddle_xmpp_core::carbons::should_copy_message(incoming) {
-        let mut exclude = recipient_sessions.clone();
-        if !exclude.contains(bound_jid) {
-            exclude.push(bound_jid.clone());
-        }
-        events.push(waddle_xmpp::protocol::OutboundEvent::SendCarbons {
-            owner: sender_bare,
-            message: Box::new(sent_form),
-            kind: waddle_xmpp::protocol::CarbonKind::Sent,
-            exclude,
-        });
-    }
-    let nested = crate::server::routes::interpret::interpret(events, &deps).await;
+
     Some(nested.frames)
 }
 

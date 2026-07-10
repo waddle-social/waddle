@@ -45,9 +45,12 @@ pub(super) async fn dispatch_to_room(
             .ordered_relay_delivery_bridge
             .as_ref()
         {
+            use crate::clustering::route_bridge::{
+                MucProxyRouteDecision, OrderedRelayMucProxyOutcome,
+            };
             let stanza = Stanza::Message(incoming.clone());
             match bridge
-                .try_proxy_muc_remote(
+                .try_proxy_muc_remote_decision(
                     &room_jid,
                     &stanza,
                     crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
@@ -55,7 +58,7 @@ pub(super) async fn dispatch_to_room(
                 )
                 .await
             {
-                Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
+                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(
                     replies,
                 )) => {
                     for reply in replies {
@@ -72,14 +75,22 @@ pub(super) async fn dispatch_to_room(
                     }
                     return outcome;
                 }
-                Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-                | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
+                // Attempted-but-failed AND retryable routing states
+                // (claim lookup/lease trouble, origin claim held
+                // elsewhere) bounce a wait-class retry error. Falling
+                // through to the local registry here would misreport a
+                // healthy REMOTE room as `<item-not-found/>` (review P2
+                // on PR #1277).
+                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
+                | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
+                | MucProxyRouteDecision::RoomClaimUnavailable
+                | MucProxyRouteDecision::OriginUnavailable => {
                     let reply = build_message_error_reply(
                         &incoming,
                         &room_jid,
                         &sender_full,
                         resource_constraint_error(
-                            "This room's ownership recently moved to another node; please retry.",
+                            "This room is temporarily unreachable; please retry.",
                         ),
                     );
                     match Stanza::Message(reply).to_element_string() {
@@ -94,15 +105,17 @@ pub(super) async fn dispatch_to_room(
                     }
                     return outcome;
                 }
-                Some(
-                    crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
-                )
-                | Some(
-                    crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
+                | MucProxyRouteDecision::Attempted(
+                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                 ) => {
                     return outcome;
                 }
-                None => {}
+                // The local registry is authoritative: the room claim is
+                // owned here, or no claim row exists anywhere (a truly
+                // nonexistent/dormant room — the local path bounces
+                // `<item-not-found/>` correctly).
+                MucProxyRouteDecision::LocalRoom | MucProxyRouteDecision::RoomUnclaimed => {}
             }
         }
     }

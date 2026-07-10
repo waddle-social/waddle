@@ -297,8 +297,11 @@ async fn muc_pm_to_detached_resumable_occupant_replays_on_resume() {
 
     // Alice enables XEP-0198 resumption AFTER joining, then drops
     // uncleanly — her occupancy detaches instead of leaving.
+    let enable = Element::builder("enable", "urn:xmpp:sm:3")
+        .attr(attr_name("resume").to_owned(), "true")
+        .build();
     alice
-        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .send(&element_to_xml(enable))
         .await
         .expect("send sm enable");
     let enabled = alice
@@ -332,10 +335,12 @@ async fn muc_pm_to_detached_resumable_occupant_replays_on_resume() {
             .authenticate(DOMAIN, ALICE, &alice_pass)
             .await
             .expect("authenticate resume connection");
+        let resume = Element::builder("resume", "urn:xmpp:sm:3")
+            .attr(attr_name("previd").to_owned(), stream_id.clone())
+            .attr(attr_name("h").to_owned(), "0")
+            .build();
         candidate
-            .send(&format!(
-                r#"<resume xmlns="urn:xmpp:sm:3" previd="{stream_id}" h="0"/>"#
-            ))
+            .send(&element_to_xml(resume))
             .await
             .expect("send resume");
         match tokio::time::timeout(
