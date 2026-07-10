@@ -2801,26 +2801,20 @@ async fn collect_remote_muc_reconcile_candidates(state: &WebSocketState) -> Vec<
         {
             continue;
         }
-        match state
+        // Cross-node guard (SM review P1 on PR #1277): a session that
+        // detached HERE and was resume-stolen by another node leaves no
+        // local trace, but its durable row (now owned by the stealing
+        // node) proves the occupancy is still legitimately resumable.
+        // The probe checks this node's memory AND the shared durable
+        // store, and fails closed on read errors.
+        if state
             .deps
             .protocol
             .sm_session_registry
-            .detached_resources_for_user(&occupant.to_bare())
+            .any_resumable_session_for_full_jid(&occupant)
             .await
         {
-            Ok(detached) if detached.contains(&occupant) => continue,
-            Ok(_) => {}
-            // Fail-closed: on a registry read error, skip this occupant
-            // for this sweep rather than risk evicting a resumable
-            // session's occupancy.
-            Err(error) => {
-                warn!(
-                    jid = %occupant,
-                    %error,
-                    "remote MUC reconciler: detached-session lookup failed; skipping"
-                );
-                continue;
-            }
+            continue;
         }
         candidates.push(occupant);
     }
@@ -2840,6 +2834,10 @@ pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSo
     let weak_state = Arc::downgrade(websocket_state);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(REMOTE_MUC_MEMBERSHIP_RECONCILE_INTERVAL);
+        // A sweep slower than the interval (serial relays against an
+        // unreachable node) must not burst-fire missed ticks into a
+        // continuous retry loop (race review P2 on PR #1277).
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await;
         loop {
             ticker.tick().await;
@@ -2855,6 +2853,23 @@ pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSo
                 "remote MUC reconciler: re-driving unavailable relays for departed occupants"
             );
             for occupant in candidates {
+                // Re-check liveness IMMEDIATELY before the re-drive
+                // (codex review P1 on PR #1277): the candidate list was
+                // collected before earlier awaited re-drives, and the
+                // same full JID may have reconnected in that gap. A
+                // registered connection means the occupancy is
+                // legitimate again; the membership-generation guards
+                // inside the cleanup protect the map but cannot undo a
+                // relayed remote leave.
+                if state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_entry(&occupant)
+                    .is_some()
+                {
+                    continue;
+                }
                 routes::websocket::redrive_remote_muc_cleanup(&state, &occupant).await;
             }
         }

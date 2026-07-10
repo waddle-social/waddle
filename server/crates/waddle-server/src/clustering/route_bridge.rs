@@ -921,10 +921,16 @@ impl OrderedRelayDeliveryBridge {
         };
 
         let Some(outcome) = Arc::clone(self).deliver_seeded_remote(seed, true).await else {
-            // `deliver_seeded_remote` yields `None` only when the target
-            // claim refreshed to LOCAL ownership mid-flight — the caller's
-            // local room path is now authoritative.
-            return MucProxyRouteDecision::LocalRoom;
+            // `deliver_seeded_remote` yields `None` for more than the
+            // benign "target claim refreshed to local ownership" case —
+            // notably a `RelayAskError::NotFound` after a transient
+            // owner-lookup miss while the room claim lease is still
+            // fresh (the envelope was rolled back, provably never
+            // delivered). Classify RETRYABLE (race review P2 on PR
+            // #1277): the cleanup janitor re-drives it, and if the room
+            // truly became local the next attempt classifies
+            // `LocalRoom` and the local sweep converges the occupancy.
+            return MucProxyRouteDecision::RoomClaimUnavailable;
         };
         if outcome.maybe_committed {
             if kind == OrderedRelayMucProxyKind::JoinPresence && outcome.join_repair_allowed {

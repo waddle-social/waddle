@@ -87,10 +87,13 @@ async fn handle_muc_private_message(
     // XEP-0045 `muc#roomconfig_allowpm` (#1257): honor the room's PM
     // policy against the sender's current role.
     if !snapshot.room.config.allow_pm.permits(sender_occupant.role) {
+        // RFC 6120 §8.3.3.5: <forbidden/> is associated with type='auth'
+        // (matches every §7/§8 example in XEP-0045 and this repo's
+        // groupchat forbidden_error helper).
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ErrorType::Cancel,
+            ErrorType::Auth,
             DefinedCondition::Forbidden,
             "Private messages are not allowed for your role in this room.",
         )]);
@@ -157,7 +160,19 @@ async fn handle_muc_private_message(
         routed.to = Some(jid::Jid::from(recipient.clone()));
         let stanza = Stanza::Message(routed);
         let outcome = deliver_pm_to_session(state, &deps, recipient, &stanza).await;
-        if outcome.suppresses_fallback() {
+        // Explicit success set (codex review on PR #1277): Delivered /
+        // QueuedDetached are real deliveries; a clustered MaybeCommitted
+        // may have reached the target, so bouncing would risk a
+        // duplicate-visible error. Unavailable/Dropped never count.
+        let session_handled = match outcome {
+            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+            | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => true,
+            #[cfg(feature = "clustering")]
+            crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => true,
+            crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
+            | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => false,
+        };
+        if session_handled {
             any_session_handled = true;
         } else {
             warn!(
@@ -221,12 +236,30 @@ async fn handle_muc_private_message(
             });
         }
     }
-    events.push(waddle_xmpp::protocol::OutboundEvent::SendCarbons {
-        owner: sender_bare,
-        message: Box::new(sent_form),
-        kind: waddle_xmpp::protocol::CarbonKind::Sent,
-        exclude: vec![bound_jid.clone()],
-    });
+    // XEP-0280 eligibility (review P2 on PR #1277): honor §6.1
+    // `<private/>` and XEP-0334 `<no-copy/>` suppression — the shared
+    // `should_copy_message` rule the 1:1 CarbonsMessageHandler applies —
+    // since this path emits SendCarbons directly. The exclusion set is
+    // the original delivery set per §6.3: every session of the target
+    // nick PLUS the originating resource, so a self-PM (own nick) never
+    // double-delivers to a sibling resource that already got the live
+    // relayed copy. Deliberate SHOULD-level deviation: the copy goes to
+    // ALL other carbon-enabled resources, not only Multi-Session-Nick
+    // clients in this room — XEP-0280's note allows this (clients not
+    // joined "SHOULD either ignore such carbon copies, or provide a way
+    // for the user to join the MUC before answering").
+    if waddle_xmpp_core::carbons::should_copy_message(incoming) {
+        let mut exclude = recipient_sessions.clone();
+        if !exclude.contains(bound_jid) {
+            exclude.push(bound_jid.clone());
+        }
+        events.push(waddle_xmpp::protocol::OutboundEvent::SendCarbons {
+            owner: sender_bare,
+            message: Box::new(sent_form),
+            kind: waddle_xmpp::protocol::CarbonKind::Sent,
+            exclude,
+        });
+    }
     let nested = crate::server::routes::interpret::interpret(events, &deps).await;
     Some(nested.frames)
 }

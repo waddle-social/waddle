@@ -37,6 +37,29 @@ pub(super) async fn handle_muc_self_ping_iq(
     // and silently stopped receiving messages (#1254). Rejoining
     // re-hydrates a dormant room through the normal join path.
     let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+        // No LOCAL room actor. In clustered deployments this node may
+        // have admitted this very session into a room whose actor lives
+        // on ANOTHER node (recorded in `remote_muc_memberships` at join
+        // time) — answering "not joined" there would put every
+        // cross-node occupant into a perpetual XEP-0410 leave/rejoin
+        // loop (race review P1 on PR #1277). The membership record is
+        // this node's authoritative view of that admission, so answer
+        // the optimized "joined" result when the pinged nick matches.
+        if state
+            .deps
+            .protocol
+            .remote_muc_memberships
+            .nick_for(sender_jid, &room_jid)
+            .as_deref()
+            == Some(nick.as_str())
+        {
+            return vec![build_iq_result_xml(
+                iq.id(),
+                response_from,
+                response_to,
+                None,
+            )];
+        }
         return vec![build_iq_error_xml_typed(
             iq.id(),
             response_from,

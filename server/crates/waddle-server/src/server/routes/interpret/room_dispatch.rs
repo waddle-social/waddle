@@ -159,7 +159,7 @@ pub(super) async fn dispatch_to_room(
                 &incoming,
                 &room_jid,
                 &sender_full,
-                internal_server_error_for_lookup(),
+                room_lookup_internal_error(),
             );
             return outcome;
         }
@@ -184,7 +184,7 @@ pub(super) async fn dispatch_to_room(
                 &incoming,
                 &room_jid,
                 &sender_full,
-                internal_server_error_for_lookup(),
+                room_lookup_internal_error(),
             );
             return outcome;
         }
@@ -506,6 +506,19 @@ pub(super) async fn dispatch_to_room(
     }
 
     outcome
+}
+
+/// Wait-class internal error for a transient room-registry / snapshot
+/// failure (#1263) — context-appropriate human text (the shared
+/// `internal_server_error_for_lookup` helper's text talks about archive
+/// lookups; review P3 on PR #1277).
+fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
+    xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Wait,
+        xmpp_parsers::stanza_error::DefinedCondition::InternalServerError,
+        "en",
+        "Room lookup failed; please retry.",
+    )
 }
 
 /// Serialize a XEP-0045 message error reply from the room to the sender

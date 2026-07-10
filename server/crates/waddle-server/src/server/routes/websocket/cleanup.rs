@@ -177,16 +177,30 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
     cleanup_muc_presence_with_origin(state, jid, Some(&origin)).await
 }
 
-/// #1249: re-drive the remote MUC unavailable relay for a session that
-/// no longer exists locally. Called by the reconciliation janitor for
-/// occupants whose earlier disconnect cleanup could not reach the
-/// remote room owner (node unreachable, claim lookup failure, origin
-/// claim held elsewhere) — `cleanup_remote_muc_presence` re-takes the
-/// restored membership snapshots and retries the relay, so occupancy
-/// converges instead of ghosting until the next same-JID disconnect.
+/// #1249: re-drive the MUC cleanup for a session that no longer exists
+/// locally. Called by the reconciliation janitor for occupants whose
+/// earlier disconnect cleanup could not reach the remote room owner
+/// (node unreachable, claim lookup failure, origin claim held
+/// elsewhere) — `cleanup_remote_muc_presence` re-takes the restored
+/// membership snapshots and retries the relay, so occupancy converges
+/// instead of ghosting until the next same-JID disconnect.
+///
+/// Runs the FULL cleanup (remote relay pass + local room sweep), not
+/// just the remote pass: a room claim that migrated to THIS node
+/// between the failed relay and the re-drive classifies as
+/// `LocalRoom` / `NoRemoteOccupancy` (membership forgotten), and only
+/// the local `LeaveByRealJid` loop can then remove the occupancy from
+/// the now-local `RoomActor` (codex review P1 on PR #1277).
+///
+/// Residual (documented, #1195): when the user's `UserActor` claim is
+/// held by another node (second device online there) AND the
+/// disconnect-time remote-resource relay failed (e.g. partition), the
+/// re-drive's `Entity(UserActor)` origin stays `OriginUnavailable`
+/// until that claim is released — the ghost heals when the other
+/// device disconnects or the claim expires, not before.
 #[cfg(feature = "clustering")]
 pub(crate) async fn redrive_remote_muc_cleanup(state: &WebSocketState, jid: &FullJid) {
-    cleanup_remote_muc_presence(state, jid, None).await;
+    cleanup_muc_presence_with_origin(state, jid, None).await;
 }
 
 /// If `outcome` represents the final occupant leaving a
@@ -880,14 +894,34 @@ async fn cleanup_remote_muc_presence(
             // node/claim recovers — the cleanup is now convergent instead
             // of one-shot.
             RemoteMucCleanupDisposition::RetryableFailure => {
-                warn!(
-                    room = %room_jid,
-                    nick = %nick,
-                    jid = %jid,
-                    decision = ?decision,
-                    "failed to relay remote MUC unavailable during disconnect cleanup; \
-                     membership kept for janitor re-drive"
-                );
+                // Log-level split (race review P2 on PR #1277):
+                // `OriginUnavailable` is the EXPECTED steady state while
+                // the user's other device holds the `UserActor` claim on
+                // another node — the janitor re-drives every 30s and the
+                // relay converges when that claim releases, so a warn per
+                // attempt would just recreate the recurring-noise problem
+                // this fix retires. Genuine relay failures stay at warn.
+                if matches!(
+                    decision,
+                    crate::clustering::route_bridge::MucProxyRouteDecision::OriginUnavailable
+                ) {
+                    info!(
+                        room = %room_jid,
+                        nick = %nick,
+                        jid = %jid,
+                        "remote MUC unavailable cleanup deferred: origin claim held \
+                         elsewhere; membership kept for janitor re-drive"
+                    );
+                } else {
+                    warn!(
+                        room = %room_jid,
+                        nick = %nick,
+                        jid = %jid,
+                        decision = ?decision,
+                        "failed to relay remote MUC unavailable during disconnect cleanup; \
+                         membership kept for janitor re-drive"
+                    );
+                }
                 state
                     .deps
                     .protocol

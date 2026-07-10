@@ -501,3 +501,99 @@ async fn muc_pm_to_unknown_nick_bounces_item_not_found() {
 
     let _ = admin.close().await;
 }
+
+/// XEP-0045 §7.5: a NON-occupant sending a PM into a room gets
+/// `<not-acceptable/>`.
+#[tokio::test]
+async fn muc_pm_from_non_occupant_bounces_not_acceptable() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(ALICE, &alice_pass)]);
+    let admin_pass = server.fixed_account_password().to_string();
+
+    let mut admin = connect(&server, ADMIN, &admin_pass, "pm-nonocc-admin").await;
+    let mut alice = connect(&server, ALICE, &alice_pass, "pm-nonocc-alice").await;
+
+    let room = format!("pm-nonocc-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room, ADMIN).await;
+    // Alice never joins.
+    alice
+        .send(&pm_xml(&room, ADMIN, "pm-nonocc-1", "sneaky"))
+        .await
+        .expect("send PM as non-occupant");
+    let bounce = alice
+        .recv_matching(|frame| frame.contains("pm-nonocc-1"))
+        .await
+        .expect("non-occupant bounce");
+    assert!(
+        bounce.contains("<error") && bounce.contains("not-acceptable"),
+        "XEP-0045 §7.5: only occupants may send PMs: {bounce}"
+    );
+
+    let _ = admin.close().await;
+    let _ = alice.close().await;
+}
+
+/// XEP-0280 §6.1 (review P2 on PR #1277): a PM carrying
+/// `<private xmlns='urn:xmpp:carbons:2'/>` is delivered but MUST NOT be
+/// carbon-copied to the sender's other carbon-enabled resource.
+#[tokio::test]
+async fn muc_pm_private_hint_suppresses_sent_carbon() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(ALICE, &alice_pass)]);
+    let admin_pass = server.fixed_account_password().to_string();
+
+    let mut admin_room = connect(&server, ADMIN, &admin_pass, "pm-priv-room").await;
+    let mut admin_other = connect(&server, ADMIN, &admin_pass, "pm-priv-other").await;
+    enable_carbons(&mut admin_other, "pm-priv-carbons").await;
+    let mut alice = connect(&server, ALICE, &alice_pass, "pm-priv-target").await;
+
+    let room = format!("pm-priv-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin_room, &room, ADMIN).await;
+    join_room(&mut alice, &room, ALICE).await;
+
+    let body = format!("private-hint-{}", uuid::Uuid::new_v4());
+    let pm = Element::builder("message", NS_CLIENT)
+        .attr(attr_name("type").to_owned(), "chat")
+        .attr(attr_name("to").to_owned(), format!("{room}/{ALICE}"))
+        .attr(attr_name("id").to_owned(), "pm-priv-1".to_owned())
+        .append(
+            Element::builder("body", NS_CLIENT)
+                .append(body.clone())
+                .build(),
+        )
+        .append(Element::builder("private", NS_CARBONS).build())
+        .build();
+    admin_room
+        .send(&element_to_xml(pm))
+        .await
+        .expect("send private-hinted PM");
+
+    alice
+        .recv_matching(|frame| frame.contains(&body))
+        .await
+        .expect("PM still delivered to the target occupant");
+
+    // The other resource must observe NO carbon of it.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(900);
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match tokio::time::timeout(deadline - now, admin_other.recv()).await {
+            Ok(Ok(frame)) => {
+                assert!(
+                    !frame.contains(&body),
+                    "XEP-0280 §6.1: <private/> PM must not be carbon-copied: {frame}"
+                );
+            }
+            _ => break,
+        }
+    }
+
+    let _ = admin_room.close().await;
+    let _ = admin_other.close().await;
+    let _ = alice.close().await;
+}

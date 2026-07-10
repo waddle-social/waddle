@@ -189,9 +189,8 @@ use groupchat_archive::{
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
-    bad_request_error, build_message_error_reply, internal_server_error_for_lookup,
-    item_not_found_error, remove_framework_envelopes, resource_constraint_error,
-    service_unavailable_error, validate_groupchat_rich_targets,
+    bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
+    resource_constraint_error, service_unavailable_error, validate_groupchat_rich_targets,
 };
 #[cfg(feature = "clustering")]
 pub use handoff::OrderedRelayHandoffHandle;
@@ -204,9 +203,7 @@ use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 pub(crate) use route_to_connection::{fallback_reply_for_undeliverable_iq, route_to_connection};
-pub(crate) use routing::{
-    deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome, DROPPED_FULL_RETRY_DELAYS,
-};
+pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
 use routing::{
     deliver_peer_to_live_only, deliver_to_detached, run_fanout_recipient_pass,
     run_headless_recipient_pass, FanoutPassResult,

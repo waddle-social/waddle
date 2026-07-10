@@ -320,15 +320,19 @@ pub(super) async fn run_fanout_recipient_pass(
 /// interpreter loop.
 const ACTOR_DELIVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// #1263: bounded in-line retry schedule for a `DroppedFull` delivery —
-/// the recipient's outbound channel was full, the frame was provably never
-/// enqueued, and a short pause usually lets the consumer drain. Two
-/// retries (75 ms total worst case) bound the latency a single wedged
-/// recipient can add to a fan-out while converting the common
-/// transient-backpressure case from a silent loss into a delivery.
-pub(crate) const DROPPED_FULL_RETRY_DELAYS: [std::time::Duration; 2] = [
-    std::time::Duration::from_millis(25),
-    std::time::Duration::from_millis(50),
+/// #1263: bounded in-line retry schedule for a `DroppedFull` actor-path
+/// delivery — the recipient's outbound channel was full, the frame was
+/// provably never enqueued, and a short pause usually lets the consumer
+/// drain. Kept deliberately tight (25 ms total worst case): the retries
+/// run inside the sender's interpreter, so across a sequential
+/// reflection fan-out with several backpressured recipients the added
+/// sender-loop latency stays far below the existing 2 s per-ask bound
+/// (SM review on PR #1277). The MUC presence fan-out does NOT use this
+/// schedule — its join/leave broadcast loops are non-blocking by
+/// contract and retry once without sleeping.
+const DROPPED_FULL_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(5),
+    std::time::Duration::from_millis(20),
 ];
 
 /// Which recipient-pass semantics the actor should stamp on the queued frame.

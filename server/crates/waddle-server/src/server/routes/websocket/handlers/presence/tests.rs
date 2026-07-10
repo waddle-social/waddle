@@ -168,38 +168,23 @@ fn rebuilt_available_presence_carries_xep0319_idle_for_subscribers() {
     );
 }
 
-/// #1263: a MUC presence fan-out that hits a momentarily-full recipient
-/// channel must retry (bounded) instead of treating `DroppedFull` as
-/// delivered — pre-fix, the recipient silently missed the presence and
-/// kept a stale occupant roster forever.
+/// #1263: a MUC presence fan-out to a recipient with channel capacity
+/// is delivered (baseline for the DroppedFull surfacing below). The
+/// retry policy for a full channel is a single IMMEDIATE re-attempt —
+/// no sleeps, because this helper sits inside the sequential join/leave
+/// broadcast loops whose non-blocking contract is load-bearing.
 #[tokio::test]
-async fn muc_presence_fanout_retries_transient_full_channel() {
+async fn muc_presence_fanout_delivers_when_channel_has_capacity() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "carol@example.com/web".parse().unwrap();
     let room: BareJid = "room@muc.example.com".parse().unwrap();
 
-    // Capacity-1 channel, pre-filled: the first try_send observes Full.
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
     let _owner = state
         .deps
         .protocol
         .connection_registry
         .register(jid.clone(), tx);
-    let filler = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .try_send_to(&jid, waddle_xmpp::Stanza::Presence(filler));
-
-    // Drain the filler shortly after the first attempt fails, so a
-    // retry succeeds within the bounded schedule.
-    let drainer = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let first = rx.recv().await.expect("filler");
-        let second = rx.recv().await.expect("retried presence");
-        (first, second)
-    });
 
     let mut presence =
         xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
@@ -212,15 +197,12 @@ async fn muc_presence_fanout_retries_transient_full_channel() {
     )
     .await;
 
-    let (_, second) = drainer.await.expect("drainer");
-    assert!(
-        matches!(
-            &second.stanza,
-            waddle_xmpp::Stanza::Presence(p)
-                if p.type_ == xmpp_parsers::presence::Type::Unavailable
-        ),
-        "the retried fan-out presence must reach the recipient's channel"
-    );
+    let delivered = rx.try_recv().expect("fan-out presence delivered");
+    assert!(matches!(
+        &delivered.stanza,
+        waddle_xmpp::Stanza::Presence(p)
+            if p.type_ == xmpp_parsers::presence::Type::Unavailable
+    ));
 }
 
 /// #1263: when the recipient's channel is STILL full after every bounded
