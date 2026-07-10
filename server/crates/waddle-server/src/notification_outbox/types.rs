@@ -199,6 +199,11 @@ pub(crate) enum SuppressedReason {
     /// push would be spurious (#1126). Emitted at publish time;
     /// the job is dropped terminally instead of published.
     UnreadZeroAtPublish,
+    /// T1 policy evaluation deferred too many times for a durable
+    /// candidate, most commonly because the room policy is permanently
+    /// unavailable after a MUC room was evicted and never became live
+    /// again. Emitted by the candidate drain as a terminal dead-letter.
+    PolicyRetriesExhausted,
     /// The originating message was XEP-0444 reaction-only (reactions
     /// payload, no substantive body) — "Alice reacted 👍" is archived
     /// but never fires an OS push (#780). Message-frozen at T0,
@@ -229,6 +234,7 @@ impl SuppressedReason {
         Self::ProviderTokenExpired,
         Self::Xep0357PushServiceDegraded,
         Self::UnreadZeroAtPublish,
+        Self::PolicyRetriesExhausted,
         Self::Xep0444Reaction,
     ];
 
@@ -247,6 +253,7 @@ impl SuppressedReason {
             Self::ProviderTokenExpired => "provider_token_expired",
             Self::Xep0357PushServiceDegraded => "xep0357_push_service_degraded",
             Self::UnreadZeroAtPublish => "unread_zero_at_publish",
+            Self::PolicyRetriesExhausted => "policy_retries_exhausted",
             Self::Xep0444Reaction => "xep0444_reaction",
         }
     }
