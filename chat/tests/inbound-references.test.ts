@@ -552,6 +552,10 @@ describe("dmMessageFromArchived", () => {
     expect(result).not.toBeNull();
     expect(result?.stanzaId).toBe("case-folded-id");
     expect(result?.wireIds).toContain("case-folded-id");
+    // The row carries the NORMALIZED authority, not the wire casing —
+    // downstream strict-equality lookups (MDS) must never see
+    // "Example.COM".
+    expect(result?.stanzaIdBy).toBe("example.com");
   });
 
   test("does not expose a DM MDS stanza-id assigned only by a foreign domain", () => {

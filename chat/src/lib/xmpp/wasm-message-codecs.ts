@@ -431,13 +431,17 @@ function assignedStanzaIdBy(
     const byScoped = message.stanza_ids?.find(
       (stanzaId) => stanzaId.id && stanzaIdAuthorityKey(stanzaId.by) === authority,
     );
-    if (byScoped?.id) return { id: byScoped.id, by: barePeerJid(byScoped.by) };
+    // Return the NORMALIZED authority, never the wire-cased original:
+    // a mixed-case `by` (e.g. "Example.COM") propagating into
+    // `stanzaIdBy` would fail strict-equality comparisons downstream
+    // (MDS displayed-sync matching). Normalize once, at the source.
+    if (byScoped?.id) return { id: byScoped.id, by: authority };
     if (
       message.stanza_id &&
       message.stanza_id_by &&
       stanzaIdAuthorityKey(message.stanza_id_by) === authority
     ) {
-      return { id: message.stanza_id, by: barePeerJid(message.stanza_id_by) };
+      return { id: message.stanza_id, by: authority };
     }
   }
   return null;
