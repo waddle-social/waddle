@@ -45,9 +45,12 @@ pub(super) async fn dispatch_to_room(
             .ordered_relay_delivery_bridge
             .as_ref()
         {
+            use crate::clustering::route_bridge::{
+                MucProxyRouteDecision, OrderedRelayMucProxyOutcome,
+            };
             let stanza = Stanza::Message(incoming.clone());
             match bridge
-                .try_proxy_muc_remote(
+                .try_proxy_muc_remote_decision(
                     &room_jid,
                     &stanza,
                     crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
@@ -55,7 +58,7 @@ pub(super) async fn dispatch_to_room(
                 )
                 .await
             {
-                Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
+                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(
                     replies,
                 )) => {
                     for reply in replies {
@@ -72,14 +75,22 @@ pub(super) async fn dispatch_to_room(
                     }
                     return outcome;
                 }
-                Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-                | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
+                // Attempted-but-failed AND retryable routing states
+                // (claim lookup/lease trouble, origin claim held
+                // elsewhere) bounce a wait-class retry error. Falling
+                // through to the local registry here would misreport a
+                // healthy REMOTE room as `<item-not-found/>` (review P2
+                // on PR #1277).
+                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
+                | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
+                | MucProxyRouteDecision::RoomClaimUnavailable
+                | MucProxyRouteDecision::OriginUnavailable => {
                     let reply = build_message_error_reply(
                         &incoming,
                         &room_jid,
                         &sender_full,
                         resource_constraint_error(
-                            "This room's ownership recently moved to another node; please retry.",
+                            "This room is temporarily unreachable; please retry.",
                         ),
                     );
                     match Stanza::Message(reply).to_element_string() {
@@ -94,15 +105,17 @@ pub(super) async fn dispatch_to_room(
                     }
                     return outcome;
                 }
-                Some(
-                    crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
-                )
-                | Some(
-                    crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
+                | MucProxyRouteDecision::Attempted(
+                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                 ) => {
                     return outcome;
                 }
-                None => {}
+                // The local registry is authoritative: the room claim is
+                // owned here, or no claim row exists anywhere (a truly
+                // nonexistent/dormant room — the local path bounces
+                // `<item-not-found/>` correctly).
+                MucProxyRouteDecision::LocalRoom | MucProxyRouteDecision::RoomUnclaimed => {}
             }
         }
     }
@@ -128,15 +141,38 @@ pub(super) async fn dispatch_to_room(
         .await
     {
         Ok(Some(actor)) => actor,
+        // XEP-0045 §7.4 (#1263): a groupchat message to a room that does
+        // not exist SHOULD be answered with `<item-not-found/>` — never
+        // silently dropped. (A dormant/reaped room also has no live
+        // occupancy, so the sender could not be an occupant of it.)
         Ok(None) => {
-            warn!(room = %room_jid, "DispatchToRoom: room not registered; dropping");
+            debug!(
+                room = %room_jid,
+                "DispatchToRoom: room not registered; bouncing item-not-found"
+            );
+            push_sender_error_reply(
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                item_not_found_error("Requested room not found."),
+            );
             return outcome;
         }
+        // Transient lookup failure (#1263): surface an error to the
+        // sender instead of silently losing the message.
         Err(error) => {
             warn!(
                 room = %room_jid,
                 error = ?error,
-                "DispatchToRoom: room registry lookup failed; dropping"
+                "DispatchToRoom: room registry lookup failed; bouncing internal-server-error"
+            );
+            push_sender_error_reply(
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                room_lookup_internal_error(),
             );
             return outcome;
         }
@@ -148,11 +184,20 @@ pub(super) async fn dispatch_to_room(
         .await
     {
         Ok(snapshot) => snapshot,
+        // Snapshot failure (#1263): same rule — the sender must learn
+        // their message did not reach the room.
         Err(error) => {
             warn!(
                 room = %room_jid,
                 error = ?error,
-                "DispatchToRoom: GetRoomSnapshot failed; dropping"
+                "DispatchToRoom: GetRoomSnapshot failed; bouncing internal-server-error"
+            );
+            push_sender_error_reply(
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                room_lookup_internal_error(),
             );
             return outcome;
         }
@@ -476,6 +521,43 @@ pub(super) async fn dispatch_to_room(
     }
 
     outcome
+}
+
+/// Wait-class internal error for a transient room-registry / snapshot
+/// failure (#1263) — context-appropriate human text (the shared
+/// `internal_server_error_for_lookup` helper's text talks about archive
+/// lookups; review P3 on PR #1277).
+fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
+    xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Wait,
+        xmpp_parsers::stanza_error::DefinedCondition::InternalServerError,
+        "en",
+        "Room lookup failed; please retry.",
+    )
+}
+
+/// Serialize a XEP-0045 message error reply from the room to the sender
+/// and push it onto the outcome's wire frames (#1263: every pre-dispatch
+/// failure must reach the sender instead of silently dropping the
+/// message).
+fn push_sender_error_reply(
+    outcome: &mut InterpretOutcome,
+    incoming: &Message,
+    room_jid: &jid::BareJid,
+    sender_full: &jid::FullJid,
+    error: xmpp_parsers::stanza_error::StanzaError,
+) {
+    let reply = build_message_error_reply(incoming, room_jid, sender_full, error);
+    match Stanza::Message(reply).to_element_string() {
+        Ok(xml) => outcome.frames.push(xml),
+        Err(serialize_error) => {
+            warn!(
+                room = %room_jid,
+                error = %serialize_error,
+                "DispatchToRoom: failed to serialize sender error reply"
+            );
+        }
+    }
 }
 
 pub(super) fn normalize_thread_create_source(message: &mut Message) -> Option<String> {

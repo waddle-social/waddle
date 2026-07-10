@@ -112,11 +112,11 @@ is the High/Critical items below. Sub-bundles touch mostly-disjoint files and ru
 in parallel; within a bundle, top-to-bottom.
 
 **J1 — Client chat `[one PR bundle]`**
-1. #1243 — **High**: unwrap normal XEP-0280 carbons (client only unwraps call-carbons; WASM emits no `carbon:*`, TS handlers dead) → multi-device DM sync dead. Top 1:1 symptom.
-2. #1256 — MUC PMs (`type=chat` from `room/nick`) misfiled as DMs keyed by room bare JID → replies broadcast.
-3. #1258 — client implements retract/moderate/reactions/correct/sid but advertises none in caps (mirror of the advertise⇔conform rule).
-4. #1255 — join requests default MUC history while also running MAM catch-up → duplicates. Relates #232.
-5. #1267 — client 1:1 minor cluster (6 items: 0424 fallback marker, unverified-`by` catch-up dedupe [#466 residual], first-stanza-id, catch-up gap marker, correction guard, `Date.now` stamp).
+1. ✅ **#1243 — High: WASM core now unwraps normal XEP-0280 carbons (§11 own-bare-JID verified, forged envelopes fully ignored) and surfaces the inner message with a `carbon` direction marker; TS renders/dedupes it (dead `carbon:*` compat handlers deleted). DONE (PR #1273).**
+2. ✅ **#1256 — MUC PMs (`type=chat` from a known room's occupant JID) file under the full occupant JID; replies/chat-states/reactions/corrections address `room@service/nick` with full-occupant-JID sender checks. DONE (PR #1273).**
+3. ✅ **#1258 — caps now advertise message-retract:1, reactions:0, message-correct:0, sid:0 (implement ⇒ advertise; ver-string recomputed). moderate:1 deliberately omitted — XEP-0425 defines it for the groupchat service only. DONE (PR #1273).**
+4. ✅ **#1255 — `join_room` always sends `<history maxstanzas='0'/>` (XEP-0045 §7.2.15); MAM catch-up is authoritative; `join_room_without_history` variant deleted. DONE (PR #1273).**
+5. ✅ **#1267 — client 1:1 minor cluster: 0424 fallback marker, `by`-verified catch-up dedupe (#466 residual), first-stanza-id consumers fixed, resumed catch-up budget-gap affordance, correction guards (no tombstone resurrection, occupant-JID match); `Date.now` item = forwarded-`<delay>` propagation (residual merge-window documented in PR #1273). DONE (PR #1273).**
 
 **J2 — Server 1:1 routing / MAM / receipts `[bundle]`**
 1. ✅ #1244 — **Critical**: full-JID chat to an offline resource silently dropped (no bare-JID fallback / offline store / error; RFC 6121 §8.5.3.2.1). DONE (PR #1272)
@@ -138,11 +138,11 @@ in parallel; within a bundle, top-to-bottom.
 3. ✅ #1268 — XEP-0421 occupant-id gaps (PM, destroy presence, MAM real-JID for non-anon rooms). DONE (PR #1274)
 
 **J5 — MUC delivery / self-ping reliability `[bundle]`**
-1. #1249 — **High**: cross-node disconnect cleanup ghosts occupants — root cause of the recurring prod `failed to relay remote MUC unavailable during disconnect cleanup`. Relates #1195.
-2. #1253 — self-ping broken for multi-session nicks → rejoin loop (#1221 territory).
-3. #1254 — reaped/dormant room self-ping returns `item-not-found`, read by clients as still-joined → silently stop receiving.
-4. #1257 — MUC PM delivery fire-and-forget: no SM fallback/archive/carbon/occupant-id.
-5. #1263 — reflection/presence silently lost on `DroppedFull` / room-lookup failure.
+1. ✅ #1249 — **High**: cross-node disconnect cleanup ghosts occupants — typed `MucProxyRouteDecision` splits benign local-room from harmful origin-claim-elsewhere, remote-resource origin fixes the second-device case, reconciliation janitor re-drives failed relays. DONE (PR #1277)
+2. ✅ #1253 — self-ping now matches all `occupant_sessions` for the nick (multi-session rejoin loop fixed). DONE (PR #1277)
+3. ✅ #1254 — reaped/dormant room self-ping answers `<not-acceptable/>` (XEP-0410 not-joined) so clients rejoin. DONE (PR #1277)
+4. ✅ #1257 — MUC PMs route through the SM/detached delivery envelope + XEP-0313 archives + XEP-0280 sent-carbons + `muc#roomconfig_allowpm`. DONE (PR #1277)
+5. ✅ #1263 — `<item-not-found/>` bounce for nonexistent rooms, bounded `DroppedFull` retries + drop counter on reflection/presence fan-out. DONE (PR #1277)
 
 **J6 — Disco truthfulness**
 1. ✅ #1259 — duplicate feature + duplicate `muc#roominfo` FORM_TYPE make disco#info ill-formed (XEP-0115 §5.4). DONE (PR #1271)

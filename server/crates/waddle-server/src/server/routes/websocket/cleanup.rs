@@ -177,6 +177,32 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
     cleanup_muc_presence_with_origin(state, jid, Some(&origin)).await
 }
 
+/// #1249: re-drive the MUC cleanup for a session that no longer exists
+/// locally. Called by the reconciliation janitor for occupants whose
+/// earlier disconnect cleanup could not reach the remote room owner
+/// (node unreachable, claim lookup failure, origin claim held
+/// elsewhere) — `cleanup_remote_muc_presence` re-takes the restored
+/// membership snapshots and retries the relay, so occupancy converges
+/// instead of ghosting until the next same-JID disconnect.
+///
+/// Runs the FULL cleanup (remote relay pass + local room sweep), not
+/// just the remote pass: a room claim that migrated to THIS node
+/// between the failed relay and the re-drive classifies as
+/// `LocalRoom` / `NoRemoteOccupancy` (membership forgotten), and only
+/// the local `LeaveByRealJid` loop can then remove the occupancy from
+/// the now-local `RoomActor` (codex review P1 on PR #1277).
+///
+/// Residual (documented, #1195): when the user's `UserActor` claim is
+/// held by another node (second device online there) AND the
+/// disconnect-time remote-resource relay failed (e.g. partition), the
+/// re-drive's `Entity(UserActor)` origin stays `OriginUnavailable`
+/// until that claim is released — the ghost heals when the other
+/// device disconnects or the claim expires, not before.
+#[cfg(feature = "clustering")]
+pub(crate) async fn redrive_remote_muc_cleanup(state: &WebSocketState, jid: &FullJid) {
+    cleanup_muc_presence_with_origin(state, jid, None).await;
+}
+
 /// If `outcome` represents the final occupant leaving a
 /// non-persistent (instant-style) MUC room, dispatch `DestroyRoom`
 /// to the room registry so the per-room `RoomActor` is reaped and
@@ -531,7 +557,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         .connection_registry
                         .unregister_if_owner(&jid, owner)
                         .is_some();
-                    let cleanup_origin = clustered_user_actor_cleanup_origin(&jid);
+                    let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
                     if detach_fail_removed {
                         cleanup_muc_presence_with_origin(state, &jid, cleanup_origin.as_ref())
                             .await;
@@ -580,7 +606,7 @@ pub(super) async fn cleanup_connection_shutdown(
         // The flag is only true if this session actually sent initial
         // available presence (RFC 6121 §4.2.2) and did not retract it.
         let was_presence_available = removed_entry.is_presence_available();
-        let cleanup_origin = clustered_user_actor_cleanup_origin(&jid);
+        let cleanup_origin = clustered_cleanup_origin(state, &jid, &owner).await;
         // XEP-0115 §6: drop the per-resource caps mapping for this
         // resource. The hash-keyed `CapsCache` itself stays warm so
         // a future session reusing the same `(hash, ver)` short-
@@ -805,46 +831,103 @@ async fn cleanup_remote_muc_presence(
         presence.from = Some(jid::Jid::from(jid.clone()));
         presence.to = Some(to);
         let stanza = Stanza::Presence(presence);
-        let outcome = bridge
-            .try_proxy_muc_remote(
+        let decision = bridge
+            .try_proxy_muc_remote_decision(
                 &room_jid,
                 &stanza,
                 crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
                 &origin,
             )
             .await;
-        if let Some(retry_kind) = remote_muc_cleanup_retry_kind(outcome.as_ref()) {
-            match retry_kind {
-                RemoteMucCleanupRetryKind::UncertainCommit => {
-                    debug!(
+        match remote_muc_cleanup_disposition(&decision) {
+            RemoteMucCleanupDisposition::Converged => {
+                debug!(
+                    room = %room_jid,
+                    nick = %nick,
+                    jid = %jid,
+                    "remote MUC unavailable relayed; membership cleaned up"
+                );
+                state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .forget_snapshot_if_current(&membership);
+            }
+            // #1249: the previously-warned benign cases. A locally-owned
+            // room claim means the local `LeaveByRealJid` loop that runs
+            // right after this pass converges the occupancy; an unclaimed
+            // room has no live RoomActor anywhere, so there is no remote
+            // occupancy left to clean. Both forget the membership so the
+            // recurring un-actionable warn is gone AND the entry stops
+            // resurrecting.
+            RemoteMucCleanupDisposition::NoRemoteOccupancy => {
+                debug!(
+                    room = %room_jid,
+                    nick = %nick,
+                    jid = %jid,
+                    decision = ?decision,
+                    "remote MUC membership has no remote occupancy (room local or unclaimed); \
+                     local cleanup path is authoritative"
+                );
+                state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .forget_snapshot_if_current(&membership);
+            }
+            RemoteMucCleanupDisposition::UncertainCommit => {
+                debug!(
+                    room = %room_jid,
+                    nick = %nick,
+                    jid = %jid,
+                    decision = ?decision,
+                    "remote MUC unavailable cleanup commit uncertain; keeping retry provenance"
+                );
+                state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .restore_snapshot_if_current(&membership);
+            }
+            // #1249: the harmful case. Restore the membership so the
+            // reconciliation janitor re-drives the relay until the remote
+            // node/claim recovers — the cleanup is now convergent instead
+            // of one-shot.
+            RemoteMucCleanupDisposition::RetryableFailure => {
+                // Log-level split (race review P2 on PR #1277):
+                // `OriginUnavailable` is the EXPECTED steady state while
+                // the user's other device holds the `UserActor` claim on
+                // another node — the janitor re-drives every 30s and the
+                // relay converges when that claim releases, so a warn per
+                // attempt would just recreate the recurring-noise problem
+                // this fix retires. Genuine relay failures stay at warn.
+                if matches!(
+                    decision,
+                    crate::clustering::route_bridge::MucProxyRouteDecision::OriginUnavailable
+                ) {
+                    info!(
                         room = %room_jid,
                         nick = %nick,
                         jid = %jid,
-                        outcome = ?outcome,
-                        "remote MUC unavailable cleanup commit uncertain; keeping retry provenance"
+                        "remote MUC unavailable cleanup deferred: origin claim held \
+                         elsewhere; membership kept for janitor re-drive"
                     );
-                }
-                RemoteMucCleanupRetryKind::DefiniteNoEffect => {
+                } else {
                     warn!(
                         room = %room_jid,
                         nick = %nick,
                         jid = %jid,
-                        outcome = ?outcome,
-                        "failed to relay remote MUC unavailable during disconnect cleanup"
+                        decision = ?decision,
+                        "failed to relay remote MUC unavailable during disconnect cleanup; \
+                         membership kept for janitor re-drive"
                     );
                 }
+                state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .restore_snapshot_if_current(&membership);
             }
-            state
-                .deps
-                .protocol
-                .remote_muc_memberships
-                .restore_snapshot_if_current(&membership);
-        } else {
-            state
-                .deps
-                .protocol
-                .remote_muc_memberships
-                .forget_snapshot_if_current(&membership);
         }
     }
     if acquired_user_actor_origin {
@@ -852,26 +935,47 @@ async fn cleanup_remote_muc_presence(
     }
 }
 
+/// How the disconnect-cleanup pass converges one remote MUC membership
+/// after a relay decision (#1249).
 #[cfg(feature = "clustering")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoteMucCleanupRetryKind {
+enum RemoteMucCleanupDisposition {
+    /// The unavailable was delivered remotely — forget the membership.
+    Converged,
+    /// No remote occupancy can exist (room claim locally owned, or no
+    /// claim row at all) — forget the membership; the local room path
+    /// is authoritative.
+    NoRemoteOccupancy,
+    /// The relay may have committed remotely; keep the membership so a
+    /// re-drive can settle it, but don't warn — this is the expected
+    /// ambiguous-network case.
     UncertainCommit,
-    DefiniteNoEffect,
+    /// The relay definitively did not run (remote unreachable, claim
+    /// lookup failure, origin claim held elsewhere). Keep the
+    /// membership; the reconciliation janitor re-drives it.
+    RetryableFailure,
 }
 
 #[cfg(feature = "clustering")]
-fn remote_muc_cleanup_retry_kind(
-    outcome: Option<&crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
-) -> Option<RemoteMucCleanupRetryKind> {
-    match outcome {
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(_)) => None,
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
-            Some(RemoteMucCleanupRetryKind::UncertainCommit)
+fn remote_muc_cleanup_disposition(
+    decision: &crate::clustering::route_bridge::MucProxyRouteDecision,
+) -> RemoteMucCleanupDisposition {
+    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+    match decision {
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
+            RemoteMucCleanupDisposition::Converged
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
-        | None => Some(RemoteMucCleanupRetryKind::DefiniteNoEffect),
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+            RemoteMucCleanupDisposition::UncertainCommit
+        }
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
+        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
+        | MucProxyRouteDecision::RoomClaimUnavailable
+        | MucProxyRouteDecision::OriginUnavailable => RemoteMucCleanupDisposition::RetryableFailure,
+        MucProxyRouteDecision::LocalRoom | MucProxyRouteDecision::RoomUnclaimed => {
+            RemoteMucCleanupDisposition::NoRemoteOccupancy
+        }
     }
 }
 
@@ -891,9 +995,50 @@ fn clustered_user_actor_cleanup_origin(
     })
 }
 
+/// Preferred ordered-relay origin for a disconnecting session's MUC
+/// cleanup (#1249). When this socket was registered as a REMOTE-owned
+/// resource (its `UserActor` claim is held by the node hosting the
+/// user's other device — the exact case that used to fail with
+/// `failed to relay remote MUC unavailable during disconnect cleanup`),
+/// the cleanup must relay through the remote-resource origin path: the
+/// user-owning node holds the origin claim and forwards the unavailable
+/// to the room owner. Falls back to the local `UserActor` entity origin
+/// when the socket is not remote-registered.
+#[cfg(feature = "clustering")]
+async fn clustered_cleanup_origin(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        if let Some(remote) = bridge.remote_resource_origin_if_owner(jid, owner).await {
+            return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::RemoteResource(
+                    remote,
+                ),
+                sender_entity: waddle_xmpp::ownership::Entity::new(
+                    waddle_xmpp::ownership::EntityType::UserActor,
+                    jid.to_bare().to_string(),
+                ),
+                inbound_sequence: 0,
+                handoff: None,
+            });
+        }
+    }
+    clustered_user_actor_cleanup_origin(jid)
+}
+
 #[cfg(not(feature = "clustering"))]
-fn clustered_user_actor_cleanup_origin(
+async fn clustered_cleanup_origin(
+    _state: &WebSocketState,
     _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
     None
 }
@@ -1170,40 +1315,6 @@ mod eviction_tests {
 
     #[cfg(feature = "clustering")]
     #[test]
-    fn remote_muc_cleanup_classifies_retry_outcomes() {
-        use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::{
-            Delivered, Dropped, JoinMaybeCommitted, MaybeCommitted, Unavailable,
-        };
-
-        assert_eq!(
-            remote_muc_cleanup_retry_kind(Some(&Delivered(Vec::new()))),
-            None
-        );
-        assert_eq!(
-            remote_muc_cleanup_retry_kind(Some(&MaybeCommitted)),
-            Some(RemoteMucCleanupRetryKind::UncertainCommit)
-        );
-        assert_eq!(
-            remote_muc_cleanup_retry_kind(Some(&JoinMaybeCommitted)),
-            Some(RemoteMucCleanupRetryKind::UncertainCommit)
-        );
-
-        assert_eq!(
-            remote_muc_cleanup_retry_kind(Some(&Unavailable)),
-            Some(RemoteMucCleanupRetryKind::DefiniteNoEffect)
-        );
-        assert_eq!(
-            remote_muc_cleanup_retry_kind(Some(&Dropped)),
-            Some(RemoteMucCleanupRetryKind::DefiniteNoEffect)
-        );
-        assert_eq!(
-            remote_muc_cleanup_retry_kind(None),
-            Some(RemoteMucCleanupRetryKind::DefiniteNoEffect)
-        );
-    }
-
-    #[cfg(feature = "clustering")]
-    #[test]
     fn remote_muc_cleanup_retry_restore_does_not_overwrite_fresh_join() {
         let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
         let occupant = full_jid("alice@example.com/web");
@@ -1227,7 +1338,9 @@ mod eviction_tests {
     #[cfg(feature = "clustering")]
     #[test]
     fn remote_muc_cleanup_success_leaves_fresh_join_untouched() {
-        use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered;
+        use crate::clustering::route_bridge::{
+            MucProxyRouteDecision, OrderedRelayMucProxyOutcome::Delivered,
+        };
 
         let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
         let occupant = full_jid("alice@example.com/web");
@@ -1241,8 +1354,10 @@ mod eviction_tests {
 
         memberships.record_join(&occupant, &room, "fresh-nick");
         assert_eq!(
-            remote_muc_cleanup_retry_kind(Some(&Delivered(Vec::new()))),
-            None
+            remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
+                Delivered(Vec::new())
+            )),
+            RemoteMucCleanupDisposition::Converged
         );
         memberships.forget_snapshot_if_current(&snapshot[0]);
 
@@ -1415,5 +1530,65 @@ mod eviction_tests {
             count_after, 1,
             "room must remain registered while at least one occupant is present"
         );
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod remote_muc_cleanup_disposition_tests {
+    use super::{remote_muc_cleanup_disposition, RemoteMucCleanupDisposition};
+    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+
+    /// #1249: the benign "room claim locally owned" and definitive
+    /// "room unclaimed anywhere" cases converge by FORGETTING the
+    /// membership (no warn, no ghost resurrection) — pre-fix they were
+    /// classified `DefiniteNoEffect` and warned + restored forever.
+    #[test]
+    fn benign_local_and_unclaimed_rooms_forget_membership() {
+        assert_eq!(
+            remote_muc_cleanup_disposition(&MucProxyRouteDecision::LocalRoom),
+            RemoteMucCleanupDisposition::NoRemoteOccupancy
+        );
+        assert_eq!(
+            remote_muc_cleanup_disposition(&MucProxyRouteDecision::RoomUnclaimed),
+            RemoteMucCleanupDisposition::NoRemoteOccupancy
+        );
+    }
+
+    /// #1249: every failure that could leave a ghost occupant on a
+    /// remote node is RETRYABLE — the membership is kept so the
+    /// reconciliation janitor re-drives the relay.
+    #[test]
+    fn harmful_failures_are_retryable() {
+        for decision in [
+            MucProxyRouteDecision::OriginUnavailable,
+            MucProxyRouteDecision::RoomClaimUnavailable,
+            MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable),
+            MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped),
+        ] {
+            assert_eq!(
+                remote_muc_cleanup_disposition(&decision),
+                RemoteMucCleanupDisposition::RetryableFailure,
+                "{decision:?} must keep the membership for janitor re-drive"
+            );
+        }
+    }
+
+    #[test]
+    fn delivered_converges_and_uncertain_commit_retries_quietly() {
+        assert_eq!(
+            remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
+                OrderedRelayMucProxyOutcome::Delivered(Vec::new()),
+            )),
+            RemoteMucCleanupDisposition::Converged
+        );
+        for outcome in [
+            OrderedRelayMucProxyOutcome::MaybeCommitted,
+            OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+        ] {
+            assert_eq!(
+                remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(outcome)),
+                RemoteMucCleanupDisposition::UncertainCommit
+            );
+        }
     }
 }

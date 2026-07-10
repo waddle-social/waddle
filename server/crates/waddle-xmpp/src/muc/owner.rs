@@ -11,6 +11,7 @@
 use minidom::Element;
 
 use super::pin::PinPermission;
+use super::room::AllowPm;
 use super::MucRoom;
 #[cfg(test)]
 use super::RoomConfig;
@@ -83,6 +84,27 @@ pub fn build_config_form(room: &MucRoom) -> Element {
             .with_label("Allow Occupants to Change Subject"),
         )
         .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
+        .add_field(
+            Field::new("muc#roomconfig_allowpm", FieldType::ListSingle)
+                .with_label("Roles that May Send Private Messages")
+                .with_value(room.config.allow_pm.as_form_value())
+                .add_option(FieldOption::with_label(
+                    "Anyone",
+                    AllowPm::Anyone.as_form_value(),
+                ))
+                .add_option(FieldOption::with_label(
+                    "Anyone with Voice",
+                    AllowPm::Participants.as_form_value(),
+                ))
+                .add_option(FieldOption::with_label(
+                    "Moderators Only",
+                    AllowPm::Moderators.as_form_value(),
+                ))
+                .add_option(FieldOption::with_label(
+                    "Nobody",
+                    AllowPm::None.as_form_value(),
+                )),
+        )
         .add_field(
             Field::new(FIELD_PIN_PERMISSION, FieldType::ListSingle)
                 .with_label("Who can pin messages")

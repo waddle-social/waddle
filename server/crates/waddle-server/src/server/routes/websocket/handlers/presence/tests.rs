@@ -167,3 +167,86 @@ fn rebuilt_available_presence_carries_xep0319_idle_for_subscribers() {
         "idle since serializes to the stamped xs:dateTime"
     );
 }
+
+/// #1263: a MUC presence fan-out to a recipient with channel capacity
+/// is delivered (baseline for the DroppedFull surfacing below). The
+/// retry policy for a full channel is a single IMMEDIATE re-attempt —
+/// no sleeps, because this helper sits inside the sequential join/leave
+/// broadcast loops whose non-blocking contract is load-bearing.
+#[tokio::test]
+async fn muc_presence_fanout_delivers_when_channel_has_capacity() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "carol@example.com/web".parse().unwrap();
+    let room: BareJid = "room@muc.example.com".parse().unwrap();
+
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
+    let _owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+
+    let mut presence =
+        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+    presence.to = Some(jid::Jid::from(jid.clone()));
+    super::muc::route_room_presence_to_occupant(
+        state.as_ref(),
+        &room,
+        &jid,
+        waddle_xmpp::Stanza::Presence(presence),
+    )
+    .await;
+
+    let delivered = rx.try_recv().expect("fan-out presence delivered");
+    assert!(matches!(
+        &delivered.stanza,
+        waddle_xmpp::Stanza::Presence(p)
+            if p.type_ == xmpp_parsers::presence::Type::Unavailable
+    ));
+}
+
+/// #1263: when the recipient's channel is STILL full after every bounded
+/// retry, the loss is surfaced through the
+/// `waddle_delivery_retry_exhausted_drop_total` counter instead of
+/// being silently reported as delivered.
+#[tokio::test]
+async fn muc_presence_fanout_counts_exhausted_full_channel_drop() {
+    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "dave@example.com/web".parse().unwrap();
+    let room: BareJid = "room@muc.example.com".parse().unwrap();
+
+    // Capacity-1 channel, pre-filled and never drained: every retry
+    // observes Full. Keep `rx` alive so the channel never reads closed.
+    let (tx, rx) = mpsc::channel::<OutboundStanza>(1);
+    let _owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    let filler = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .try_send_to(&jid, waddle_xmpp::Stanza::Presence(filler));
+
+    let before = waddle_xmpp::prometheus::delivery_retry_exhausted_drop_count();
+    let mut presence =
+        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+    presence.to = Some(jid::Jid::from(jid.clone()));
+    super::muc::route_room_presence_to_occupant(
+        state.as_ref(),
+        &room,
+        &jid,
+        waddle_xmpp::Stanza::Presence(presence),
+    )
+    .await;
+    let after = waddle_xmpp::prometheus::delivery_retry_exhausted_drop_count();
+    assert_eq!(
+        after,
+        before + 1,
+        "an exhausted DroppedFull fan-out must be surfaced via the drop counter"
+    );
+    drop(rx);
+}

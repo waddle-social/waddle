@@ -3,7 +3,7 @@ import type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 import type { RichInlineStyle } from "@/lib/rich-message/types";
 
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
-import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
+import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
@@ -393,10 +393,24 @@ function deriveCreatedAt(
   };
 }
 
+/**
+ * XEP-0359 `by` comparison key: case-folded bare JID (RFC 7622), but a
+ * resource-carrying `by` never matches — a resource-scoped value is a
+ * different entity than the archiving authority, and folding it away
+ * would let `room@conf/nick` impersonate the room. Mirrors the seen-id
+ * path (`stanzaIdAuthorityKey` in client-mam.ts); the two MUST agree.
+ */
+export function stanzaIdAuthorityKey(value: string): string | null {
+  if (!value || value.includes("/")) return null;
+  return bareJidKey(value);
+}
+
 function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): string | undefined {
-  const byScoped = message.stanza_ids?.find((stanzaId) => stanzaId.by === roomJid);
+  const room = stanzaIdAuthorityKey(roomJid);
+  if (!room) return undefined;
+  const byScoped = message.stanza_ids?.find((stanzaId) => stanzaIdAuthorityKey(stanzaId.by) === room);
   if (byScoped?.id) return byScoped.id;
-  return message.stanza_id && message.stanza_id_by === roomJid
+  return message.stanza_id && message.stanza_id_by && stanzaIdAuthorityKey(message.stanza_id_by) === room
     ? message.stanza_id
     : undefined;
 }
@@ -405,18 +419,29 @@ function assignedStanzaIdBy(
   message: WasmArchivedMessage,
   authorities: readonly string[],
 ): { id: string; by: string } | null {
-  const normalizedAuthorities = authorities.map(barePeerJid).filter(Boolean);
+  // Same case-folded (RFC 7622) authority comparison as
+  // `rawMessageSeenIds` — the seen-id path and the row-identity path
+  // must accept exactly the same stanza-ids, or a mixed-case `by`
+  // (e.g. "Example.COM") enters seen-ids but not the row's wireIds and
+  // the archive copy re-emits as a duplicate on reconnect.
+  const normalizedAuthorities = authorities
+    .map(stanzaIdAuthorityKey)
+    .filter((value): value is string => !!value);
   for (const authority of normalizedAuthorities) {
     const byScoped = message.stanza_ids?.find(
-      (stanzaId) => stanzaId.id && barePeerJid(stanzaId.by) === authority,
+      (stanzaId) => stanzaId.id && stanzaIdAuthorityKey(stanzaId.by) === authority,
     );
-    if (byScoped?.id) return { id: byScoped.id, by: barePeerJid(byScoped.by) };
+    // Return the NORMALIZED authority, never the wire-cased original:
+    // a mixed-case `by` (e.g. "Example.COM") propagating into
+    // `stanzaIdBy` would fail strict-equality comparisons downstream
+    // (MDS displayed-sync matching). Normalize once, at the source.
+    if (byScoped?.id) return { id: byScoped.id, by: authority };
     if (
       message.stanza_id &&
       message.stanza_id_by &&
-      barePeerJid(message.stanza_id_by) === authority
+      stanzaIdAuthorityKey(message.stanza_id_by) === authority
     ) {
-      return { id: message.stanza_id, by: barePeerJid(message.stanza_id_by) };
+      return { id: message.stanza_id, by: authority };
     }
   }
   return null;
@@ -488,7 +513,9 @@ export function roomMessageFromArchived(
   // it looking like a normal user post.
   if (message.pin_event) {
     return {
-      id: message.id ?? message.stanza_id ?? message.mam_id,
+      // #1267 item 3: only trust a stanza-id whose `by` is the room
+      // (XEP-0359 §Security) — never the unverified first-listed one.
+      id: message.id ?? stampedByRoom ?? message.mam_id,
       archiveId: message.mam_id,
       roomJid,
       nick: "",
@@ -594,7 +621,10 @@ export function roomMessageFromArchived(
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
     ...(message.moderated_by ? { moderatedBy: message.moderated_by } : {}),
     ...(message.moderation_reason ? { moderationReason: message.moderation_reason } : {}),
-    ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
+    // #1267 item 3 + Qodo: a correction target must be an id the sender
+    // actually owns (origin/wire id) and never an empty string — a
+    // room-verified stanza-id feeds replies/MDS below, not corrections.
+    ...(message.origin_id ?? message.id ? { correctionTargetId: (message.origin_id ?? message.id) as string } : {}),
     ...(stampedByRoom ? { replyableId: stampedByRoom } : {}),
     // XEP-0490 needs the room-injected stanza-id (by=room) so the
     // MDS publish carries the spec-correct stanza-id for group chats.
@@ -740,7 +770,7 @@ export function dmMessageFromArchived(
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.is_retracted ? { isRetracted: true } : {}),
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
-    ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
+    ...(message.origin_id ?? message.id ? { correctionTargetId: (message.origin_id ?? message.id) as string } : {}),
     ...(message.origin_id || message.id ? { replyableId: message.origin_id ?? message.id ?? undefined } : {}),
     // XEP-0490 needs the user-server-injected stanza-id for DM
     // displayed-sync. `message.stanza_id` plus its `by` JID round-
@@ -794,6 +824,9 @@ export function buildWasmSendOptions(
   }
   if (opts.requestDisplayedMarker) {
     wasmOpts.request_displayed_marker = true;
+  }
+  if ((opts as SendDirectMessageOptions).mucPm) {
+    wasmOpts.muc_pm = true;
   }
   if (opts.files?.length) {
     wasmOpts.shared_files = opts.files.map((file) => ({

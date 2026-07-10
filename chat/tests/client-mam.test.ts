@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
-import { MamPager, type MamWasmClient } from "../src/lib/xmpp/client-mam";
+import { MamPager, rawMessageSeenIds, type MamWasmClient } from "../src/lib/xmpp/client-mam";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import type { LiveDmMessage, XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { WasmArchivedMessage, WasmMamPage } from "../src/lib/xmpp/wasm-types";
@@ -53,6 +53,13 @@ function createPager(xmpp: MamWasmClient, overrides: { currentXmpp?: () => MamWa
     roomJidForChannel: (channelId) => `${channelId}@muc.example.com`,
     isCurrentConnected: (candidate) =>
       overrides.currentXmpp ? overrides.currentXmpp() === candidate : xmpp === candidate,
+    // Mirrors BrowserXmppClient.mucPmOccupant for a known test room.
+    classifyMucPm: (message) => {
+      const counterpart = (message.from ?? "").startsWith(SELF) ? (message.to ?? "") : (message.from ?? "");
+      const [bare, nick] = [counterpart.split("/")[0], counterpart.split("/").slice(1).join("/")];
+      if (!nick || bare !== "room@muc.example.com") return undefined;
+      return { occupantJid: counterpart, nick };
+    },
   });
   return { pager, events, catchup, errors };
 }
@@ -183,5 +190,97 @@ describe("MamPager reconnect catch-up cursor handling", () => {
 
     expect(delivered).toEqual([]);
     expect(catchupInfos).toEqual([{ outcome: "aborted" }]);
+  });
+});
+
+describe("MUC-PM classification on the archive path (#1256)", () => {
+  test("catch-up re-emissions re-key MUC PMs by the occupant JID", async () => {
+    const pmFromOccupant: WasmArchivedMessage = {
+      mam_id: "pm-1",
+      id: "msg-pm-1",
+      from: "room@muc.example.com/juliet",
+      to: SELF,
+      body: "whispered",
+      message_type: "chat",
+      timestamp: "2026-07-01T10:00:01.000Z",
+    };
+    const xmpp: MamWasmClient = {
+      fetch_dm_history_page: async () => page([pmFromOccupant], { complete: true }),
+    };
+    const { pager, events } = createPager(xmpp);
+    const received: LiveDmMessage[] = [];
+    events.set("directMessage", (message) => received.push(message));
+
+    await pager.runReconnectCatchup(
+      xmpp,
+      [{ kind: "dm", key: "room@muc.example.com/juliet", since: "2026-07-01T09:00:00.000Z" }],
+      "fresh",
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      mucPm: true,
+      nick: "juliet",
+    });
+  });
+});
+
+describe("rawMessageSeenIds stanza-id verification (#1267 item 2)", () => {
+  test("keeps only stanza-ids stamped by a trusted archiving authority", () => {
+    const ids = rawMessageSeenIds(
+      {
+        id: "wire-1",
+        origin_id: "origin-1",
+        stanza_id: "spoofed-sid",
+        stanza_id_by: "mallory@evil.example",
+        stanza_ids: [
+          { id: "spoofed-sid-2", by: "mallory@evil.example" },
+          { id: "server-sid", by: "example.com" },
+          { id: "account-sid", by: SELF },
+        ],
+        message_type: "chat",
+        reaction_emojis: [],
+        markup_spans: [],
+        mention_uris: [],
+        references: [],
+        is_muc: false,
+        is_sticker: false,
+        shared_files: [],
+        link_previews: [],
+        is_retracted: false,
+        displayed_marker_requested: false,
+      },
+      [SELF, "example.com"],
+    );
+
+    // Sender-owned ids always count; XEP-0359 stanza-ids only when their
+    // `by` matches an expected authority (§Security Considerations).
+    expect(ids.sort()).toEqual(["account-sid", "origin-1", "server-sid", "wire-1"].sort());
+    expect(ids).not.toContain("spoofed-sid");
+    expect(ids).not.toContain("spoofed-sid-2");
+  });
+
+  test("accepts the singular stanza-id when its by matches the authority", () => {
+    const ids = rawMessageSeenIds(
+      {
+        id: "wire-2",
+        stanza_id: "room-sid",
+        stanza_id_by: "room@muc.example.com",
+        message_type: "groupchat",
+        reaction_emojis: [],
+        markup_spans: [],
+        mention_uris: [],
+        references: [],
+        is_muc: true,
+        is_sticker: false,
+        shared_files: [],
+        link_previews: [],
+        is_retracted: false,
+        displayed_marker_requested: false,
+      },
+      ["room@muc.example.com"],
+    );
+    expect(ids.sort()).toEqual(["room-sid", "wire-2"].sort());
   });
 });

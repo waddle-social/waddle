@@ -18,9 +18,9 @@ mod types;
 pub use builders::{
     build_chat_state_message, build_correction_message, build_displayed_message,
     build_file_sharing_element, build_in_call_reaction_message, build_moderation_message,
-    build_outbound_message, build_pinned_chat_message, build_pinned_message,
-    build_reaction_message, build_retraction_message, build_unpinned_chat_message,
-    build_unpinned_message,
+    build_muc_join_presence, build_outbound_message, build_pinned_chat_message,
+    build_pinned_message, build_reaction_message, build_retraction_message,
+    build_unpinned_chat_message, build_unpinned_message,
 };
 pub use call::{
     build_finish, build_finish_migrated, build_finish_with_options, build_finish_with_reason,
@@ -34,7 +34,7 @@ pub use call::{
 pub use namespaces::{
     build_in_call_presence_state_element, build_muji_element, NS_CHAT_MARKERS, NS_CHAT_STATES,
     NS_CLIENT, NS_JINGLE_RTP, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI,
-    NS_REACTIONS, NS_WADDLE_IN_CALL, NS_WADDLE_PIN_V0,
+    NS_REACTIONS, NS_STANZA_ID, NS_WADDLE_IN_CALL, NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;
@@ -45,9 +45,9 @@ pub use parsing::{
 };
 pub use presence::{build_presence_stanza, parse_show};
 pub use types::{
-    ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
-    ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData, ExtensionEnvelopeData,
-    ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
+    CarbonDirection, ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload,
+    ExtensionCapabilityData, ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData,
+    ExtensionEnvelopeData, ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
     ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
     ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
     InCallReactionEmoji, InCallReactionPayload, InCallReactionRecipient, InCallSessionId,

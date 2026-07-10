@@ -58,6 +58,21 @@ export function assignCorrectionFields(
  * timeline, or `null` on target miss / sender mismatch so callers can
  * skip the ref reassignment (a spoofed correction must not rewrite
  * someone else's message).
+ *
+ * Guards (#1267 item 5):
+ * - sender identity via `policy.senderMatches` (bare JID for DMs; full
+ *   occupant JID for MUC/MUC-PM, plus real-JID continuity where both
+ *   sides carry a real JID — full occupancy-continuity tracking needs
+ *   server occupant-id support, #1268);
+ * - a retracted message is never corrected: XEP-0424 tombstones are
+ *   final, and a correction targeting one would resurrect content the
+ *   sender (or a moderator) removed.
+ *
+ * XEP-0308's most-recent-only intent is deliberately NOT enforced on
+ * receive: §Business Rules allows receivers to accept corrections of
+ * older messages ("support ... SHOULD NOT be assumed" — sender-side
+ * scope), and Waddle's own clients let users edit any of their earlier
+ * messages, so rejecting older targets would break first-party edits.
  */
 export function applyCorrection(
   messages: TimelineMessage[],
@@ -68,6 +83,7 @@ export function applyCorrection(
   const index = findMessageIndexById(messages, replacesId);
   if (index < 0) return null;
   const current = messages[index]!;
+  if (current.isRetracted) return null;
   if (!policy.senderMatches(current)) return null;
   const updated: TimelineMessage = { ...current };
   assignCorrectionFields(updated, { ...payload, body: payload.body.trim() });

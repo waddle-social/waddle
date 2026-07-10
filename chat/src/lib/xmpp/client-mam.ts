@@ -12,7 +12,7 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import { buildDmCallOutcomeAnchor, type DmCallOutcomeAnchor } from "@/lib/calls/dm-call-anchor";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
-import { barePeerJid } from "./jid";
+import { barePeerJid, jidDomain } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { classifyMamError, isMamCursorNotFound } from "./mam";
 import type { ReconnectCatchup } from "./reconnect-catchup";
@@ -26,7 +26,7 @@ import type {
   RoomActivityEvent,
   XmppErrorEvent,
 } from "./types";
-import { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
+import { dmMessageFromArchived, roomMessageFromArchived, stanzaIdAuthorityKey } from "./wasm-message-codecs";
 import type { WasmArchivedMessage, WasmMamPage, WasmMessage } from "./wasm-types";
 
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
@@ -46,6 +46,16 @@ type CatchupRunStats = { pages: number; messages: number };
 type CatchupOutcome = "completed" | "aborted" | "failed";
 
 type ReconnectCatchupEntry = { kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] };
+
+/**
+ * #1267 item 4: typed marker for catch-up page-budget exhaustion. Unlike
+ * a transient IQ failure, budget exhaustion means messages beyond the cap
+ * were genuinely NOT replayed — a real archive gap — so the failure
+ * handler must trigger the wholesale-reload fallback even on a resumed
+ * lifecycle, where transient failures are otherwise ignored (the resumed
+ * stream itself is gap-free).
+ */
+class CatchupPageBudgetExceededError extends Error {}
 
 type ArchivedDmCallOutcome = {
   anchor: DmCallOutcomeAnchor;
@@ -96,12 +106,41 @@ function messageSeenIds(message: Pick<LiveDmMessage | LiveRoomMessage, "id" | "w
   return Array.from(new Set([message.id, ...(message.wireIds ?? [])].filter(Boolean)));
 }
 
-export function rawMessageSeenIds(message: WasmMessage): string[] {
+/**
+ * Wire ids of a raw stanza usable for catch-up dedupe. XEP-0359
+ * §Security Considerations (#1267 item 2, #466 residual): a stanza-id is
+ * only trustworthy when its `by` matches the archiving authority for
+ * the conversation (the room bare JID for MUC, the user's server /
+ * account for DMs) — an unverified sender-controlled id colliding with
+ * a real archive id would make catch-up skip a legitimate message.
+ */
+export function rawMessageSeenIds(
+  message: WasmMessage,
+  stanzaIdAuthorities: ReadonlyArray<string>,
+): string[] {
+  // `stanzaIdAuthorityKey` (shared with the decode path) case-folds the
+  // bare and rejects resource-carrying `by` values — the seen-id path
+  // and the row-identity path MUST accept exactly the same ids, or a
+  // mixed-case authority is recorded as seen while the row omits it
+  // (duplicate on reconnect).
+  const authorities = new Set(
+    stanzaIdAuthorities.map(stanzaIdAuthorityKey).filter((value): value is string => !!value),
+  );
+  const verifiedStanzaIds = [
+    ...(message.stanza_ids ?? []),
+    ...(message.stanza_id && message.stanza_id_by
+      ? [{ id: message.stanza_id, by: message.stanza_id_by }]
+      : []),
+  ]
+    .filter((stanzaId) => {
+      const key = stanzaIdAuthorityKey(stanzaId.by);
+      return !!stanzaId.id && !!key && authorities.has(key);
+    })
+    .map((stanzaId) => stanzaId.id);
   return Array.from(new Set([
     message.id,
     message.origin_id,
-    message.stanza_id,
-    ...(message.stanza_ids?.map((stanzaId) => stanzaId.id) ?? []),
+    ...verifiedStanzaIds,
   ].filter((value): value is string => !!value)));
 }
 
@@ -121,11 +160,12 @@ function shouldSkipCatchupMessage(
 
 function shouldSkipRawCatchupMessage(
   message: WasmMessage,
+  stanzaIdAuthorities: ReadonlyArray<string>,
   since?: string,
   seenIds?: ReadonlyArray<string>,
 ): boolean {
   const seen = new Set(seenIds ?? []);
-  if (seen.size > 0 && rawMessageSeenIds(message).some((id) => seen.has(id))) return true;
+  if (seen.size > 0 && rawMessageSeenIds(message, stanzaIdAuthorities).some((id) => seen.has(id))) return true;
   if (!since || !message.timestamp) return false;
   return compareTimestamps(message.timestamp, since) < 0;
 }
@@ -189,6 +229,13 @@ type MamPagerDeps = {
   roomJidForChannel: (channelId: string) => string;
   /** Identity + liveness gate for a specific WASM handle mid-pagination. */
   isCurrentConnected: (xmpp: MamWasmClient, sessionJid: string) => boolean;
+  /**
+   * XEP-0045 §7.5 (#1256): classify a raw DM-path stanza as a MUC private
+   * message (counterpart is `room@service/nick` for a known room) so
+   * archived/catch-up re-emissions key by the occupant JID exactly like
+   * the live path. Optional so bare unit-test pagers keep working.
+   */
+  classifyMucPm?: (message: WasmMessage) => { occupantJid: string; nick: string } | undefined;
 };
 
 export class MamPager {
@@ -196,6 +243,21 @@ export class MamPager {
 
   private selfBare(): string {
     return barePeerJid(this.deps.sessionJid());
+  }
+
+  /** XEP-0359 archiving authorities for a DM: the user's own account
+   * bare JID (what the Waddle server stamps) plus its server domain —
+   * the SAME set the DM decode path (`assignedStanzaIdBy`) adopts as
+   * the row identity/wireIds, so catch-up seen-ids can never diverge
+   * from the ids the timeline rows carry (a divergence would re-emit
+   * or strand rows). Both authorities are safe to trust: the server
+   * strips sender-spoofed `<stanza-id/>` elements claiming either its
+   * account-bare OR its domain authority on the inbound DM path
+   * (XEP-0359 §5; #1275, fixed alongside this in PR #1273 —
+   * `protocol/handlers/canonicalize.rs`). */
+  private dmStanzaIdAuthorities(): string[] {
+    const selfBare = this.selfBare();
+    return [selfBare, jidDomain(selfBare)];
   }
 
   private roomPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
@@ -211,7 +273,10 @@ export class MamPager {
       ? []
       : this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
     const messages = page.messages
-      .map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() }))
+      .map((message) => {
+        const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
+        return converted ? this.applyMucPmClassification(message, converted) : null;
+      })
       .filter((message): message is LiveDmMessage => !!message);
     const outcomeMessages = outcomeAnchors.map((outcome) =>
       this.dmCallOutcomeAnchorToLiveMessage(outcome),
@@ -227,7 +292,7 @@ export class MamPager {
   private dmCallOutcomeAnchorToLiveMessage(outcome: ArchivedDmCallOutcome): LiveDmMessage {
     const { anchor, terminalMessage } = outcome;
     const card = buildDmCallOutcomeAnchor(anchor, this.deps.sessionJid());
-    const wireIds = rawMessageSeenIds(terminalMessage);
+    const wireIds = rawMessageSeenIds(terminalMessage, this.dmStanzaIdAuthorities());
     return {
       id: card.id,
       ...(terminalMessage.mam_id ? { archiveId: terminalMessage.mam_id } : {}),
@@ -252,7 +317,7 @@ export class MamPager {
     const outcomeAnchors: ArchivedDmCallOutcome[] = [];
     for (const message of page?.messages ?? []) {
       if (!message.call_event) continue;
-      if (shouldSkipRawCatchupMessage(message, options.since, options.seenIds)) continue;
+      if (shouldSkipRawCatchupMessage(message, this.dmStanzaIdAuthorities(), options.since, options.seenIds)) continue;
       const outcomeAnchor = applyDmCallEvent({
         event: message.call_event,
         selfBareJid: selfBare,
@@ -264,6 +329,19 @@ export class MamPager {
       if (outcomeAnchor) outcomeAnchors.push({ anchor: outcomeAnchor, terminalMessage: message });
     }
     return outcomeAnchors;
+  }
+
+  /** Apply the #1256 occupant re-keying to a converted DM message. */
+  private applyMucPmClassification(raw: WasmMessage, converted: LiveDmMessage): LiveDmMessage {
+    const occupant = this.deps.classifyMucPm?.(raw);
+    if (!occupant) return converted;
+    const isSelf = barePeerJid(raw.from ?? "") === this.selfBare();
+    return {
+      ...converted,
+      peerJid: occupant.occupantJid,
+      mucPm: true,
+      ...(isSelf ? {} : { nick: occupant.nick }),
+    };
   }
 
   private recordRoomWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
@@ -449,10 +527,14 @@ export class MamPager {
           // Signal the failure so that reload can run as the fallback.
           // Serialization is per-conversation: the fallback fires after
           // THIS conversation's attempt failed (other entries may still
-          // be paging their own conversations concurrently). Resumed
-          // sessions never skipped a reload — the stream is gap-free —
-          // so a failure there must not trigger a spurious reload.
-          if (lifecycle === "fresh") {
+          // be paging their own conversations concurrently). On a
+          // RESUMED lifecycle the stream itself is gap-free, so a
+          // transient failure must not trigger a spurious reload — but
+          // page-budget exhaustion (#1267 item 4) means the archive gap
+          // beyond the cap was genuinely not replayed (long offline
+          // window in a busy conversation), so the reload fallback is
+          // the gap affordance there too.
+          if (lifecycle === "fresh" || error instanceof CatchupPageBudgetExceededError) {
             // Plain `emit` with local isolation, not `emitSafe`: a throw
             // must neither propagate (it would reject the resume barrier
             // and abort the remaining entries) nor be mislabeled as a
@@ -498,7 +580,7 @@ export class MamPager {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
         if (pageCount >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
-          throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${entry.key}`);
+          throw new CatchupPageBudgetExceededError(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${entry.key}`);
         }
         let page: WasmMamPage | null | undefined;
         try {
@@ -541,7 +623,7 @@ export class MamPager {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
         if (pageCount >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
-          throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${entry.key}`);
+          throw new CatchupPageBudgetExceededError(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${entry.key}`);
         }
         let page: WasmMamPage | null | undefined;
         try {
@@ -601,7 +683,7 @@ export class MamPager {
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
       if (pages.length >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
         applyCollected();
-        throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${peerJid}`);
+        throw new CatchupPageBudgetExceededError(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${peerJid}`);
       }
       const firstArchiveId = pageFirstArchiveId(page);
       if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${peerJid}`);
@@ -638,7 +720,7 @@ export class MamPager {
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
       if (pages.length >= RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION) {
         applyCollected();
-        throw new Error(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${roomJid}`);
+        throw new CatchupPageBudgetExceededError(`Reconnect catch-up exceeded ${RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION} pages for ${roomJid}`);
       }
       const firstArchiveId = pageFirstArchiveId(page);
       if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${roomJid}`);
@@ -662,8 +744,10 @@ export class MamPager {
       this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
     }
     for (const message of page?.messages ?? []) {
-      const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
-      if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      const decoded = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
+      if (!decoded) continue;
+      const converted = this.applyMucPmClassification(message, decoded);
+      if (shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.deps.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       this.deps.events.emit("directMessage", converted);
       if (options.stats) options.stats.messages += 1;

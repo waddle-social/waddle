@@ -216,8 +216,15 @@ export class WaddleClient {
      * right fallback in either case.
      */
     is_community_owner(): Promise<any>;
+    /**
+     * Join a MUC room. Always requests zero discussion history
+     * (`<history maxstanzas='0'/>`, XEP-0045 §7.2.15): MAM catch-up is
+     * the authoritative history source, so accepting the service's
+     * default join history would double-deliver recent messages (#1255).
+     * The canonical presence shape lives in
+     * [`waddle_xmpp_client::messaging::build_muc_join_presence`].
+     */
     join_room(room_jid: string, nick: string): Promise<any>;
-    join_room_without_history(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;
     list_room_members(room_jid: string, affiliation: string): Promise<any>;
     list_roster_contacts(): Promise<any>;

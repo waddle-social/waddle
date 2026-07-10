@@ -94,6 +94,18 @@ pub struct WaddleMessage {
     pub pubsub_events: Vec<WaddlePubsubEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inbox_push: Option<WaddleInboxConversation>,
+    /// XEP-0280: present when this message was unwrapped from a verified
+    /// carbon envelope (#1243). Exactly one of `sent`/`received` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carbon: Option<WaddleCarbonMarker>,
+}
+
+/// XEP-0280 carbon direction marker surfaced to JS as
+/// `{ sent: boolean, received: boolean }`.
+#[derive(Debug, Serialize)]
+pub struct WaddleCarbonMarker {
+    pub sent: bool,
+    pub received: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -922,6 +934,8 @@ pub struct WaddleSendOptions {
     pub thread: Option<WaddleThreadTarget>,
     pub link_preview_token: Option<String>,
     pub request_displayed_marker: bool,
+    /// XEP-0045 §7.5 MUC private message marker (see `SendMessageOptions::muc_pm`).
+    pub muc_pm: bool,
     pub shared_files: Vec<WaddleSharedFile>,
     pub markup_spans: Vec<WaddleMarkupSpanInput>,
     pub references: Vec<WaddleReference>,
