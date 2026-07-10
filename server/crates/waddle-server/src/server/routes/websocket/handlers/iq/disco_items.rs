@@ -232,7 +232,7 @@ pub(super) async fn handle_disco_items_iq(
                     )];
                 }
             };
-            let (mut items, channel_backed_jids) =
+            let (mut items, channel_backed) =
                 match canonical_channel_disco_items(state, muc_domain, MUC_DISCO_ITEMS_FETCH_BOUND)
                     .await
                 {
@@ -249,9 +249,7 @@ pub(super) async fn handle_disco_items_iq(
             // XEP-0045 §6.3 (#1265 item 11): public live instant rooms
             // are part of the service's item list too, not only
             // channel-backed persistent rooms.
-            items.extend(
-                live_public_instant_room_items(state, muc_domain, &channel_backed_jids).await,
-            );
+            items.extend(live_public_instant_room_items(state, muc_domain, &channel_backed).await);
             items.sort_by(|a, b| a.jid.cmp(&b.jid));
             items.dedup_by(|a, b| a.jid == b.jid);
             let Some(rsm_request) = rsm_request else {
@@ -616,7 +614,7 @@ fn page_disco_items<'a>(
 async fn live_public_instant_room_items(
     state: &WebSocketState,
     muc_domain: &str,
-    channel_backed_jids: &std::collections::HashSet<BareJid>,
+    channel_backed: &ChannelBackedRooms,
 ) -> Vec<DiscoItem> {
     let room_jids =
         match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -636,13 +634,17 @@ async fn live_public_instant_room_items(
     // to a handful, cost one snapshot ask each, capped hard.
     const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
     let mut items = Vec::new();
-    for room_jid in room_jids
-        .into_iter()
-        .filter(|room_jid| {
-            room_jid.domain().as_str() == muc_domain && !channel_backed_jids.contains(room_jid)
-        })
-        .take(MAX_INSTANT_ROOM_SCAN)
-    {
+    let mut scanned = 0usize;
+    for room_jid in room_jids {
+        if room_jid.domain().as_str() != muc_domain
+            || channel_backed.contains(state, &room_jid).await
+        {
+            continue;
+        }
+        scanned += 1;
+        if scanned > MAX_INSTANT_ROOM_SCAN {
+            break;
+        }
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };
@@ -690,7 +692,7 @@ async fn canonical_channel_disco_items(
     state: &WebSocketState,
     muc_domain: &str,
     limit: usize,
-) -> Result<(Vec<DiscoItem>, std::collections::HashSet<BareJid>), String> {
+) -> Result<(Vec<DiscoItem>, ChannelBackedRooms), String> {
     match list_xmpp_channels(
         state.deps.app_state.db_pool.global_actor().clone(),
         limit,
@@ -699,18 +701,51 @@ async fn canonical_channel_disco_items(
     .await
     {
         Ok(channels) => {
-            let channel_backed_jids: std::collections::HashSet<BareJid> = channels
-                .iter()
-                .filter_map(|channel| waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok())
-                .collect();
+            let channel_backed = ChannelBackedRooms {
+                jids: channels
+                    .iter()
+                    .filter_map(|channel| {
+                        waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok()
+                    })
+                    .collect(),
+                // When the fetch filled the bound, rows beyond it exist
+                // and the set is incomplete — membership misses must
+                // fall back to a per-room catalog check.
+                truncated: channels.len() >= limit,
+            };
             Ok((
                 channels_to_disco_items(channels, muc_domain),
-                channel_backed_jids,
+                channel_backed,
             ))
         }
         Err(error) => {
             warn!(error = %error, "Failed to list canonical channels for MUC discovery");
             Err(error)
         }
+    }
+}
+
+/// The catalog-backed room JIDs known to this request, plus whether the
+/// fetch hit its bound (in which case the set may be incomplete).
+struct ChannelBackedRooms {
+    jids: std::collections::HashSet<BareJid>,
+    truncated: bool,
+}
+
+impl ChannelBackedRooms {
+    /// Whether `room_jid` is catalog-backed. In-memory for the common
+    /// case; only a truncated catalog fetch falls back to a per-room
+    /// lookup for JIDs missing from the set.
+    async fn contains(&self, state: &WebSocketState, room_jid: &BareJid) -> bool {
+        if self.jids.contains(room_jid) {
+            return true;
+        }
+        if !self.truncated {
+            return false;
+        }
+        matches!(
+            get_managed_channel_for_room(state, room_jid).await,
+            Ok(Some(_))
+        )
     }
 }
