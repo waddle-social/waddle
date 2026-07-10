@@ -5,11 +5,14 @@ verified against actual code, not just issue state. Ordering: Tier 0 first;
 within a tier, lanes run in parallel and bullets within a lane run top-to-bottom.
 Bundles marked `[one PR]` touch the same files and should land together.
 
+**Update 2026-07-10:** a second deep audit of 1:1 + group chat vs main @ `c35afb9d`
+added **Lane J** (#1243–#1268, epic #1269) — the highest-impact chat/MUC defects.
+
 ## Tier 0 — Close / rescope on GitHub (no implementation)
 
 | Issue | Action |
 |---|---|
-| #466 | Close — XEP-0359 §3 `by`-verification live (`chat/src/lib/xmpp/wasm-message-codecs.ts:607`) |
+| #466 | Close — XEP-0359 §3 `by`-verification live for DM identity (`chat/src/lib/xmpp/wasm-message-codecs.ts`, PR #863). Residual (unverified-`by` catch-up dedupe in `rawMessageSeenIds`) tracked in #1267 |
 | #395 | Close — DM identity disambiguated (avatars + presence dot in `DmPanel.vue`) |
 | #389 | Close — composer placeholder tracks active conversation |
 | #386 | Close — channel settings separated from destructive delete (ConfirmDialog wired) |
@@ -100,6 +103,54 @@ _Residual (tracked, not #945-gating): survivor-check TOCTOU needs per-call locki
 2. #1160 — required status checks + merge_group + gate container publish on XMPP compliance. HITL (rulesets).
 3. #1163 — alerts-as-code + Alloy pod-log collection. Contact-point routing HITL.
 
+### Lane J — 1:1 chat + MUC conformance (2026-07-10 audit; epic #1269)
+
+Second deep audit (6 lanes incl. independent gpt-5.5) of private + group chat vs
+main @ `c35afb9d`; all findings verified in code. #1243–#1268 filed, indexed by
+epic **#1269**. Both features are broadly implemented — the user-visible breakage
+is the High/Critical items below. Sub-bundles touch mostly-disjoint files and run
+in parallel; within a bundle, top-to-bottom.
+
+**J1 — Client chat `[one PR bundle]`**
+1. #1243 — **High**: unwrap normal XEP-0280 carbons (client only unwraps call-carbons; WASM emits no `carbon:*`, TS handlers dead) → multi-device DM sync dead. Top 1:1 symptom.
+2. #1256 — MUC PMs (`type=chat` from `room/nick`) misfiled as DMs keyed by room bare JID → replies broadcast.
+3. #1258 — client implements retract/moderate/reactions/correct/sid but advertises none in caps (mirror of the advertise⇔conform rule).
+4. #1255 — join requests default MUC history while also running MAM catch-up → duplicates. Relates #232.
+5. #1267 — client 1:1 minor cluster (6 items: 0424 fallback marker, unverified-`by` catch-up dedupe [#466 residual], first-stanza-id, catch-up gap marker, correction guard, `Date.now` stamp).
+
+**J2 — Server 1:1 routing / MAM / receipts `[bundle]`**
+1. #1244 — **Critical**: full-JID chat to an offline resource silently dropped (no bare-JID fallback / offline store / error; RFC 6121 §8.5.3.2.1).
+2. #1245 — full-JID DM to a detached SM resource bypasses recipient MAM/stanza-id/carbons (#1106 fixed bare-JID only).
+3. #1246 — message to nonexistent local user persisted instead of `<service-unavailable/>` (RFC 6121 §8.5.1).
+4. #1247 — server fabricates XEP-0184 receipts (dup/false receipts; presence oracle).
+5. #1266 — 1:1 minor cluster (8 items). Coordinate with Lane D #1173 (to-less MAM) — same read path.
+
+**J3 — MUC invites / lifecycle `[bundle]`**
+1. #1248 — **High**: mediated invitations (§7.8) unimplemented for non-group-DM rooms → "invite" silently no-ops. Relates #945.
+2. #1252 — **High**: nick change silently dropped after tearing down MUJI + SFU (no 303/210 anywhere).
+3. #1261 — destroy doesn't wipe durable state (resurrection) + misses sibling same-nick sessions.
+4. #1264 — mediated decline spoofable (no invite ledger) + dropped for offline/remote inviter.
+5. #1262 — owner bypasses §8.4/§9.7 role-change target protections.
+
+**J4 — MUC-MAM + occupant-id + spoofing `[bundle]`**
+1. #1250 — **High**: MUC-MAM result envelopes missing `from` → strict clients discard all room history.
+2. #1251 — **High (security)**: client `muc#user <x>` not stripped from groupchat messages before reflect/archive (persisted spoofing).
+3. #1268 — XEP-0421 occupant-id gaps (PM, destroy presence, MAM real-JID for non-anon rooms).
+
+**J5 — MUC delivery / self-ping reliability `[bundle]`**
+1. #1249 — **High**: cross-node disconnect cleanup ghosts occupants — root cause of the recurring prod `failed to relay remote MUC unavailable during disconnect cleanup`. Relates #1195.
+2. #1253 — self-ping broken for multi-session nicks → rejoin loop (#1221 territory).
+3. #1254 — reaped/dormant room self-ping returns `item-not-found`, read by clients as still-joined → silently stop receiving.
+4. #1257 — MUC PM delivery fire-and-forget: no SM fallback/archive/carbon/occupant-id.
+5. #1263 — reflection/presence silently lost on `DroppedFull` / room-lookup failure.
+
+**J6 — Disco truthfulness**
+1. #1259 — duplicate feature + duplicate `muc#roominfo` FORM_TYPE make disco#info ill-formed (XEP-0115 §5.4).
+2. #1260 — disco#info on a nonexistent room fabricates an open room (should be `item-not-found`).
+3. #1265 — XEP-0045 MUC minor conformance cluster (16 items, incl. `muc#stable_id` advertise, history-knob, member-list access). Relates Lane D #1170 (extended-MAM), #1258.
+
+_Cross-refs (already-lane'd, referenced not re-filed): #1173/#1171/#1170 (Lane D), #1118 (Lane E), #984 (Lane G), #466 (Tier 0 close — residual → #1267)._
+
 ## Tier 3 — Performance / scale prep (parallel with Tier 2 tail)
 
 1. #1087 — bare-JID connection index (blocks #1102).
@@ -152,12 +203,14 @@ _Residual (tracked, not #945-gating): survivor-check TOCTOU needs per-call locki
 
 ## Max parallelism summary
 
-Lanes **A–I run concurrently** (disjoint files). Within Tier 2 that is up to
-9 simultaneous work streams. Only hard cross-lane dependencies:
+Lanes **A–J run concurrently** (disjoint files). Within Tier 2 that is up to
+10 simultaneous work streams (Lane J's six bundles J1–J6 are themselves parallel).
+Only hard cross-lane dependencies:
 
 - #1087 → #1102
 - #1096 → #1088 → #1195-Ph3 / #971 (Tier 5 chain)
 - #1023 (HITL) → #1033
 - #752 → #753; #435 → #436 / retires #445
 - #1120 co-designed with #1037 item 4
+- Lane J soft cross-refs: J2 ⇄ Lane D #1173 (shared MAM read path); J6 ⇄ Lane D #1170; J5 #1249 ⇄ #1195 (clustering); J1 #1255 ⇄ #232
 - HITL items needing the owner: #1159, #1160, #1023, #870, #1092, #1148, #1088/#1195/#971 direction
