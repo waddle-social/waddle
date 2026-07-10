@@ -1,5 +1,7 @@
 use super::*;
 
+use waddle_xmpp::muc::roominfo::MucRoomInfo;
+
 /// XEP-0030 routing classification for a disco#info target as seen by the
 /// MUC dispatcher.
 ///
@@ -211,6 +213,33 @@ async fn requester_has_durable_group_dm_membership(
         .is_ok_and(|row| row.is_some())
 }
 
+/// Compose a room's disco#info extension forms with exactly one
+/// `muc#roominfo` FORM_TYPE (#1259, XEP-0115 §5.4): the optional
+/// XEP-0503 parent form, the single merged `muc#roominfo` form
+/// (description + XEP-0500 slow-mode duration + optional space link),
+/// and the Waddle room-metadata form. Pushes `Feature::spaces()` when
+/// the room is space-linked.
+fn room_disco_extension_forms(
+    features: &mut Vec<Feature>,
+    space_link: Option<RoomSpaceLink>,
+    description: Option<&str>,
+    room_metadata_form: Element,
+) -> Vec<Element> {
+    let mut extensions = Vec::new();
+    let mut room_info = MucRoomInfo {
+        description: description.map(str::to_string),
+        ..MucRoomInfo::default()
+    };
+    if let Some(link) = space_link {
+        features.push(Feature::spaces());
+        extensions.push(link.parent_form);
+        room_info.space_pubsub_iri = Some(link.pubsub_iri);
+    }
+    extensions.push(room_info.to_form_element());
+    extensions.push(room_metadata_form);
+    extensions
+}
+
 pub(super) async fn handle_muc_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
@@ -364,16 +393,16 @@ pub(super) async fn handle_muc_disco_info<'a>(
             features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
         }
         features.extend(extension_features_for_disco(state));
-        let mut extensions = room_space_metadata_extensions(state, &room_jid, description).await;
-        let has_space_metadata = !extensions.is_empty();
-        if has_space_metadata {
-            features.push(Feature::spaces());
-        }
-        extensions.push(build_muc_slow_mode_roominfo_form(0));
-        extensions.push(build_room_metadata_form(
-            channel_type,
-            snapshot.config.pin_permission.as_form_value(),
-        ));
+        let space_link = room_space_link(state, &room_jid).await;
+        let extensions = room_disco_extension_forms(
+            &mut features,
+            space_link,
+            description,
+            build_room_metadata_form(
+                channel_type,
+                snapshot.config.pin_permission.as_form_value(),
+            ),
+        );
         let response = build_disco_info_response_with_extensions(
             req.request_iq,
             &identities,
@@ -406,19 +435,18 @@ pub(super) async fn handle_muc_disco_info<'a>(
             features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
         }
         features.extend(extension_features_for_disco(state));
-        let mut extensions =
-            room_space_metadata_extensions(state, &room_jid, channel.description.as_deref()).await;
-        let has_space_metadata = !extensions.is_empty();
-        if has_space_metadata {
-            features.push(Feature::spaces());
-        }
+        let space_link = room_space_link(state, &room_jid).await;
         // #422: read the persisted pin policy from the channel record so
         // dormant rooms advertise the truth, not the default.
-        extensions.push(build_muc_slow_mode_roominfo_form(0));
-        extensions.push(build_room_metadata_form(
-            &channel.channel_type,
-            channel.pin_permission.as_form_value(),
-        ));
+        let extensions = room_disco_extension_forms(
+            &mut features,
+            space_link,
+            channel.description.as_deref(),
+            build_room_metadata_form(
+                &channel.channel_type,
+                channel.pin_permission.as_form_value(),
+            ),
+        );
         let response = build_disco_info_response_with_extensions(
             req.request_iq,
             &identities,
@@ -429,15 +457,15 @@ pub(super) async fn handle_muc_disco_info<'a>(
         return Some(DiscoInfoResponse::iq(response));
     }
 
-    let room_name = room_jid
-        .node()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "Room".to_string());
-    let identities = vec![Identity::muc_room(Some(&room_name))];
-    let mut features = muc_room_features(false, false, true, false, false);
-    features.extend(extension_features_for_disco(state));
-    let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-    Some(DiscoInfoResponse::iq(response))
+    // #1260 / XEP-0045 §6.4: a localpart with no live actor and no
+    // persisted channel record is a room that does not exist — return
+    // <item-not-found/> instead of fabricating an open-room response.
+    Some(DiscoInfoResponse::error(
+        req.id,
+        req.response_from,
+        req.response_to,
+        item_not_found_iq_error("Requested item not found."),
+    ))
 }
 
 #[cfg(test)]

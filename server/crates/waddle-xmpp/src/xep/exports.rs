@@ -396,9 +396,9 @@ pub use waddle_xmpp_core::xep0501::{
 pub use super::xep0502::{ActivityTracker, RoomActivity};
 
 pub use super::xep0500::{
-    build_muc_slow_mode_roominfo_form, build_roominfo_slow_mode_duration_field,
-    parse_slow_mode_duration, SlowModeCheck, SlowModeConfig, SlowModeTracker,
-    FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION, SLOW_MODE_DISABLED,
+    build_roominfo_slow_mode_duration_field, parse_slow_mode_duration, SlowModeCheck,
+    SlowModeConfig, SlowModeTracker, FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION,
+    SLOW_MODE_DISABLED,
 };
 
 pub use super::xep0486::{extract_avatar_hash_from_presence, MucAvatar, MucAvatarCache};
@@ -455,9 +455,7 @@ pub use super::xep_waddle_in_call::{
 };
 
 pub use super::xep0503::{
-    build_channel_item, build_muc_roominfo_form, build_muc_roominfo_pubsub_form,
-    build_room_metadata_form, build_room_space_metadata_forms,
-    build_room_space_metadata_forms_with_description, build_server_role_form, build_space_node_iri,
+    build_channel_item, build_room_metadata_form, build_server_role_form, build_space_node_iri,
     build_space_parent_form, build_spaces_metadata_form, build_spaces_metadata_form_for_requester,
     build_spaces_metadata_form_for_requester_with_owners, build_spaces_type_form, SpaceAffiliation,
     NS_SPACES, NS_WADDLE_ROOM_METADATA,

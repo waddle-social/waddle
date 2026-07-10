@@ -15,10 +15,11 @@ pub(super) async fn handle_account_disco_info<'a>(
             Identity::server(Some("Personal Archive")),
             build_pep_identity(),
         ];
+        // `urn:xmpp:mam:2` (+`#extended`) come from `pep_features()`;
+        // do NOT add them again here — duplicate `<feature/>` vars make
+        // the response ill-formed per XEP-0115 §5.4 (#1259).
         let mut features = vec![
             Feature::disco_info(),
-            Feature::mam(),
-            Feature::mam_extended(),
             Feature::fulltext_mam(),
             Feature::threads_query(),
         ];

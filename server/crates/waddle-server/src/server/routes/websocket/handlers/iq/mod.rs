@@ -62,10 +62,10 @@ use waddle_xmpp::{
     xep::{
         add_stanza_id_xep0359, build_command_items, build_command_result,
         build_last_activity_response, build_moderation_result_message,
-        build_muc_slow_mode_roominfo_form, build_room_metadata_form,
-        build_room_space_metadata_forms_with_description, build_search_form_response,
-        build_search_response_with_rsm, build_server_role_form,
-        build_spaces_metadata_form_for_requester_with_owners, is_last_activity_query,
+        build_room_metadata_form, build_search_form_response,
+        build_search_response_with_rsm, build_server_role_form, build_space_node_iri,
+        build_space_parent_form, build_spaces_metadata_form_for_requester_with_owners,
+        is_last_activity_query,
         is_search_form_request, is_search_request, is_time_query, is_version_query,
         parse_command_from_iq, parse_moderation_iq, parse_search_request, AdHocCommandCondition,
         ChannelResult, Command, CommandError, CommandStatus, RsmRequest, RsmResponse, Searchable,
@@ -153,7 +153,7 @@ use permissions::{
 use pin_query::{handle_pin_query_iq, is_pin_query_iq};
 use pubsub_dispatch::handle_pubsub_iq;
 use spaces_discovery::{
-    room_space_metadata_extensions, space_details_from_node, spaces_service_bare_jid,
+    room_space_link, space_details_from_node, spaces_service_bare_jid, RoomSpaceLink,
 };
 use spaces_items::handle_spaces_items;
 use spaces_publish::handle_spaces_publish;

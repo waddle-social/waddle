@@ -66,6 +66,56 @@ fn test_build_disco_info_response() {
     );
 }
 
+/// #1259 / XEP-0115 §5.4 step 2.4: duplicate feature vars or identity
+/// tuples make a disco#info response ill-formed and force
+/// caps-verifying clients to discard it. The builder must dedupe so no
+/// call site can compose an ill-formed response.
+#[test]
+fn test_build_disco_info_response_dedupes_features_and_identities() {
+    let query_elem = Element::builder("query", DISCO_INFO_NS).build();
+    let iq = Iq::Get {
+        from: Some("user@example.com".parse().unwrap()),
+        to: Some("example.com".parse().unwrap()),
+        id: "disco-dedupe-1".to_string(),
+        payload: query_elem,
+    };
+
+    let response = build_disco_info_response(
+        &iq,
+        &[
+            Identity::server(Some("Waddle")),
+            Identity::server(Some("Waddle")),
+        ],
+        &[
+            Feature::mam(),
+            Feature::mam_extended(),
+            Feature::disco_info(),
+            Feature::mam(),
+            Feature::mam_extended(),
+        ],
+        None,
+    );
+
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
+        panic!("expected disco#info result payload");
+    };
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+    assert!(
+        !parsed.ill_formed,
+        "builder output must satisfy XEP-0115 §5.4 well-formedness"
+    );
+    assert_eq!(parsed.identities.len(), 1);
+    assert_eq!(
+        parsed.features,
+        vec![Feature::mam(), Feature::mam_extended(), Feature::disco_info()],
+        "first occurrence wins; order preserved"
+    );
+}
+
 #[test]
 fn test_server_features_include_core_features() {
     let features = server_features();
@@ -122,6 +172,35 @@ fn test_muc_room_features_public_open_room() {
     assert!(features.contains(&Feature::muc_public()));
     assert!(!features.contains(&Feature::muc_membersonly()));
     assert!(!features.contains(&Feature::muc_hidden()));
+}
+
+/// #1265 items 13+14: rooms truthfully advertise `muc_unsecured` (no
+/// password support exists), `muc_temporary`/`muc_persistent` per
+/// config, and XEP-0045 §7.4 `muc#stable_id` (reflected ids are
+/// preserved by the room dispatch path).
+#[test]
+fn test_muc_room_features_advertise_unsecured_stable_id_and_lifespan() {
+    let persistent = muc_room_features(true, false, true, false, false);
+    assert!(persistent.contains(&Feature::muc_unsecured()));
+    assert!(persistent.contains(&Feature::muc_stable_id()));
+    assert!(persistent.contains(&Feature::muc_persistent()));
+    assert!(!persistent.contains(&Feature::muc_temporary()));
+    // No password support anywhere: never claim muc_passwordprotected.
+    assert!(!persistent.contains(&Feature::new("muc_passwordprotected")));
+
+    let temporary = muc_room_features(false, false, true, false, false);
+    assert!(temporary.contains(&Feature::muc_temporary()));
+    assert!(!temporary.contains(&Feature::muc_persistent()));
+    assert_eq!(
+        Feature::muc_stable_id().0,
+        "http://jabber.org/protocol/muc#stable_id"
+    );
+}
+
+/// #1265 item 14: the MUC service itself advertises stable-id support.
+#[test]
+fn test_muc_service_features_advertise_stable_id() {
+    assert!(muc_service_features().contains(&Feature::muc_stable_id()));
 }
 
 #[test]

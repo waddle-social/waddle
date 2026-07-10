@@ -38,15 +38,13 @@ use std::time::{Duration, Instant};
 
 use minidom::Element;
 
-use super::xep0004::{DataForm, Field, FormType, ToElement};
+use super::xep0004::{Field, ToElement};
 
 /// Room configuration field for slow mode duration.
 pub const FIELD_SLOW_MODE_DURATION: &str = "muc#roomconfig_slow_mode_duration";
 
 /// MUC roominfo disco field for slow mode duration.
 pub const FIELD_ROOMINFO_SLOW_MODE_DURATION: &str = "muc#roominfo_slow_mode_duration";
-
-const FORM_TYPE_MUC_ROOMINFO: &str = "http://jabber.org/protocol/muc#roominfo";
 
 /// Default: slow mode disabled (0 seconds).
 pub const SLOW_MODE_DISABLED: u64 = 0;
@@ -200,19 +198,13 @@ pub fn parse_slow_mode_duration(value: &str) -> u64 {
 }
 
 /// Build the XEP-0500 roominfo field for disco#info extension forms.
+///
+/// The field is emitted inside the room's single `muc#roominfo` form —
+/// see `crate::muc::roominfo::MucRoomInfo`. XEP-0500 must not append
+/// its own `muc#roominfo` form: two forms with the same FORM_TYPE make
+/// the disco#info response ill-formed per XEP-0115 §5.4 (#1259).
 pub fn build_roominfo_slow_mode_duration_field(duration_secs: u64) -> Element {
     Field::text_single(FIELD_ROOMINFO_SLOW_MODE_DURATION, duration_secs.to_string()).to_element()
-}
-
-/// Build a MUC roominfo data-form extension containing the slow mode duration.
-pub fn build_muc_slow_mode_roominfo_form(duration_secs: u64) -> Element {
-    DataForm::new(FormType::Result)
-        .add_field(Field::form_type(FORM_TYPE_MUC_ROOMINFO))
-        .add_field(Field::text_single(
-            FIELD_ROOMINFO_SLOW_MODE_DURATION,
-            duration_secs.to_string(),
-        ))
-        .to_element()
 }
 
 #[cfg(test)]
@@ -353,16 +345,5 @@ mod tests {
             field.get_child("value", NS_DATA_FORMS).map(|v| v.text()),
             Some("20".to_owned())
         );
-    }
-
-    #[test]
-    fn test_build_muc_slow_mode_roominfo_form() {
-        let form = build_muc_slow_mode_roominfo_form(20);
-        assert_eq!(form.name(), "x");
-        assert_eq!(form.ns(), NS_DATA_FORMS);
-        assert_eq!(form.attr("type"), Some("result"));
-        assert!(form
-            .children()
-            .any(|child| child.attr("var") == Some(FIELD_ROOMINFO_SLOW_MODE_DURATION)));
     }
 }

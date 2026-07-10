@@ -798,10 +798,12 @@ async fn handle_iq_disco_info_advertises_replies() {
         &ConnectionPhase::Unauthenticated,
     )
     .await;
+    // #1260 / XEP-0045 §6.4: disco#info on a room that does not exist
+    // (no live actor, no persisted channel) is <item-not-found/>, never
+    // a fabricated open-room response.
     let room_response = room_responses.first().expect("room disco response");
-    assert!(room_response.contains("urn:xmpp:mam:2"));
-    assert!(room_response.contains("urn:xmpp:reply:0"));
-    assert!(room_response.contains("urn:xmpp:fulltext:0"));
+    assert!(room_response.contains("item-not-found"));
+    assert!(!room_response.contains("urn:xmpp:mam:2"));
     assert!(!room_response.contains("urn:waddle:test-extension:1"));
 
     let user_jid: FullJid = "alice@example.com/waddle".parse().expect("user jid");
