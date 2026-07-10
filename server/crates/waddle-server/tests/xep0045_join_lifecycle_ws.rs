@@ -426,3 +426,49 @@ async fn xep_0045_fresh_bind_after_unclean_drop_cleans_detached_occupancy() {
     let _ = bob.close().await;
     let _ = alice_fresh.close().await;
 }
+
+/// XEP-0045 §7.4 (#1263): a groupchat message to a room that does not
+/// exist must be answered with a message error carrying
+/// `<item-not-found/>` — the previous behavior silently dropped the
+/// message and the sender never learned it was lost.
+#[tokio::test]
+async fn xep_0045_groupchat_to_nonexistent_room_bounces_item_not_found() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "ghost-room-sender").await;
+
+    let ghost_room = format!("never-created-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let msg_id = format!("ghost-{}", uuid::Uuid::new_v4());
+    admin
+        .send(&format!(
+            r#"<message to="{ghost_room}" type="groupchat" id="{msg_id}"><body>hello?</body></message>"#
+        ))
+        .await
+        .expect("send groupchat to nonexistent room");
+
+    let frame = admin
+        .recv_matching(|frame| frame.contains(&msg_id))
+        .await
+        .expect("error reply for message to nonexistent room");
+    let element = frame
+        .parse::<Element>()
+        .unwrap_or_else(|err| panic!("frame must parse as XML: {err}; frame={frame}"));
+    assert_eq!(element.name(), "message", "expected <message>: {frame}");
+    assert_eq!(
+        element.attr("type"),
+        Some("error"),
+        "reply must be a message error: {frame}"
+    );
+    assert_eq!(
+        element.attr("from"),
+        Some(ghost_room.as_str()),
+        "the error comes from the room bare JID: {frame}"
+    );
+    assert!(
+        find_descendant(&element, "item-not-found", NS_XMPP_STANZAS).is_some(),
+        "XEP-0045 §7.4: nonexistent room bounces <item-not-found/>: {frame}"
+    );
+
+    let _ = admin.close().await;
+}

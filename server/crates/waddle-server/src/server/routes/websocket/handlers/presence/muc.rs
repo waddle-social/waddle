@@ -143,16 +143,40 @@ pub(crate) async fn route_room_presence_to_occupant(
     if try_deliver_registered_remote_resource(state, recipient, &stanza).await {
         return;
     }
-    match state
-        .deps
-        .protocol
-        .connection_registry
-        .try_send_to(recipient, stanza.clone())
-    {
-        waddle_xmpp::registry::BroadcastOutcome::Delivered
-        | waddle_xmpp::registry::BroadcastOutcome::DroppedFull => return,
-        waddle_xmpp::registry::BroadcastOutcome::NotConnected
-        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {}
+    // #1263: `DroppedFull` was previously treated as delivered, so a
+    // client whose channel was momentarily full silently missed a room
+    // presence and kept a stale occupant roster forever. The frame was
+    // provably never enqueued, so retry on the shared bounded schedule;
+    // if the channel is STILL full, surface the loss (metric + warn) —
+    // the recipient's roster is stale until its next rejoin/resync, and
+    // a genuinely wedged consumer is torn down by the send-stall
+    // backstop, whose disconnect cleanup re-syncs occupancy.
+    let mut retry_delays = crate::server::routes::interpret::DROPPED_FULL_RETRY_DELAYS.iter();
+    loop {
+        match state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(recipient, stanza.clone())
+        {
+            waddle_xmpp::registry::BroadcastOutcome::Delivered => return,
+            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
+                if let Some(delay) = retry_delays.next() {
+                    tokio::time::sleep(*delay).await;
+                    continue;
+                }
+                waddle_xmpp::prometheus::increment_delivery_retry_exhausted_drop();
+                warn!(
+                    room = %room_jid,
+                    recipient = %recipient,
+                    "MUC presence fan-out: recipient channel still full after bounded \
+                     retries; dropped — occupant roster stale until resync"
+                );
+                return;
+            }
+            waddle_xmpp::registry::BroadcastOutcome::NotConnected
+            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => break,
+        }
     }
     #[cfg(not(feature = "clustering"))]
     let _ = room_jid;

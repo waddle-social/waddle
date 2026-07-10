@@ -128,15 +128,38 @@ pub(super) async fn dispatch_to_room(
         .await
     {
         Ok(Some(actor)) => actor,
+        // XEP-0045 §7.4 (#1263): a groupchat message to a room that does
+        // not exist SHOULD be answered with `<item-not-found/>` — never
+        // silently dropped. (A dormant/reaped room also has no live
+        // occupancy, so the sender could not be an occupant of it.)
         Ok(None) => {
-            warn!(room = %room_jid, "DispatchToRoom: room not registered; dropping");
+            debug!(
+                room = %room_jid,
+                "DispatchToRoom: room not registered; bouncing item-not-found"
+            );
+            push_sender_error_reply(
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                item_not_found_error("Requested room not found."),
+            );
             return outcome;
         }
+        // Transient lookup failure (#1263): surface an error to the
+        // sender instead of silently losing the message.
         Err(error) => {
             warn!(
                 room = %room_jid,
                 error = ?error,
-                "DispatchToRoom: room registry lookup failed; dropping"
+                "DispatchToRoom: room registry lookup failed; bouncing internal-server-error"
+            );
+            push_sender_error_reply(
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                internal_server_error_for_lookup(),
             );
             return outcome;
         }
@@ -148,11 +171,20 @@ pub(super) async fn dispatch_to_room(
         .await
     {
         Ok(snapshot) => snapshot,
+        // Snapshot failure (#1263): same rule — the sender must learn
+        // their message did not reach the room.
         Err(error) => {
             warn!(
                 room = %room_jid,
                 error = ?error,
-                "DispatchToRoom: GetRoomSnapshot failed; dropping"
+                "DispatchToRoom: GetRoomSnapshot failed; bouncing internal-server-error"
+            );
+            push_sender_error_reply(
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                internal_server_error_for_lookup(),
             );
             return outcome;
         }
@@ -474,6 +506,30 @@ pub(super) async fn dispatch_to_room(
     }
 
     outcome
+}
+
+/// Serialize a XEP-0045 message error reply from the room to the sender
+/// and push it onto the outcome's wire frames (#1263: every pre-dispatch
+/// failure must reach the sender instead of silently dropping the
+/// message).
+fn push_sender_error_reply(
+    outcome: &mut InterpretOutcome,
+    incoming: &Message,
+    room_jid: &jid::BareJid,
+    sender_full: &jid::FullJid,
+    error: xmpp_parsers::stanza_error::StanzaError,
+) {
+    let reply = build_message_error_reply(incoming, room_jid, sender_full, error);
+    match Stanza::Message(reply).to_element_string() {
+        Ok(xml) => outcome.frames.push(xml),
+        Err(serialize_error) => {
+            warn!(
+                room = %room_jid,
+                error = %serialize_error,
+                "DispatchToRoom: failed to serialize sender error reply"
+            );
+        }
+    }
 }
 
 pub(super) fn normalize_thread_create_source(message: &mut Message) -> Option<String> {
