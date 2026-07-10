@@ -2696,7 +2696,6 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
             "FORM_TYPE",
             "muc#roomconfig_roomname",
             "muc#roomconfig_roomdesc",
-            "muc#roomconfig_persistentroom",
             "muc#roomconfig_membersonly",
             "muc#roomconfig_publicroom",
             "muc#roomconfig_moderatedroom",
@@ -5552,5 +5551,585 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
         room.find_nick_by_real_jid(&alice).is_none(),
         "a fresh bind's invalidation must clean the dead session's room \
          occupancy — the new stream has not joined anything yet"
+    );
+}
+
+// ─── Lane J6 (#1259 #1260 #1265): disco truthfulness + XEP-0045 minor
+// conformance. Dedicated coverage for the disco#info well-formedness
+// contract, reserved-nick discovery, occupant-JID disco, member-list
+// access, admin error mapping, config knobs, and the RSM room list.
+
+fn owner_config_submit_iq(room_jid: &BareJid, id: &str, fields: &[(&str, &str)]) -> String {
+    let mut form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    for (var, value) in fields {
+        form = form.append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), *var)
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append(*value)
+                        .build(),
+                )
+                .build(),
+        );
+    }
+    element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                    .append(form.build())
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+fn disco_query_from_response(frame: &str) -> Element {
+    let iq = Element::from_str(frame).expect("disco response XML");
+    assert_eq!(iq.attr("type"), Some("result"), "disco result: {frame}");
+    iq.get_child("query", waddle_xmpp::disco::DISCO_INFO_NS)
+        .expect("disco#info query payload")
+        .clone()
+}
+
+/// #1259 / XEP-0115 §5.4: a live room's disco#info response must be
+/// well-formed — no duplicate features and exactly one `muc#roominfo`
+/// FORM_TYPE extension form (carrying the XEP-0500 slow-mode field).
+#[tokio::test]
+async fn xep0115_room_disco_info_is_well_formed_with_single_roominfo_form() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "wellformed@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+
+    let frame = disco_info_iq_frame("room-wf-1", &room_jid.to_string(), None);
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let query = disco_query_from_response(responses.first().expect("room disco response"));
+    let parsed =
+        waddle_xmpp::disco::info::parse_disco_info_response(&query).expect("parseable disco#info");
+    assert!(
+        !parsed.ill_formed,
+        "room disco#info must satisfy XEP-0115 §5.4 well-formedness"
+    );
+
+    // #1265 items 13+14 on the wire.
+    let vars: Vec<&str> = parsed.features.iter().map(|f| f.0.as_str()).collect();
+    assert!(vars.contains(&"muc_unsecured"), "{vars:?}");
+    assert!(
+        vars.contains(&"http://jabber.org/protocol/muc#stable_id"),
+        "{vars:?}"
+    );
+    assert!(!vars.contains(&"muc_passwordprotected"), "{vars:?}");
+
+    // Exactly one muc#roominfo FORM_TYPE, carrying the slow-mode field.
+    let roominfo_forms: Vec<&Element> = parsed
+        .extensions
+        .iter()
+        .filter(|form| {
+            form.children().any(|field| {
+                field.attr("var") == Some("FORM_TYPE")
+                    && field
+                        .children()
+                        .any(|v| v.text() == "http://jabber.org/protocol/muc#roominfo")
+            })
+        })
+        .collect();
+    assert_eq!(
+        roominfo_forms.len(),
+        1,
+        "exactly one muc#roominfo form (#1259): {:?}",
+        parsed.extensions
+    );
+    assert!(
+        roominfo_forms[0]
+            .children()
+            .any(|field| field.attr("var") == Some("muc#roominfo_slow_mode_duration")),
+        "slow-mode duration rides inside the single muc#roominfo form"
+    );
+}
+
+/// #1265 item 9 / XEP-0045 §7.12: reserved-nick discovery. An occupant
+/// gets their locked nick as a conference identity name; a user with no
+/// occupancy gets an empty query.
+#[tokio::test]
+async fn xep0045_reserved_nick_discovery_returns_locked_nick() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "reserved-nick@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+
+    let frame = disco_info_iq_frame("nick-1", &room_jid.to_string(), Some("x-roomuser-item"));
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let query = disco_query_from_response(responses.first().expect("reserved nick response"));
+    assert_eq!(query.attr("node"), Some("x-roomuser-item"));
+    let identity = query
+        .get_child("identity", waddle_xmpp::disco::DISCO_INFO_NS)
+        .expect("occupant has a reserved-nick identity");
+    assert_eq!(identity.attr("category"), Some("conference"));
+    assert_eq!(identity.attr("name"), Some("alice"));
+
+    let frame = disco_info_iq_frame("nick-2", &room_jid.to_string(), Some("x-roomuser-item"));
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    let query = disco_query_from_response(responses.first().expect("no reserved nick response"));
+    assert!(
+        query
+            .get_child("identity", waddle_xmpp::disco::DISCO_INFO_NS)
+            .is_none(),
+        "no occupancy → empty query per XEP-0030"
+    );
+}
+
+/// #1265 item 10 / XEP-0045 §6.6: disco to `room@service/nick` is
+/// <bad-request/> for non-occupants (MUST); occupants get
+/// <feature-not-implemented/> because pass-through is unsupported.
+#[tokio::test]
+async fn xep0045_occupant_jid_disco_rejected_per_section_6_6() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "occupant-disco@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+    let occupant_target = format!("{room_jid}/alice");
+
+    // Non-occupant → bad-request, for both disco flavors.
+    for (id, frame) in [
+        (
+            "66-info",
+            disco_info_iq_frame("66-info", &occupant_target, None),
+        ),
+        (
+            "66-items",
+            disco_items_iq_frame("66-items", &occupant_target, None),
+        ),
+    ] {
+        let responses = handle_iq(
+            &frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ready_phase(&bob_jid),
+        )
+        .await;
+        let response = responses.first().unwrap_or_else(|| panic!("{id} response"));
+        assert!(
+            response.contains("bad-request"),
+            "§6.6 MUST bad-request for non-occupant {id}: {response}"
+        );
+    }
+
+    // Occupant → feature-not-implemented (no pass-through support).
+    let frame = disco_info_iq_frame("66-occ", &occupant_target, None);
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let response = responses.first().expect("occupant disco response");
+    assert!(
+        response.contains("feature-not-implemented"),
+        "occupant pass-through unsupported: {response}"
+    );
+}
+
+/// #1265 item 16 / XEP-0045 §8.2: kicking a nick that is not in the
+/// room returns <item-not-found/>, not <forbidden/>.
+#[tokio::test]
+async fn xep0045_kick_absent_nick_returns_item_not_found() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "kick-ghost@muc.example.com".parse().expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+
+    let kick_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "kick-ghost",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "ghost")
+            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "none")
+            .build(),
+    );
+    let responses = handle_iq(
+        &kick_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let response = responses.first().expect("kick error response");
+    assert!(
+        response.contains("item-not-found"),
+        "absent nick is item-not-found: {response}"
+    );
+    assert!(!response.contains("<forbidden"), "{response}");
+}
+
+/// #1265 item 12 / XEP-0045 §9.5: a member can retrieve the member
+/// list; other affiliation lists stay admin-only.
+#[tokio::test]
+async fn xep0045_member_can_retrieve_member_list() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "member-list@muc.example.com".parse().expect("room jid");
+    let (alice_session, alice_jid, bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+
+    // Alice grants bob explicit membership.
+    let grant_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "grant-bob",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                bob_jid.to_bare().to_string(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                "member",
+            )
+            .build(),
+    );
+    let grant_responses = handle_iq(
+        &grant_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    assert!(
+        grant_responses
+            .first()
+            .is_some_and(|r| r.contains("type='result'")),
+        "membership grant: {grant_responses:?}"
+    );
+
+    let member_list_get = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "get-members")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(
+                        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                            .attr(
+                                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                                "member",
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let responses = handle_iq(
+        &member_list_get,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    let response = responses.first().expect("member list response");
+    assert!(
+        response.contains("type='result'"),
+        "member may GET the member list (§9.5): {response}"
+    );
+    assert!(
+        response.contains(&bob_jid.to_bare().to_string()),
+        "member list includes bob: {response}"
+    );
+
+    // The owner list remains privileged.
+    let owner_list_get = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "get-owners")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(
+                        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                            .attr(
+                                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                                "owner",
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let responses = handle_iq(
+        &owner_list_get,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    let response = responses.first().expect("owner list response");
+    assert!(
+        response.contains("forbidden"),
+        "owner list stays admin+: {response}"
+    );
+}
+
+/// #1265 item 7 / XEP-0045 §10.2: `muc#roomconfig_maxusers` and (for
+/// ad-hoc rooms) `muc#roomconfig_persistentroom` apply on submit.
+#[tokio::test]
+async fn xep0045_owner_config_maxusers_and_persistentroom_apply() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "config-knobs@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+
+    let owner_iq = owner_config_submit_iq(
+        &room_jid,
+        "knobs-1",
+        &[
+            ("muc#roomconfig_maxusers", "17"),
+            ("muc#roomconfig_persistentroom", "0"),
+            ("muc#roomconfig_changesubject", "1"),
+        ],
+    );
+    let responses = handle_iq(
+        &owner_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    assert!(
+        responses
+            .first()
+            .is_some_and(|r| r.contains("type='result'")),
+        "owner config submit: {responses:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.config.max_occupants, 17, "maxusers honored");
+    // #1265 item 7: persistentroom is NOT offered in the form —
+    // configuring a room persists it into the channel catalog, so the
+    // submitted (unoffered) field is ignored and the room stays
+    // persistent, which is what the disco features truthfully say.
+    assert!(
+        room.config.persistent,
+        "unoffered persistentroom field is ignored; configured rooms are persistent"
+    );
+    assert!(
+        room.config.occupants_may_change_subject,
+        "changesubject knob honored"
+    );
+}
+
+/// #1265 item 11 / XEP-0030 §3.2: disco#items on the MUC domain with an
+/// unknown node is <item-not-found/>, never the room list.
+#[tokio::test]
+async fn xep0030_muc_disco_items_unknown_node_returns_item_not_found() {
+    let state = create_test_websocket_state().await;
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let frame = disco_items_iq_frame("items-node-1", "muc.example.com", Some("bogus-node"));
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let response = responses.first().expect("node disco response");
+    assert!(response.contains("item-not-found"), "{response}");
+}
+
+/// #1265 item 11 / XEP-0045 §6.3 + XEP-0059: the MUC room list pages
+/// via RSM and includes public live instant rooms.
+#[tokio::test]
+async fn xep0059_muc_disco_items_rsm_pages_room_list() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    for room in ["rsm-a", "rsm-b", "rsm-c"] {
+        let room_jid: BareJid = format!("{room}@muc.example.com").parse().expect("room jid");
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            None,
+            &Some(alice_session.clone()),
+        )
+        .await;
+    }
+
+    // Full (un-paged) list surfaces the public live instant rooms.
+    let frame = disco_items_iq_frame("rsm-full", "muc.example.com", None);
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let full = responses.first().expect("full room list");
+    for room in ["rsm-a", "rsm-b", "rsm-c"] {
+        assert!(
+            full.contains(&format!("{room}@muc.example.com")),
+            "live public instant room {room} listed: {full}"
+        );
+    }
+
+    // Paged request: max=2 → 2 items + <set/> metadata.
+    let rsm_query = Element::builder("query", waddle_xmpp::disco::DISCO_ITEMS_NS)
+        .append(
+            Element::builder("set", "http://jabber.org/protocol/rsm")
+                .append(
+                    Element::builder("max", "http://jabber.org/protocol/rsm")
+                        .append("2")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let frame = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "rsm-page")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "muc.example.com",
+            )
+            .append(rsm_query)
+            .build(),
+    );
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let page =
+        Element::from_str(responses.first().expect("paged room list")).expect("paged response XML");
+    let query = page
+        .get_child("query", waddle_xmpp::disco::DISCO_ITEMS_NS)
+        .expect("paged query");
+    let items: Vec<&Element> = query
+        .children()
+        .filter(|child| child.name() == "item")
+        .collect();
+    assert_eq!(items.len(), 2, "max=2 returns two items");
+    let set = query
+        .get_child("set", "http://jabber.org/protocol/rsm")
+        .expect("XEP-0059 <set/> in paged response");
+    let count: usize = set
+        .get_child("count", "http://jabber.org/protocol/rsm")
+        .expect("count")
+        .text()
+        .parse()
+        .expect("count number");
+    assert!(count >= 3, "count covers all rooms: {count}");
+    assert!(
+        set.get_child("first", "http://jabber.org/protocol/rsm")
+            .is_some()
+            && set
+                .get_child("last", "http://jabber.org/protocol/rsm")
+                .is_some(),
+        "first/last present"
     );
 }

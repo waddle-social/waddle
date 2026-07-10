@@ -4225,3 +4225,65 @@ async fn sealed_room_reports_dormant_so_the_sweep_converges() {
          affiliations, so the next sweep re-confirms the seal"
     );
 }
+
+/// #1265 item 1 / XEP-0045 §7.2.8: a banned user joining a
+/// members-only room is refused as `Banned` (→ <forbidden/>), never as
+/// `MembersOnly` (→ <registration-required/>, which would invite the
+/// banned user to apply for membership). A plain non-member keeps the
+/// `MembersOnly` reason.
+#[tokio::test]
+async fn banned_join_denial_reason_is_banned_even_in_members_only_room() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let banned: BareJid = "mallory@example.com".parse().expect("bare jid");
+    actor
+        .ask(ChangeAffiliation {
+            jid: banned,
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban mallory");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: "mallory@example.com/res".parse().expect("full jid"),
+            nick: "mallory".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(RoomActorError::JoinForbidden {
+                reason: crate::muc::room_actor::JoinDenialReason::Banned
+            }))
+        ),
+        "ban outranks members-only in the denial reason, got {outcome:?}"
+    );
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: "stranger@example.com/res".parse().expect("full jid"),
+            nick: "stranger".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(RoomActorError::JoinForbidden {
+                reason: crate::muc::room_actor::JoinDenialReason::MembersOnly
+            }))
+        ),
+        "plain non-member keeps the MembersOnly reason, got {outcome:?}"
+    );
+}

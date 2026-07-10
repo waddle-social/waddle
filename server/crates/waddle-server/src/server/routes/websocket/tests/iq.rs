@@ -819,6 +819,20 @@ async fn handle_iq_disco_info_advertises_replies() {
     .await;
     let user_response = user_responses.first().expect("user disco response");
     assert!(user_response.contains("urn:xmpp:mam:2"));
+    // #1259 / XEP-0115 §5.4: the own-bare-JID response must be
+    // well-formed — previously `urn:xmpp:mam:2`(+#extended) appeared
+    // twice (explicit + via pep_features) and caps-verifying clients
+    // discarded the whole response.
+    let user_iq = Element::from_str(user_response).expect("user disco XML");
+    let user_query = user_iq
+        .get_child("query", waddle_xmpp::disco::DISCO_INFO_NS)
+        .expect("user disco query");
+    let parsed = waddle_xmpp::disco::info::parse_disco_info_response(user_query)
+        .expect("parseable user disco#info");
+    assert!(
+        !parsed.ill_formed,
+        "own-bare-JID disco#info must have no duplicate features/identities"
+    );
     assert!(user_response.contains("urn:xmpp:fulltext:0"));
 }
 

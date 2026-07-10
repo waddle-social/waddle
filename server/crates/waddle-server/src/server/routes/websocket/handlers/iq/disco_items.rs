@@ -624,8 +624,17 @@ async fn live_public_instant_room_items(
         };
     let mut items = Vec::new();
     for room_jid in room_jids {
-        if room_jid.domain().as_str() != muc_domain
-            || waddle_xmpp::parse_managed_room_jid(&room_jid).is_some()
+        if room_jid.domain().as_str() != muc_domain {
+            continue;
+        }
+        // Channel-backed rooms (a channels-catalog row exists) are
+        // already listed from the database; only true instant rooms
+        // are added here.
+        if get_managed_channel_for_room(state, &room_jid)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
         {
             continue;
         }

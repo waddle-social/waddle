@@ -148,23 +148,17 @@ pub(super) async fn apply_muc_owner_config(
                     config.max_occupants = max_occupants;
                 }
             }
-            // #1265 item 7: honor the offered persistentroom knob for
-            // ad-hoc rooms instead of force-overwriting it (the
-            // channel-backed override below keeps managed rooms
-            // persistent by construction).
-            if let Some(persistent) = data_form_bool(form, "muc#roomconfig_persistentroom") {
-                config.persistent = persistent;
-            }
         }
     }
 
+    // #1265 item 7: `muc#roomconfig_persistentroom` is not offered in
+    // the config form — submitting this very form persists the room
+    // into the channel catalog below, so every configured room is
+    // persistent by construction. A submitted value for the unoffered
+    // field is ignored.
+    config.persistent = true;
+
     let channel_id = waddle_xmpp::parse_managed_room_jid(room_jid);
-    // Channel-backed rooms are persistent by construction — the channel
-    // row is the persistence — so the submitted knob cannot turn one
-    // into an instant room.
-    if channel_id.is_some() {
-        config.persistent = true;
-    }
     let existing_channel_type = managed_channel_type_for_room(state, room_jid).await?;
     if let Some(channel_type) = existing_channel_type {
         project_channel_type_to_config(&mut config, channel_type);

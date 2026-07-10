@@ -323,9 +323,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         req.node,
         Some(NODE_COMMANDS) | Some(waddle_xmpp::admin::NS_GROUP_DM_RENAME)
     ) {
-        let Some(room_jid) = bare_group_dm_room_target(req.target_to, req.muc_domain) else {
-            return None;
-        };
+        let room_jid = bare_group_dm_room_target(req.target_to, req.muc_domain)?;
         match classify_room_command_target(state, &room_jid, req.requester).await {
             RoomCommandTarget::GroupDm => {}
             RoomCommandTarget::NotGroupDm
