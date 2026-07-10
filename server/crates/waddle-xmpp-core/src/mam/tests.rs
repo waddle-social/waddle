@@ -978,3 +978,72 @@ fn rejects_too_many_stanza_ids() {
     let err = parse_mam_query(&iq).expect_err("must reject");
     assert!(matches!(err, CoreError::BadRequest(_)));
 }
+
+/// #1266 item 8: fallback reconstructions (no `stanza_xml`) of 1:1
+/// rows must carry the archive owner's XEP-0359 `<stanza-id/>`, not
+/// only groupchat rows. `archived.stanza_id.by` is reconstructed from
+/// the archive JID at decode time, so it names the archiving entity.
+#[test]
+fn xep_0359_legacy_1to1_replay_emits_recipient_stanza_id() {
+    let archived = ArchivedMessage {
+        id: "row-1".to_string(),
+        body: Some("hi".to_string()),
+        stanza_id: Some(StanzaId::new(
+            "row-1",
+            "bob@example.com".parse::<Jid>().expect("valid jid"),
+        )),
+        message_type: MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
+    };
+
+    let inner = archived_inner_message(&archived);
+    let sid = inner
+        .children()
+        .find(|c| c.name() == "stanza-id" && c.ns() == STANZA_ID_NS)
+        .expect("1:1 fallback reconstruction must include <stanza-id/>");
+    assert_eq!(sid.attr("id"), Some("row-1"));
+    assert_eq!(sid.attr("by"), Some("bob@example.com"));
+}
+
+/// Same rule on the rich (typed) fallback path.
+#[test]
+fn xep_0359_typed_1to1_replay_emits_recipient_stanza_id() {
+    let archived = ArchivedMessage {
+        id: "row-2".to_string(),
+        body: Some("hi".to_string()),
+        stanza_id: Some(StanzaId::new(
+            "row-2",
+            "bob@example.com".parse::<Jid>().expect("valid jid"),
+        )),
+        message_type: MessageType::Chat,
+        rich: Some(ArchivedRichMessage::default()),
+        ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
+    };
+
+    let inner = archived_inner_message(&archived);
+    let sid = inner
+        .children()
+        .find(|c| c.name() == "stanza-id" && c.ns() == STANZA_ID_NS)
+        .expect("typed fallback reconstruction must include <stanza-id/>");
+    assert_eq!(sid.attr("id"), Some("row-2"));
+    assert_eq!(sid.attr("by"), Some("bob@example.com"));
+}
+
+/// A 1:1 fallback row without a decoded stanza-id emits none (nothing
+/// to fabricate), and groupchat rows keep the room-stamped shape.
+#[test]
+fn xep_0359_fallback_replay_without_stanza_id_emits_none() {
+    let archived = ArchivedMessage {
+        id: "row-3".to_string(),
+        body: Some("hi".to_string()),
+        message_type: MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
+    };
+    let inner = archived_inner_message(&archived);
+    assert!(
+        !inner
+            .children()
+            .any(|c| c.name() == "stanza-id" && c.ns() == STANZA_ID_NS),
+        "no stanza-id row data → no fabricated stanza-id"
+    );
+}

@@ -204,7 +204,9 @@ use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 pub(crate) use route_to_connection::{fallback_reply_for_undeliverable_iq, route_to_connection};
 pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
-use routing::{run_fanout_recipient_pass, run_headless_recipient_pass, FanoutPassResult};
+use routing::{
+    deliver_to_detached, run_fanout_recipient_pass, run_headless_recipient_pass, FanoutPassResult,
+};
 
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;

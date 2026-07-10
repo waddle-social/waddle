@@ -37,7 +37,6 @@ pub mod inbox;
 pub mod jingle;
 pub mod offline_delivery;
 pub mod ping;
-pub mod receipts;
 pub mod rich_target_validation;
 pub mod route;
 pub mod session;
@@ -118,9 +117,12 @@ pub fn register_call_handlers(
 /// 9. [`route::RouteHandler`] — final stage for the content stanza:
 ///    route 1:1 to the destination connection, dispatch groupchat to
 ///    the room chain, or write to the local wire on the recipient pass.
-/// 10. [`receipts::ReceiptsHandler`] (XEP-0184) — after the content
-///     stanza is queued for delivery, emit a separate receipt route for
-///     eligible direct messages that requested one.
+///
+/// XEP-0184 delivery receipts are deliberately NOT generated here: the
+/// XEP assigns ack generation to the receiving *client*, so the server
+/// only routes `<request/>` content messages and client-generated
+/// `<received/>` acks verbatim (#1247 removed the server-side
+/// fabricator that used to run after [`route::RouteHandler`]).
 pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(blocking_filter::BlockingFilterHandler));
     dispatcher.register_message(Arc::new(framework_envelope::FrameworkEnvelopeGuardHandler));
@@ -134,7 +136,6 @@ pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(carbons_message::CarbonsMessageHandler));
     dispatcher.register_message(Arc::new(inbox::InboxHandler));
     dispatcher.register_message(Arc::new(route::RouteHandler));
-    dispatcher.register_message(Arc::new(receipts::ReceiptsHandler));
 }
 
 /// Build an empty `type="result"` IQ with `from`/`to` swapped relative to

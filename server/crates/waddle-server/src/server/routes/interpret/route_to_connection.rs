@@ -55,13 +55,31 @@ async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<ji
         return routable;
     }
     // Tier 2: no presence-available (non-negative) resource — fall back to
-    // every connected resource (matching the legacy `get_resources_for_user`
-    // behaviour). This fires both for clients that bind but defer
-    // `<presence/>` (the intended case) and, as a deliberate legacy
-    // divergence from strict RFC 6121 §8.5.2.1.1, for a user whose only
-    // resources advertise negative priority — those are delivered rather than
-    // treated as offline, preserving pre-cutover behaviour.
-    waddle_xmpp::registry::get_resources_for_user(user_registry, bare).await
+    // the connected resources that have NOT advertised a negative priority.
+    // This keeps delivering to clients that bind but defer `<presence/>`
+    // (the intended legacy case: no presence yet, so no priority to honor)
+    // while conforming to RFC 6121 §8.5.2.1.1's "MUST NOT deliver the
+    // stanza to available resources with a negative priority" — a resource
+    // that explicitly asked to be skipped for bare-JID delivery stays
+    // skipped, and a user whose only resources are negative-priority falls
+    // through to the offline/headless path (§8.5.2.1.1 "SHOULD store
+    // offline"), closing the deliberate pre-cutover divergence (#1266
+    // item 4).
+    let all_connected = waddle_xmpp::registry::get_resources_for_user(user_registry, bare).await;
+    if all_connected.is_empty() {
+        return all_connected;
+    }
+    let negative: std::collections::HashSet<jid::FullJid> =
+        waddle_xmpp::registry::available_resources_for_user(user_registry, bare)
+            .await
+            .into_iter()
+            .filter(|(_, priority)| *priority < 0)
+            .map(|(full, _)| full)
+            .collect();
+    all_connected
+        .into_iter()
+        .filter(|full| !negative.contains(full))
+        .collect()
 }
 
 pub(crate) async fn route_to_connection(
@@ -162,331 +180,606 @@ pub(crate) async fn route_to_connection(
         }
 
         match jid.clone().try_into_full() {
-            Ok(full) => {
-                let delivery =
-                    match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await {
-                        Some(outcome) => outcome,
-                        None => {
-                            deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await
-                        }
-                    };
-                if delivery == FullJidDeliveryOutcome::Unavailable {
-                    fallback_reply_for_undeliverable_iq(stanza.as_ref())
-                        .into_iter()
-                        .collect()
-                } else {
-                    Vec::new()
+            Ok(full) => route_to_full_jid(deps, full, stanza, recursion_depth).await,
+            Err(bare) => route_to_bare_jid(deps, bare, stanza, recursion_depth).await,
+        }
+    }
+}
+
+/// RFC 6121 §8.5.3 full-JID delivery.
+///
+/// DM messages (`type='chat'`/`'normal'`) get the conformant
+/// no-matching-resource treatment (§8.5.3.2.1) via
+/// [`route_dm_to_full_jid`]; every other stanza keeps the legacy
+/// single-resource delivery (live channel → detached XEP-0198 buffer →
+/// drop, with a synthesized reply for undeliverable request IQs,
+/// #1130). MUC reflections (type `groupchat` addressed to occupant
+/// full JIDs) deliberately stay on the legacy path: falling back to
+/// bare-JID semantics would leak room traffic to resources that never
+/// joined the room.
+async fn route_to_full_jid(
+    deps: &Deps<'_>,
+    full: jid::FullJid,
+    stanza: Box<Stanza>,
+    recursion_depth: u8,
+) -> Vec<Stanza> {
+    let is_dm_message = matches!(
+        stanza.as_ref(),
+        Stanza::Message(message)
+            if matches!(
+                message.type_,
+                xmpp_parsers::message::MessageType::Chat
+                    | xmpp_parsers::message::MessageType::Normal,
+            )
+    );
+    if is_dm_message {
+        return route_dm_to_full_jid(deps, full, stanza, recursion_depth).await;
+    }
+    let delivery = match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await {
+        Some(outcome) => outcome,
+        None => deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await,
+    };
+    if delivery == FullJidDeliveryOutcome::Unavailable {
+        fallback_reply_for_undeliverable_iq(stanza.as_ref())
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// RFC 6121 §8.5.3 for DM messages addressed to a full JID.
+///
+/// 1. **Live resource** (locally or on a remote cluster node): deliver
+///    as `PeerStanza` — the destination connection runs the recipient
+///    pass exactly as before.
+/// 2. **Detached XEP-0198 resource** (#1245): run the shared fan-out
+///    recipient pass (the #1106 machinery) targeted at just this
+///    resource, so the queued replay copy carries the recipient
+///    `<stanza-id/>` (XEP-0359 §5), the recipient archive captures the
+///    message (XEP-0313 §5.1), received-carbons reach the recipient's
+///    other live resources (XEP-0280 §6.1), and the inbox projection
+///    updates — then queue the PROCESSED stanza into the replay
+///    buffer. This replaces the legacy pre-recipient-pass verbatim
+///    queueing for full-JID DMs.
+/// 3. **No matching resource** (#1244, RFC 6121 §8.5.3.2.1): treat the
+///    stanza as if addressed to the bare JID — deliver to the user's
+///    other available resources, or run the offline/headless path
+///    (§8.5.2 / §8.5.1) — instead of silently dropping it.
+async fn route_dm_to_full_jid(
+    deps: &Deps<'_>,
+    full: jid::FullJid,
+    stanza: Box<Stanza>,
+    recursion_depth: u8,
+) -> Vec<Stanza> {
+    // Cluster relay first (resource owned by a remote node): any
+    // outcome other than a confirmed `Unavailable` is terminal here —
+    // `Delivered`/`QueuedDetached`/`MaybeCommitted` are handled (or
+    // possibly handled, which must suppress local fallback to avoid
+    // duplicates), and `Dropped` is the deliberate full-channel /
+    // ambiguous-failure drop the legacy path also performed.
+    let relay_outcome = deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await;
+    match relay_outcome {
+        Some(FullJidDeliveryOutcome::Unavailable) => {
+            // Confirmed offline on the owning node → §8.5.3.2.1
+            // fallback below.
+        }
+        Some(_) => return Vec::new(),
+        None => {
+            // Registered-remote-resource path (clustering): same
+            // outcome contract as the ordered relay.
+            match deliver_registered_remote_resource(
+                deps,
+                &full,
+                stanza.as_ref(),
+                waddle_xmpp::registry::DeliveryKind::PeerStanza,
+            )
+            .await
+            {
+                Some(FullJidDeliveryOutcome::Unavailable) => {}
+                Some(_) => return Vec::new(),
+                None => {
+                    // Local live-channel attempt with the detached
+                    // fallback SUPPRESSED (`sm_session_registry` =
+                    // `None`): a detached hit must go through the
+                    // recipient-pass path below (#1245), never queue
+                    // the raw pre-pass stanza. `Delivered` is done;
+                    // `Dropped` (full channel / ambiguous ask
+                    // failure) drops exactly like the legacy path;
+                    // only a confirmed `Unavailable` (no live
+                    // channel) falls through.
+                    let live_outcome =
+                        deliver_peer_to_full(deps.user_registry, None, &full, stanza.as_ref())
+                            .await;
+                    if live_outcome != FullJidDeliveryOutcome::Unavailable {
+                        return Vec::new();
+                    }
                 }
             }
-            Err(bare) => {
-                if let Some(delivery) =
-                    deliver_bare_jid_via_ordered_relay(deps, &bare, stanza.as_ref()).await
-                {
-                    return if delivery == FullJidDeliveryOutcome::Unavailable {
-                        fallback_reply_for_undeliverable_iq(stanza.as_ref())
-                            .into_iter()
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                }
+        }
+    }
 
-                // Enumerate XEP-0198 detached-but-resumable
-                // resources for the bare JID. The legacy
-                // `handle_message` direct-route path queued
-                // bare-JID DMs onto detached resources via
-                // `record_stanza_for_detached_bound_resource`
-                // so a recipient mid-resume didn't lose
-                // messages; we preserve that here.
-                let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry {
-                    Some(sm) => {
-                        sm.detached_resources_for_user(&bare)
-                            .await
-                            .unwrap_or_else(|error| {
-                                warn!(
-                                    bare_jid = %bare,
-                                    %error,
-                                    "RouteToConnection: failed to enumerate \
-                                     detached resources for bare-JID delivery"
-                                );
-                                Vec::new()
-                            })
-                    }
-                    None => Vec::new(),
-                };
-                // RFC 6121 §8.5.2.1.1 prefers presence-available resources for
-                // bare-JID delivery; falls back to any connected resource when
-                // none have emitted `<presence/>` yet (many clients defer
-                // presence until after bind, and the legacy direct-route path
-                // delivered without consulting presence).
-                //
-                // ADR-0017 Phase 3 Slice 9: the candidate set + RFC priority
-                // ranking are read from the actor-authoritative `UserActor`
-                // alone (tier-1 `SelectRoutableResources`, then tier-2
-                // `GetResources`) — the transitional Slice-1 DashMap-liveness
-                // intersection is retired. A stale extra self-heals via
-                // `TrySendPeer`/`TrySendDirect` → `DroppedClosed` eviction at
-                // delivery time instead of being filtered out here; see
-                // `select_bare_jid_live_targets`'s doc comment. The headless
-                // -persistence gate below covers the residual case where
-                // self-healing alone would otherwise lose the message: every
-                // selected target turning out stale.
-                let live_targets = select_bare_jid_live_targets(deps, &bare).await;
-                if live_targets.is_empty() && detached_targets.is_empty() {
-                    if bare.domain().as_str() != deps.local_domain {
-                        debug!(
-                            bare_jid = %bare,
-                            local_domain = %deps.local_domain,
-                            "RouteToConnection: cross-domain bare JID with no \
-                             local resources; dropping (s2s out of scope)"
-                        );
-                    } else {
-                        run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1)
-                            .await;
-                    }
+    let bare = full.to_bare();
+
+    // #1245: the addressed resource is detached-but-resumable — run
+    // the shared recipient pass targeted at exactly this resource and
+    // queue its processed output for XEP-0198 replay.
+    let is_detached = match deps.sm_session_registry {
+        Some(sm) => sm
+            .detached_resources_for_user(&bare)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(
+                    jid = %full,
+                    %error,
+                    "RouteToConnection: failed to enumerate detached \
+                     resources for full-JID DM delivery"
+                );
+                Vec::new()
+            })
+            .contains(&full),
+        None => false,
+    };
+    if is_detached {
+        match run_fanout_recipient_pass(
+            deps,
+            &bare,
+            vec![full.clone()],
+            (*stanza).clone(),
+            recursion_depth + 1,
+        )
+        .await
+        {
+            FanoutPassResult::Ran {
+                processed,
+                side_routes,
+            } => {
+                if let Some(processed) = processed {
+                    queue_processed_for_detached(
+                        deps.sm_session_registry,
+                        vec![full.clone()],
+                        &std::collections::HashSet::new(),
+                        &processed,
+                    )
+                    .await;
                 } else {
-                    // Build a set from the cached `live_targets`
-                    // before iterating so we can both consume
-                    // the targets for delivery and re-check
-                    // membership when filtering the detached
-                    // list — avoids re-querying the registry
-                    // per detached resource (Copilot review on
-                    // PR #276).
-                    let live_set: std::collections::HashSet<jid::FullJid> =
-                        live_targets.iter().cloned().collect();
-
-                    // #1106: a bare-JID DM with live targets runs the
-                    // recipient pass ONCE (shared, headless-style) and
-                    // fans the single processed stanza out to every
-                    // same-priority resource — instead of queueing a
-                    // `PeerStanza` per resource, which ran the full
-                    // recipient pass N times (N archive rows with
-                    // divergent XEP-0359 stanza-ids, N inbox unread
-                    // increments, and cross-resource received-carbons
-                    // that XEP-0280 §6.3 forbids).
-                    let is_dm_message = matches!(
-                        stanza.as_ref(),
-                        Stanza::Message(message)
-                            if matches!(
-                                message.type_,
-                                xmpp_parsers::message::MessageType::Chat
-                                    | xmpp_parsers::message::MessageType::Normal,
-                            )
+                    debug!(
+                        jid = %full,
+                        "RouteToConnection: shared recipient pass produced no \
+                         wire copy for detached full-JID DM (blocked or \
+                         halted); dropping delivery"
                     );
-                    if is_dm_message && !live_targets.is_empty() {
-                        // The carbon exclusion set is every client the
-                        // original stanza is addressed to (XEP-0280 §6.3):
-                        // the live delivery set PLUS the detached XEP-0198
-                        // resources whose replay buffers get the processed
-                        // original queued below — a detached sibling must
-                        // not ALSO find a received-carbon in its buffer on
-                        // resume.
-                        let mut delivery_fanout = live_targets.clone();
-                        delivery_fanout.extend(
-                            detached_targets
-                                .iter()
-                                .filter(|full| !live_set.contains(*full))
-                                .cloned(),
-                        );
-                        match run_fanout_recipient_pass(
-                            deps,
-                            &bare,
-                            delivery_fanout,
-                            (*stanza).clone(),
-                            recursion_depth + 1,
-                        )
-                        .await
-                        {
-                            FanoutPassResult::Ran {
-                                processed,
-                                side_routes,
-                            } => {
-                                if let Some(processed) = processed {
-                                    // Wire delivery of the ONE processed stanza
-                                    // per resource as a `DeliveryKind::DirectFrame`
-                                    // — the destination's main loop keeps XEP-0198
-                                    // outbound accounting (`record_outbound`) but
-                                    // does NOT re-run the recipient pass. The
-                                    // stanza's `to` stays bare (RFC 6121
-                                    // §8.5.2.1.1). ADR-0017 Slice 2: this now goes
-                                    // through the authoritative actor
-                                    // (`TrySendDirect`, non-blocking) via
-                                    // `deliver_direct_to_full`.
-                                    for full in &live_targets {
-                                        deliver_direct_to_full_with_registered_remote(
-                                            deps, full, &processed,
-                                        )
-                                        .await;
-                                    }
-                                    // Detached XEP-0198 targets get the
-                                    // PROCESSED stanza too, so resume
-                                    // replay carries the recipient
-                                    // <stanza-id/> (closes the
-                                    // stanza-id-parity gap documented on
-                                    // the legacy path).
-                                    queue_processed_for_detached(
-                                        deps.sm_session_registry,
-                                        detached_targets,
-                                        &live_set,
-                                        &processed,
-                                    )
-                                    .await;
-                                } else {
-                                    debug!(
-                                        bare_jid = %bare,
-                                        "RouteToConnection: shared recipient pass \
-                                         produced no wire copy (blocked or halted); \
-                                         dropping delivery"
-                                    );
-                                }
-                                // Handler-generated side stanzas (XEP-0184
-                                // receipt back to the sender) route at the
-                                // OUTER depth — the old per-connection
-                                // pass routed them from the recipient's
-                                // own interpret loop at depth 0.
-                                // Receipts always target the sender's
-                                // full JID, so this cannot re-enter the
-                                // bare-JID fan-out.
-                                if !side_routes.is_empty() {
-                                    let side_events: Vec<OutboundEvent> = side_routes
-                                        .into_iter()
-                                        .map(|(jid, stanza)| OutboundEvent::RouteToConnection {
-                                            jid,
-                                            stanza,
-                                        })
-                                        .collect();
-                                    let _ = Box::pin(interpret_with_depth(
-                                        side_events,
-                                        deps,
-                                        recursion_depth,
-                                    ))
-                                    .await;
-                                }
-                                return Vec::new();
-                            }
-                            FanoutPassResult::Unavailable => {
-                                // Shared pass unavailable (no dispatcher
-                                // in test fixtures, or blocklist load
-                                // failed): fall through to the legacy
-                                // per-resource PeerStanza path below —
-                                // each recipient connection's bind-time
-                                // blocklist snapshot keeps XEP-0191
-                                // enforcement.
-                            }
-                        }
-                    }
-                    // ADR-0017 Phase 3 Slice 9 headless-persistence gate: with
-                    // the Slice-1 DashMap-liveness filter retired, a target
-                    // selected as "live" can still turn out stale (self-heals
-                    // via `DroppedClosed` eviction — see
-                    // `select_bare_jid_live_targets`'s doc comment). Track
-                    // whether ANYTHING in this delivery set actually landed
-                    // (a live channel or the detached replay buffer); if
-                    // nothing did, the message would otherwise be silently
-                    // lost, so fall back to the same offline/headless
-                    // recipient pass the "both empty at selection" branch
-                    // above already runs.
-                    let mut any_landed = false;
-                    for full in live_targets {
-                        let disposition =
-                            deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
-                        if disposition.suppresses_fallback() {
-                            any_landed = true;
-                        }
-                    }
-                    if let Some(sm) = deps.sm_session_registry {
-                        for full in detached_targets {
-                            // Skip if this resource was just
-                            // delivered live (race between
-                            // enumeration and live-resource
-                            // selection).
-                            if live_set.contains(&full) {
-                                continue;
-                            }
-                            // Known limitation: queues the
-                            // pre-recipient-pass stanza into
-                            // the detached XEP-0198 replay
-                            // buffer. When the resource
-                            // resumes, replay sends the
-                            // stored XML verbatim WITHOUT
-                            // running the recipient-pass
-                            // chain, so the replayed message
-                            // is missing the recipient-side
-                            // `<stanza-id by='recipient/>`
-                            // (XEP-0359 §5) and recipient-
-                            // side filtering / archive /
-                            // inbox effects don't fire.
-                            // This matches LEGACY behaviour
-                            // (which had no recipient pass
-                            // at all) and is therefore not a
-                            // regression. Closing the gap
-                            // properly requires running the
-                            // headless recipient pass per
-                            // detached target and queueing
-                            // its `SendStanza` output —
-                            // tracked as a follow-up to
-                            // #229 (Copilot review on
-                            // PR #276).
-                            let stanza_typed = (*stanza).clone();
-                            match sm
-                                .record_stanza_for_detached_bound_resource(
-                                    &full,
-                                    &stanza_typed,
-                                    chrono::Utc::now(),
+                }
+                route_side_stanzas(deps, side_routes, recursion_depth).await;
+                return Vec::new();
+            }
+            FanoutPassResult::Unavailable => {
+                // Shared pass unavailable (no dispatcher in test
+                // fixtures, or blocklist load failed): fall back to
+                // the legacy verbatim queueing so the message is not
+                // lost while resumable.
+                deliver_to_detached(deps.sm_session_registry, &full, stanza.as_ref()).await;
+                return Vec::new();
+            }
+        }
+    }
+
+    // #1244 — RFC 6121 §8.5.3.2.1: no connected resource matches the
+    // full JID, so process the stanza as if it were addressed to the
+    // bare JID (§8.5.2 resource selection, offline storage via the
+    // headless pass, or the §8.5.1 nonexistent-account bounce).
+    debug!(
+        jid = %full,
+        "RouteToConnection: full-JID DM has no matching live or detached \
+         resource; falling back to bare-JID delivery per RFC 6121 \
+         §8.5.3.2.1"
+    );
+    route_to_bare_jid(deps, bare, stanza, recursion_depth).await
+}
+
+/// Handler-generated side stanzas (e.g. a XEP-0191 bounce back to the
+/// sender) from a shared recipient pass route at the OUTER depth — the
+/// old per-connection pass routed them from the recipient's own
+/// interpret loop at depth 0. They always target the peer's JID, so
+/// they cannot re-enter the fan-out that produced them.
+async fn route_side_stanzas(
+    deps: &Deps<'_>,
+    side_routes: Vec<(Jid, Box<Stanza>)>,
+    recursion_depth: u8,
+) {
+    if side_routes.is_empty() {
+        return;
+    }
+    let side_events: Vec<OutboundEvent> = side_routes
+        .into_iter()
+        .map(|(jid, stanza)| OutboundEvent::RouteToConnection { jid, stanza })
+        .collect();
+    let _ = Box::pin(interpret_with_depth(side_events, deps, recursion_depth)).await;
+}
+
+/// RFC 6121 §8.5.2 bare-JID delivery (plus the §8.5.1 no-such-account
+/// bounce and the offline/headless recipient pass).
+async fn route_to_bare_jid(
+    deps: &Deps<'_>,
+    bare: BareJid,
+    stanza: Box<Stanza>,
+    recursion_depth: u8,
+) -> Vec<Stanza> {
+    {
+        if let Some(delivery) =
+            deliver_bare_jid_via_ordered_relay(deps, &bare, stanza.as_ref()).await
+        {
+            return if delivery == FullJidDeliveryOutcome::Unavailable {
+                fallback_reply_for_undeliverable_iq(stanza.as_ref())
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        }
+
+        // Enumerate XEP-0198 detached-but-resumable
+        // resources for the bare JID. The legacy
+        // `handle_message` direct-route path queued
+        // bare-JID DMs onto detached resources via
+        // `record_stanza_for_detached_bound_resource`
+        // so a recipient mid-resume didn't lose
+        // messages; we preserve that here.
+        let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry {
+            Some(sm) => sm
+                .detached_resources_for_user(&bare)
+                .await
+                .unwrap_or_else(|error| {
+                    warn!(
+                        bare_jid = %bare,
+                        %error,
+                        "RouteToConnection: failed to enumerate \
+                         detached resources for bare-JID delivery"
+                    );
+                    Vec::new()
+                }),
+            None => Vec::new(),
+        };
+        // RFC 6121 §8.5.2.1.1 prefers presence-available resources for
+        // bare-JID delivery; falls back to any connected resource when
+        // none have emitted `<presence/>` yet (many clients defer
+        // presence until after bind, and the legacy direct-route path
+        // delivered without consulting presence).
+        //
+        // ADR-0017 Phase 3 Slice 9: the candidate set + RFC priority
+        // ranking are read from the actor-authoritative `UserActor`
+        // alone (tier-1 `SelectRoutableResources`, then tier-2
+        // `GetResources`) — the transitional Slice-1 DashMap-liveness
+        // intersection is retired. A stale extra self-heals via
+        // `TrySendPeer`/`TrySendDirect` → `DroppedClosed` eviction at
+        // delivery time instead of being filtered out here; see
+        // `select_bare_jid_live_targets`'s doc comment. The headless
+        // -persistence gate below covers the residual case where
+        // self-healing alone would otherwise lose the message: every
+        // selected target turning out stale.
+        let live_targets = select_bare_jid_live_targets(deps, &bare).await;
+        if live_targets.is_empty() && detached_targets.is_empty() {
+            if bare.domain().as_str() != deps.local_domain {
+                debug!(
+                    bare_jid = %bare,
+                    local_domain = %deps.local_domain,
+                    "RouteToConnection: cross-domain bare JID with no \
+                     local resources; dropping (s2s out of scope)"
+                );
+            } else if !local_account_exists_for(deps, &bare).await {
+                // #1246 — RFC 6121 §8.5.1: the domainpart
+                // matches but no local account exists. A
+                // message MUST be bounced with
+                // <service-unavailable/> (never persisted —
+                // no MAM/pending/inbox rows for arbitrary
+                // never-to-exist JIDs), a request IQ gets the
+                // same typed error, and presence is silently
+                // ignored.
+                debug!(
+                    bare_jid = %bare,
+                    "RouteToConnection: no local account for bare JID; \
+                     bouncing with service-unavailable instead of \
+                     persisting (RFC 6121 §8.5.1)"
+                );
+                return bounce_for_nonexistent_account(stanza.as_ref());
+            } else {
+                run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1).await;
+            }
+        } else {
+            // Build a set from the cached `live_targets`
+            // before iterating so we can both consume
+            // the targets for delivery and re-check
+            // membership when filtering the detached
+            // list — avoids re-querying the registry
+            // per detached resource (Copilot review on
+            // PR #276).
+            let live_set: std::collections::HashSet<jid::FullJid> =
+                live_targets.iter().cloned().collect();
+
+            // #1106: a bare-JID DM with live targets runs the
+            // recipient pass ONCE (shared, headless-style) and
+            // fans the single processed stanza out to every
+            // same-priority resource — instead of queueing a
+            // `PeerStanza` per resource, which ran the full
+            // recipient pass N times (N archive rows with
+            // divergent XEP-0359 stanza-ids, N inbox unread
+            // increments, and cross-resource received-carbons
+            // that XEP-0280 §6.3 forbids).
+            let is_dm_message = matches!(
+                stanza.as_ref(),
+                Stanza::Message(message)
+                    if matches!(
+                        message.type_,
+                        xmpp_parsers::message::MessageType::Chat
+                            | xmpp_parsers::message::MessageType::Normal,
+                    )
+            );
+            if is_dm_message && !live_targets.is_empty() {
+                // The carbon exclusion set is every client the
+                // original stanza is addressed to (XEP-0280 §6.3):
+                // the live delivery set PLUS the detached XEP-0198
+                // resources whose replay buffers get the processed
+                // original queued below — a detached sibling must
+                // not ALSO find a received-carbon in its buffer on
+                // resume.
+                let mut delivery_fanout = live_targets.clone();
+                delivery_fanout.extend(
+                    detached_targets
+                        .iter()
+                        .filter(|full| !live_set.contains(*full))
+                        .cloned(),
+                );
+                match run_fanout_recipient_pass(
+                    deps,
+                    &bare,
+                    delivery_fanout,
+                    (*stanza).clone(),
+                    recursion_depth + 1,
+                )
+                .await
+                {
+                    FanoutPassResult::Ran {
+                        processed,
+                        side_routes,
+                    } => {
+                        if let Some(processed) = processed {
+                            // Wire delivery of the ONE processed stanza
+                            // per resource as a `DeliveryKind::DirectFrame`
+                            // — the destination's main loop keeps XEP-0198
+                            // outbound accounting (`record_outbound`) but
+                            // does NOT re-run the recipient pass. The
+                            // stanza's `to` stays bare (RFC 6121
+                            // §8.5.2.1.1). ADR-0017 Slice 2: this now goes
+                            // through the authoritative actor
+                            // (`TrySendDirect`, non-blocking) via
+                            // `deliver_direct_to_full`.
+                            for full in &live_targets {
+                                deliver_direct_to_full_with_registered_remote(
+                                    deps, full, &processed,
                                 )
-                                .await
-                            {
-                                Ok(true) => {
-                                    any_landed = true;
-                                    debug!(
-                                        jid = %full,
-                                        "RouteToConnection: bare-JID stanza queued \
-                                         for detached XEP-0198 replay"
-                                    );
-                                }
-                                Ok(false) => {
-                                    debug!(
-                                        jid = %full,
-                                        "RouteToConnection: detached session expired \
-                                         between enumeration and queue; dropping"
-                                    );
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        jid = %full,
-                                        %error,
-                                        "RouteToConnection: failed to record bare-JID \
-                                         stanza for detached resource"
-                                    );
-                                }
+                                .await;
                             }
-                        }
-                    }
-                    if !any_landed {
-                        if bare.domain().as_str() != deps.local_domain {
-                            debug!(
-                                bare_jid = %bare,
-                                local_domain = %deps.local_domain,
-                                "RouteToConnection: cross-domain bare JID; every \
-                                 selected target turned out stale and none is \
-                                 local, dropping (s2s out of scope)"
-                            );
+                            // Detached XEP-0198 targets get the
+                            // PROCESSED stanza too, so resume
+                            // replay carries the recipient
+                            // <stanza-id/> (closes the
+                            // stanza-id-parity gap documented on
+                            // the legacy path).
+                            queue_processed_for_detached(
+                                deps.sm_session_registry,
+                                detached_targets,
+                                &live_set,
+                                &processed,
+                            )
+                            .await;
                         } else {
                             debug!(
                                 bare_jid = %bare,
-                                "RouteToConnection: every selected/detached target \
-                                 turned out stale (self-healed via DroppedClosed \
-                                 eviction); running the headless recipient pass so \
-                                 the message is not silently lost"
+                                "RouteToConnection: shared recipient pass \
+                                 produced no wire copy (blocked or halted); \
+                                 dropping delivery"
                             );
-                            run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1)
-                                .await;
+                        }
+                        // Handler-generated side stanzas (XEP-0184
+                        // receipt back to the sender) route at the
+                        // OUTER depth — the old per-connection
+                        // pass routed them from the recipient's
+                        // own interpret loop at depth 0.
+                        // Receipts always target the sender's
+                        // full JID, so this cannot re-enter the
+                        // bare-JID fan-out.
+                        route_side_stanzas(deps, side_routes, recursion_depth).await;
+                        return Vec::new();
+                    }
+                    FanoutPassResult::Unavailable => {
+                        // Shared pass unavailable (no dispatcher
+                        // in test fixtures, or blocklist load
+                        // failed): fall through to the legacy
+                        // per-resource PeerStanza path below —
+                        // each recipient connection's bind-time
+                        // blocklist snapshot keeps XEP-0191
+                        // enforcement.
+                    }
+                }
+            }
+            // ADR-0017 Phase 3 Slice 9 headless-persistence gate: with
+            // the Slice-1 DashMap-liveness filter retired, a target
+            // selected as "live" can still turn out stale (self-heals
+            // via `DroppedClosed` eviction — see
+            // `select_bare_jid_live_targets`'s doc comment). Track
+            // whether ANYTHING in this delivery set actually landed
+            // (a live channel or the detached replay buffer); if
+            // nothing did, the message would otherwise be silently
+            // lost, so fall back to the same offline/headless
+            // recipient pass the "both empty at selection" branch
+            // above already runs.
+            let mut any_landed = false;
+            for full in live_targets {
+                let disposition =
+                    deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
+                if disposition.suppresses_fallback() {
+                    any_landed = true;
+                }
+            }
+            if let Some(sm) = deps.sm_session_registry {
+                for full in detached_targets {
+                    // Skip if this resource was just
+                    // delivered live (race between
+                    // enumeration and live-resource
+                    // selection).
+                    if live_set.contains(&full) {
+                        continue;
+                    }
+                    // Known limitation: queues the
+                    // pre-recipient-pass stanza into
+                    // the detached XEP-0198 replay
+                    // buffer. When the resource
+                    // resumes, replay sends the
+                    // stored XML verbatim WITHOUT
+                    // running the recipient-pass
+                    // chain, so the replayed message
+                    // is missing the recipient-side
+                    // `<stanza-id by='recipient/>`
+                    // (XEP-0359 §5) and recipient-
+                    // side filtering / archive /
+                    // inbox effects don't fire.
+                    // This matches LEGACY behaviour
+                    // (which had no recipient pass
+                    // at all) and is therefore not a
+                    // regression. Closing the gap
+                    // properly requires running the
+                    // headless recipient pass per
+                    // detached target and queueing
+                    // its `SendStanza` output —
+                    // tracked as a follow-up to
+                    // #229 (Copilot review on
+                    // PR #276).
+                    let stanza_typed = (*stanza).clone();
+                    match sm
+                        .record_stanza_for_detached_bound_resource(
+                            &full,
+                            &stanza_typed,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            any_landed = true;
+                            debug!(
+                                jid = %full,
+                                "RouteToConnection: bare-JID stanza queued \
+                                 for detached XEP-0198 replay"
+                            );
+                        }
+                        Ok(false) => {
+                            debug!(
+                                jid = %full,
+                                "RouteToConnection: detached session expired \
+                                 between enumeration and queue; dropping"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                jid = %full,
+                                %error,
+                                "RouteToConnection: failed to record bare-JID \
+                                 stanza for detached resource"
+                            );
                         }
                     }
                 }
-                Vec::new()
+            }
+            if !any_landed {
+                if bare.domain().as_str() != deps.local_domain {
+                    debug!(
+                        bare_jid = %bare,
+                        local_domain = %deps.local_domain,
+                        "RouteToConnection: cross-domain bare JID; every \
+                         selected target turned out stale and none is \
+                         local, dropping (s2s out of scope)"
+                    );
+                } else {
+                    debug!(
+                        bare_jid = %bare,
+                        "RouteToConnection: every selected/detached target \
+                         turned out stale (self-healed via DroppedClosed \
+                         eviction); running the headless recipient pass so \
+                         the message is not silently lost"
+                    );
+                    run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1).await;
+                }
             }
         }
+        Vec::new()
+    }
+}
+
+/// #1246 — does `bare` resolve to a registered local account?
+///
+/// Uses the OIDC + native aware [`crate::auth::local_account_exists`]
+/// (two-table identity: `users` for OIDC accounts, `native_users` for
+/// SCRAM accounts) — a native-only check would wrongly bounce every
+/// OIDC user. Fails OPEN: with no `web_socket_state` (unit-test
+/// fixtures) or on a transient DB error the message proceeds to the
+/// headless pass rather than bouncing a possibly-valid user; a
+/// domain-only bare JID (no localpart) is not a user account and is
+/// left to the existing routing behavior.
+async fn local_account_exists_for(deps: &Deps<'_>, bare: &BareJid) -> bool {
+    let Some(state) = deps.web_socket_state else {
+        return true;
+    };
+    let Some(node) = bare.node() else {
+        return true;
+    };
+    let actor = state.deps.app_state.db_pool.global_actor();
+    match crate::auth::local_account_exists(actor, node.as_str(), bare.domain().as_str()).await {
+        Ok(exists) => exists,
+        Err(error) => {
+            warn!(
+                bare_jid = %bare,
+                %error,
+                "RouteToConnection: local_account_exists lookup failed; \
+                 failing open (message proceeds to the offline pass)"
+            );
+            true
+        }
+    }
+}
+
+/// RFC 6121 §8.5.1 reply for a stanza addressed to a local bare JID
+/// with no registered account:
+///
+/// - **message** (non-error): `<service-unavailable/>` bounce — the
+///   same condition XEP-0191 blocked-sender bounces use, so the two
+///   are indistinguishable to the sender.
+/// - **IQ** `get`/`set`: `<service-unavailable/>` (via the shared
+///   undeliverable-IQ builder; `result`/`error` IQs get nothing).
+/// - **presence** / error-typed messages: silently ignored (§8.5.1;
+///   RFC 6121 §8.3 forbids error-of-error).
+///
+/// Returned stanzas are written back to the originating connection by
+/// the interpret loop, exactly like the undeliverable-IQ fallback.
+fn bounce_for_nonexistent_account(stanza: &Stanza) -> Vec<Stanza> {
+    match stanza {
+        Stanza::Message(message) => {
+            if matches!(message.type_, xmpp_parsers::message::MessageType::Error) {
+                return Vec::new();
+            }
+            let reply = waddle_xmpp::protocol::handlers::errors::message_error_reply(
+                message,
+                StanzaError::new(
+                    ErrorType::Cancel,
+                    DefinedCondition::ServiceUnavailable,
+                    "en",
+                    "Service unavailable at this address.",
+                ),
+            );
+            vec![Stanza::Message(reply)]
+        }
+        Stanza::Iq(_) => fallback_reply_for_undeliverable_iq(stanza)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

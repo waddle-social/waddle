@@ -209,17 +209,7 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                 .build(),
         );
     }
-    if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
-        builder = builder.append(
-            Element::builder("stanza-id", STANZA_ID_NS)
-                .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
-                .attr(
-                    minidom::rxml::xml_ncname!("by").to_owned(),
-                    archived.to.to_string(),
-                )
-                .build(),
-        );
-    }
+    builder = append_reconstructed_stanza_id(builder, archived, &msg_type);
     if let Some(reply) = rich.reply.as_ref() {
         let mut reply_builder = Element::builder("reply", REPLY_NS).attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
@@ -462,8 +452,33 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
                 .build(),
         );
     }
-    if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
-        builder = builder.append(
+    builder = append_reconstructed_stanza_id(builder, archived, &msg_type);
+
+    builder.build()
+}
+
+/// Append the XEP-0359 `<stanza-id/>` to a reconstructed (fallback)
+/// inner message.
+///
+/// - **Groupchat** rows stamp `by` = the room JID (`archived.to`).
+/// - **1:1** rows stamp the archive owner's `<stanza-id/>` recorded on
+///   the row (`archived.stanza_id`, whose `by` is reconstructed from
+///   the archive JID at decode time). XEP-0359 §5 requires the
+///   archiving entity's id to survive replay; omitting it (the old
+///   groupchat-only behavior) left legacy 1:1 rows un-dedupable
+///   against live-delivered copies (#1266 item 8). Rows persisted with
+///   `stanza_xml` already carry the stamp inline and never reach this
+///   fallback.
+fn append_reconstructed_stanza_id(
+    builder: minidom::ElementBuilder,
+    archived: &ArchivedMessage,
+    msg_type: &MessageType,
+) -> minidom::ElementBuilder {
+    if *msg_type == MessageType::Groupchat {
+        if archived.id.is_empty() {
+            return builder;
+        }
+        return builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
                 .attr(
@@ -473,8 +488,21 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
                 .build(),
         );
     }
-
-    builder.build()
+    let Some(sid) = archived.stanza_id.as_ref() else {
+        return builder;
+    };
+    if sid.id.is_empty() {
+        return builder;
+    }
+    builder.append(
+        Element::builder("stanza-id", STANZA_ID_NS)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.id.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("by").to_owned(),
+                sid.by.to_string(),
+            )
+            .build(),
+    )
 }
 
 fn build_rsm_response_element(result: &MamResult) -> Element {

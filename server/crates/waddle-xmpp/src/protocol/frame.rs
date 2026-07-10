@@ -293,6 +293,15 @@ fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
             // MAM replay, retraction round-trip) reads parent through
             // `xep0201::thread_info_from_message` and never sees the raw
             // wire form again.
+            // RFC 6121 §5.2.2: "if an application receives a message
+            // with no 'type' attribute or the application does not
+            // understand the value of the 'type' attribute provided,
+            // it MUST consider the message to be of type 'normal'."
+            // `xmpp_parsers` rejects unknown values outright, which
+            // silently dropped the whole stanza (#1266 item 6);
+            // normalize the attribute at the parse boundary instead.
+            let mut element = element;
+            normalize_unknown_message_type(&mut element);
             let stanza_ns = element.ns().to_string();
             let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
             let mut msg = xmpp_parsers::message::Message::try_from(element).map_err(|err| {
@@ -322,6 +331,25 @@ fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
         }
     };
     Ok(InboundFrame::Stanza(Box::new(stanza)))
+}
+
+/// RFC 6121 §5.2.2 unknown-type normalization: rewrite a `type`
+/// attribute outside the closed RFC set (`chat`, `error`, `groupchat`,
+/// `headline`, `normal`) to `normal` so the typed parse succeeds and
+/// the stanza flows through the normal-message pipeline instead of
+/// being dropped as a parse failure.
+fn normalize_unknown_message_type(element: &mut Element) {
+    let known = matches!(
+        element.attr("type"),
+        None | Some("chat" | "error" | "groupchat" | "headline" | "normal")
+    );
+    if !known {
+        element.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            "normal",
+        );
+    }
 }
 
 /// Insert `xmlns="{ns}"` into the opening tag of a stanza when absent.

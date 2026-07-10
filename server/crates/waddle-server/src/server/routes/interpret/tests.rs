@@ -3437,3 +3437,460 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
         "the delivered recipient <stanza-id/> must match the deduped archive row"
     );
 }
+
+// ---------------------------------------------------------------------
+// #1244 — RFC 6121 §8.5.3.2.1: full-JID DM with no matching resource
+// falls back to bare-JID delivery semantics instead of dropping.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn route_full_jid_dm_offline_resource_falls_back_to_other_live_resource() {
+    // Alice keeps replying to bob@x/old-resource after Bob reconnected
+    // under /desk. RFC 6121 §8.5.3.2.1: with no resource matching the
+    // full JID, treat the stanza as addressed to the bare JID — /desk
+    // must receive it (previously: silent drop).
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::registry::{DeliveryKind, UserRegistryActor};
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    registry.update_presence(&bob_desk, true, 0);
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = offline_pass_deps_with_user_registry(
+        &registry,
+        &user_registry,
+        &mam,
+        &inbox,
+        &blocking,
+        &dispatcher,
+    );
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com/gone", "hi bob");
+    let outcome = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com/gone".parse::<jid::Jid>().expect("full"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &deps,
+    )
+    .await;
+    assert!(
+        outcome.frames.is_empty(),
+        "fallback delivery must not synthesize an error to the sender"
+    );
+
+    let delivered = drain_inbound(&mut desk_rx);
+    assert_eq!(
+        delivered.len(),
+        1,
+        "RFC 6121 §8.5.3.2.1: bare-JID fallback delivers to bob's live resource"
+    );
+    assert_eq!(
+        delivered[0].kind,
+        DeliveryKind::DirectFrame,
+        "fallback goes through the shared recipient pass (processed copy)"
+    );
+
+    let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let bob_archive = mam
+        .query_messages(&bob_bare, &Default::default())
+        .await
+        .expect("query bob");
+    assert_eq!(
+        bob_archive.messages.len(),
+        1,
+        "recipient pass ran exactly once for the fallback delivery"
+    );
+}
+
+#[tokio::test]
+async fn route_full_jid_dm_no_resources_stores_offline() {
+    // Full-JID DM, recipient has no resources at all: §8.5.3.2.1 →
+    // §8.5.2 → offline handling (headless recipient pass persists
+    // archive + inbox). Previously the message vanished.
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com/gone", "offline?");
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com/gone".parse::<jid::Jid>().expect("full"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &deps,
+    )
+    .await;
+
+    let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let bob_archive = mam
+        .query_messages(&bob_bare, &Default::default())
+        .await
+        .expect("query bob");
+    assert_eq!(
+        bob_archive.messages.len(),
+        1,
+        "full-JID DM to a fully-offline user must be stored, not dropped"
+    );
+}
+
+// ---------------------------------------------------------------------
+// #1245 — full-JID DM to a detached XEP-0198 resource runs the shared
+// recipient pipeline (stanza-id + archive + inbox) and queues the
+// PROCESSED stanza for replay.
+// ---------------------------------------------------------------------
+
+fn detached_dm_session(
+    stream_id: &str,
+    jid: &jid::FullJid,
+) -> waddle_xmpp::stream_management::DetachedSession {
+    waddle_xmpp::stream_management::DetachedSession {
+        stream_id: stream_id.to_string(),
+        user_id: jid.to_bare().to_string(),
+        jid: jid.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: true,
+        blocklist_interested: false,
+        presence_available: true,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    }
+}
+
+#[tokio::test]
+async fn route_full_jid_dm_to_detached_resource_runs_recipient_pipeline() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::stream_management::SmSessionRegistry;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let registry = ConnectionRegistry::new();
+    let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
+    let sm = Arc::new(InMemorySmSessionRegistry::new());
+    sm.store_session(detached_dm_session("bob-phone-stream", &bob_phone))
+        .await
+        .expect("store detached session");
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        sm_session_registry: Some(&sm),
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
+    };
+
+    let msg = chat_msg(
+        "alice@example.com/web",
+        "bob@example.com/phone",
+        "resume me",
+    );
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com/phone".parse::<jid::Jid>().expect("full"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &deps,
+    )
+    .await;
+
+    // XEP-0313 §5.1: the recipient archive captured the message.
+    let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let bob_archive = mam
+        .query_messages(&bob_bare, &Default::default())
+        .await
+        .expect("query bob");
+    assert_eq!(
+        bob_archive.messages.len(),
+        1,
+        "detached full-JID DM must land in the recipient's archive"
+    );
+
+    // XEP-0359 §5: the queued replay copy is the PROCESSED stanza and
+    // carries the recipient <stanza-id by='bob@example.com'/>.
+    let session = sm
+        .peek_session("bob-phone-stream")
+        .await
+        .expect("peek ok")
+        .expect("session present");
+    assert_eq!(
+        session.unacked_stanzas.len(),
+        1,
+        "processed DM queued for XEP-0198 replay"
+    );
+    let queued_element: Element = session.unacked_stanzas[0]
+        .stanza_xml
+        .parse()
+        .expect("queued stanza XML parses");
+    let queued =
+        xmpp_parsers::message::Message::try_from(queued_element).expect("queued message parses");
+    let by: jid::Jid = "bob@example.com".parse().expect("jid");
+    let recipient_stanza_id = waddle_xmpp_core::xep0359::extract_stanza_id_by(&queued, &by);
+    assert!(
+        recipient_stanza_id.is_some(),
+        "replay copy must carry the recipient-side stanza-id (XEP-0359 §5); \
+         payloads: {:?}",
+        queued.payloads
+    );
+    assert_eq!(
+        recipient_stanza_id.as_deref(),
+        Some(bob_archive.messages[0].id.as_str()),
+        "wire stanza-id and archive row id must agree"
+    );
+}
+
+// ---------------------------------------------------------------------
+// #1246 — RFC 6121 §8.5.1: message to a nonexistent local account is
+// bounced with <service-unavailable/>, never persisted.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        web_socket_state: Some(&state),
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
+    };
+
+    let msg = chat_msg("alice@example.com/web", "typo@example.com", "anyone?");
+    let outcome = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "typo@example.com".parse::<jid::Jid>().expect("bare"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "sender must receive a bounce for a nonexistent local account"
+    );
+    assert!(
+        outcome.frames[0].contains("service-unavailable"),
+        "RFC 6121 §8.5.1: the bounce is <service-unavailable/>; got {}",
+        outcome.frames[0]
+    );
+    assert!(
+        outcome.frames[0].contains("type=\"error\"") || outcome.frames[0].contains("type='error'"),
+        "bounce is a message of type error; got {}",
+        outcome.frames[0]
+    );
+
+    let typo_bare: jid::BareJid = "typo@example.com".parse().expect("bare");
+    let typo_archive = mam
+        .query_messages(&typo_bare, &Default::default())
+        .await
+        .expect("query typo");
+    assert!(
+        typo_archive.messages.is_empty(),
+        "no MAM rows may be created for a nonexistent account"
+    );
+}
+
+#[tokio::test]
+async fn route_bare_jid_message_to_existing_oidc_user_persists_offline() {
+    // Two-table identity: an OIDC-provisioned account exists only in
+    // `users` (no native_users row). The existence gate must accept it
+    // and run the normal offline/headless persistence.
+    use crate::db::actor::DbExecute;
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(DbExecute {
+            sql: "INSERT INTO users \
+                  (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                .to_string(),
+            params: vec![
+                "bob@example.com".into(),
+                "bob".into(),
+                "bob".into(),
+                "Bob".into(),
+                crate::db::Value::NullText,
+                crate::db::Value::NullText,
+                "2026-01-01T00:00:00Z".into(),
+                "2026-01-01T00:00:00Z".into(),
+            ],
+        })
+        .await
+        .expect("seed oidc user");
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        web_socket_state: Some(&state),
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
+    };
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hello bob");
+    let outcome = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &deps,
+    )
+    .await;
+    assert!(
+        outcome.frames.is_empty(),
+        "existing OIDC account must not be bounced"
+    );
+
+    let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let bob_archive = mam
+        .query_messages(&bob_bare, &Default::default())
+        .await
+        .expect("query bob");
+    assert_eq!(
+        bob_archive.messages.len(),
+        1,
+        "offline persistence runs for the OIDC-only account"
+    );
+}
+
+// ---------------------------------------------------------------------
+// #1266 item 4 — RFC 6121 §8.5.2.1.1: bare-JID delivery MUST NOT reach
+// resources that advertised a negative presence priority.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn route_to_connection_bare_jid_skips_negative_priority_resources() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &bob_phone, phone_tx).await;
+    // desk explicitly opts out of bare-JID delivery (priority -1);
+    // phone is connected but has not sent presence (tier-2 fallback
+    // territory).
+    registry.update_presence(&bob_desk, true, -1);
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi bare");
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert!(
+        drain_inbound(&mut desk_rx).is_empty(),
+        "RFC 6121 §8.5.2.1.1: negative-priority resource must not receive \
+         bare-JID delivery"
+    );
+    assert_eq!(
+        drain_inbound(&mut phone_rx).len(),
+        1,
+        "presence-deferred sibling still receives via the tier-2 fallback"
+    );
+}
+
+#[tokio::test]
+async fn route_to_connection_bare_jid_all_negative_priority_goes_offline() {
+    // A user whose only resources advertise negative priority is
+    // treated as offline for bare-JID delivery (§8.5.2.1.1 →
+    // "SHOULD store offline"): the headless pass persists instead of
+    // delivering.
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    registry.update_presence(&bob_desk, true, -1);
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = offline_pass_deps_with_user_registry(
+        &registry,
+        &user_registry,
+        &mam,
+        &inbox,
+        &blocking,
+        &dispatcher,
+    );
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "store me");
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(
+        drain_inbound(&mut desk_rx).is_empty(),
+        "negative-priority resource must not receive the message"
+    );
+    let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let bob_archive = mam
+        .query_messages(&bob_bare, &Default::default())
+        .await
+        .expect("query bob");
+    assert_eq!(
+        bob_archive.messages.len(),
+        1,
+        "message stored offline instead of delivered to the negative resource"
+    );
+}

@@ -65,12 +65,37 @@ pub(super) async fn run_headless_recipient_pass(
 
     let events = transient.handle(InboundEvent::StanzaFromPeer(Box::new(stanza)));
 
+    // Handler-generated side stanzas addressed to OTHER parties (the
+    // XEP-0191 <service-unavailable/> bounce back to a blocked sender)
+    // must route at the depth of the interpret loop that invoked this
+    // pass: interpreting them at `depth` (the headless depth itself)
+    // would trip the recursion guard and silently swallow them.
+    // Mirrors the fanout pass's `side_routes` partition. Side routes
+    // always target the peer's JID, so they cannot re-enter the pass
+    // that produced them.
+    let mut side_routes: Vec<OutboundEvent> = Vec::new();
+    let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
+    for event in events {
+        match event {
+            OutboundEvent::RouteToConnection { .. } => side_routes.push(event),
+            other => remaining.push(other),
+        }
+    }
+    if !side_routes.is_empty() {
+        let _ = Box::pin(interpret_with_depth(
+            side_routes,
+            deps,
+            depth.saturating_sub(1),
+        ))
+        .await;
+    }
+
     // Recursively interpret with the depth bumped. The inner outcome
     // is *discarded*: the transient SM is ephemeral so any frames
     // (SendStanza) have no wire to write to and any feedback events
     // (callback completions) belong to a state machine that goes out
     // of scope at function return.
-    let nested = Box::pin(interpret_with_depth(events, deps, depth)).await;
+    let nested = Box::pin(interpret_with_depth(remaining, deps, depth)).await;
     let InterpretOutcome {
         frames,
         close,
