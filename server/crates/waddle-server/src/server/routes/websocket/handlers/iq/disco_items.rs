@@ -633,15 +633,21 @@ async fn live_public_instant_room_items(
     // no per-room DB query — so only true instant rooms, normally zero
     // to a handful, cost one snapshot ask each, capped hard.
     const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
+    // Order of operations: (1) the free in-memory filter removes every
+    // catalog-listed room so managed rooms never consume cap slots;
+    // (2) sort for a deterministic selection when the cap bites;
+    // (3) cap so the batched DB probe's IN-clause and the snapshot
+    // asks stay bounded.
     let mut candidates: Vec<BareJid> = room_jids
         .into_iter()
-        .filter(|room_jid| room_jid.domain().as_str() == muc_domain)
+        .filter(|room_jid| {
+            room_jid.domain().as_str() == muc_domain && !channel_backed.jids.contains(room_jid)
+        })
         .collect();
-    // Cap BEFORE the batched membership probe so both the IN-clause
-    // parameter count and the snapshot asks are bounded.
+    candidates.sort_unstable();
     candidates.truncate(MAX_INSTANT_ROOM_SCAN);
     channel_backed
-        .retain_instant_rooms(state, &mut candidates)
+        .drop_unlisted_channel_rooms(state, &mut candidates)
         .await;
     let mut items = Vec::new();
     for room_jid in candidates {
@@ -733,12 +739,16 @@ struct ChannelBackedRooms {
 }
 
 impl ChannelBackedRooms {
-    /// Drop every catalog-backed room from `candidates`. In-memory for
-    /// the common (untruncated) case; a truncated catalog fetch issues
-    /// ONE batched membership query for the JIDs missing from the set
-    /// instead of a per-room lookup.
-    async fn retain_instant_rooms(&self, state: &WebSocketState, candidates: &mut Vec<BareJid>) {
-        candidates.retain(|room_jid| !self.jids.contains(room_jid));
+    /// Drop catalog-backed rooms that the bounded fetch missed. No-op
+    /// for the common (untruncated) case — the in-memory set filtering
+    /// already happened; a truncated catalog fetch issues ONE batched
+    /// membership query for the capped candidate list instead of a
+    /// per-room lookup.
+    async fn drop_unlisted_channel_rooms(
+        &self,
+        state: &WebSocketState,
+        candidates: &mut Vec<BareJid>,
+    ) {
         if !self.truncated || candidates.is_empty() {
             return;
         }
