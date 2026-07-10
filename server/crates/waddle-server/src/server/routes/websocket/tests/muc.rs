@@ -6126,3 +6126,160 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
         responses[0]
     );
 }
+
+/// Greptile P1 (#1276): the registry destroy is the point of no
+/// return. When its fenced durable wipe fails (`DurableWipeFailed`),
+/// the owner gets a retryable error and — critically — NO occupant
+/// receives a destroy presence and no SFU participant is torn down:
+/// nobody may be told the room died while it lives on.
+#[tokio::test]
+async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
+    use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    /// Every write succeeds except the destroy-time wipe.
+    struct FailingDeleteStore;
+    impl MucDurableStore for FailingDeleteStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::DurableRoomState>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a waddle_xmpp::muc::RoomConfig,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn delete_room_state<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+            Box::pin(async {
+                Err(waddle_xmpp::XmppError::internal(
+                    "destroy-time wipe refused by test store",
+                ))
+            })
+        }
+    }
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-wipe-fails@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(WireClusteringClaims {
+            claim_store: std::sync::Arc::new(InProcessClaimStore::new())
+                as std::sync::Arc<dyn ClaimStore>,
+            node_identity: SharedNodeIdentity::new(NodeIdentity::new("test-node", "epoch-1")),
+            durable_store: Some(std::sync::Arc::new(FailingDeleteStore)),
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire failing durable store");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "wipe-failed destroy: {responses:?}");
+    assert!(
+        responses[0].contains("internal-server-error"),
+        "a destroy whose fenced wipe failed must error, not succeed: {responses:?}"
+    );
+    assert!(
+        !responses.iter().any(
+            |frame| Element::from_str(frame).is_ok_and(|el| presence_has_muc_user_destroy(&el))
+        ),
+        "the owner must not receive a destroy presence: {responses:?}"
+    );
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "no occupant may be told the room died while it lives on"
+    );
+    let still_there = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask");
+    assert!(still_there.is_some(), "the room stays registered for retry");
+}

@@ -302,73 +302,15 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     internal_server_error_iq_error("Internal server error."),
                 )];
             }
-            let mut frames = Vec::new();
-            {
-                {
-                    for occupant in snapshot.room.occupants.values() {
-                        // XEP-0045 §10.9 (#1261): the service sends one
-                        // unavailable presence with `<destroy/>` to EACH
-                        // occupant session — every device sharing this
-                        // nick, not just the roster's single `real_jid`.
-                        // Sibling sessions that were skipped kept a live
-                        // room locally after the destroy.
-                        for session_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
-                            let is_self_session = session_jid == *sender_jid;
-                            // XEP-0421: the destroy notification is the
-                            // occupant's final unavailable presence from
-                            // the room and MUST carry their occupant-id
-                            // (#1268).
-                            let occupant_bare = session_jid.to_bare();
-                            let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                                bare_jid: &occupant_bare,
-                                real_jid: Some(&session_jid),
-                                secret: &state.deps.occupant_id_secret,
-                            };
-                            let presence = build_destroy_notification(
-                                &room_jid,
-                                &occupant.nick,
-                                &session_jid,
-                                &destroy_request,
-                                is_self_session,
-                                &identity,
-                            );
-                            if is_self_session {
-                                frames.push(stanza_to_xml(&Stanza::Presence(presence)));
-                            } else {
-                                let _ = state
-                                    .deps
-                                    .protocol
-                                    .connection_registry
-                                    .try_send_to(&session_jid, Stanza::Presence(presence));
-                            }
-                            // XEP-0045 §10.9 destroy ends every occupant's
-                            // session in the room — their LiveKit
-                            // participant must end with it. Without this
-                            // the SFU keeps the room populated until its
-                            // own timeout even though the XMPP room is
-                            // gone. Idempotent for non-call participants.
-                            super::super::super::muc_call_sfu::unregister_participant_from_room(
-                                state,
-                                &room_jid,
-                                &session_jid,
-                            );
-                        }
-                    }
-                }
-            }
-
+            // Greptile P1: the registry destroy is the point of no
+            // return — it MUST commit before any occupant learns about
+            // the destruction. On `DurableWipeFailed` the registry
+            // restored the room and nobody was told anything; the
+            // waddle-side rows wiped above are idempotent deletes a
+            // retried destroy re-runs (and their absence only narrows
+            // access — see `wipe_destroyed_room_durable_state`).
             match destroy_room_actor(state, &room_jid).await {
-                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed => {
-                    debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-                    let room_jid_string = room_jid.to_string();
-                    frames.push(build_iq_result_xml(
-                        id,
-                        Some(room_jid_string.as_str()),
-                        response_to,
-                        None,
-                    ));
-                    return frames;
-                }
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed => {}
                 waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered => {
                     return vec![build_iq_error_xml_typed(
                         id,
@@ -379,7 +321,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 }
                 // The registry refused because its fenced clustering
                 // wipe failed and it kept the room alive — surface a
-                // retryable error, never a success (#1261).
+                // retryable error, never a success (#1261). No destroy
+                // presence was sent and no SFU participant was
+                // unregistered.
                 waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed => {
                     return vec![build_iq_error_xml_typed(
                         id,
@@ -389,6 +333,66 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     )];
                 }
             }
+            debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
+
+            let mut frames = Vec::new();
+            for occupant in snapshot.room.occupants.values() {
+                // XEP-0045 §10.9 (#1261): the service sends one
+                // unavailable presence with `<destroy/>` to EACH
+                // occupant session — every device sharing this
+                // nick, not just the roster's single `real_jid`.
+                // Sibling sessions that were skipped kept a live
+                // room locally after the destroy.
+                for session_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+                    let is_self_session = session_jid == *sender_jid;
+                    // XEP-0421: the destroy notification is the
+                    // occupant's final unavailable presence from
+                    // the room and MUST carry their occupant-id
+                    // (#1268).
+                    let occupant_bare = session_jid.to_bare();
+                    let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                        bare_jid: &occupant_bare,
+                        real_jid: Some(&session_jid),
+                        secret: &state.deps.occupant_id_secret,
+                    };
+                    let presence = build_destroy_notification(
+                        &room_jid,
+                        &occupant.nick,
+                        &session_jid,
+                        &destroy_request,
+                        is_self_session,
+                        &identity,
+                    );
+                    if is_self_session {
+                        frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+                    } else {
+                        let _ = state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .try_send_to(&session_jid, Stanza::Presence(presence));
+                    }
+                    // XEP-0045 §10.9 destroy ends every occupant's
+                    // session in the room — their LiveKit
+                    // participant must end with it. Without this
+                    // the SFU keeps the room populated until its
+                    // own timeout even though the XMPP room is
+                    // gone. Idempotent for non-call participants.
+                    super::super::super::muc_call_sfu::unregister_participant_from_room(
+                        state,
+                        &room_jid,
+                        &session_jid,
+                    );
+                }
+            }
+            let room_jid_string = room_jid.to_string();
+            frames.push(build_iq_result_xml(
+                id,
+                Some(room_jid_string.as_str()),
+                response_to,
+                None,
+            ));
+            return frames;
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
