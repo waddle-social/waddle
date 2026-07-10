@@ -81,8 +81,17 @@ impl MessageHandler for InboxHandler {
             Locality::Recipient => {
                 if let Some(peer) = from_bare {
                     // Recipient pass: a brand-new message arriving for
-                    // this owner — bump their unread count.
-                    events.push(build(owner, peer, message, &local_archive_id, true));
+                    // this owner — bump their unread count. EXCEPT for
+                    // self-DMs (peer == owner: alice → alice bare or
+                    // cross-resource): the sender pass on the
+                    // originating connection already projected the
+                    // conversation with `increment_unread = false`
+                    // (you authored it); a recipient-pass projection
+                    // here would bump the owner's unread count for
+                    // their own message (#1266 item 7).
+                    if peer != owner {
+                        events.push(build(owner, peer, message, &local_archive_id, true));
+                    }
                 }
             }
             Locality::Both => {
@@ -404,5 +413,25 @@ mod tests {
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].2, "alice-A1");
+    }
+
+    #[test]
+    fn inbox_self_dm_recipient_pass_skips_projection_and_unread_bump() {
+        // alice/web -> alice (bare or another resource), observed on
+        // the recipient pass. The sender pass already projected the
+        // conversation with increment_unread=false; projecting again
+        // here would bump alice's unread for her own message (#1266
+        // item 7).
+        let local = full("alice@example.com/phone");
+        let mut msg = chat_with_body("alice@example.com/web", "alice@example.com", "note to self");
+        msg.payloads.push(build_stanza_id_element(
+            "alice-self",
+            &jid("alice@example.com"),
+        ));
+        let outcome = run(&local, &mut msg);
+        assert!(
+            extract_inbox(&outcome).is_empty(),
+            "self-DM recipient pass must not re-project or bump unread"
+        );
     }
 }

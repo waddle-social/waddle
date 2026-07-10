@@ -4,11 +4,16 @@
 //! later stages (canonicalize, archive, carbons, route) never see a
 //! blocked stanza. Two distinct rules apply:
 //!
-//! - **§3.1 Server Behavior, incoming side** — when a stanza is being
+//! - **Server Behavior, incoming side** — when a stanza is being
 //!   delivered TO the local user and the sender's bare JID is on the
-//!   local blocklist, the server MUST drop the stanza silently (or, for
-//!   IQs, return `<service-unavailable/>`). For messages the conformant
-//!   choice is silent drop.
+//!   local blocklist, the server MUST NOT deliver it. Per the current
+//!   XEP-0191 text ("If a blocked JID attempts to send a stanza to the
+//!   user"), for message stanzas the server SHOULD return an error,
+//!   which SHOULD be `<service-unavailable/>` — indistinguishable from
+//!   the recipient not existing, so the user appears offline to the
+//!   blocked JID. Presence stanzas and stanzas of type `error` are
+//!   still dropped silently (no error MAY be returned for presence;
+//!   RFC 6121 §8.3 forbids error-of-error).
 //! - **§3.2 Server Behavior, outgoing side** — when the local user
 //!   attempts to send a stanza TO a JID on their own blocklist, the
 //!   server MUST return `<not-acceptable/>` with a
@@ -25,11 +30,13 @@
 //! `cargo test xep_0191` returns every XEP-0191 conformance test in the
 //! workspace.
 
-use super::errors::{outgoing_block_error_reply, send_message_error};
+use super::errors::{message_error_reply, outgoing_block_error_reply, send_message_error};
+use crate::protocol::event::OutboundEvent;
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Pipeline filter for XEP-0191 blocking-list rules.
 #[derive(Debug, Default, Clone, Copy)]
@@ -71,12 +78,35 @@ impl MessageHandler for BlockingFilterHandler {
                 }
                 HandlerOutcome::Continue(Vec::new())
             }
-            // Recipient pass: §3.1 — silently drop incoming stanzas
-            // from blocked senders.
+            // Recipient pass — the sender is blocked: do not deliver.
+            // XEP-0191 ("If a blocked JID attempts to send a stanza to
+            // the user"): for message stanzas the server SHOULD return
+            // an error, which SHOULD be <service-unavailable/> — the
+            // same condition a nonexistent account returns, so the
+            // block is not a presence oracle. Error-typed stanzas are
+            // dropped silently (RFC 6121 §8.3 forbids error-of-error).
+            // The bounce is emitted as a `RouteToConnection` addressed
+            // to the sender because on the recipient pass `SendStanza`
+            // would write to the *recipient's* wire.
             Locality::Recipient => {
                 if let Some(from) = message.from.as_ref() {
                     if ctx.blocklist.contains_jid(from) {
-                        return HandlerOutcome::Halt(Vec::new());
+                        if is_error_stanza {
+                            return HandlerOutcome::Halt(Vec::new());
+                        }
+                        let reply = message_error_reply(
+                            message,
+                            StanzaError::new(
+                                ErrorType::Cancel,
+                                DefinedCondition::ServiceUnavailable,
+                                "en",
+                                "Service unavailable.",
+                            ),
+                        );
+                        return HandlerOutcome::Halt(vec![OutboundEvent::RouteToConnection {
+                            jid: from.clone(),
+                            stanza: Box::new(crate::Stanza::Message(reply)),
+                        }]);
                     }
                 }
                 HandlerOutcome::Continue(Vec::new())
@@ -174,17 +204,53 @@ mod tests {
         StanzaError::try_from(elem.clone()).expect("typed parse")
     }
 
+    /// Assert a recipient-pass halt whose single event is a
+    /// `<service-unavailable/>` message-error bounce routed back to
+    /// the blocked sender (XEP-0191 incoming message rule).
+    fn assert_halt_service_unavailable_bounce(outcome: &HandlerOutcome, expected_sender: &str) {
+        let events = match outcome {
+            HandlerOutcome::Halt(events) => events,
+            other => panic!("expected Halt with bounce, got {other:?}"),
+        };
+        assert_eq!(events.len(), 1);
+        let (jid, stanza) = match &events[0] {
+            OutboundEvent::RouteToConnection { jid, stanza } => (jid, stanza),
+            other => panic!("expected RouteToConnection bounce, got {other:?}"),
+        };
+        assert_eq!(jid.to_string(), expected_sender);
+        let msg = match stanza.as_ref() {
+            crate::Stanza::Message(m) => m,
+            other => panic!("expected Message stanza, got {other:?}"),
+        };
+        assert_eq!(msg.type_, MessageType::Error);
+        assert_eq!(
+            msg.to.as_ref().map(ToString::to_string),
+            Some(expected_sender.to_string())
+        );
+        let elem = msg
+            .payloads
+            .iter()
+            .find(|p| p.name() == "error")
+            .expect("error payload present");
+        let parsed = StanzaError::try_from(elem.clone()).expect("typed parse");
+        assert_eq!(parsed.type_, ErrorType::Cancel);
+        assert_eq!(
+            parsed.defined_condition,
+            DefinedCondition::ServiceUnavailable
+        );
+    }
+
     // -----------------------------------------------------------------
-    // XEP-0191 §3.1 — incoming silent drop
+    // XEP-0191 — incoming message bounce (service-unavailable)
     // -----------------------------------------------------------------
 
     #[test]
-    fn xep_0191_recipient_pass_drops_silently_when_sender_is_blocked() {
+    fn xep_0191_recipient_pass_bounces_service_unavailable_when_sender_is_blocked() {
         let local = full("bob@example.com/desk");
         let bl = Blocklist::new([bare("alice@example.com")]);
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
         let (outcome, _) = run(&local, &bl, &mut msg);
-        assert_halt_no_events(&outcome);
+        assert_halt_service_unavailable_bounce(&outcome, "alice@example.com/web");
     }
 
     #[test]
@@ -202,7 +268,7 @@ mod tests {
         let bl = Blocklist::new([jid("alice@example.com/web")]);
         let mut blocked = chat_msg("alice@example.com/web", "bob@example.com");
         let (blocked_outcome, _) = run(&local, &bl, &mut blocked);
-        assert_halt_no_events(&blocked_outcome);
+        assert_halt_service_unavailable_bounce(&blocked_outcome, "alice@example.com/web");
 
         let mut other_resource = chat_msg("alice@example.com/mobile", "bob@example.com");
         let (other_outcome, _) = run(&local, &bl, &mut other_resource);
@@ -215,7 +281,7 @@ mod tests {
         let bl = Blocklist::new([jid("blocked.example.com")]);
         let mut msg = chat_msg("alice@blocked.example.com/web", "bob@example.com");
         let (outcome, _) = run(&local, &bl, &mut msg);
-        assert_halt_no_events(&outcome);
+        assert_halt_service_unavailable_bounce(&outcome, "alice@blocked.example.com/web");
     }
 
     // -----------------------------------------------------------------
@@ -266,13 +332,14 @@ mod tests {
         // alice/phone -> alice/web with alice in her own blocklist. On
         // alice/web's connection the locality is Recipient (from is
         // alice/phone — different resource — so it's not Sender; to is
-        // alice/web exactly — full match for Recipient). The §3.1
-        // recipient-side rule applies: silent drop, no events.
+        // alice/web exactly — full match for Recipient). The incoming
+        // recipient-side rule applies: no delivery, service-unavailable
+        // back to the sending resource.
         let local = full("alice@example.com/web");
         let bl = Blocklist::new([bare("alice@example.com")]);
         let mut msg = chat_msg("alice@example.com/phone", "alice@example.com/web");
         let (outcome, _) = run(&local, &bl, &mut msg);
-        assert_halt_no_events(&outcome);
+        assert_halt_service_unavailable_bounce(&outcome, "alice@example.com/phone");
     }
 
     // -----------------------------------------------------------------

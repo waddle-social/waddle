@@ -265,17 +265,7 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                 .build(),
         );
     }
-    if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
-        builder = builder.append(
-            Element::builder("stanza-id", STANZA_ID_NS)
-                .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
-                .attr(
-                    minidom::rxml::xml_ncname!("by").to_owned(),
-                    archived.to.to_string(),
-                )
-                .build(),
-        );
-    }
+    builder = append_reconstructed_stanza_id(builder, archived, &msg_type);
     if msg_type == MessageType::Groupchat {
         // XEP-0421 Business Rules: occupant-id MUST be attached to
         // every message sent by a MUC, including MAM history — the
@@ -532,8 +522,35 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
                 .build(),
         );
     }
-    if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
-        builder = builder.append(
+    builder = append_reconstructed_stanza_id(builder, archived, &msg_type);
+
+    builder.build()
+}
+
+/// Append the XEP-0359 `<stanza-id/>` to a reconstructed (fallback)
+/// inner message.
+///
+/// - **Groupchat** rows stamp `by` = the room JID (`archived.to`).
+/// - **1:1** rows stamp the archive row's canonical XEP-0359 id
+///   (`archived.id` — the value the live-delivered copy carried in its
+///   `<stanza-id/>` per XEP-0359 §3), attributed to the archive owner
+///   (`archived.stanza_id.by`, reconstructed from the archive JID at
+///   decode time). NOTE: `archived.stanza_id.id` is the message's WIRE
+///   id, not the archive id — emitting it here would advertise an id
+///   no client can correlate with the live copy. A reconstruction
+///   without any stanza-id left legacy 1:1 rows un-dedupable against
+///   live copies (#1266 item 8). Rows persisted with `stanza_xml`
+///   already carry the stamp inline and never reach this fallback.
+fn append_reconstructed_stanza_id(
+    builder: minidom::ElementBuilder,
+    archived: &ArchivedMessage,
+    msg_type: &MessageType,
+) -> minidom::ElementBuilder {
+    if archived.id.is_empty() {
+        return builder;
+    }
+    if *msg_type == MessageType::Groupchat {
+        return builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
                 .attr(
@@ -543,8 +560,22 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
                 .build(),
         );
     }
-
-    builder.build()
+    // The archive owner's JID is only recorded on the row via the
+    // decode-reconstructed `stanza_id.by`; without it there is no
+    // trustworthy `by` to attribute (XEP-0359 §3 makes `by` REQUIRED),
+    // so emit nothing rather than fabricate an attribution.
+    let Some(sid) = archived.stanza_id.as_ref() else {
+        return builder;
+    };
+    builder.append(
+        Element::builder("stanza-id", STANZA_ID_NS)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
+            .attr(
+                minidom::rxml::xml_ncname!("by").to_owned(),
+                sid.by.to_string(),
+            )
+            .build(),
+    )
 }
 
 fn build_rsm_response_element(result: &MamResult) -> Element {

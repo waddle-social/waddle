@@ -53,6 +53,39 @@ mod send;
 mod stream_features;
 mod stream_management;
 
+/// Seed an OIDC-provisioned local account directly into the `users`
+/// table, the way the OIDC login flow does. Needed since #1246: a
+/// message routed to a local bare JID with no registered account is
+/// bounced with `<service-unavailable/>` (RFC 6121 §8.5.1) instead of
+/// being persisted, so tests that message an offline recipient must
+/// give that recipient an account first.
+pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) {
+    use crate::db::actor::DbExecute;
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(DbExecute {
+            sql: "INSERT INTO users \
+                  (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                .to_string(),
+            params: vec![
+                format!("{localpart}@example.com").into(),
+                localpart.into(),
+                localpart.into(),
+                "Test User".into(),
+                crate::db::Value::NullText,
+                crate::db::Value::NullText,
+                "2026-01-01T00:00:00Z".into(),
+                "2026-01-01T00:00:00Z".into(),
+            ],
+        })
+        .await
+        .expect("seed local account");
+}
+
 pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
