@@ -637,11 +637,14 @@ async fn live_public_instant_room_items(
         .into_iter()
         .filter(|room_jid| room_jid.domain().as_str() == muc_domain)
         .collect();
+    // Cap BEFORE the batched membership probe so both the IN-clause
+    // parameter count and the snapshot asks are bounded.
+    candidates.truncate(MAX_INSTANT_ROOM_SCAN);
     channel_backed
         .retain_instant_rooms(state, &mut candidates)
         .await;
     let mut items = Vec::new();
-    for room_jid in candidates.into_iter().take(MAX_INSTANT_ROOM_SCAN) {
+    for room_jid in candidates {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };
