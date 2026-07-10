@@ -2038,7 +2038,10 @@ async fn native_muc_admin_role_set_allows_jid_echo_without_affiliation() {
         &ready,
     )
     .await;
-    assert_eq!(responses.len(), 1, "admin response: {responses:?}");
+    // §8.2 ordering (#1265 item 6): IQ result first, moderator's own
+    // broadcast copy second.
+    assert_eq!(responses.len(), 2, "admin response: {responses:?}");
+    assert!(responses[1].contains("<presence"), "{responses:?}");
     assert!(responses[0].contains("type='result'"));
 
     let snapshot = get_room_actor(state.as_ref(), &room_jid)
@@ -2699,6 +2702,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
             "muc#roomconfig_moderatedroom",
             "muc#roomconfig_maxusers",
             "muc#roomconfig_enablelogging",
+            "muc#roomconfig_changesubject",
             waddle_xmpp::xep::FIELD_FORUM_MODE,
             waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
         ]
@@ -5286,8 +5290,14 @@ async fn muc_admin_kick_evicts_target_sessions_from_room_call() {
         &ready,
     )
     .await;
-    assert_eq!(responses.len(), 1, "kick response: {responses:?}");
+    // XEP-0045 §8.2/§9.1 ordering (#1265 item 6): the moderator sees the
+    // IQ result first, then their own copy of the broadcast presence.
+    assert_eq!(responses.len(), 2, "kick response: {responses:?}");
     assert!(responses[0].contains("type='result'"), "{responses:?}");
+    assert!(
+        responses[1].contains("<presence"),
+        "moderator's broadcast copy follows the IQ result: {responses:?}"
+    );
 
     let evicted = recorder.snapshot();
     assert_eq!(
@@ -5335,8 +5345,14 @@ async fn muc_admin_ban_evicts_target_sessions_from_room_call() {
         &ready,
     )
     .await;
-    assert_eq!(responses.len(), 1, "ban response: {responses:?}");
+    // XEP-0045 §8.2/§9.1 ordering (#1265 item 6): the moderator sees the
+    // IQ result first, then their own copy of the broadcast presence.
+    assert_eq!(responses.len(), 2, "ban response: {responses:?}");
     assert!(responses[0].contains("type='result'"), "{responses:?}");
+    assert!(
+        responses[1].contains("<presence"),
+        "moderator's broadcast copy follows the IQ result: {responses:?}"
+    );
 
     let evicted = recorder.snapshot();
     assert_eq!(
@@ -5374,8 +5390,14 @@ async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
         &ready,
     )
     .await;
-    assert_eq!(responses.len(), 1, "demote response: {responses:?}");
+    // XEP-0045 §8.2/§9.1 ordering (#1265 item 6): the moderator sees the
+    // IQ result first, then their own copy of the broadcast presence.
+    assert_eq!(responses.len(), 2, "demote response: {responses:?}");
     assert!(responses[0].contains("type='result'"), "{responses:?}");
+    assert!(
+        responses[1].contains("<presence"),
+        "moderator's broadcast copy follows the IQ result: {responses:?}"
+    );
 
     assert!(
         recorder.snapshot().is_empty(),

@@ -776,6 +776,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         durable_recipient_bare_jids: &snapshot.durable_recipient_bare_jids,
         managed_room_forbidden: false,
         room_moderated: snapshot.config.moderated,
+        room_occupants_may_change_subject: false,
         room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,

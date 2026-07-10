@@ -72,6 +72,13 @@ pub fn build_config_form(room: &MucRoom) -> Element {
             Field::boolean("muc#roomconfig_enablelogging", room.config.enable_logging)
                 .with_label("Enable Room Logging"),
         )
+        .add_field(
+            Field::boolean(
+                "muc#roomconfig_changesubject",
+                room.config.occupants_may_change_subject,
+            )
+            .with_label("Allow Occupants to Change Subject"),
+        )
         .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
         .add_field(
             Field::new(FIELD_PIN_PERMISSION, FieldType::ListSingle)

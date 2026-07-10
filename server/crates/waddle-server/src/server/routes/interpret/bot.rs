@@ -101,6 +101,7 @@ pub(super) async fn dispatch_bot_groupchat_response(
         durable_recipient_bare_jids: bot_ctx.durable_recipient_bare_jids,
         managed_room_forbidden: false,
         room_moderated: bot_ctx.room_moderated,
+        room_occupants_may_change_subject: false,
         room_members_only: bot_ctx.room_members_only,
         pin_permission: bot_ctx.pin_permission,
         id_gen: &id_gen,

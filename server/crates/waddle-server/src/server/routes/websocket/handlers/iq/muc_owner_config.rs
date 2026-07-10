@@ -121,6 +121,10 @@ pub(super) async fn apply_muc_owner_config(
             if let Some(enable_logging) = data_form_bool(form, "muc#roomconfig_enablelogging") {
                 config.enable_logging = enable_logging;
             }
+            // XEP-0045 §8.1 (#1265 item 8): who may change the subject.
+            if let Some(changesubject) = data_form_bool(form, "muc#roomconfig_changesubject") {
+                config.occupants_may_change_subject = changesubject;
+            }
             if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
                 config.forum = forum;
             }
@@ -134,13 +138,33 @@ pub(super) async fn apply_muc_owner_config(
                     config.pin_permission = pin_permission;
                 }
             }
+            // #1265 item 7: honor muc#roomconfig_maxusers on submit.
+            // The registrar value "none" and 0 both mean unlimited.
+            if let Some(value) = data_form_value(form, "muc#roomconfig_maxusers") {
+                let trimmed = value.trim();
+                if trimmed.eq_ignore_ascii_case("none") {
+                    config.max_occupants = 0;
+                } else if let Ok(max_occupants) = trimmed.parse::<u32>() {
+                    config.max_occupants = max_occupants;
+                }
+            }
+            // #1265 item 7: honor the offered persistentroom knob for
+            // ad-hoc rooms instead of force-overwriting it (the
+            // channel-backed override below keeps managed rooms
+            // persistent by construction).
+            if let Some(persistent) = data_form_bool(form, "muc#roomconfig_persistentroom") {
+                config.persistent = persistent;
+            }
         }
     }
 
-    // Waddle rooms are persistent, non-anonymous collaboration surfaces.
-    config.persistent = true;
-
     let channel_id = waddle_xmpp::parse_managed_room_jid(room_jid);
+    // Channel-backed rooms are persistent by construction — the channel
+    // row is the persistence — so the submitted knob cannot turn one
+    // into an instant room.
+    if channel_id.is_some() {
+        config.persistent = true;
+    }
     let existing_channel_type = managed_channel_type_for_room(state, room_jid).await?;
     if let Some(channel_type) = existing_channel_type {
         project_channel_type_to_config(&mut config, channel_type);

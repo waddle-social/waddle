@@ -593,13 +593,27 @@ pub(super) async fn handle_muc_admin_iq(
             )];
         }
     };
+    // XEP-0045 §8.2/§9.1 stanza ordering (#1265 item 6): the kicked/
+    // banned occupant's unavailable presence goes out first, then the
+    // moderator's IQ result, then the broadcast to remaining occupants.
+    // The moderator's own broadcast copy rides this connection's
+    // response frames AFTER the IQ result so the order is deterministic
+    // on the moderator's stream.
+    let mut remaining_broadcasts = Vec::new();
+    let mut moderator_frames = Vec::new();
     for (recipient, presence) in applied.presence_updates {
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to(&recipient, Stanza::Presence(presence))
-            .await;
+        if applied.removed_by_moderation.contains(&recipient) {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(&recipient, Stanza::Presence(presence))
+                .await;
+        } else if recipient == *sender_jid {
+            moderator_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+        } else {
+            remaining_broadcasts.push((recipient, presence));
+        }
     }
     // Membership-scoped visibility (#935): a kick (307) or ban (301)
     // ends the occupant's room membership, so their live SFU call
@@ -612,9 +626,19 @@ pub(super) async fn handle_muc_admin_iq(
             state, &room_jid, removed,
         );
     }
-    vec![iq_to_xml(build_admin_set_result(
+    for (recipient, presence) in remaining_broadcasts {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
+    }
+    let mut frames = vec![iq_to_xml(build_admin_set_result(
         iq.id(),
         &room_jid,
         &Jid::from(sender_jid.clone()),
-    ))]
+    ))];
+    frames.extend(moderator_frames);
+    frames
 }

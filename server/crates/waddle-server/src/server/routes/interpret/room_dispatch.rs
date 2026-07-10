@@ -261,6 +261,7 @@ pub(super) async fn dispatch_to_room(
         durable_recipient_bare_jids: &durable_recipient_bare_jids,
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
+        room_occupants_may_change_subject: snapshot.config.occupants_may_change_subject,
         room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
@@ -398,6 +399,7 @@ pub(super) async fn dispatch_to_room(
         // the legacy `RoomActor::BuildGroupchatBroadcast` check that
         // previously emitted `RoomActorError::VisitorMayNotSpeak`.
         room_moderated: snapshot.config.moderated,
+        room_occupants_may_change_subject: snapshot.config.occupants_may_change_subject,
         room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,

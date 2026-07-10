@@ -194,6 +194,7 @@ mod tests {
             durable_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated: false,
+            room_occupants_may_change_subject: false,
             room_members_only: false,
             pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,

@@ -48,6 +48,11 @@ pub struct RoomConfig {
     /// Whether this MUC room is a Waddle group DM rather than a channel.
     #[serde(default)]
     pub group_dm: bool,
+    /// XEP-0045 §8.1 `muc#roomconfig_changesubject` (#1265 item 8):
+    /// when true, any occupant (participant or visitor) may change the
+    /// room subject; when false (the XEP default), moderators only.
+    #[serde(default)]
+    pub occupants_may_change_subject: bool,
     /// #415: who may pin/unpin messages in this room. Default is
     /// `admins-only`; when set to `anyone`, any current occupant may
     /// pin. Set via the `urn:waddle:roomconfig:pinpermission` field on
@@ -76,6 +81,7 @@ impl Default for RoomConfig {
             enable_logging: true,
             forum: false,
             group_dm: false,
+            occupants_may_change_subject: false,
             pin_permission: PinPermission::default(),
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),

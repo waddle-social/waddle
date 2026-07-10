@@ -73,7 +73,14 @@ impl RoomHandler for MucSubjectHandler {
         // strict §8.1 reading is "no body element at all"; we tighten
         // to "no body content" because empty bodies have no legitimate
         // groupchat-message use and are the natural exfiltration path.
-        if message.subjects.is_empty() || message.bodies.values().any(|b| !b.trim().is_empty()) {
+        // §8.1 also excludes <subject/>+<thread/>: "A message with a
+        // <subject/> and a <body/> or a <subject/> and a <thread/> is a
+        // legitimate message, but it SHALL NOT be interpreted as a
+        // subject change" (#1265 item 8).
+        if message.subjects.is_empty()
+            || message.thread.is_some()
+            || message.bodies.values().any(|b| !b.trim().is_empty())
+        {
             return RoomHandlerOutcome::Continue(Vec::new());
         }
 
@@ -99,10 +106,12 @@ impl RoomHandler for MucSubjectHandler {
         // were materialized into the snapshot at dispatch start, so the
         // check observes the same role assignment that produced the
         // canonicalized `from='room/nick'`.
+        // §8.1: moderators by default; any occupant when the room's
+        // `muc#roomconfig_changesubject` knob allows it (#1265 item 8).
         let allowed = match sender.role {
             Role::Moderator => true,
-            Role::Participant => !ctx.room_moderated,
-            Role::Visitor | Role::None => false,
+            Role::Participant | Role::Visitor => ctx.room_occupants_may_change_subject,
+            Role::None => false,
         };
         if !allowed {
             let reply = forbidden_reply(message, ctx);
@@ -193,6 +202,7 @@ mod tests {
         sender: &'a FullJid,
         occupants: &'a [OccupantSnapshot],
         room_moderated: bool,
+        room_occupants_may_change_subject: bool,
         id_gen: &'a FixedIdGenerator,
         secret: &'a OccupantIdSecret,
     ) -> RoomContext<'a> {
@@ -203,6 +213,7 @@ mod tests {
             durable_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated,
+            room_occupants_may_change_subject,
             room_members_only: false,
             pin_permission: crate::muc::PinPermission::default(),
             id_gen,
@@ -222,6 +233,18 @@ mod tests {
         role: Role,
         room_moderated: bool,
     ) -> RoomHandlerOutcome {
+        run_with_knob(msg, room, sender, nick, role, room_moderated, false)
+    }
+
+    fn run_with_knob(
+        msg: &mut Message,
+        room: &BareJid,
+        sender: &FullJid,
+        nick: &str,
+        role: Role,
+        room_moderated: bool,
+        room_occupants_may_change_subject: bool,
+    ) -> RoomHandlerOutcome {
         let occupants = vec![OccupantSnapshot {
             full_jid: sender.clone(),
             nick: nick.to_string(),
@@ -230,7 +253,15 @@ mod tests {
         }];
         let id_gen = FixedIdGenerator("test".to_string());
         let secret = OccupantIdSecret::for_testing(b"subject-handler-test".to_vec());
-        let ctx = ctx(room, sender, &occupants, room_moderated, &id_gen, &secret);
+        let ctx = ctx(
+            room,
+            sender,
+            &occupants,
+            room_moderated,
+            room_occupants_may_change_subject,
+            &id_gen,
+            &secret,
+        );
         MucSubjectHandler.handle(msg, &ctx)
     }
 
@@ -275,8 +306,11 @@ mod tests {
         assert_eq!(setter_nick, "alice-nick");
     }
 
+    /// XEP-0045 §8.1 default (#1265 item 8): only moderators may change
+    /// the subject unless `muc#roomconfig_changesubject` opens it up —
+    /// even in unmoderated rooms.
     #[test]
-    fn subject_change_from_participant_in_unmoderated_room_emits_persist_event() {
+    fn subject_change_from_participant_denied_by_default() {
         let room = bare("team@muc.example.com");
         let sender = full("bob@example.com/phone");
         let mut msg = subject_change(&room, &sender, "Topic by participant");
@@ -288,10 +322,49 @@ mod tests {
             Role::Participant,
             false,
         );
-        let RoomHandlerOutcome::Continue(events) = outcome else {
-            panic!("participant in unmoderated room should be allowed, got {outcome:?}");
+        let RoomHandlerOutcome::Halt(events) = outcome else {
+            panic!("participant without changesubject knob should be denied, got {outcome:?}");
         };
-        assert!(extract_persist(&events).is_some());
+        assert_send_forbidden(&events);
+    }
+
+    /// §8.1: with `muc#roomconfig_changesubject` enabled, "a mere
+    /// participant or even visitor" may change the subject.
+    #[test]
+    fn changesubject_knob_allows_participants_and_visitors() {
+        let room = bare("team@muc.example.com");
+        for (jid, nick, role) in [
+            ("bob@example.com/phone", "bob-nick", Role::Participant),
+            ("eve@example.com/web", "eve-nick", Role::Visitor),
+        ] {
+            let sender = full(jid);
+            let mut msg = subject_change(&room, &sender, "Occupant topic");
+            let outcome = run_with_knob(&mut msg, &room, &sender, nick, role, false, true);
+            let RoomHandlerOutcome::Continue(events) = outcome else {
+                panic!("{role:?} with changesubject knob should be allowed, got {outcome:?}");
+            };
+            assert!(extract_persist(&events).is_some());
+        }
+    }
+
+    /// §8.1 (#1265 item 8): `<subject/>` + `<thread/>` (no body) SHALL
+    /// NOT be interpreted as a subject change.
+    #[test]
+    fn subject_with_thread_is_not_a_subject_change() {
+        let room = bare("team@muc.example.com");
+        let sender = full("eve@example.com/web");
+        let mut msg = subject_change(&room, &sender, "Threaded topic");
+        msg.thread = Some(xmpp_parsers::message::Thread {
+            id: "thread-1".to_string(),
+            parent: None,
+        });
+        // A visitor would be denied if this were a subject change; the
+        // thread makes it a regular message that passes through.
+        let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
+        let RoomHandlerOutcome::Continue(events) = outcome else {
+            panic!("subject+thread is not a subject change, got {outcome:?}");
+        };
+        assert!(extract_persist(&events).is_none());
     }
 
     #[test]
