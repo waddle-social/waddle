@@ -131,12 +131,23 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
                     for occupant in snapshot.room.occupants.values() {
                         let is_self_occupant = occupant.real_jid == *sender_jid;
+                        // XEP-0421: the destroy notification is the
+                        // occupant's final unavailable presence from
+                        // the room and MUST carry their occupant-id
+                        // (#1268).
+                        let occupant_bare = occupant.real_jid.to_bare();
+                        let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                            bare_jid: &occupant_bare,
+                            real_jid: Some(&occupant.real_jid),
+                            secret: &state.deps.occupant_id_secret,
+                        };
                         let presence = build_destroy_notification(
                             &room_jid,
                             &occupant.nick,
                             &occupant.real_jid,
                             &destroy_request,
                             is_self_occupant,
+                            &identity,
                         );
                         if is_self_occupant {
                             frames.push(stanza_to_xml(&Stanza::Presence(presence)));
@@ -379,6 +390,10 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     reply: None,
                     references: Vec::new(),
                     mentions: Vec::new(),
+                    // Room-authored moderation event row: no occupant
+                    // sender to identify.
+                    occupant_id: None,
+                    muc_sender: None,
                 }),
                 nickname_generation: None,
             };

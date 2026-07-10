@@ -180,6 +180,124 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
 }
 
 #[tokio::test]
+async fn test_sqlite_origin_id_dedup_ignores_per_session_muc_sender() {
+    let storage = create_test_storage().await;
+    assert_origin_id_dedup_ignores_per_session_muc_sender(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_origin_id_dedup_ignores_per_session_muc_sender() {
+    let storage = InMemoryMamStorage::new();
+    assert_origin_id_dedup_ignores_per_session_muc_sender(&storage).await;
+}
+
+/// Regression (#1268 follow-up): the XEP-0313 §MUC Archives real-JID
+/// disclosure (`muc_sender`) carries the sender's *per-session* full
+/// JID (a fresh random resource each reconnect). A fresh-session
+/// origin-id retry MUST still dedup — the identity fields are excluded
+/// from the dedup fingerprint / content comparison — otherwise the
+/// same logical message is archived twice and duplicated in history.
+async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn MamStorage) {
+    use waddle_xmpp_core::mam::{ArchivedMucSender, ArchivedOccupantId, ArchivedRichMessage};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+
+    let archive = bare("room@conference.example.com");
+    let archive_jid = jid("room@conference.example.com");
+    let origin_id = waddle_xmpp_core::xep0359::OriginId::new("client-origin-session");
+    let base_timestamp = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+
+    // Occupant-id is a stable HMAC of (bare, room, secret) — identical
+    // across sessions. muc_sender.jid is the per-session full JID.
+    let stable_occupant_id = ArchivedOccupantId::new("stable-occupant-id");
+    let first = ArchivedMessage {
+        id: "archive-session-first".to_string(),
+        timestamp: base_timestamp,
+        body: Some("resent across sessions".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(3),
+        rich: Some(ArchivedRichMessage {
+            occupant_id: stable_occupant_id.clone(),
+            muc_sender: Some(ArchivedMucSender {
+                jid: jid("alice@example.com/session-A"),
+                affiliation: Affiliation::Member,
+                role: Role::Participant,
+            }),
+            ..ArchivedRichMessage::default()
+        }),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    let retry_fresh_session = ArchivedMessage {
+        id: "archive-session-retry".to_string(),
+        timestamp: base_timestamp,
+        body: Some("resent across sessions".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(3),
+        rich: Some(ArchivedRichMessage {
+            occupant_id: stable_occupant_id,
+            muc_sender: Some(ArchivedMucSender {
+                // Fresh session ⇒ different resource, and the
+                // affiliation happens to have changed too.
+                jid: jid("alice@example.com/session-B"),
+                affiliation: Affiliation::Admin,
+                role: Role::Moderator,
+            }),
+            ..ArchivedRichMessage::default()
+        }),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+
+    // A retry whose rich projection is entirely absent (`None`) — e.g.
+    // a legacy row or a path that didn't capture identity — must STILL
+    // dedup against an identity-only stored row: the identity-only
+    // projection normalizes to "no dedup-relevant content", same as
+    // `None` (codex second-pass finding).
+    let retry_no_rich = ArchivedMessage {
+        id: "archive-session-retry-no-rich".to_string(),
+        timestamp: base_timestamp,
+        body: Some("resent across sessions".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(3),
+        rich: None,
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+
+    let first_id = storage.store_message(&archive, &first).await.unwrap();
+    let retry_id = storage
+        .store_message(&archive, &retry_fresh_session)
+        .await
+        .unwrap();
+    let retry_no_rich_id = storage
+        .store_message(&archive, &retry_no_rich)
+        .await
+        .unwrap();
+
+    assert_eq!(first_id, "archive-session-first");
+    assert_eq!(
+        retry_id, first_id,
+        "fresh-session retry must dedup despite a differing per-session muc_sender"
+    );
+    assert_eq!(
+        retry_no_rich_id, first_id,
+        "a rich=None retry must dedup against an identity-only stored row"
+    );
+
+    let result = storage
+        .query_messages(&archive, &MamQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        result.messages.len(),
+        1,
+        "the message must be archived exactly once"
+    );
+}
+
+#[tokio::test]
 async fn test_sqlite_origin_id_dedup_uses_bare_sender_for_direct_messages() {
     let storage = create_test_storage().await;
     assert_origin_id_dedup_uses_bare_sender_for_direct_messages(&storage).await;

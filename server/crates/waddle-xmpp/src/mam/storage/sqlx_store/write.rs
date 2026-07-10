@@ -25,7 +25,7 @@ pub(super) async fn store_message(
     let origin_dedup_fingerprint = message
         .origin_id
         .as_ref()
-        .map(|_| origin_dedup_fingerprint(message, rich_payload.as_deref()));
+        .map(|_| origin_dedup_fingerprint(message));
 
     if let Some(existing_archive_id) = find_existing_origin_id_match(
         backend,
@@ -187,7 +187,7 @@ pub(super) async fn store_message_fenced(
     let origin_dedup_fingerprint = message
         .origin_id
         .as_ref()
-        .map(|_| origin_dedup_fingerprint(message, rich_payload.as_deref()));
+        .map(|_| origin_dedup_fingerprint(message));
 
     if let Some(existing_archive_id) = find_existing_origin_id_match(
         backend,
@@ -506,7 +506,7 @@ impl OriginDedupRow {
             && self.reply_to_jid.as_ref()
                 == incoming.reply.as_ref().and_then(|reply| reply.to.as_ref())
             && self.message_type == incoming.message_type
-            && self.rich_payload.as_deref() == incoming_rich_payload
+            && rich_payload_content_matches(self.rich_payload.as_deref(), incoming_rich_payload)
     }
 
     fn sender_scope_matches(&self, incoming: &ArchivedMessage) -> bool {
@@ -567,7 +567,36 @@ fn parse_dedup_jid(archive_id: &str, column: &'static str, value: &str) -> Optio
     }
 }
 
-fn origin_dedup_fingerprint(message: &ArchivedMessage, rich_payload: Option<&str>) -> String {
+/// Compare two encoded `rich_payload` JSON blobs for origin-id retry
+/// dedup, ignoring the server-derived MUC identity fields
+/// (`occupant_id`, `muc_sender`) that vary per session. A blob that
+/// fails to decode falls back to raw-string equality (defensive:
+/// corrupt/foreign JSON should never spuriously dedup two rows).
+fn rich_payload_content_matches(existing: Option<&str>, incoming: Option<&str>) -> bool {
+    // `Ok(Some(_))` decoded to a non-empty content projection;
+    // `Ok(None)` is "absent, empty, or identity-only" (all normalize to
+    // no dedup-relevant content); `Err(())` is present-but-undecodable.
+    fn normalized(value: Option<&str>) -> Result<Option<ArchivedRichMessage>, ()> {
+        match value {
+            None => Ok(None),
+            Some(value) if value.trim().is_empty() => Ok(None),
+            Some(value) => match serde_json::from_str::<ArchivedRichMessage>(value) {
+                Ok(rich) => Ok(rich.dedup_content()),
+                Err(_) => Err(()),
+            },
+        }
+    }
+
+    match (normalized(existing), normalized(incoming)) {
+        (Ok(existing), Ok(incoming)) => existing == incoming,
+        // At least one side is present-but-undecodable — fall back to
+        // conservative exact string equality (never spuriously merge
+        // two rows whose payloads we could not parse).
+        _ => existing == incoming,
+    }
+}
+
+fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
     let mut hasher = Sha256::new();
     update_hash_part(
         &mut hasher,
@@ -602,7 +631,20 @@ fn origin_dedup_fingerprint(message: &ArchivedMessage, rich_payload: Option<&str
         .and_then(|reply| reply.to.as_ref())
         .map(|jid| jid.to_string());
     update_hash_part(&mut hasher, "reply_to_jid", reply_to_jid.as_deref());
-    update_hash_part(&mut hasher, "rich_payload", rich_payload);
+    // Hash the CONTENT-ONLY rich payload, not the full one bound to the
+    // `rich_payload` column: the server-derived MUC identity fields
+    // (`occupant_id`, `muc_sender`) carry per-session data
+    // (`muc_sender.jid` is a fresh random resource each reconnect), so
+    // including them would make every fresh-session origin-id retry
+    // fingerprint differently and defeat dedup. `content_only()` clears
+    // them, matching the in-memory `origin_id_dedup_match` check.
+    let dedup_rich = message
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.dedup_content())
+        .as_ref()
+        .and_then(|rich| serde_json::to_string(rich).ok());
+    update_hash_part(&mut hasher, "rich_payload", dedup_rich.as_deref());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -635,6 +677,11 @@ pub(super) async fn replace_with_tombstone(
         reply: None,
         references: Vec::new(),
         mentions: Vec::new(),
+        // XEP-0424 §Tombstones: the occupant-id and real-JID item
+        // identify the original sender and MUST NOT survive the
+        // tombstone replacement.
+        occupant_id: None,
+        muc_sender: None,
     };
     let encoded = serde_json::to_string(&payload)
         .map_err(|error| MamStorageError::Serialization(error.to_string()))?;

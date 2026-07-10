@@ -332,7 +332,8 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
 
     // Run through the wire serializer used by the MAM IQ handler.
     let requester = jid("alice@example.com/device");
-    let wire_messages = build_result_messages("qid-1", &requester, &result.messages);
+    let archive = jid("alice@example.com");
+    let wire_messages = build_result_messages("qid-1", &archive, &requester, &result.messages);
     assert_eq!(wire_messages.len(), 1, "one wire message produced");
 
     // Extract the inner forwarded stanza from the MAM result element and

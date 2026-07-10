@@ -114,6 +114,7 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
     // carries `<thread parent='root-thread'>child-thread</thread>`.
     let envelopes = waddle_xmpp_core::mam::build_result_messages(
         "q1",
+        &jid_lit("room@conference.example.com"),
         &jid_lit("alice@example.com"),
         &result.messages,
     );
@@ -209,8 +210,12 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
         nickname_generation: Some(0),
     };
 
-    let envelopes =
-        waddle_xmpp_core::mam::build_result_messages("q-xml", &jid_lit("bob@example.com"), &[row]);
+    let envelopes = waddle_xmpp_core::mam::build_result_messages(
+        "q-xml",
+        &jid_lit("room@conference.example.com"),
+        &jid_lit("bob@example.com"),
+        &[row],
+    );
     let result_payload = envelopes[0]
         .payloads
         .iter()

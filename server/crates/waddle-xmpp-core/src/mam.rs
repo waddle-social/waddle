@@ -11,15 +11,16 @@ mod types;
 
 pub use query::{build_query_form_iq, is_mam_query, is_mam_query_form_request, parse_mam_query};
 pub use response::{
-    archived_inner_message, build_fin_iq, build_result_messages, message_type_wire_str,
+    archived_inner_message, build_archived_muc_sender_x, build_archived_occupant_id_element,
+    build_fin_iq, build_result_messages, message_type_wire_str,
 };
 pub use stanza_id_filter::{
     MamFilterStanzaId, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN, STANZA_ID_FILTER_FIELD,
 };
 pub use types::{
-    ArchivedMention, ArchivedMessage, ArchivedModeration, ArchivedReactionSet, ArchivedReference,
-    ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
-    MamQuery, MamResult, RichMessageId, RichText, ThreadId,
+    ArchivedMention, ArchivedMessage, ArchivedModeration, ArchivedMucSender, ArchivedOccupantId,
+    ArchivedReactionSet, ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
+    ArchivedRichPayload, ArchivedTombstone, MamQuery, MamResult, RichMessageId, RichText, ThreadId,
 };
 
 /// MAM XML namespace (XEP-0313 v2).
@@ -88,6 +89,13 @@ pub const FORWARD_NS: &str = "urn:xmpp:forward:0";
 
 /// Delay namespace (XEP-0203).
 pub const DELAY_NS: &str = "urn:xmpp:delay";
+
+/// XEP-0421 occupant-id namespace.
+pub const OCCUPANT_ID_NS: &str = "urn:xmpp:occupant-id:0";
+
+/// XEP-0045 `muc#user` namespace (extended presence / archived
+/// real-JID disclosure per XEP-0313 §MUC Archives).
+pub const MUC_USER_NS: &str = "http://jabber.org/protocol/muc#user";
 
 const CLIENT_NS: &str = "jabber:client";
 const REPLY_NS: &str = "urn:xmpp:reply:0";
