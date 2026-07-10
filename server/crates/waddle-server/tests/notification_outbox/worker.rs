@@ -1187,6 +1187,117 @@ async fn unknown_room_policy_defers_groupchat_candidate_at_t1() {
     );
 }
 
+#[tokio::test]
+async fn policy_deferral_cap_dead_letters_candidate_and_unblocks_fresh_work() {
+    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let store = store().await;
+    let target = target();
+    let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let projection = settings_projection().await;
+    let room_policy = UnknownRoomPolicy::new();
+    let recipient = bare("alice@example.com");
+    let room = bare("team@muc.example.com");
+    register_push_target(&push_store, &recipient, &target).await;
+
+    let stuck_candidate = groupchat_candidate_for(
+        &recipient,
+        &room,
+        "team@muc.example.com/bob".parse().expect("room occupant"),
+        "archive-policy-cap",
+        NotificationClass::NotifyAll,
+    );
+    store
+        .insert_candidate(&stuck_candidate)
+        .await
+        .expect("groupchat insert");
+    store
+        .execute(
+            "UPDATE notification_candidates SET policy_error_count = 47, next_attempt_at_ms = NULL WHERE stanza_id = ?",
+            waddle_server::db_params!["archive-policy-cap"],
+        )
+        .await
+        .expect("prime final policy attempt");
+
+    assert_eq!(
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain capped candidate"),
+        1,
+        "terminal policy retry exhaustion must count as processed",
+    );
+
+    let mut rows = store
+        .query(
+            "SELECT policy_error_count, outboxed_at_ms, suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+            waddle_server::db_params!["archive-policy-cap"],
+        )
+        .await
+        .expect("candidate row query");
+    let row = rows
+        .next()
+        .await
+        .expect("candidate row read")
+        .expect("candidate row");
+    assert_eq!(row.get::<i64>(0).expect("policy_error_count"), 48);
+    assert!(
+        row.get::<Option<i64>>(1).expect("outboxed_at_ms").is_some(),
+        "retry-exhausted candidate must be marked outboxed for retention pruning",
+    );
+    assert_eq!(
+        row.get::<Option<String>>(2)
+            .expect("suppressed_reason")
+            .as_deref(),
+        Some("policy_retries_exhausted"),
+    );
+    let rendered = waddle_xmpp::prometheus::render_metrics();
+    assert!(
+        rendered.contains("waddle_push_suppressed_total{reason=\"policy_retries_exhausted\"} 1"),
+        "metrics render missing policy retry exhaustion counter: {rendered}",
+    );
+    assert!(
+        store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+        "dead-lettering must not enqueue a push job",
+    );
+
+    let fresh_candidate = candidate_for(
+        &recipient,
+        &bare("bob@example.com"),
+        "archive-fresh-after-policy-cap",
+    );
+    store
+        .insert_candidate(&fresh_candidate)
+        .await
+        .expect("fresh candidate insert");
+    assert_eq!(
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain fresh candidate"),
+        1,
+        "fresh candidate must drain after the stuck row is dead-lettered",
+    );
+    let jobs = store.pending_outbox_jobs().await.expect("fresh jobs");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].recipient_bare_jid(), &recipient);
+}
+
 /// The per-batch room-policy cache MUST collapse repeat lookups
 /// for the same room into a single [`RoomPolicyStore`]
 /// round-trip. With one room and N candidates, only one actor

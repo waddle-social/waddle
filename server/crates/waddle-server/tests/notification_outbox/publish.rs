@@ -1090,3 +1090,52 @@ async fn prune_completed_deletes_outboxed_candidates_in_ordered_batches() {
         vec!["archive-older".to_string(), "archive-live".to_string()]
     );
 }
+
+#[tokio::test]
+async fn prune_completed_reaps_policy_retry_dead_lettered_candidate() {
+    let store = store().await;
+    let candidate = candidate("archive-policy-retries-exhausted");
+    store
+        .insert_candidate(&candidate)
+        .await
+        .expect("insert candidate");
+    let cutoff_ms = waddle_server::time::now_ms().saturating_sub(1_000);
+    let old_ms = cutoff_ms.saturating_sub(1);
+    store
+        .execute(
+            r#"
+            UPDATE notification_candidates
+            SET outboxed_at_ms = ?,
+                suppressed_reason = ?
+            WHERE stanza_id = ?
+            "#,
+            waddle_server::db_params![
+                old_ms,
+                "policy_retries_exhausted",
+                "archive-policy-retries-exhausted",
+            ],
+        )
+        .await
+        .expect("mark candidate dead-lettered");
+
+    let pruned = store
+        .prune_completed_before(cutoff_ms, 100)
+        .await
+        .expect("prune");
+
+    assert_eq!(pruned.candidates_deleted, 1);
+    assert_eq!(pruned.jobs_deleted, 0);
+    let mut rows = store
+        .query(
+            "SELECT COUNT(*) FROM notification_candidates WHERE stanza_id = ?",
+            waddle_server::db_params!["archive-policy-retries-exhausted"],
+        )
+        .await
+        .expect("candidate count query");
+    let row = rows
+        .next()
+        .await
+        .expect("candidate count row")
+        .expect("candidate count");
+    assert_eq!(row.get::<i64>(0).expect("candidate count"), 0);
+}

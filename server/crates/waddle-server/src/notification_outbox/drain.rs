@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// Maximum T1 policy-deferral attempts before a candidate is
+/// terminally suppressed. The bound is deliberately generous:
+/// 48 attempts with the saturated retry delay is roughly four hours,
+/// so transient blocklist, gate, or room-policy infrastructure faults
+/// keep retrying while permanently unresolvable candidates stop
+/// starving fresher rows.
+const MAX_CANDIDATE_POLICY_ATTEMPTS: i64 = 48;
+
 impl NotificationOutboxStore {
     pub async fn drain_pending_candidates_into_outbox(
         &self,
@@ -64,7 +72,9 @@ impl NotificationOutboxStore {
                         %error,
                         "XEP-0191 blocklist load failed; deferring notification candidate fail-closed"
                     );
-                    self.defer_candidate_policy_error(&candidate).await?;
+                    if self.defer_candidate_policy_error(&candidate).await? {
+                        processed += 1;
+                    }
                     continue;
                 }
             }
@@ -124,7 +134,9 @@ impl NotificationOutboxStore {
                         error = ?error,
                         "push gate evaluation failed at T1; deferring candidate"
                     );
-                    self.defer_candidate_policy_error(&candidate).await?;
+                    if self.defer_candidate_policy_error(&candidate).await? {
+                        processed += 1;
+                    }
                     continue;
                 }
             };
@@ -162,7 +174,9 @@ impl NotificationOutboxStore {
                         class = ?candidate.class(),
                         "MUC config unavailable at T1; deferring candidate (unknown room policy is not 'public')"
                     );
-                    self.defer_candidate_policy_error(&candidate).await?;
+                    if self.defer_candidate_policy_error(&candidate).await? {
+                        processed += 1;
+                    }
                     continue;
                 }
                 T1PushDispatchOutcome::Deliver { rich } => rich,
@@ -201,9 +215,45 @@ impl NotificationOutboxStore {
     async fn defer_candidate_policy_error(
         &self,
         candidate: &NotificationCandidate,
-    ) -> Result<(), NotificationOutboxError> {
+    ) -> Result<bool, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
         let next_policy_error_count = candidate.policy_error_count + 1;
+        if next_policy_error_count >= MAX_CANDIDATE_POLICY_ATTEMPTS {
+            let reason = SuppressedReason::PolicyRetriesExhausted;
+            let mut tx = self.db.begin().await?;
+            tx.execute(
+                r#"
+                UPDATE notification_candidates
+                SET policy_error_count = ?
+                WHERE recipient_bare_jid = ?
+                  AND conversation_jid = ?
+                  AND sender_jid = ?
+                  AND thread_id = ?
+                  AND stanza_id_by = ?
+                  AND stanza_id = ?
+                  AND class = ?
+                  AND outboxed_at_ms IS NULL
+                "#,
+                crate::db_params![
+                    next_policy_error_count,
+                    candidate.recipient_bare_jid.to_string(),
+                    candidate.conversation_jid.to_string(),
+                    candidate.sender_jid.to_string(),
+                    candidate.thread_id.as_str(),
+                    candidate.archive_stanza_id.by.to_string(),
+                    candidate.archive_stanza_id.id.clone(),
+                    candidate.class.as_db_value(),
+                ],
+            )
+            .await?;
+            record_candidate_suppressed_reason_tx(&mut tx, candidate, reason).await?;
+            let claimed = mark_candidate_outboxed_tx(&mut tx, candidate, now_ms).await?;
+            tx.commit().await?;
+            if claimed > 0 {
+                waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+            }
+            return Ok(claimed > 0);
+        }
         self.execute(
             r#"
             UPDATE notification_candidates
@@ -231,7 +281,7 @@ impl NotificationOutboxStore {
             ],
         )
         .await?;
-        Ok(())
+        Ok(false)
     }
 
     pub async fn pending_candidates(

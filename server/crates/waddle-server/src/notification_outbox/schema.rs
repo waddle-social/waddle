@@ -35,7 +35,7 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
-pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 14] = [
+pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 15] = [
     "xep0357_self",
     "xep0357_no_registration",
     "xep0357_registration_disabled",
@@ -49,9 +49,10 @@ pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 14] = 
     "provider_token_expired",
     "xep0357_push_service_degraded",
     "unread_zero_at_publish",
+    "policy_retries_exhausted",
     "xep0444_reaction",
 ];
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish', 'xep0444_reaction')";
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish', 'policy_retries_exhausted', 'xep0444_reaction')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
@@ -1300,7 +1301,7 @@ mod tests {
 
     #[test]
     fn postgres_suppressed_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying, 'unread_zero_at_publish'::character varying, 'xep0444_reaction'::character varying])::text[]))))";
+        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying, 'unread_zero_at_publish'::character varying, 'policy_retries_exhausted'::character varying, 'xep0444_reaction'::character varying])::text[]))))";
         assert!(
             notification_candidates_suppressed_reason_constraint_matches_expected(
                 postgres_definition
@@ -1420,7 +1421,8 @@ mod tests {
         let url = format!("sqlite://{path}");
         {
             // Simulate the pre-#780 schema: full column set, but a
-            // 13-value CHECK missing `xep0444_reaction` → stale.
+            // 13-value CHECK missing later additions
+            // (`policy_retries_exhausted`, `xep0444_reaction`) → stale.
             let db = crate::db::Database::from_config(
                 "outbox-rebuild-legacy",
                 &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
