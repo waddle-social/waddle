@@ -109,26 +109,39 @@ pub fn is_reaction_message(msg: &Message) -> bool {
     msg.payloads.iter().any(is_reactions_element)
 }
 
+/// Routing/transport metadata namespaces that never make a stanza
+/// actionable on their own: XEP-0359 stanza/origin ids, XEP-0334
+/// storage hints, XEP-0203 delayed-delivery stamps, and XEP-0421
+/// occupant ids. Everything OUTSIDE this list defeats the
+/// reaction-only predicate — the safe failure mode for a payload we
+/// don't recognize is to notify, never to suppress.
+const NON_ACTIONABLE_PAYLOAD_NAMESPACES: &[&str] = &[
+    "urn:xmpp:sid:0",
+    "urn:xmpp:hints",
+    "urn:xmpp:delay",
+    "urn:xmpp:occupant-id:0",
+];
+
 /// A reaction-ONLY message: carries `<reactions/>` and NOTHING else
 /// actionable (#780). This is the push-suppression predicate —
 /// "Alice reacted 👍" should not fire an OS push, but any other
-/// actionable content riding the same stanza keeps the notification:
+/// actionable content riding the same stanza keeps the notification.
 ///
-/// - a substantive (non-whitespace) body,
-/// - an XEP-0308 correction (an edit is actionable even body-less),
-/// - an XEP-0424 retraction,
-/// - XEP-0513 explicit mentions (a body-less mention still pings).
-///
-/// (Greptile review on the #780 PR: without the payload checks, a
-/// body-less but actionable stanza that happened to also carry
-/// reactions would be silently suppressed before mention/class policy
-/// ran.)
+/// The check is an ALLOW-list, not an enumeration of known actionable
+/// payloads (Greptile review on the #780 PR, twice): besides requiring
+/// no substantive body, every payload element must be either the
+/// `<reactions/>` element itself or pure routing/transport metadata
+/// ([`NON_ACTIONABLE_PAYLOAD_NAMESPACES`]). A correction, retraction,
+/// mention, invite, file share, or any future payload we have not
+/// modeled therefore fails open to "still notify" instead of being
+/// silently suppressed.
 pub fn is_reaction_only_message(msg: &Message) -> bool {
     is_reaction_message(msg)
         && !msg.bodies.values().any(|text| !text.trim().is_empty())
-        && !super::xep0308::is_correction_message(msg)
-        && super::xep0424::extract_retraction_from_message(msg).is_none()
-        && super::xep0513::extract_explicit_mentions(msg).is_none()
+        && msg.payloads.iter().all(|elem| {
+            is_reactions_element(elem)
+                || NON_ACTIONABLE_PAYLOAD_NAMESPACES.contains(&elem.ns().as_str())
+        })
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -314,6 +327,34 @@ mod tests {
                 .build(),
         );
         assert!(!is_reaction_only_message(&with_mention));
+
+        // Pure routing/transport metadata riding the reaction does NOT
+        // defeat the predicate: stanza ids, hints, delay stamps, and
+        // occupant ids are never actionable on their own.
+        let mut with_metadata = reaction_only.clone();
+        with_metadata.payloads.push(
+            Element::builder("stanza-id", "urn:xmpp:sid:0")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sid-1")
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    "alice@example.com",
+                )
+                .build(),
+        );
+        with_metadata
+            .payloads
+            .push(Element::builder("store", "urn:xmpp:hints").build());
+        assert!(is_reaction_only_message(&with_metadata));
+
+        // ANY unmodeled payload fails open to "still notify" — the
+        // allow-list, not an actionable-payload enumeration, is the
+        // safety property (e.g. a body-less file share or invite that
+        // also carries reactions must not be suppressed).
+        let mut with_unknown = reaction_only.clone();
+        with_unknown
+            .payloads
+            .push(Element::builder("file-sharing", "urn:xmpp:sfs:0").build());
+        assert!(!is_reaction_only_message(&with_unknown));
     }
 
     #[test]
