@@ -2773,8 +2773,9 @@ const REMOTE_MUC_MEMBERSHIP_RECONCILE_INTERVAL: Duration = Duration::from_secs(3
 
 /// Collect the occupants whose remote MUC memberships need a cleanup
 /// re-drive (#1249): an ACTIVE membership entry whose occupant full JID
-/// has neither a live connection-registry entry nor a detached
-/// XEP-0198 session on this node. Such an entry can only be the residue
+/// has no live connection-registry entry here and no resumable
+/// XEP-0198 session anywhere (this node's memory OR the shared durable
+/// store). Such an entry can only be the residue
 /// of a failed (or missed) disconnect cleanup — the join path records
 /// memberships strictly while the connection is registered, and both
 /// graceful-leave and successful cleanup forget them.
