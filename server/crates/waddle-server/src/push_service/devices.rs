@@ -525,14 +525,35 @@ impl DatabasePushServiceStore {
             .ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
             .await
         {
-            let _ = self
+            // Compensation: the node+device commit above must not
+            // leave an active device whose XEP-0060 backing node was
+            // never provisioned — retries mint fresh device ids, and
+            // active orphans are never reaped by the disabled-device
+            // pruner, so they would permanently eat into
+            // MAX_PUSH_DEVICES_PER_NODE. If the compensating disable
+            // ITSELF fails (double DB failure), log loudly so an
+            // operator can reap the orphan; swallowing it silently
+            // would make the quota leak undiagnosable.
+            if let Err(compensation_error) = self
                 .disable_device_for_owner(
                     owner_bare_jid,
                     node.node(),
                     device.device_id(),
                     Some("failed to provision XEP-0060 Push Service node"),
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    owner = %owner_bare_jid,
+                    node = %node.node(),
+                    device_id = %device.device_id(),
+                    provisioning_error = %error,
+                    %compensation_error,
+                    "register-device compensation failed; an ACTIVE push device \
+                     without a XEP-0060 backing node was left behind and counts \
+                     against the per-node device quota until manually disabled"
+                );
+            }
             return Err(error);
         }
         Ok((node, device))
