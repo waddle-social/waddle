@@ -76,35 +76,16 @@ fn parse_in_call_flags(in_call: JsValue) -> InCallPresenceFlags {
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Join a MUC room. Always requests zero discussion history
+    /// (`<history maxstanzas='0'/>`, XEP-0045 §7.2.15): MAM catch-up is
+    /// the authoritative history source, so accepting the service's
+    /// default join history would double-deliver recent messages (#1255).
+    /// The canonical presence shape lives in
+    /// [`waddle_xmpp_client::messaging::build_muc_join_presence`].
     pub fn join_room(&self, room_jid: String, nick: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let to = format!("{room_jid}/{nick}");
-            let stanza = Element::builder("presence", NS_CLIENT)
-                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
-                .append(Element::builder("x", NS_MUC).build())
-                .build();
-            send_stanza_command(inner, stanza).await?;
-            Ok(JsValue::UNDEFINED)
-        })
-    }
-
-    pub fn join_room_without_history(&self, room_jid: String, nick: String) -> Promise {
-        let inner = self.inner.clone();
-        future_to_promise(async move {
-            let to = format!("{room_jid}/{nick}");
-            let stanza = Element::builder("presence", NS_CLIENT)
-                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
-                .append(
-                    Element::builder("x", NS_MUC)
-                        .append(
-                            Element::builder("history", NS_MUC)
-                                .attr(minidom::rxml::xml_ncname!("maxstanzas").to_owned(), "0")
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build();
+            let stanza = waddle_xmpp_client::messaging::build_muc_join_presence(&room_jid, &nick);
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })

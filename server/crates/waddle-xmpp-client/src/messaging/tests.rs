@@ -2298,6 +2298,36 @@ fn build_retraction_message_has_expected_shape() {
     assert!(stanza.get_child("thread", "jabber:client").is_none());
 }
 
+/// XEP-0424 §Use Case (#1267 item 1): the retraction's fallback body
+/// SHOULD be marked with a XEP-0428 `<fallback/>` whose `for` attribute
+/// names the retraction namespace, so supporting clients never render
+/// the generic body as real content.
+#[test]
+fn build_retraction_message_marks_body_as_xep0428_fallback() {
+    let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1", None);
+    let fallback = stanza
+        .get_child("fallback", crate::xep::fallback::NS_FALLBACK)
+        .expect("XEP-0428 fallback marker present");
+    assert_eq!(fallback.attr("for"), Some(NS_MESSAGE_RETRACT));
+}
+
+/// XEP-0045 §7.2.15 (#1255): the join presence always requests zero
+/// discussion history — MAM catch-up is the authoritative history
+/// source, so accepting default join history would double-deliver.
+#[test]
+fn build_muc_join_presence_requests_no_history() {
+    let presence = build_muc_join_presence("room@muc.example", "alice");
+    assert_eq!(presence.name(), "presence");
+    assert_eq!(presence.attr("to"), Some("room@muc.example/alice"));
+    let x = presence
+        .get_child("x", "http://jabber.org/protocol/muc")
+        .expect("muc <x/> child present");
+    let history = x
+        .get_child("history", "http://jabber.org/protocol/muc")
+        .expect("<history/> child present");
+    assert_eq!(history.attr("maxstanzas"), Some("0"));
+}
+
 #[test]
 fn build_retraction_message_includes_thread_when_present() {
     // XEP-0201 §3 + XEP-0424 — retracting a threaded message SHOULD

@@ -323,6 +323,10 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         extension_body_fallback,
         mds_displayed,
         pubsub_events,
+        // XEP-0280 direction is a property of the wrapping envelope, not
+        // of the message element itself; the runtime stamps it after the
+        // §11 own-bare-JID verification.
+        carbon: None,
     })
 }
 

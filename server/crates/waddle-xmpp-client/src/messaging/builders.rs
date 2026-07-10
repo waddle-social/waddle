@@ -228,12 +228,46 @@ pub fn build_retraction_message(
             Element::builder("body", NS_CLIENT)
                 .append("This person attempted to retract a previous message.")
                 .build(),
+        )
+        // XEP-0424 §Use Case: the generic body is only a fallback for
+        // non-supporting clients and SHOULD be marked with a XEP-0428
+        // <fallback for='urn:xmpp:message-retract:1'/> so supporting
+        // receivers never render it as real content (#1267 item 1).
+        .append(
+            Element::builder("fallback", crate::xep::fallback::NS_FALLBACK)
+                .attr(
+                    minidom::rxml::xml_ncname!("for").to_owned(),
+                    NS_MESSAGE_RETRACT,
+                )
+                .build(),
         );
     if let Some(thread) = thread {
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
     builder
         .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+/// Build the XEP-0045 §7.2 room-join `<presence/>` for `room_jid`/`nick`.
+///
+/// Always requests **no discussion history** (`<history maxstanzas='0'/>`,
+/// XEP-0045 §7.2.15): Waddle clients hydrate room history exclusively via
+/// MAM catch-up (XEP-0313), so accepting the service's default history on
+/// join would deliver the same recent messages twice (#1255).
+pub fn build_muc_join_presence(room_jid: &str, nick: &str) -> Element {
+    let to = format!("{room_jid}/{nick}");
+    Element::builder("presence", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .append(
+            Element::builder("x", NS_MUC)
+                .append(
+                    Element::builder("history", NS_MUC)
+                        .attr(minidom::rxml::xml_ncname!("maxstanzas").to_owned(), "0")
+                        .build(),
+                )
+                .build(),
+        )
         .build()
 }
 

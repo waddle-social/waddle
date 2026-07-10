@@ -199,12 +199,32 @@ pub struct CorrectionPayload {
     pub replaces_id: String,
 }
 
+/// XEP-0280 carbon direction of an unwrapped forwarded copy.
+///
+/// `Sent` mirrors a message another of our resources sent (`<sent/>`);
+/// `Received` mirrors a message another of our resources received
+/// (`<received/>`). Only stamped after the runtime has verified the
+/// wrapping envelope came from the account's own bare JID (XEP-0280
+/// §11 forgery rule) — a parsed message carrying `Some(direction)` is
+/// always a verified carbon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarbonDirection {
+    Sent,
+    Received,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboundMessage {
     pub from: Option<String>,
     pub to: Option<String>,
     pub message_type: String,
     pub id: Option<String>,
+    /// First-listed XEP-0359 `<stanza-id/>` (a stanza may carry several,
+    /// one per archiving entity). The `by` attribute is preserved but NOT
+    /// verified here — consumers MUST check `by` against the expected
+    /// archive authority before trusting the id (XEP-0359 §Security
+    /// Considerations); prefer scanning `stanza_ids` for the authority
+    /// you need instead of reaching for this first-child convenience.
     pub stanza_id: Option<StableStanzaId>,
     pub stanza_ids: Vec<StableStanzaId>,
     pub origin_id: Option<String>,
@@ -270,6 +290,11 @@ pub struct InboundMessage {
     /// Generic typed XEP-0060 PubSub event notifications carried by
     /// `<event xmlns='http://jabber.org/protocol/pubsub#event'/>`.
     pub pubsub_events: Vec<crate::pubsub_event::PubsubEvent>,
+    /// XEP-0280: `Some(direction)` when this message was unwrapped from
+    /// a `<sent/>`/`<received/>` carbon envelope whose wrapping stanza
+    /// passed the §11 own-bare-JID check. `None` for directly received
+    /// stanzas. Stamped by the runtime, never by the parser.
+    pub carbon: Option<CarbonDirection>,
 }
 
 /// XEP-0490 §3 displayed entry as surfaced from a PEP event.

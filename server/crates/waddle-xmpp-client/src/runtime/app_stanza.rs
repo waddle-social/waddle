@@ -59,6 +59,38 @@ impl XmppRuntime {
             if let Some(call_event) = parse_carbon_call_event(element, self.account_bare_jid()) {
                 return vec![ClientEvent::Call(Box::new(call_event))];
             }
+
+            // XEP-0280: unwrap a normal (non-call) carbon copy so the
+            // inner message flows through the regular messaging pipeline
+            // tagged with its direction (#1243). The §11 forgery rule is
+            // applied first: any carbon-shaped stanza whose wrapping
+            // 'from' is not our own bare JID MUST be ignored outright —
+            // it must not fall through to `messaging::parse`, where the
+            // body-less outer envelope would masquerade as a message.
+            match unwrap_carbon(element, self.account_bare_jid()) {
+                CarbonOutcome::Unwrapped {
+                    direction,
+                    inner,
+                    forwarded_timestamp,
+                } => {
+                    if let Some(crate::messaging::MessagingEvent::Message(mut message)) =
+                        messaging::parse(&inner)
+                    {
+                        message.carbon = Some(direction);
+                        // XEP-0297 §5: prefer the inner element's own
+                        // <delay/>, fall back to the forwarded wrapper's.
+                        message.timestamp = message.timestamp.or(forwarded_timestamp);
+                        return vec![ClientEvent::Messaging(
+                            crate::messaging::MessagingEvent::Message(message),
+                        )];
+                    }
+                    // Carbon wrapped something that is not a parseable
+                    // message: nothing to surface.
+                    return Vec::new();
+                }
+                CarbonOutcome::Forged => return Vec::new(),
+                CarbonOutcome::NotCarbon => {}
+            }
         }
 
         if let Some(call_event) = messaging::parse_call_event(element) {
@@ -88,13 +120,82 @@ impl XmppRuntime {
     }
 }
 
+/// XEP-0280 carbons namespace (`<sent/>` / `<received/>` envelopes).
+const NS_CARBONS: &str = "urn:xmpp:carbons:2";
+/// XEP-0297 stanza forwarding namespace (`<forwarded/>`).
+const NS_FORWARD: &str = "urn:xmpp:forward:0";
+/// XEP-0203 delayed delivery namespace (forwarded-level `<delay/>`).
+const NS_DELAY: &str = "urn:xmpp:delay";
+
+/// Result of probing a `<message>` for a XEP-0280 carbon envelope.
+enum CarbonOutcome {
+    /// A verified carbon: the wrapping stanza came from the account's
+    /// own bare JID and contained `<sent|received>/<forwarded>/<message>`.
+    Unwrapped {
+        direction: crate::messaging::CarbonDirection,
+        inner: Element,
+        /// XEP-0297 §5: the `<forwarded/>` wrapper may carry the original
+        /// delivery time as a `<delay/>` child. Propagated so the inner
+        /// message keeps its authoritative timestamp when the inner
+        /// element itself has none.
+        forwarded_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// Carbon-shaped but the wrapping 'from' is not our bare JID —
+    /// XEP-0280 §11 says such copies MUST be ignored.
+    Forged,
+    /// Not a carbon envelope at all.
+    NotCarbon,
+}
+
+/// Probe `element` for a XEP-0280 `<sent/>`/`<received/>` carbon and
+/// extract the forwarded inner `<message>` after the §11 own-bare-JID
+/// forgery check.
+fn unwrap_carbon(element: &Element, account: &jid::BareJid) -> CarbonOutcome {
+    let Some(carbon) = element.children().find(|child| {
+        child.ns() == NS_CARBONS && (child.name() == "sent" || child.name() == "received")
+    }) else {
+        return CarbonOutcome::NotCarbon;
+    };
+
+    let verified_own_bare = element
+        .attr("from")
+        .and_then(|from| from.parse::<jid::Jid>().ok())
+        .is_some_and(|from| &from.to_bare() == account);
+    if !verified_own_bare {
+        return CarbonOutcome::Forged;
+    }
+
+    let direction = if carbon.name() == "sent" {
+        crate::messaging::CarbonDirection::Sent
+    } else {
+        crate::messaging::CarbonDirection::Received
+    };
+    let Some(forwarded) = carbon.get_child("forwarded", NS_FORWARD) else {
+        return CarbonOutcome::Forged;
+    };
+    let Some(inner) = forwarded
+        .children()
+        .find(|child| child.name() == "message" && child.ns() == "jabber:client")
+    else {
+        return CarbonOutcome::Forged;
+    };
+    let forwarded_timestamp = forwarded
+        .get_child("delay", NS_DELAY)
+        .and_then(|delay| delay.attr("stamp"))
+        .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
+        .map(|stamp| stamp.with_timezone(&chrono::Utc));
+
+    CarbonOutcome::Unwrapped {
+        direction,
+        inner: inner.clone(),
+        forwarded_timestamp,
+    }
+}
+
 fn parse_carbon_call_event(
     element: &Element,
     account: &jid::BareJid,
 ) -> Option<crate::messaging::InboundCallEvent> {
-    const NS_CARBONS: &str = "urn:xmpp:carbons:2";
-    const NS_FORWARD: &str = "urn:xmpp:forward:0";
-
     if element.name() != "message" {
         return None;
     }
