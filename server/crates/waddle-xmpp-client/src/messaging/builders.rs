@@ -249,16 +249,25 @@ pub fn build_retraction_message(
         .build()
 }
 
-/// Build the XEP-0045 §7.2 room-join `<presence/>` for `room_jid`/`nick`.
+/// Build the XEP-0045 §7.2 room-join `<presence/>` for `room`/`nick`.
 ///
 /// Always requests **no discussion history** (`<history maxstanzas='0'/>`,
 /// XEP-0045 §7.2.15): Waddle clients hydrate room history exclusively via
 /// MAM catch-up (XEP-0313), so accepting the service's default history on
 /// join would deliver the same recent messages twice (#1255).
-pub fn build_muc_join_presence(room_jid: &str, nick: &str) -> Element {
-    let to = format!("{room_jid}/{nick}");
-    Element::builder("presence", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+///
+/// Typed-payloads rule: the occupant JID is built from a typed
+/// [`jid::BareJid`] + resource (nick validation happens here, not via
+/// string concatenation); an invalid nick surfaces as a bad-request error.
+pub fn build_muc_join_presence(room: &jid::BareJid, nick: &str) -> ClientResult<Element> {
+    let occupant = room
+        .with_resource_str(nick)
+        .map_err(|err| CoreError::bad_request(Some(format!("invalid MUC nick {nick:?}: {err}"))))?;
+    Ok(Element::builder("presence", NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            occupant.to_string(),
+        )
         .append(
             Element::builder("x", NS_MUC)
                 .append(
@@ -268,7 +277,7 @@ pub fn build_muc_join_presence(room_jid: &str, nick: &str) -> Element {
                 )
                 .build(),
         )
-        .build()
+        .build())
 }
 
 pub fn build_moderation_message(

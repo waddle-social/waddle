@@ -2355,7 +2355,8 @@ fn build_outbound_message_marks_muc_pm_with_muc_user_x() {
 /// source, so accepting default join history would double-deliver.
 #[test]
 fn build_muc_join_presence_requests_no_history() {
-    let presence = build_muc_join_presence("room@muc.example", "alice");
+    let room: jid::BareJid = "room@muc.example".parse().expect("valid room JID");
+    let presence = build_muc_join_presence(&room, "alice").expect("valid nick");
     assert_eq!(presence.name(), "presence");
     assert_eq!(presence.attr("to"), Some("room@muc.example/alice"));
     let x = presence

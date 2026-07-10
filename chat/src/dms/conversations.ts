@@ -360,9 +360,19 @@ export function useDirectMessageConversations(
 
   async function openDm(peerJid: string) {
     const bare = conversationKeyFor(peerJid);
-    ensureConversation(bare);
+    // #1256: an initiated MUC-PM conversation gets the same provenance
+    // metadata as a received one, and no presence subscribe is sent —
+    // the PresenceManager would bare-fold the occupant JID and target
+    // the room bare JID.
+    const isOccupant = bare.includes("/");
+    if (isOccupant) {
+      ensureConversation(bare, mucPmDisplayName(bare), barePeerJid(bare));
+    } else {
+      ensureConversation(bare);
+    }
     activePeerJid.value = bare;
     hydratePeerDmCallActivity(bare);
+    if (isOccupant) return;
     try {
       await xmppClient.value?.subscribeToPeerPresence(bare);
     } catch {

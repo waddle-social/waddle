@@ -85,7 +85,13 @@ impl WaddleClient {
     pub fn join_room(&self, room_jid: String, nick: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = waddle_xmpp_client::messaging::build_muc_join_presence(&room_jid, &nick);
+            // Parse untyped FFI input into a typed JID once, here at the
+            // boundary (typed-payloads rule).
+            let room: BareJid = room_jid
+                .parse()
+                .map_err(|err| js_error(format!("invalid room JID: {err}")))?;
+            let stanza = waddle_xmpp_client::messaging::build_muc_join_presence(&room, &nick)
+                .map_err(|err| js_error(err.to_string()))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })

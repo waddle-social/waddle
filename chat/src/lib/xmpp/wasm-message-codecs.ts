@@ -596,9 +596,10 @@ export function roomMessageFromArchived(
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
     ...(message.moderated_by ? { moderatedBy: message.moderated_by } : {}),
     ...(message.moderation_reason ? { moderationReason: message.moderation_reason } : {}),
-    // #1267 item 3: gate on ids the sender actually owns (origin/wire id)
-    // or the room-verified stanza-id — not the unverified first-listed one.
-    ...(stampedByRoom ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
+    // #1267 item 3 + Qodo: a correction target must be an id the sender
+    // actually owns (origin/wire id) and never an empty string — a
+    // room-verified stanza-id feeds replies/MDS below, not corrections.
+    ...(message.origin_id ?? message.id ? { correctionTargetId: (message.origin_id ?? message.id) as string } : {}),
     ...(stampedByRoom ? { replyableId: stampedByRoom } : {}),
     // XEP-0490 needs the room-injected stanza-id (by=room) so the
     // MDS publish carries the spec-correct stanza-id for group chats.
@@ -744,7 +745,7 @@ export function dmMessageFromArchived(
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.is_retracted ? { isRetracted: true } : {}),
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
-    ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
+    ...(message.origin_id ?? message.id ? { correctionTargetId: (message.origin_id ?? message.id) as string } : {}),
     ...(message.origin_id || message.id ? { replyableId: message.origin_id ?? message.id ?? undefined } : {}),
     // XEP-0490 needs the user-server-injected stanza-id for DM
     // displayed-sync. `message.stanza_id` plus its `by` JID round-
