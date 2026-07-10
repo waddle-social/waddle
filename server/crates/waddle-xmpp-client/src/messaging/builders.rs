@@ -228,6 +228,18 @@ pub fn build_retraction_message(
             Element::builder("body", NS_CLIENT)
                 .append("This person attempted to retract a previous message.")
                 .build(),
+        )
+        // XEP-0424 §Use Case: the generic body is only a fallback for
+        // non-supporting clients and SHOULD be marked with a XEP-0428
+        // <fallback for='urn:xmpp:message-retract:1'/> so supporting
+        // receivers never render it as real content (#1267 item 1).
+        .append(
+            Element::builder("fallback", crate::xep::fallback::NS_FALLBACK)
+                .attr(
+                    minidom::rxml::xml_ncname!("for").to_owned(),
+                    NS_MESSAGE_RETRACT,
+                )
+                .build(),
         );
     if let Some(thread) = thread {
         builder = builder.append(xep_thread::build_thread_element(thread));
@@ -235,6 +247,37 @@ pub fn build_retraction_message(
     builder
         .append(Element::builder("store", NS_HINTS).build())
         .build()
+}
+
+/// Build the XEP-0045 §7.2 room-join `<presence/>` for `room`/`nick`.
+///
+/// Always requests **no discussion history** (`<history maxstanzas='0'/>`,
+/// XEP-0045 §7.2.15): Waddle clients hydrate room history exclusively via
+/// MAM catch-up (XEP-0313), so accepting the service's default history on
+/// join would deliver the same recent messages twice (#1255).
+///
+/// Typed-payloads rule: the occupant JID is built from a typed
+/// [`jid::BareJid`] + resource (nick validation happens here, not via
+/// string concatenation); an invalid nick surfaces as a bad-request error.
+pub fn build_muc_join_presence(room: &jid::BareJid, nick: &str) -> ClientResult<Element> {
+    let occupant = room
+        .with_resource_str(nick)
+        .map_err(|err| CoreError::bad_request(Some(format!("invalid MUC nick {nick:?}: {err}"))))?;
+    Ok(Element::builder("presence", NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            occupant.to_string(),
+        )
+        .append(
+            Element::builder("x", NS_MUC)
+                .append(
+                    Element::builder("history", NS_MUC)
+                        .attr(minidom::rxml::xml_ncname!("maxstanzas").to_owned(), "0")
+                        .build(),
+                )
+                .build(),
+        )
+        .build())
 }
 
 pub fn build_moderation_message(
@@ -309,6 +352,14 @@ pub fn build_outbound_message(
 
     if options.request_displayed_marker && matches!(message_type, "chat" | "groupchat") {
         builder = builder.append(Element::builder("markable", NS_CHAT_MARKERS).build());
+    }
+
+    // XEP-0045 §7.5: mark MUC private messages with an empty
+    // `<x xmlns='http://jabber.org/protocol/muc#user'/>` so the sender's
+    // other clients can classify the XEP-0280 sent-carbon copy as a MUC
+    // PM (receivers MUST NOT rely on it; it is a sender-side SHOULD).
+    if options.muc_pm && message_type == "chat" {
+        builder = builder.append(Element::builder("x", NS_MUC_USER).build());
     }
 
     if let Some(subject) = options.subject.as_deref() {

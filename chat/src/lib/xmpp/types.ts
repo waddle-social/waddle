@@ -246,6 +246,21 @@ export interface LiveDmMessage {
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
+  /**
+   * XEP-0045 §7.5 (#1256): this is a MUC private message. `peerJid` is
+   * the FULL occupant JID (`room@service/nick`) — the conversation
+   * identity — and replies MUST address it verbatim; stripping the
+   * resource would broadcast to the whole room.
+   */
+  mucPm?: boolean;
+  /**
+   * XEP-0280 restamp pass (#1267 item 6): this dispatch exists ONLY to
+   * upgrade an already-rendered row's fallback timestamp with the
+   * carbon's authoritative forwarded <delay/>. The timeline merge
+   * consumes it; unread accounting and notifications MUST skip it —
+   * the direct copy already produced those side effects.
+   */
+  timestampRefreshOnly?: boolean;
   peerJid: string;
   fromJid: string;
   nick: string;
@@ -380,6 +395,15 @@ export interface ReactionEvent {
 export interface DmConversation {
   peerJid: string;
   peerUsername: string;
+  /**
+   * XEP-0045 §7.5 (#1256): this is a MUC private-message conversation.
+   * `peerJid` is the FULL occupant JID (`room@service/nick`) and
+   * `mucPmRoomJid` carries the room for provenance rendering — an
+   * occupant nick must never be displayed as if it were an account
+   * identity (nick spoofing).
+   */
+  mucPm?: boolean;
+  mucPmRoomJid?: string;
   peerAvatarUrl?: string | null;
   lastMessageBody?: string;
   lastMessageAt?: string;

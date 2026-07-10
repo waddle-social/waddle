@@ -115,7 +115,6 @@ const NS_ROSTER: &str = "jabber:iq:roster";
 const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 const NS_VERSION: &str = "jabber:iq:version";
 const NS_USER_SEARCH: &str = "jabber:iq:search";
-const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_ADHOC_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_WADDLE_EXTENSION_1: &str = "urn:waddle:extension:1";
 const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";

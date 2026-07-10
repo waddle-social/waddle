@@ -492,7 +492,11 @@ export class OfflineSendQueue {
       kind: "dm",
       id: queuedId,
       createdAt: new Date().toISOString(),
-      peerJid: barePeerJid(peerJid),
+      // #1256: a MUC-PM address is the FULL occupant JID and must be
+      // preserved verbatim — bare-folding it would drain the reply to
+      // the room bare JID (a broadcast).
+      peerJid: opts.mucPm ? peerJid : barePeerJid(peerJid),
+      ...(opts.mucPm ? { mucPm: true } : {}),
       body,
       ...(opts.markup?.length ? { markup: opts.markup } : {}),
       ...(opts.references?.length ? { references: opts.references } : {}),
@@ -535,7 +539,9 @@ export class OfflineSendQueue {
       kind: "dm",
       id: opts.id,
       createdAt: new Date().toISOString(),
-      peerJid: barePeerJid(peerJid),
+      // #1256: see queueDirectMessage — occupant JIDs stay verbatim.
+      peerJid: opts.mucPm ? peerJid : barePeerJid(peerJid),
+      ...(opts.mucPm ? { mucPm: true } : {}),
       body,
       ...(opts.markup?.length ? { markup: opts.markup } : {}),
       ...(opts.references?.length ? { references: opts.references } : {}),
@@ -558,7 +564,7 @@ export class OfflineSendQueue {
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
         let messageId: string | null;
         try {
-          messageId = await this.deps.sendDirect(barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), id: entry.id });
+          messageId = await this.deps.sendDirect(entry.mucPm ? entry.peerJid : barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.mucPm ? { mucPm: true } : {}), id: entry.id });
         } catch (error) {
           if (isNonRetryableWasmSendFailure(error)) {
             this.discardNonRetryable(entry.id);

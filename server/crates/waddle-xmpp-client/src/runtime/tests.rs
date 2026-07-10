@@ -174,6 +174,211 @@ fn app_stanza_ignores_forged_carbon_wrapped_call_from_peer() {
     );
 }
 
+// ─── XEP-0280 normal-message carbon unwrap (#1243) ─────────────────────────
+
+#[test]
+fn app_stanza_unwraps_received_carbon_into_inner_message() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook' type='chat'>
+        <received xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/phone' type='chat' id='m1'>
+              <body>hi alice</body>
+            </message>
+          </forwarded>
+        </received>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 1);
+    let ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message)) = &events[0]
+    else {
+        panic!("expected inner message event, got {:?}", events[0]);
+    };
+    assert_eq!(message.body.as_deref(), Some("hi alice"));
+    assert_eq!(message.from.as_deref(), Some("bob@example.com/desktop"));
+    assert_eq!(message.to.as_deref(), Some("alice@example.com/phone"));
+    assert_eq!(message.id.as_deref(), Some("m1"));
+    assert_eq!(
+        message.carbon,
+        Some(crate::messaging::CarbonDirection::Received)
+    );
+}
+
+#[test]
+fn app_stanza_unwraps_sent_carbon_into_inner_message() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook' type='chat'>
+        <sent xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='alice@example.com/phone' to='bob@example.com' type='chat' id='m2'>
+              <body>sent elsewhere</body>
+            </message>
+          </forwarded>
+        </sent>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 1);
+    let ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message)) = &events[0]
+    else {
+        panic!("expected inner message event, got {:?}", events[0]);
+    };
+    assert_eq!(message.body.as_deref(), Some("sent elsewhere"));
+    assert_eq!(message.from.as_deref(), Some("alice@example.com/phone"));
+    assert_eq!(
+        message.carbon,
+        Some(crate::messaging::CarbonDirection::Sent)
+    );
+}
+
+/// XEP-0297 §5: the `<forwarded/>` wrapper's `<delay/>` is the original
+/// delivery time; the unwrapped inner message must carry it when the
+/// inner element has no delay of its own (#1267 item 6).
+#[test]
+fn app_stanza_propagates_forwarded_delay_onto_unwrapped_carbon() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook' type='chat'>
+        <received xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <delay xmlns='urn:xmpp:delay' stamp='2026-07-01T10:00:00Z'/>
+            <message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/phone' type='chat' id='m3'>
+              <body>delayed copy</body>
+            </message>
+          </forwarded>
+        </received>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    let ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message)) = &events[0]
+    else {
+        panic!("expected inner message event, got {:?}", events[0]);
+    };
+    assert_eq!(
+        message.timestamp.map(|t| t.to_rfc3339()),
+        Some("2026-07-01T10:00:00+00:00".to_string())
+    );
+}
+
+/// XEP-0280 §11: carbon envelopes not from the account's own bare JID
+/// MUST be ignored — including the outer envelope, which must not fall
+/// through to the messaging parser as a body-less phantom message.
+#[test]
+fn app_stanza_ignores_forged_carbon_wrapped_message_entirely() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='mallory@example.com' to='alice@example.com/macbook' type='chat'>
+        <received xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/phone' type='chat' id='f1'>
+              <body>forged</body>
+            </message>
+          </forwarded>
+        </received>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(
+        events.is_empty(),
+        "forged carbon must be fully ignored, got {events:?}"
+    );
+}
+
+/// XEP-0280 §6.1/§6.2: the wrapping 'from' MUST be the account's BARE
+/// JID. A carbon-shaped stanza from one of the account's own FULL JIDs
+/// (a sibling resource, not the server) must be ignored, or an
+/// authenticated device could smuggle an inner message forged as any
+/// sender.
+#[test]
+fn app_stanza_ignores_carbon_envelope_from_own_full_jid() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com/attacker' to='alice@example.com/macbook' type='chat'>
+        <received xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/phone' type='chat' id='f2'>
+              <body>forged via sibling resource</body>
+            </message>
+          </forwarded>
+        </received>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(
+        events.is_empty(),
+        "full-JID carbon envelope must be fully ignored, got {events:?}"
+    );
+}
+
+/// Same strictness on the call-carbon path: a JMI event wrapped in a
+/// carbon envelope from the account's own FULL JID is not a
+/// server-generated carbon.
+#[test]
+fn app_stanza_ignores_carbon_wrapped_call_from_own_full_jid() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com/attacker' to='alice@example.com/macbook'>
+        <sent xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='alice@example.com/phone' to='bob@example.com/desktop'>
+              <finish xmlns='urn:xmpp:jingle-message:0' id='call-9'/>
+            </message>
+          </forwarded>
+        </sent>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Call(_))),
+        "full-JID carbon envelope must not surface a call event"
+    );
+}
+
+/// A directly received message (no carbon envelope) must not be stamped
+/// with a carbon direction.
+#[test]
+fn app_stanza_leaves_direct_messages_unstamped() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/macbook' type='chat' id='d1'>
+        <body>direct</body>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    let ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message)) = &events[0]
+    else {
+        panic!("expected message event, got {:?}", events[0]);
+    };
+    assert_eq!(message.carbon, None);
+    assert_eq!(message.body.as_deref(), Some("direct"));
+}
+
 #[test]
 fn app_stanza_acknowledges_jingle_iq_set_and_surfaces_call_event() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
