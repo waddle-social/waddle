@@ -642,6 +642,13 @@ impl NotificationOutboxStore {
         .await?;
         tx.execute(&notification_candidates_table_sql(i64_type, false), ())
             .await?;
+        // This rebuild runs AFTER every add_column_if_missing in
+        // `initialize` (unlike the legacy reason/class rebuilds), so
+        // the copy list must carry the FULL current column set — a
+        // pre-existing DB forced through this rebuild by a new
+        // suppressed_reason value must not lose in-flight candidates'
+        // `last_message_body` / `reaction` bits (Codex review on the
+        // #780 PR).
         tx.execute(
             r#"
             INSERT INTO notification_candidates (
@@ -660,7 +667,9 @@ impl NotificationOutboxStore {
                 suppressed_reason,
                 noping,
                 no_store,
-                no_permanent_store
+                no_permanent_store,
+                last_message_body,
+                reaction
             )
             SELECT
                 recipient_bare_jid,
@@ -678,7 +687,9 @@ impl NotificationOutboxStore {
                 suppressed_reason,
                 noping,
                 no_store,
-                no_permanent_store
+                no_permanent_store,
+                last_message_body,
+                reaction
             FROM notification_candidates_old_suppressed_reason_check
             "#,
             (),
@@ -1390,6 +1401,82 @@ mod tests {
             insert_result.is_err(),
             "CHECK constraint must reject nonsense suppressed_reason"
         );
+    }
+
+    /// #780 Codex review regression: when a NEW suppressed_reason value
+    /// forces the SQLite CHECK rebuild on a pre-existing DB, the
+    /// rename→create→copy MUST carry the FULL current column set —
+    /// in-flight candidates must not lose `last_message_body` or
+    /// `reaction` mid-migration.
+    #[tokio::test]
+    async fn suppressed_reason_rebuild_preserves_body_and_reaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join("outbox-rebuild.sqlite")
+            .to_str()
+            .expect("utf-8 path")
+            .to_string();
+        let url = format!("sqlite://{path}");
+        {
+            // Simulate the pre-#780 schema: full column set, but a
+            // 13-value CHECK missing `xep0444_reaction` → stale.
+            let db = crate::db::Database::from_config(
+                "outbox-rebuild-legacy",
+                &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+            )
+            .await
+            .expect("legacy db");
+            let conn = db.guard().await.expect("guard");
+            conn.execute(
+                "CREATE TABLE notification_candidates (                     recipient_bare_jid TEXT NOT NULL,                     conversation_jid TEXT NOT NULL,                     sender_jid TEXT NOT NULL,                     thread_id TEXT NOT NULL DEFAULT '',                     stanza_id_by TEXT NOT NULL,                     stanza_id TEXT NOT NULL,                     class TEXT NOT NULL CONSTRAINT notification_candidates_class_check CHECK (class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),                     reason TEXT NOT NULL CONSTRAINT notification_candidates_reason_check CHECK (reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')),                     created_at_ms INTEGER NOT NULL,                     policy_error_count INTEGER NOT NULL DEFAULT 0,                     next_attempt_at_ms INTEGER,                     outboxed_at_ms INTEGER,                     suppressed_reason TEXT CONSTRAINT notification_candidates_suppressed_reason_check CHECK (suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish')),                     noping INTEGER NOT NULL DEFAULT 0,                     no_store INTEGER NOT NULL DEFAULT 0,                     no_permanent_store INTEGER NOT NULL DEFAULT 0,                     last_message_body TEXT,                     reaction INTEGER NOT NULL DEFAULT 0,                     PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)                 )",
+                (),
+            )
+            .await
+            .expect("legacy table");
+            conn.execute(
+                "INSERT INTO notification_candidates (                     recipient_bare_jid, conversation_jid, sender_jid, thread_id,                     stanza_id_by, stanza_id, class, reason, created_at_ms,                     policy_error_count, suppressed_reason, noping, no_store,                     no_permanent_store, last_message_body, reaction                 ) VALUES (?, ?, ?, '', ?, ?, 'dm', 'offline_dm', 1, 0, NULL, 1, 0, 0, ?, 1)",
+                crate::db_params![
+                    "alice@example.com",
+                    "bob@example.com",
+                    "bob@example.com/web",
+                    "alice@example.com",
+                    "rebuild-probe",
+                    "the in-flight body",
+                ],
+            )
+            .await
+            .expect("legacy row");
+        }
+
+        // Opening the store runs initialize() → the stale CHECK forces
+        // the rebuild.
+        let db = crate::db::Database::from_config(
+            "outbox-rebuild-current",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+        )
+        .await
+        .expect("current db");
+        let store = NotificationOutboxStore::new(db).await.expect("store");
+        let mut rows = store
+            .query(
+                "SELECT last_message_body, reaction, noping FROM notification_candidates                  WHERE stanza_id = ?",
+                crate::db_params!["rebuild-probe"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row survives");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("body").as_deref(),
+            Some("the in-flight body"),
+            "rebuild must carry last_message_body"
+        );
+        assert_eq!(
+            row.get::<i64>(1).expect("reaction"),
+            1,
+            "rebuild must carry reaction"
+        );
+        assert_eq!(row.get::<i64>(2).expect("noping"), 1);
     }
 
     /// Schema regression: cold-init MUST produce a

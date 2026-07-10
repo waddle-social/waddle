@@ -65,7 +65,32 @@ pub(crate) struct ParsedPushPayload {
     /// so the service worker's in-band-vs-Web-Push dedupe key matches
     /// what the foreground tab posts. `None` when the publisher
     /// omitted it (the envelope falls back to the pubsub item id).
-    pub stanza_id: Option<String>,
+    pub stanza_id: Option<ContextStanzaId>,
+}
+
+/// Non-empty XEP-0359 stanza-id lifted off the typed context at the
+/// parse boundary (#779). Downstream it is an opaque equality token —
+/// the SW only ever compares it against the id the foreground tab
+/// posted — so the newtype's invariant is exactly "non-empty",
+/// enforced by the only constructor. (The full
+/// `waddle_xmpp_core::xep0359::StanzaId` pairs the id with its `by`
+/// archive JID; the context attribute deliberately carries only the
+/// id, since the SW dedup key is unscoped.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextStanzaId(String);
+
+impl ContextStanzaId {
+    fn parse(value: &str) -> Option<Self> {
+        if value.is_empty() {
+            None
+        } else {
+            Some(Self(value.to_owned()))
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The dedup key shipped as `PushEnvelope.item` (#779): the
@@ -74,7 +99,11 @@ pub(crate) struct ParsedPushPayload {
 /// behavior, kept as the fallback so a payload without the typed
 /// attribute still produces a usable (if non-matching) key.
 pub(crate) fn envelope_item<'a>(parsed: &'a ParsedPushPayload, pubsub_item_id: &'a str) -> &'a str {
-    parsed.stanza_id.as_deref().unwrap_or(pubsub_item_id)
+    parsed
+        .stanza_id
+        .as_ref()
+        .map(ContextStanzaId::as_str)
+        .unwrap_or(pubsub_item_id)
 }
 
 /// Parse the serialized `<notification>` element. Strictly validates
@@ -120,10 +149,7 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
         .attr("thread")
         .filter(|t| !t.is_empty())
         .map(str::to_owned);
-    let stanza_id = context
-        .attr("stanza-id")
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let stanza_id = context.attr("stanza-id").and_then(ContextStanzaId::parse);
     let message_count = parse_summary_message_count(&payload);
     Ok(ParsedPushPayload {
         message_count,
@@ -431,7 +457,10 @@ mod tests {
     fn parse_publish_payload_extracts_stanza_id() {
         let xml = build_notification_xml_with_stanza_id("stanza-abc-123");
         let parsed = parse_publish_payload(&xml).expect("valid payload");
-        assert_eq!(parsed.stanza_id.as_deref(), Some("stanza-abc-123"));
+        assert_eq!(
+            parsed.stanza_id.as_ref().map(ContextStanzaId::as_str),
+            Some("stanza-abc-123")
+        );
         assert_eq!(envelope_item(&parsed, "job-uuid"), "stanza-abc-123");
     }
 

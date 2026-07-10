@@ -109,14 +109,26 @@ pub fn is_reaction_message(msg: &Message) -> bool {
     msg.payloads.iter().any(is_reactions_element)
 }
 
-/// A reaction-ONLY message: carries `<reactions/>` and no substantive
-/// body (#780). This is the push-suppression predicate — "Alice
-/// reacted 👍" should not fire an OS push, but a message that adjusts
-/// reactions AND carries a real body still notifies. Whitespace-only
-/// bodies do not count as substantive, matching the archive layer's
-/// body test.
+/// A reaction-ONLY message: carries `<reactions/>` and NOTHING else
+/// actionable (#780). This is the push-suppression predicate —
+/// "Alice reacted 👍" should not fire an OS push, but any other
+/// actionable content riding the same stanza keeps the notification:
+///
+/// - a substantive (non-whitespace) body,
+/// - an XEP-0308 correction (an edit is actionable even body-less),
+/// - an XEP-0424 retraction,
+/// - XEP-0513 explicit mentions (a body-less mention still pings).
+///
+/// (Greptile review on the #780 PR: without the payload checks, a
+/// body-less but actionable stanza that happened to also carry
+/// reactions would be silently suppressed before mention/class policy
+/// ran.)
 pub fn is_reaction_only_message(msg: &Message) -> bool {
-    is_reaction_message(msg) && !msg.bodies.values().any(|text| !text.trim().is_empty())
+    is_reaction_message(msg)
+        && !msg.bodies.values().any(|text| !text.trim().is_empty())
+        && !super::xep0308::is_correction_message(msg)
+        && super::xep0424::extract_retraction_from_message(msg).is_none()
+        && super::xep0513::extract_explicit_mentions(msg).is_none()
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -279,6 +291,29 @@ mod tests {
             .bodies
             .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
         assert!(!is_reaction_only_message(&plain));
+
+        // Body-less reactions + XEP-0308 correction → NOT reaction-only
+        // (an edit is actionable and must still notify).
+        let mut with_correction = reaction_only.clone();
+        with_correction.payloads.push(
+            Element::builder("replace", super::super::xep0308::NS_MESSAGE_CORRECT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "orig-1")
+                .build(),
+        );
+        assert!(!is_reaction_only_message(&with_correction));
+
+        // Body-less reactions + XEP-0513 explicit mention → NOT
+        // reaction-only (a body-less mention still pings).
+        let mut with_mention = reaction_only.clone();
+        with_mention.payloads.push(
+            Element::builder("mention", super::super::xep0513::NS_EXPLICIT_MENTIONS)
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "carol@example.com",
+                )
+                .build(),
+        );
+        assert!(!is_reaction_only_message(&with_mention));
     }
 
     #[test]
