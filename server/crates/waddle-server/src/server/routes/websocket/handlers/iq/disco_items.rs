@@ -616,7 +616,7 @@ fn page_disco_items<'a>(
 async fn live_public_instant_room_items(
     state: &WebSocketState,
     muc_domain: &str,
-    channel_backed_jids: &std::collections::HashSet<String>,
+    channel_backed_jids: &std::collections::HashSet<BareJid>,
 ) -> Vec<DiscoItem> {
     let room_jids =
         match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -639,8 +639,7 @@ async fn live_public_instant_room_items(
     for room_jid in room_jids
         .into_iter()
         .filter(|room_jid| {
-            room_jid.domain().as_str() == muc_domain
-                && !channel_backed_jids.contains(&room_jid.to_string())
+            room_jid.domain().as_str() == muc_domain && !channel_backed_jids.contains(room_jid)
         })
         .take(MAX_INSTANT_ROOM_SCAN)
     {
@@ -691,7 +690,7 @@ async fn canonical_channel_disco_items(
     state: &WebSocketState,
     muc_domain: &str,
     limit: usize,
-) -> Result<(Vec<DiscoItem>, std::collections::HashSet<String>), String> {
+) -> Result<(Vec<DiscoItem>, std::collections::HashSet<BareJid>), String> {
     match list_xmpp_channels(
         state.deps.app_state.db_pool.global_actor().clone(),
         limit,
@@ -700,13 +699,9 @@ async fn canonical_channel_disco_items(
     .await
     {
         Ok(channels) => {
-            let channel_backed_jids: std::collections::HashSet<String> = channels
+            let channel_backed_jids: std::collections::HashSet<BareJid> = channels
                 .iter()
-                .filter_map(|channel| {
-                    waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
-                        .ok()
-                        .map(|room_jid| room_jid.to_string())
-                })
+                .filter_map(|channel| waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok())
                 .collect();
             Ok((
                 channels_to_disco_items(channels, muc_domain),
