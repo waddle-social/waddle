@@ -161,10 +161,18 @@ async fn handle_muc_private_message(
             jid::Jid::from(recipient_bare.clone()),
         );
         waddle_xmpp_core::xep0359::add_stanza_id(&mut relayed, &recipient_sid);
-        let sender_sid = waddle_xmpp_core::xep0359::StanzaId::new(
-            uuid::Uuid::new_v4().to_string(),
-            jid::Jid::from(sender_bare.clone()),
-        );
+        // Self-PM (own nick): only ONE archive row is written (the
+        // recipient/owner archive below), so the sent-carbon copy must
+        // carry that single backed id — a fresh sender-side id would
+        // reference a row that never exists (Greptile P1 on PR #1277).
+        let sender_sid = if recipient_bare == sender_bare {
+            recipient_sid.clone()
+        } else {
+            waddle_xmpp_core::xep0359::StanzaId::new(
+                uuid::Uuid::new_v4().to_string(),
+                jid::Jid::from(sender_bare.clone()),
+            )
+        };
         waddle_xmpp_core::xep0359::add_stanza_id(&mut sent_form, &sender_sid);
 
         let mut recipient_archive = relayed.clone();
