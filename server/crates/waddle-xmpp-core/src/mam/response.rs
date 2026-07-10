@@ -5,13 +5,25 @@ use uuid::Uuid;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
-use super::types::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, MamResult};
+use super::types::{
+    ArchivedMessage, ArchivedMucSender, ArchivedOccupantId, ArchivedRichMessage,
+    ArchivedRichPayload, MamResult,
+};
 use super::{
     CLIENT_NS, DELAY_NS, FORWARD_NS, MAM_NS, MENTIONS_NS, MESSAGE_CORRECT_NS, MESSAGE_MODERATE_NS,
-    MESSAGE_RETRACT_NS, REACTIONS_NS, REFERENCE_NS, REPLY_NS, RSM_NS, STANZA_ID_NS,
+    MESSAGE_RETRACT_NS, MUC_USER_NS, OCCUPANT_ID_NS, REACTIONS_NS, REFERENCE_NS, REPLY_NS, RSM_NS,
+    STANZA_ID_NS,
 };
 
 /// Build MAM result messages for each archived message.
+///
+/// `archive_jid` is the queried archive's address (room bare JID for
+/// MUC archives, user bare JID for personal archives) and is stamped
+/// as the result envelope's `from`. XEP-0313 §Security "Sender
+/// Impersonation" requires clients to verify that result messages come
+/// from the entity they queried and to discard unsolicited results —
+/// an envelope without `from` (or with the wrong `from`) is dropped by
+/// conformant clients, silently emptying room history (#1250).
 ///
 /// `to_jid` is typed as `&jid::Jid` so the recipient address is a
 /// validated value flowing in from the IQ wire-parse boundary; the
@@ -20,12 +32,13 @@ use super::{
 /// fallback (a hot-path data-loss bug).
 pub fn build_result_messages(
     query_id: &str,
+    archive_jid: &Jid,
     to_jid: &Jid,
     messages: &[ArchivedMessage],
 ) -> Vec<Message> {
     messages
         .iter()
-        .map(|archived| build_result_message(query_id, to_jid, archived))
+        .map(|archived| build_result_message(query_id, archive_jid, to_jid, archived))
         .collect()
 }
 
@@ -47,7 +60,12 @@ pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     }
 }
 
-fn build_result_message(query_id: &str, to_jid: &Jid, archived: &ArchivedMessage) -> Message {
+fn build_result_message(
+    query_id: &str,
+    archive_jid: &Jid,
+    to_jid: &Jid,
+    archived: &ArchivedMessage,
+) -> Message {
     let inner_msg = archived_inner_message(archived);
     let delay = Element::builder("delay", DELAY_NS)
         .attr(
@@ -66,6 +84,10 @@ fn build_result_message(query_id: &str, to_jid: &Jid, archived: &ArchivedMessage
         .build();
 
     let mut msg = Message::new(Some(to_jid.clone()));
+    // XEP-0313 §Security "Sender Impersonation": the result envelope
+    // MUST come from the queried archive JID so clients can match it
+    // against their open query instead of discarding it as unsolicited.
+    msg.from = Some(archive_jid.clone());
     msg.id = Some(xmpp_parsers::message::Id(Uuid::now_v7().to_string()));
     msg.type_ = MessageType::Normal;
     msg.payloads.push(result);
@@ -125,6 +147,40 @@ pub fn message_type_wire_str(message_type: &MessageType) -> &'static str {
         MessageType::Headline => "headline",
         MessageType::Normal => "normal",
     }
+}
+
+/// Build the room-authored XEP-0313 §MUC Archives real-JID disclosure:
+/// `<x xmlns='http://jabber.org/protocol/muc#user'><item affiliation
+/// role jid='real-jid'/></x>`. Used by the archive write path (baked
+/// into `stanza_xml`) and by the typed fallback reconstruction below,
+/// so both replay paths agree on the wire shape.
+pub fn build_archived_muc_sender_x(sender: &ArchivedMucSender) -> Element {
+    Element::builder("x", MUC_USER_NS)
+        .append(
+            Element::builder("item", MUC_USER_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    sender.affiliation.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("role").to_owned(),
+                    sender.role.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    sender.jid.to_string(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// Build a XEP-0421 `<occupant-id xmlns='urn:xmpp:occupant-id:0'
+/// id='…'/>` element from the archived projection value.
+pub fn build_archived_occupant_id_element(id: &ArchivedOccupantId) -> Element {
+    Element::builder("occupant-id", OCCUPANT_ID_NS)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str())
+        .build()
 }
 
 fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage) -> Element {
@@ -219,6 +275,20 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                 )
                 .build(),
         );
+    }
+    if msg_type == MessageType::Groupchat {
+        // XEP-0421 Business Rules: occupant-id MUST be attached to
+        // every message sent by a MUC, including MAM history — the
+        // typed fallback must not drop it just because the row lacks
+        // `stanza_xml` (#1268).
+        if let Some(occupant_id) = rich.occupant_id.as_ref() {
+            builder = builder.append(build_archived_occupant_id_element(occupant_id));
+        }
+        // XEP-0313 §MUC Archives: non-anonymous rooms disclose the
+        // sender's real JID via a room-authored muc#user `<x/>`.
+        if let Some(sender) = rich.muc_sender.as_ref() {
+            builder = builder.append(build_archived_muc_sender_x(sender));
+        }
     }
     if let Some(reply) = rich.reply.as_ref() {
         let mut reply_builder = Element::builder("reply", REPLY_NS).attr(

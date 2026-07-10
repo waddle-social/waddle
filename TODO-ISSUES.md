@@ -133,9 +133,9 @@ in parallel; within a bundle, top-to-bottom.
 5. #1262 — owner bypasses §8.4/§9.7 role-change target protections.
 
 **J4 — MUC-MAM + occupant-id + spoofing `[bundle]`**
-1. #1250 — **High**: MUC-MAM result envelopes missing `from` → strict clients discard all room history.
-2. #1251 — **High (security)**: client `muc#user <x>` not stripped from groupchat messages before reflect/archive (persisted spoofing).
-3. #1268 — XEP-0421 occupant-id gaps (PM, destroy presence, MAM real-JID for non-anon rooms).
+1. ✅ #1250 — **High**: MUC-MAM result envelopes missing `from` → strict clients discard all room history. DONE (PR #1274)
+2. ✅ #1251 — **High (security)**: client `muc#user <x>` not stripped from groupchat messages before reflect/archive (persisted spoofing). DONE (PR #1274)
+3. ✅ #1268 — XEP-0421 occupant-id gaps (PM, destroy presence, MAM real-JID for non-anon rooms). DONE (PR #1274)
 
 **J5 — MUC delivery / self-ping reliability `[bundle]`**
 1. #1249 — **High**: cross-node disconnect cleanup ghosts occupants — root cause of the recurring prod `failed to relay remote MUC unavailable during disconnect cleanup`. Relates #1195.

@@ -58,8 +58,23 @@ pub(super) async fn archive_groupchat_message(
     message: &Message,
     sender_nickname_generation: u64,
     fence: Option<&RoomClaimFenceContext>,
+    sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
-    let archive_clone = message.clone();
+    // XEP-0313 §MUC Archives: for non-anonymous rooms the *archived*
+    // copy carries a room-authored `<x xmlns='muc#user'><item
+    // jid='real-jid' affiliation role/></x>` disclosing the sender's
+    // real JID (#1268). The live reflection never carries it — this
+    // append happens on the archive clone only, after
+    // `MucCanonicalizeHandler` has already stripped any
+    // client-supplied muc#user forgery (#1251).
+    let mut archive_clone = message.clone();
+    if let Some(sender_item) = sender_item {
+        archive_clone
+            .payloads
+            .push(waddle_xmpp_core::mam::build_archived_muc_sender_x(
+                sender_item,
+            ));
+    }
     let archive_id = match extract_room_stanza_id(&archive_clone, room) {
         Some(id) => id,
         None => {
@@ -90,6 +105,7 @@ pub(super) async fn archive_groupchat_message(
         archive_id,
         sender_nickname_generation,
         fence,
+        sender_item,
     )
     .await
 }
@@ -111,6 +127,7 @@ pub(super) async fn finish_archive_groupchat_message(
     archive_id: String,
     sender_nickname_generation: u64,
     fence: Option<&RoomClaimFenceContext>,
+    sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
@@ -119,7 +136,7 @@ pub(super) async fn finish_archive_groupchat_message(
     let body = super::prototype_body(&archive_clone);
     let reply = extract_groupchat_reply_reference(&archive_clone, room);
     let origin_id = extract_origin_id(&archive_clone);
-    let rich = rich_archive_payload(&archive_clone);
+    let rich = rich_archive_payload(&archive_clone, sender_item);
     let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
 
     // XEP-0201: read the typed thread info (id + optional parent) from the
@@ -599,7 +616,10 @@ pub(super) fn serialize_groupchat_stanza_xml(message: &Message) -> Option<String
     }
 }
 
-pub(super) fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
+pub(super) fn rich_archive_payload(
+    message: &Message,
+    muc_sender: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
+) -> Option<ArchivedRichMessage> {
     let payload = extract_correction_from_message(message)
         .and_then(|correction| {
             RichMessageId::new(correction.replaces_id)
@@ -686,7 +706,21 @@ pub(super) fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMess
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if payload.is_none() && reply.is_none() && references.is_empty() && mentions.is_empty() {
+    // XEP-0421: capture the server-stamped occupant-id into the typed
+    // projection so the non-`stanza_xml` fallback reconstruction can
+    // re-emit it (#1268). `MucCanonicalizeHandler` stamped it (and
+    // stripped any client-supplied one) before the archive event was
+    // emitted, so this value is server-authored.
+    let occupant_id = waddle_xmpp::xep::xep0421::extract_occupant_id_from_message(message)
+        .and_then(|id| waddle_xmpp_core::mam::ArchivedOccupantId::new(id.as_str()));
+    let muc_sender = muc_sender.cloned();
+    if payload.is_none()
+        && reply.is_none()
+        && references.is_empty()
+        && mentions.is_empty()
+        && occupant_id.is_none()
+        && muc_sender.is_none()
+    {
         None
     } else {
         Some(ArchivedRichMessage {
@@ -694,6 +728,8 @@ pub(super) fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMess
             reply,
             references,
             mentions,
+            occupant_id,
+            muc_sender,
         })
     }
 }

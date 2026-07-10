@@ -535,12 +535,17 @@ pub struct DestroyRequest {
 ///
 /// `is_self` adds XEP-0045 status code 110 so the recipient
 /// recognizes the presence as their own.
+///
+/// `identity` stamps the XEP-0421 `<occupant-id/>` — the Business
+/// Rules require it on *every* presence sent by a MUC, and the destroy
+/// notification is the occupant's final unavailable presence (#1268).
 pub fn build_destroy_notification(
     room_jid: &BareJid,
     occupant_nick: &str,
     occupant_jid: &FullJid,
     destroy_request: &DestroyRequest,
     is_self: bool,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let from_room_jid = room_jid
         .with_resource_str(occupant_nick)
@@ -551,7 +556,7 @@ pub fn build_destroy_notification(
         });
 
     let mut presence = Presence::new(PresenceType::Unavailable);
-    presence.from = Some(Jid::from(from_room_jid));
+    presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(occupant_jid.clone()));
 
     // The typed MucUser serializer omits affiliation='none' / role='none'
@@ -598,5 +603,6 @@ pub fn build_destroy_notification(
     }
 
     presence.payloads.push(x_elem.build());
+    add_presence_identity_payloads(&mut presence, &from_room_jid, identity);
     presence
 }

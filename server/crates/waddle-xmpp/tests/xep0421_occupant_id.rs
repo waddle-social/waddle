@@ -343,3 +343,39 @@ fn xep0421_carrier_trait_is_a_typed_extraction_path() {
         Some("P-TRAIT")
     );
 }
+
+// ── §"Business Rules": occupant-id on EVERY presence sent by a MUC —
+//    including the XEP-0045 §10.9 destroy notification (#1268) ───────
+
+#[test]
+fn xep0421_destroy_notification_carries_occupant_id() {
+    use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest};
+    use waddle_xmpp::xep::xep0421::{OccupantIdentity, OCCUPANT_ID_SECRET_MIN_BYTES};
+
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room jid");
+    let occupant: jid::FullJid = "user@example.com/res".parse().expect("occupant jid");
+    let occupant_bare = occupant.to_bare();
+    let secret =
+        OccupantIdSecret::new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
+
+    let presence = build_destroy_notification(
+        &room,
+        "user",
+        &occupant,
+        &DestroyRequest::default(),
+        true,
+        &OccupantIdentity {
+            bare_jid: &occupant_bare,
+            real_jid: Some(&occupant),
+            secret: &secret,
+        },
+    );
+
+    let stamped = extract_occupant_id_from_presence(&presence)
+        .expect("destroy notification must carry <occupant-id/> per XEP-0421 Business Rules");
+    let expected = generate_occupant_id(&occupant_bare, &room, &secret);
+    assert_eq!(
+        stamped, expected,
+        "destroy presence occupant-id must be the stable HMAC id"
+    );
+}
