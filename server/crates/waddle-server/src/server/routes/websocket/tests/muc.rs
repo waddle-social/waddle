@@ -5524,3 +5524,375 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
          occupancy — the new stream has not joined anything yet"
     );
 }
+
+// ---------------------------------------------------------------------------
+// XEP-0045 §7.6 nick change (#1252): Waddle locks nicknames to identity,
+// so an in-room presence addressed to a different nick MUST be denied
+// with <not-acceptable/> — and the denial must happen BEFORE any
+// destructive side effect (previously it cleared the sender's Muji/SFU
+// call state and then silently dropped the stanza).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn xep0045_nick_change_denied_with_not_acceptable_without_call_teardown() {
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "nick-change-denied@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+
+    // Alice advertises an active call (Muji presence)…
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+        None,
+    )
+    .await;
+
+    // …then attempts a rename by sending in-room presence to a new nick.
+    let rename = muc_presence_to(&room_jid, "alice-renamed");
+    let responses = handlers::presence::handle_presence(
+        rename,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &None,
+        None,
+    )
+    .await;
+
+    // §7.6: the service MUST return a presence error with
+    // <not-acceptable/> from the requested occupant JID.
+    assert_eq!(responses.len(), 1, "rename must be answered: {responses:?}");
+    let error_presence = Element::from_str(&responses[0]).expect("error presence XML");
+    assert_eq!(error_presence.name(), "presence");
+    assert_eq!(error_presence.attr("type"), Some("error"));
+    assert_eq!(
+        error_presence.attr("from"),
+        Some(format!("{room_jid}/alice-renamed").as_str())
+    );
+    let error = error_presence
+        .get_child("error", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .or_else(|| error_presence.get_child("error", "jabber:client"))
+        .expect("error child present");
+    assert!(
+        error
+            .get_child("not-acceptable", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some(),
+        "denied nick change must be <not-acceptable/>: {responses:?}"
+    );
+
+    // The denial must be side-effect free: no SFU unregistration and
+    // the sender's Muji advertisement stays intact under the old nick.
+    assert!(
+        recorder.snapshot().is_empty(),
+        "denied nick change must not unregister the SFU participant"
+    );
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.find_nick_by_real_jid(&alice),
+        Some("alice"),
+        "occupant keeps the original nick"
+    );
+    assert!(
+        room.muji_for_session("alice", &alice).is_some(),
+        "denied nick change must not clear the sender's Muji call state"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// XEP-0045 §10.9 room destroy (#1261): every occupant SESSION gets the
+// unavailable+<destroy/> presence (not one arbitrary session per nick),
+// and the durable state the join path would resurrect the room from —
+// channel catalog row, invite ledger — is wiped.
+// ---------------------------------------------------------------------------
+
+fn owner_destroy_iq_frame(room_jid: &BareJid) -> String {
+    format!(
+        "<iq xmlns='jabber:client' id='destroy-1' type='set' to='{room_jid}'>\
+           <query xmlns='http://jabber.org/protocol/muc#owner'>\
+             <destroy><reason>macbeth is dead</reason></destroy>\
+           </query>\
+         </iq>"
+    )
+}
+
+fn presence_has_muc_user_destroy(element: &Element) -> bool {
+    element.name() == "presence"
+        && element.attr("type") == Some("unavailable")
+        && element
+            .get_child("x", "http://jabber.org/protocol/muc#user")
+            .is_some_and(|x| {
+                x.get_child("destroy", "http://jabber.org/protocol/muc#user")
+                    .is_some()
+            })
+}
+
+#[tokio::test]
+async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-wipe@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_web: FullJid = "bob@example.com/web".parse().expect("bob web jid");
+    let bob_phone: FullJid = "bob@example.com/phone".parse().expect("bob phone jid");
+
+    // The channel catalog row the join path resurrects a managed room
+    // from — #1261's exact resurrection vector.
+    crate::server::xmpp_channels::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_channels::XmppChannelUpsert {
+            id: "destroy-wipe".to_string(),
+            name: "Doomed".to_string(),
+            description: None,
+            channel_type: "text".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: Default::default(),
+            members_only: false,
+            public_room: true,
+        },
+    )
+    .await
+    .expect("seed channel row");
+
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let (bob_web_tx, mut bob_web_rx) = mpsc::channel(8);
+    let (bob_phone_tx, mut bob_phone_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob_web, bob_web_tx).await;
+    register_test_connection(state.as_ref(), &bob_phone, bob_phone_tx).await;
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    for bob in [&bob_web, &bob_phone] {
+        let join_frames = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            bob,
+            "bob",
+            None,
+            &Some(bob_session.clone()),
+        )
+        .await;
+        assert!(
+            !join_frames
+                .iter()
+                .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+            "bob join must succeed: {join_frames:?}"
+        );
+    }
+    while bob_web_rx.try_recv().is_ok() {}
+    while bob_phone_rx.try_recv().is_ok() {}
+
+    // Make alice the room owner so the destroy authorizes.
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+
+    // Seed an outstanding invite: destroy must wipe the ledger.
+    crate::server::routes::websocket::muc_invites::record_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: "hecate@example.com".parse().expect("invitee"),
+            inviter: alice.to_bare(),
+        },
+    )
+    .await
+    .expect("seed invite ledger row");
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+
+    // The destroying owner gets their own destroy presence inline plus
+    // the IQ result.
+    assert!(
+        responses.iter().any(
+            |frame| Element::from_str(frame).is_ok_and(|el| presence_has_muc_user_destroy(&el))
+        ),
+        "owner receives their own destroy presence: {responses:?}"
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("type=\"result\"") || frame.contains("type='result'")),
+        "owner receives the IQ result: {responses:?}"
+    );
+
+    // §10.9: EVERY occupant session is notified — both of bob's devices.
+    for (label, rx) in [("web", &mut bob_web_rx), ("phone", &mut bob_phone_rx)] {
+        let outbound = rx.try_recv().unwrap_or_else(|_| {
+            panic!("bob/{label} must receive the destroy presence: {responses:?}")
+        });
+        let element =
+            Element::from_str(&stanza_to_xml(&outbound.stanza)).expect("destroy presence XML");
+        assert!(
+            presence_has_muc_user_destroy(&element),
+            "bob/{label} destroy presence must carry <destroy/>: {element:?}"
+        );
+    }
+
+    // Durable wipe: channel catalog row and invite ledger are gone.
+    let channel = crate::server::xmpp_state::get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        "destroy-wipe",
+    )
+    .await
+    .expect("channel lookup");
+    assert!(
+        channel.is_none(),
+        "destroy must delete the channel catalog row (resurrection vector)"
+    );
+    let invite = crate::server::routes::websocket::muc_invites::find_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &"hecate@example.com".parse().expect("invitee"),
+    )
+    .await
+    .expect("ledger lookup");
+    assert!(invite.is_none(), "destroy must wipe the invite ledger");
+
+    // And the room actor itself is gone from the registry.
+    let room_after = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask");
+    assert!(
+        room_after.is_none(),
+        "destroyed room must leave the registry"
+    );
+}
+
+/// §10.9 destroy-then-rejoin: the recreated room must be a FRESH room —
+/// no config, subject, or ban list carried over from the destroyed one.
+#[tokio::test]
+async fn xep0045_destroy_then_rejoin_yields_fresh_room_without_old_bans() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-rejoin@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let banned: BareJid = "hecate@example.com".parse().expect("banned jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: banned.clone(),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban hecate");
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session.clone()),
+        &ready_phase(&alice),
+    )
+    .await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("result")),
+        "destroy must succeed: {responses:?}"
+    );
+
+    // Rejoin re-creates the room from scratch.
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+    let fresh = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        fresh.get_affiliation(&banned),
+        Affiliation::None,
+        "a destroyed room's ban list must not resurrect on rejoin"
+    );
+}

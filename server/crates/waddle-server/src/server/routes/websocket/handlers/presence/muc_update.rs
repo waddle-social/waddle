@@ -166,6 +166,43 @@ pub(crate) async fn try_handle_muc_presence_update(
         return None;
     }
 
+    // XEP-0045 §7.6 (#1252): resolve the sender's authoritative nick
+    // BEFORE any state mutation. An in-room presence addressed to
+    // `room/<other-nick>` is a nickname-change request; Waddle locks
+    // nicknames to identity, so the service MUST deny it with
+    // `<not-acceptable/>` — and must do so without first tearing down
+    // the sender's Muji/SFU call state (previously this path cleared
+    // the call state and then dropped the stanza silently).
+    let Ok(context) = actor
+        .ask(waddle_xmpp::muc::room_actor::GetAdminContext {
+            sender_jid: sender_jid.clone(),
+        })
+        .await
+    else {
+        return None;
+    };
+    let current_nick = context.nick?;
+    if current_nick != nick {
+        warn!(
+            room = %room_jid,
+            requested_nick = %nick,
+            current_nick = %current_nick,
+            sender = %sender_jid,
+            "MUC nick change denied (nicknames locked); no call state torn down"
+        );
+        return Some(vec![super::muc::build_muc_presence_error_xml(
+            room_jid,
+            nick,
+            sender_jid,
+            xmpp_parsers::stanza_error::StanzaError::new(
+                xmpp_parsers::stanza_error::ErrorType::Cancel,
+                xmpp_parsers::stanza_error::DefinedCondition::NotAcceptable,
+                "en",
+                "Nickname changes are not allowed in this room.",
+            ),
+        )]);
+    }
+
     let clears_muji_presence = muji.as_ref().is_none_or(Muji::is_empty);
     let outcome = match muji {
         Some(muji) => match actor
@@ -220,22 +257,10 @@ pub(crate) async fn try_handle_muc_presence_update(
     }
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence
-    // only. The resolved nick comes from the room actor's
-    // authoritative occupant table (keyed by the authenticated full
-    // JID), so any mismatch with the `to=room/<nick>` resource the
-    // client supplied is an attempt to impersonate another occupant
-    // — drop the update silently rather than reflecting it.
-    if outcome.update.sender_nick != nick {
-        warn!(
-            room = %room_jid,
-            to_nick = %nick,
-            actual_nick = %outcome.update.sender_nick,
-            sender = %sender_jid,
-            "MUC Muji presence to-JID nick mismatch; dropping reflection"
-        );
-        return Some(Vec::new());
-    }
-
+    // only. The nick pre-check above already rejected any presence
+    // addressed to a nick other than the sender's authoritative one
+    // (with `<not-acceptable/>`, per §7.6), so by this point the
+    // resolved nick always matches `to=room/<nick>`.
     debug!(
         room = %room_jid,
         nick = %outcome.update.sender_nick,

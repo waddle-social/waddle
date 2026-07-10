@@ -29,7 +29,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return None;
     }
 
-    let (invitee, inbound_invite) = mediated_invitee(incoming)?;
+    let (invitee, inbound_invite) = super::muc_invite::mediated_invitee(incoming)?;
     let channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid)?;
     let channel = crate::server::xmpp_state::get_xmpp_channel(
         state.deps.app_state.db_pool.global_actor().clone(),
@@ -240,6 +240,34 @@ pub(super) async fn handle_group_dm_mediated_invite(
         )]);
     }
 
+    // #1264: record the outstanding invite so a later XEP-0045 §7.8.2
+    // `<decline/>` from this invitee verifies against the ledger and
+    // routes to this inviter.
+    if let Err(error) = crate::server::routes::websocket::muc_invites::record_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: invitee.clone(),
+            inviter: bound_jid.to_bare(),
+        },
+    )
+    .await
+    {
+        warn!(
+            room = %room_jid,
+            invitee = %invitee,
+            error = %error,
+            "Failed to record outstanding group-DM invite; rolling back grant"
+        );
+        rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee).await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
+
     let mut invite = incoming.clone();
     invite.from = Some(jid::Jid::from(room_jid.clone()));
     invite.to = Some(jid::Jid::from(invitee.clone()));
@@ -345,6 +373,14 @@ async fn rollback_group_dm_invite_grant(
     )
     .await;
     let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
+    // #1264: a rolled-back invite is not declinable — drop its ledger
+    // row (harmless no-op on paths that failed before recording it).
+    let _ = crate::server::routes::websocket::muc_invites::consume_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        room_jid,
+        invitee,
+    )
+    .await;
     let _ =
         crate::admin::channels::retract_group_dm_bookmark(&state.deps.app_state, invitee, room_jid)
             .await;
@@ -508,18 +544,6 @@ async fn delete_group_dm_archive_boundary(
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-fn mediated_invitee(
-    message: &xmpp_parsers::message::Message,
-) -> Option<(jid::BareJid, minidom::Element)> {
-    let x = message
-        .payloads
-        .iter()
-        .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
-    let invite = x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)?;
-    let to = invite.attr("to")?.parse::<jid::BareJid>().ok()?;
-    Some((to, invite.clone()))
 }
 
 fn build_server_mediated_invite_payload(

@@ -903,6 +903,51 @@ mod ownership_claims_tests {
         );
     }
 
+    /// XEP-0045 §10.9 (#1261): an explicit `DestroyRoom` must wipe the
+    /// room's durable rows (config/subject/affiliations incl. bans) so
+    /// the destroyed room cannot resurrect from storage on the next
+    /// join — "the room ... destroys the room, even if it was defined
+    /// as persistent".
+    #[tokio::test]
+    async fn destroy_room_deletes_durable_room_state() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy");
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room");
+
+        registry
+            .ask(DestroyRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("destroy");
+
+        assert_eq!(
+            *durable_store.deleted_rooms.lock().expect("lock"),
+            vec![jid.to_string()],
+            "DestroyRoom must delete the durable room state exactly once"
+        );
+    }
+
     /// ADR-0017 Phase 3 Slice 7 FIX 3 (council-adjudicated): `live_room`'s
     /// dead-actor branch must capture the entry's claim epoch and release
     /// the Postgres claim BEFORE removing the entry — previously it just
@@ -1167,6 +1212,7 @@ mod ownership_claims_tests {
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         demote_notifications: Mutex<Vec<(String, String)>>,
+        deleted_rooms: Mutex<Vec<String>>,
     }
 
     impl MucDurableStore for RecordingDurableStore {
@@ -1201,6 +1247,14 @@ mod ownership_claims_tests {
             _room_jid: &'a BareJid,
             _entry: &'a AffiliationEntry,
         ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+            self.deleted_rooms
+                .lock()
+                .expect("lock")
+                .push(room_jid.to_string());
             Box::pin(async { Ok(()) })
         }
 
@@ -1304,6 +1358,7 @@ mod ownership_claims_tests {
                 )],
             }),
             demote_notifications: Mutex::new(Vec::new()),
+            deleted_rooms: Mutex::new(Vec::new()),
         });
         registry
             .ask(WireClusteringClaims {

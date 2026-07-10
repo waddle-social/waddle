@@ -225,6 +225,24 @@ fn enforce_members_only(
     presence_updates
 }
 
+/// XEP-0045 role-change authorization: target protection first, actor
+/// privilege second.
+///
+/// The target-protection matrix applies to EVERY actor — owners
+/// included (#1262):
+/// - §8.4 (revoke voice): "a service MUST NOT allow the voice
+///   privileges of an admin or owner to be removed by anyone", and "a
+///   moderator MUST NOT be able to revoke voice from a user whose
+///   affiliation is at or above the moderator's level".
+/// - §9.7 (revoke moderator): moderator status "cannot be revoked from
+///   a room owner or room admin".
+/// - §8.2 (kick): "a user cannot be kicked by a moderator with a lower
+///   affiliation" — an owner may kick an admin, but an admin may never
+///   kick an owner.
+///
+/// Role and affiliation are orthogonal; without these checks an owner
+/// could force an admin/owner into `visitor`, a state the XEP declares
+/// impossible.
 fn authorize_role_change(
     sender_affiliation: Affiliation,
     sender_role: Role,
@@ -232,10 +250,40 @@ fn authorize_role_change(
     target_role: Role,
     new_role: Role,
 ) -> Result<(), AdminApplyError> {
+    let target_privileged = matches!(target_affiliation, Affiliation::Owner | Affiliation::Admin);
+    let sender_privileged = matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin);
+    match new_role {
+        // §8.2 kick (role='none'): only a target with a strictly higher
+        // affiliation than the sender is protected from being kicked.
+        Role::None => {
+            if target_affiliation > sender_affiliation {
+                return Err(AdminApplyError::CannotModifyPrivilegedRole);
+            }
+        }
+        // §8.4 revoke voice (role='visitor'): admins/owners keep voice
+        // against everyone; a plain moderator additionally may not
+        // devoice a target at or above their own affiliation level.
+        Role::Visitor => {
+            if target_privileged || (!sender_privileged && target_affiliation >= sender_affiliation)
+            {
+                return Err(AdminApplyError::CannotModifyPrivilegedRole);
+            }
+        }
+        // §9.7 revoke moderator (role='participant'): admins/owners
+        // keep moderator status against everyone, the room owner
+        // included.
+        Role::Participant => {
+            if target_privileged && target_role == Role::Moderator {
+                return Err(AdminApplyError::CannotModifyPrivilegedRole);
+            }
+        }
+        // Granting moderator status never demotes a protected target.
+        Role::Moderator => {}
+    }
     if sender_affiliation == Affiliation::Owner {
         return Ok(());
     }
-    if matches!(target_affiliation, Affiliation::Owner | Affiliation::Admin) {
+    if target_privileged {
         return Err(AdminApplyError::CannotModifyPrivilegedRole);
     }
     if sender_affiliation == Affiliation::Admin {

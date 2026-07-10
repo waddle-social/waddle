@@ -115,7 +115,7 @@ pub(super) fn build_muc_conflict_presence_xml(
 /// `<error/>` element is serialised via the upstream
 /// `From<StanzaError> for Element` impl so the wire shape is identical
 /// to the legacy `Element::builder("error", …)` literal.
-pub(super) fn build_muc_presence_error_xml(
+pub(in crate::server::routes::websocket::handlers::presence) fn build_muc_presence_error_xml(
     room_jid: &BareJid,
     nick: &str,
     to_jid: &FullJid,

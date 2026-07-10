@@ -600,6 +600,26 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         let removed_entry = self.rooms.remove(&msg.room_jid);
         let removed_room = removed_entry.is_some();
         let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
+        // XEP-0045 §10.9 (#1261): destroy removes the room "even if it
+        // was defined as persistent" — wipe the durable rows (config,
+        // subject, affiliations incl. bans) so the room cannot
+        // resurrect from storage on the next join. Runs BEFORE the
+        // claim release below: the delete is epoch-fenced against this
+        // node's still-held claim. Best-effort — a fencing loss means
+        // another node owns the room now and this node must not wipe
+        // the new owner's rows.
+        if removed_room || removed_poison {
+            if let Some(store) = &self.durable_store {
+                if let Err(error) = store.delete_room_state(&msg.room_jid).await {
+                    warn!(
+                        room = %msg.room_jid,
+                        %error,
+                        "Failed to delete durable room state on destroy; \
+                         the room may resurrect from storage"
+                    );
+                }
+            }
+        }
         // ADR-0017 Phase 3 Slice 7: release the Postgres claim on every
         // terminal path (explicit destroy, dormancy-eviction sweep) —
         // "graceful release" per element 7. A poisoned-only removal (the

@@ -67,7 +67,7 @@ fn can_change_affiliation(
     }
 }
 
-async fn persist_managed_channel_affiliation(
+pub(in crate::server::routes::websocket::handlers) async fn persist_managed_channel_affiliation(
     state: &WebSocketState,
     channel_id: &str,
     jid: &BareJid,

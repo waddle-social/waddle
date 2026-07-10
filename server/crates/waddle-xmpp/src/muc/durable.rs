@@ -147,6 +147,20 @@ pub trait MucDurableStore: Send + Sync {
         entry: &'a AffiliationEntry,
     ) -> MucDurableFuture<'a, ()>;
 
+    /// XEP-0045 §10.9 (#1261): destroy removes the room "even if it was
+    /// defined as persistent". Delete every durable row for `room_jid`
+    /// — config, subject, and the full affiliation list — so a
+    /// destroyed room can never resurrect from storage (with its old
+    /// config, subject, or ban list) on the next join. Called by the
+    /// room registry's explicit-destroy path only; dormancy eviction
+    /// keeps the rows because an evicted-but-live room MUST restore.
+    /// Default no-op mirrors the other optional hooks: single-node
+    /// deployments never configure a `MucDurableStore` at all.
+    fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+        let _ = room_jid;
+        Box::pin(async { Ok(()) })
+    }
+
     /// Record the claim epoch this node most recently won for `room_jid`
     /// (called by the room registry immediately after a successful
     /// `ClaimStore::ensure_claimed`/steal — never by the store itself),

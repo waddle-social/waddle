@@ -126,11 +126,11 @@ in parallel; within a bundle, top-to-bottom.
 5. #1266 — 1:1 minor cluster (8 items). Coordinate with Lane D #1173 (to-less MAM) — same read path.
 
 **J3 — MUC invites / lifecycle `[bundle]`**
-1. #1248 — **High**: mediated invitations (§7.8) unimplemented for non-group-DM rooms → "invite" silently no-ops. Relates #945.
-2. #1252 — **High**: nick change silently dropped after tearing down MUJI + SFU (no 303/210 anywhere).
-3. #1261 — destroy doesn't wipe durable state (resurrection) + misses sibling same-nick sessions.
-4. #1264 — mediated decline spoofable (no invite ledger) + dropped for offline/remote inviter.
-5. #1262 — owner bypasses §8.4/§9.7 role-change target protections.
+1. ✅ #1248 — **High**: mediated invitations (§7.8) unimplemented for non-group-DM rooms → "invite" silently no-ops. Relates #945. DONE (PR #1276)
+2. ✅ #1252 — **High**: nick change silently dropped after tearing down MUJI + SFU (no 303/210 anywhere). DONE (PR #1276)
+3. ✅ #1261 — destroy doesn't wipe durable state (resurrection) + misses sibling same-nick sessions. DONE (PR #1276)
+4. ✅ #1264 — mediated decline spoofable (no invite ledger) + dropped for offline/remote inviter. DONE (PR #1276)
+5. ✅ #1262 — owner bypasses §8.4/§9.7 role-change target protections. DONE (PR #1276)
 
 **J4 — MUC-MAM + occupant-id + spoofing `[bundle]`**
 1. ✅ #1250 — **High**: MUC-MAM result envelopes missing `from` → strict clients discard all room history. DONE (PR #1274)

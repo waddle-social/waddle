@@ -216,6 +216,31 @@ CREATE TABLE IF NOT EXISTS group_dm_archive_boundaries (
 );
 "#;
 
+/// Outstanding mediated-invite ledger (XEP-0045 §7.8.2, #1264): the
+/// room only forwards a `<decline/>` from a JID it actually invited,
+/// and the recorded inviter is who the decline must reach (durably,
+/// even when they are offline). Consumed on decline; wiped on room
+/// destroy.
+pub const V1007_ADD_MUC_PENDING_INVITES: &str = r#"
+CREATE TABLE IF NOT EXISTS muc_pending_invites (
+    room_jid TEXT NOT NULL,
+    invitee_jid TEXT NOT NULL,
+    inviter_jid TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (room_jid, invitee_jid)
+);
+"#;
+
+pub const V1007_ADD_MUC_PENDING_INVITES_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS muc_pending_invites (
+    room_jid TEXT NOT NULL,
+    invitee_jid TEXT NOT NULL,
+    inviter_jid TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (room_jid, invitee_jid)
+);
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -257,6 +282,12 @@ pub fn all() -> Vec<Migration> {
             description: "Persist group-DM archive visibility boundaries".to_string(),
             sql_sqlite: V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES,
             sql_postgres: V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES_POSTGRES,
+        },
+        Migration {
+            version: 1007,
+            description: "Persist outstanding MUC mediated invitations".to_string(),
+            sql_sqlite: V1007_ADD_MUC_PENDING_INVITES,
+            sql_postgres: V1007_ADD_MUC_PENDING_INVITES_POSTGRES,
         },
     ]
 }

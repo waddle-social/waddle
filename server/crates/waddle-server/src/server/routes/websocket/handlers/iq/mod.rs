@@ -97,6 +97,10 @@ pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
 mod mentions_permissions;
 mod muc_admin;
+// XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
+// `handlers::message::muc_invite` persists the granted membership with
+// the exact same tuple write the admin affiliation path uses.
+pub(in crate::server::routes::websocket::handlers) use muc_admin::persist_managed_channel_affiliation;
 mod muc_owner_config;
 mod muc_owner_moderation;
 mod muc_self_ping;

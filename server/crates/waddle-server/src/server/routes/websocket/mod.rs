@@ -77,6 +77,7 @@ mod isr_resume;
 pub(crate) mod link_preview_refs;
 pub(crate) mod link_preview_telemetry;
 pub(crate) mod muc_call_sfu;
+pub(crate) mod muc_invites;
 mod outbound;
 mod parse_errors;
 mod registration;

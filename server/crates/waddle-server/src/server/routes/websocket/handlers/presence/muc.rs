@@ -12,10 +12,9 @@ use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::RoomRegistry;
 use xml::{
-    build_muc_conflict_presence_xml, build_muc_join_presence_stanza, build_muc_presence_error_xml,
-    build_muc_self_unavailable_xml,
+    build_muc_conflict_presence_xml, build_muc_join_presence_stanza, build_muc_self_unavailable_xml,
 };
-pub(super) use xml::{build_muc_join_presence_xml, MucJoinPresence};
+pub(super) use xml::{build_muc_join_presence_xml, build_muc_presence_error_xml, MucJoinPresence};
 
 #[cfg(any(test, feature = "clustering"))]
 pub async fn handle_muc_join(
