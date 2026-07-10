@@ -6,7 +6,7 @@ use jid::BareJid;
 use waddle_xmpp::XmppError;
 
 use super::dispatch;
-use super::nodes::{get_node_tx, MAX_NODE_ID_LEN};
+use super::nodes::{ensure_node_tx, get_node_tx, MAX_NODE_ID_LEN};
 use super::publish_jobs::wake_queued_publish_jobs_for_node_tx;
 use super::secrets::PushSecretCipher;
 use super::store::{lock_node_tx, DatabasePushServiceStore};
@@ -379,128 +379,163 @@ fn decode_device(
     })
 }
 
+pub(super) async fn upsert_device_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &BareJid,
+    registration: PushDeviceRegistration,
+    secrets: &PushSecretCipher,
+    now_ms: i64,
+) -> Result<PushServiceDevice, XmppError> {
+    if registration.device_id.is_empty()
+        || registration.node.is_empty()
+        || registration.environment.is_empty()
+    {
+        return Err(XmppError::bad_request(Some(
+            "Push Service device-id, node, and environment are required".to_string(),
+        )));
+    }
+    validate_device_registration(&registration)?;
+    if get_node_tx(tx, &registration.node).await?.is_none() {
+        return Err(XmppError::item_not_found(Some(
+            "Push node not found".to_string(),
+        )));
+    }
+    lock_node_tx(tx, &registration.node, now_ms).await?;
+    let push_node = get_node_tx(tx, &registration.node)
+        .await?
+        .ok_or_else(|| XmppError::internal("Push Service node was not persisted"))?;
+    if push_node.owner_bare_jid != *owner_bare_jid {
+        return Err(XmppError::forbidden(Some(
+            "Push node belongs to another user".to_string(),
+        )));
+    }
+    if push_node.status != PushNodeStatus::Active {
+        return Err(XmppError::item_not_found(Some(
+            "Push node not active".to_string(),
+        )));
+    }
+    prune_disabled_devices_for_node_tx(
+        tx,
+        &registration.node,
+        MAX_RETAINED_DISABLED_DEVICES_PER_NODE,
+    )
+    .await?;
+    if !active_device_exists_on_node_tx(tx, &registration.node, &registration.device_id).await?
+        && count_active_devices_for_node_tx(tx, &registration.node).await?
+            >= MAX_PUSH_DEVICES_PER_NODE
+    {
+        return Err(XmppError::bad_request(Some(format!(
+            "Push Service active device quota exceeded; max {MAX_PUSH_DEVICES_PER_NODE} active devices per node"
+        ))));
+    }
+
+    let sealed_provider_endpoint = secrets.seal_optional(registration.provider_endpoint.clone())?;
+    let sealed_provider_token = secrets.seal_optional(registration.provider_token.clone())?;
+    let sealed_provider_key_material =
+        secrets.seal_optional(registration.provider_key_material.clone())?;
+    let device_id = registration.device_id.clone();
+    tx.execute(
+        r#"
+        INSERT INTO push_devices (
+            device_id,
+            node,
+            platform,
+            environment,
+            provider_endpoint,
+            provider_token,
+            provider_key_material,
+            status,
+            failure_count,
+            last_error,
+            created_at_ms,
+            updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+        ON CONFLICT(node, device_id) DO UPDATE SET
+            platform = excluded.platform,
+            environment = excluded.environment,
+            provider_endpoint = excluded.provider_endpoint,
+            provider_token = excluded.provider_token,
+            provider_key_material = excluded.provider_key_material,
+            status = excluded.status,
+            failure_count = 0,
+            last_error = NULL,
+            updated_at_ms = excluded.updated_at_ms
+        "#,
+        crate::db_params![
+            device_id.clone(),
+            registration.node.clone(),
+            registration.platform.to_string(),
+            registration.environment.clone(),
+            sealed_provider_endpoint,
+            sealed_provider_token,
+            sealed_provider_key_material,
+            DEVICE_STATUS_ACTIVE,
+            now_ms,
+            now_ms,
+        ],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+    wake_queued_publish_jobs_for_node_tx(tx, &registration.node, now_ms).await?;
+    get_device_for_owner_on_node_tx(tx, owner_bare_jid, &registration.node, &device_id, secrets)
+        .await?
+        .ok_or_else(|| XmppError::internal("Push Service device was not persisted"))
+}
+
 impl DatabasePushServiceStore {
     pub async fn upsert_device(
         &self,
         owner_bare_jid: &BareJid,
         registration: PushDeviceRegistration,
     ) -> Result<PushServiceDevice, XmppError> {
-        if registration.device_id.is_empty()
-            || registration.node.is_empty()
-            || registration.environment.is_empty()
-        {
-            return Err(XmppError::bad_request(Some(
-                "Push Service device-id, node, and environment are required".to_string(),
-            )));
-        }
-        validate_device_registration(&registration)?;
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        if get_node_tx(&mut tx, &registration.node).await?.is_none() {
-            return Err(XmppError::item_not_found(Some(
-                "Push node not found".to_string(),
-            )));
-        }
-        lock_node_tx(&mut tx, &registration.node, now_ms).await?;
-        let push_node = get_node_tx(&mut tx, &registration.node)
-            .await?
-            .ok_or_else(|| XmppError::internal("Push Service node was not persisted"))?;
-        if push_node.owner_bare_jid != *owner_bare_jid {
-            return Err(XmppError::forbidden(Some(
-                "Push node belongs to another user".to_string(),
-            )));
-        }
-        if push_node.status != PushNodeStatus::Active {
-            return Err(XmppError::item_not_found(Some(
-                "Push node not active".to_string(),
-            )));
-        }
-        prune_disabled_devices_for_node_tx(
-            &mut tx,
-            &registration.node,
-            MAX_RETAINED_DISABLED_DEVICES_PER_NODE,
-        )
-        .await?;
-        if !active_device_exists_on_node_tx(&mut tx, &registration.node, &registration.device_id)
-            .await?
-            && count_active_devices_for_node_tx(&mut tx, &registration.node).await?
-                >= MAX_PUSH_DEVICES_PER_NODE
-        {
-            return Err(XmppError::bad_request(Some(format!(
-                "Push Service active device quota exceeded; max {MAX_PUSH_DEVICES_PER_NODE} active devices per node"
-            ))));
-        }
-
-        let sealed_provider_endpoint = self
-            .secrets
-            .seal_optional(registration.provider_endpoint.clone())?;
-        let sealed_provider_token = self
-            .secrets
-            .seal_optional(registration.provider_token.clone())?;
-        let sealed_provider_key_material = self
-            .secrets
-            .seal_optional(registration.provider_key_material.clone())?;
-        let device_id = registration.device_id.clone();
-        tx.execute(
-            r#"
-            INSERT INTO push_devices (
-                device_id,
-                node,
-                platform,
-                environment,
-                provider_endpoint,
-                provider_token,
-                provider_key_material,
-                status,
-                failure_count,
-                last_error,
-                created_at_ms,
-                updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
-            ON CONFLICT(node, device_id) DO UPDATE SET
-                platform = excluded.platform,
-                environment = excluded.environment,
-                provider_endpoint = excluded.provider_endpoint,
-                provider_token = excluded.provider_token,
-                provider_key_material = excluded.provider_key_material,
-                status = excluded.status,
-                failure_count = 0,
-                last_error = NULL,
-                updated_at_ms = excluded.updated_at_ms
-            "#,
-            crate::db_params![
-                device_id.clone(),
-                registration.node.clone(),
-                registration.platform.to_string(),
-                registration.environment.clone(),
-                sealed_provider_endpoint,
-                sealed_provider_token,
-                sealed_provider_key_material,
-                DEVICE_STATUS_ACTIVE,
-                now_ms,
-                now_ms,
-            ],
-        )
-        .await
-        .map_err(|error| XmppError::internal(error.to_string()))?;
-        wake_queued_publish_jobs_for_node_tx(&mut tx, &registration.node, now_ms).await?;
-        let device = get_device_for_owner_on_node_tx(
-            &mut tx,
-            owner_bare_jid,
-            &registration.node,
-            &device_id,
-            &self.secrets,
-        )
-        .await?
-        .ok_or_else(|| XmppError::internal("Push Service device was not persisted"))?;
+        let device =
+            upsert_device_tx(&mut tx, owner_bare_jid, registration, &self.secrets, now_ms).await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         Ok(device)
+    }
+
+    pub async fn register_device_for_owner(
+        &self,
+        owner_bare_jid: &BareJid,
+        app_id: &str,
+        registration_for_node: impl FnOnce(&str) -> PushDeviceRegistration,
+    ) -> Result<(super::types::PushServiceNode, PushServiceDevice), XmppError> {
+        let now_ms = crate::time::now_ms();
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let node = ensure_node_tx(&mut tx, owner_bare_jid, app_id, now_ms).await?;
+        let registration = registration_for_node(node.node());
+        let device =
+            upsert_device_tx(&mut tx, owner_bare_jid, registration, &self.secrets, now_ms).await?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        if let Err(error) = self
+            .ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
+            .await
+        {
+            let _ = self
+                .disable_device_for_owner(
+                    owner_bare_jid,
+                    node.node(),
+                    device.device_id(),
+                    Some("failed to provision XEP-0060 Push Service node"),
+                )
+                .await;
+            return Err(error);
+        }
+        Ok((node, device))
     }
 
     /// Disable a single device on an owner's push node, clearing its
@@ -686,11 +721,238 @@ impl DatabasePushServiceStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use async_trait::async_trait;
+    use jid::Jid;
+    use waddle_xmpp::pubsub::{
+        Affiliation, InMemoryPubSubStorage, NodeConfig, PubSubItem, PubSubNode, PubSubStorage,
+        PublishResult, StoredItem, SubId, Subscription,
+    };
     use waddle_xmpp::push::{PushSubscription, PushSubscriptionStore};
 
+    use crate::db::Database;
     use crate::push_service::secrets::SEALED_PROVIDER_VALUE_PREFIX;
-    use crate::push_service::test_support::{notification_item, owner, store};
+    use crate::push_service::test_support::{
+        assert_item_not_found, notification_item, owner, store,
+    };
+
+    struct FailingNodeConfigPubSubStorage {
+        inner: InMemoryPubSubStorage,
+    }
+
+    impl FailingNodeConfigPubSubStorage {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryPubSubStorage::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PubSubStorage for FailingNodeConfigPubSubStorage {
+        async fn get_or_create_node(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+        ) -> Result<(PubSubNode, bool), XmppError> {
+            self.inner.get_or_create_node(owner, node_name).await
+        }
+
+        async fn get_node(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+        ) -> Result<Option<PubSubNode>, XmppError> {
+            self.inner.get_node(owner, node_name).await
+        }
+
+        async fn delete_node(&self, owner: &BareJid, node_name: &str) -> Result<bool, XmppError> {
+            self.inner.delete_node(owner, node_name).await
+        }
+
+        async fn publish_item(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            item: &PubSubItem,
+            publisher: Option<&BareJid>,
+            auto_create: bool,
+        ) -> Result<PublishResult, XmppError> {
+            self.inner
+                .publish_item(owner, node_name, item, publisher, auto_create)
+                .await
+        }
+
+        async fn publish_item_if_missing_or_publisher(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            item: &PubSubItem,
+            publisher: &BareJid,
+            auto_create: bool,
+        ) -> Result<PublishResult, XmppError> {
+            self.inner
+                .publish_item_if_missing_or_publisher(
+                    owner,
+                    node_name,
+                    item,
+                    publisher,
+                    auto_create,
+                )
+                .await
+        }
+
+        async fn get_items(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            max_items: Option<u32>,
+            item_ids: &[String],
+        ) -> Result<Vec<StoredItem>, XmppError> {
+            self.inner
+                .get_items(owner, node_name, max_items, item_ids)
+                .await
+        }
+
+        async fn retract_item(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            item_id: &str,
+        ) -> Result<bool, XmppError> {
+            self.inner.retract_item(owner, node_name, item_id).await
+        }
+
+        async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError> {
+            self.inner.list_nodes(owner).await
+        }
+
+        async fn find_node_for_item(
+            &self,
+            owner: &BareJid,
+            item_id: &str,
+        ) -> Result<Option<PubSubNode>, XmppError> {
+            self.inner.find_node_for_item(owner, item_id).await
+        }
+
+        async fn list_node_names_for_item(
+            &self,
+            owner: &BareJid,
+            item_id: &str,
+        ) -> Result<Vec<String>, XmppError> {
+            self.inner.list_node_names_for_item(owner, item_id).await
+        }
+
+        async fn update_node_config(
+            &self,
+            _owner: &BareJid,
+            _node_name: &str,
+            _config: &NodeConfig,
+        ) -> Result<(), XmppError> {
+            Err(XmppError::internal("forced XEP-0060 node config failure"))
+        }
+
+        async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError> {
+            self.inner.purge_node(owner, node_name).await
+        }
+
+        async fn subscribe(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            subscriber: &Jid,
+        ) -> Result<Subscription, XmppError> {
+            self.inner.subscribe(owner, node_name, subscriber).await
+        }
+
+        async fn unsubscribe(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            subscriber: &Jid,
+            subid: Option<&SubId>,
+        ) -> Result<bool, XmppError> {
+            self.inner
+                .unsubscribe(owner, node_name, subscriber, subid)
+                .await
+        }
+
+        async fn list_node_subscriptions(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+        ) -> Result<Vec<Subscription>, XmppError> {
+            self.inner.list_node_subscriptions(owner, node_name).await
+        }
+
+        async fn list_subscriber_subscriptions(
+            &self,
+            owner: &BareJid,
+            subscriber: &Jid,
+        ) -> Result<Vec<(String, Subscription)>, XmppError> {
+            self.inner
+                .list_subscriber_subscriptions(owner, subscriber)
+                .await
+        }
+
+        async fn get_subscription(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            subid: &SubId,
+        ) -> Result<Option<Subscription>, XmppError> {
+            self.inner.get_subscription(owner, node_name, subid).await
+        }
+
+        async fn list_deliverable_subscribers(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+        ) -> Result<Vec<Subscription>, XmppError> {
+            self.inner
+                .list_deliverable_subscribers(owner, node_name)
+                .await
+        }
+
+        async fn set_affiliation(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            entity: &BareJid,
+            affiliation: Affiliation,
+        ) -> Result<Affiliation, XmppError> {
+            self.inner
+                .set_affiliation(owner, node_name, entity, affiliation)
+                .await
+        }
+
+        async fn get_affiliation(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+            entity: &BareJid,
+        ) -> Result<Affiliation, XmppError> {
+            self.inner.get_affiliation(owner, node_name, entity).await
+        }
+
+        async fn list_node_affiliations(
+            &self,
+            owner: &BareJid,
+            node_name: &str,
+        ) -> Result<Vec<(BareJid, Affiliation)>, XmppError> {
+            self.inner.list_node_affiliations(owner, node_name).await
+        }
+
+        async fn list_entity_affiliations(
+            &self,
+            owner: &BareJid,
+            entity: &BareJid,
+        ) -> Result<Vec<(String, Affiliation)>, XmppError> {
+            self.inner.list_entity_affiliations(owner, entity).await
+        }
+    }
 
     #[tokio::test]
     async fn provider_credentials_live_in_push_service_not_xep0357_registration_store() {
@@ -767,6 +1029,125 @@ mod tests {
         assert!(registrations[0].endpoint.is_none());
         assert!(registrations[0].p256dh.is_none());
         assert!(registrations[0].auth_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn register_device_for_owner_rolls_back_node_when_device_insert_fails() {
+        let store = store().await;
+        let owner = owner();
+        store
+            .execute(
+                r#"
+                CREATE TRIGGER fail_push_device_insert
+                BEFORE INSERT ON push_devices
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced push device insert failure');
+                END
+                "#,
+                (),
+            )
+            .await
+            .expect("failure trigger");
+
+        store
+            .register_device_for_owner(&owner, "web", |node| {
+                PushDeviceRegistration::new("web-1", node, PushDevicePlatform::Web, "test")
+            })
+            .await
+            .expect_err("device insert trigger aborts registration");
+
+        assert!(
+            store
+                .list_node_names_for_owner(&owner)
+                .await
+                .expect("node list")
+                .is_empty(),
+            "node insert must roll back with the failed device insert"
+        );
+        assert!(
+            store
+                .get_device_for_owner(&owner, "web-1")
+                .await
+                .expect("device lookup")
+                .is_none(),
+            "device insert failed, so no device row should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_device_for_owner_allows_disable_after_combined_commit() {
+        let store = store().await;
+        let owner = owner();
+        let (node, device) = store
+            .register_device_for_owner(&owner, "web", |node| {
+                PushDeviceRegistration::new("web-1", node, PushDevicePlatform::Web, "test")
+                    .with_provider_token(Some("provider-secret".to_string()))
+            })
+            .await
+            .expect("register device");
+
+        assert_eq!(device.node(), node.node());
+        store
+            .disable_nodes_for_owner(&owner, Some(node.node()))
+            .await
+            .expect("disable node after combined registration commit");
+        assert_item_not_found(
+            store
+                .upsert_device(
+                    &owner,
+                    PushDeviceRegistration::new(
+                        "web-2",
+                        node.node(),
+                        PushDevicePlatform::Web,
+                        "test",
+                    ),
+                )
+                .await
+                .expect_err("disabled node rejects later device registration"),
+        );
+    }
+
+    #[tokio::test]
+    async fn register_device_for_owner_compensates_device_when_pubsub_backing_fails() {
+        let owner = owner();
+        let store = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+            Database::in_memory("push-service-failing-pubsub")
+                .await
+                .expect("push service db"),
+            b"waddle-push-service-test-secret-key",
+            "push.example.com".parse().expect("push service jid"),
+            Arc::new(FailingNodeConfigPubSubStorage::new()),
+        )
+        .await
+        .expect("push service store");
+
+        store
+            .register_device_for_owner(&owner, "web", |node| {
+                PushDeviceRegistration::new("web-1", node, PushDevicePlatform::Web, "test")
+                    .with_provider_token(Some("provider-secret".to_string()))
+            })
+            .await
+            .expect_err("post-commit XEP-0060 provisioning fails");
+
+        let nodes = store
+            .list_node_names_for_owner(&owner)
+            .await
+            .expect("node list");
+        assert_eq!(nodes.len(), 1, "node commit should match ensure_node shape");
+        assert!(
+            store
+                .test_only_active_devices_for_owner_node(&owner, &nodes[0])
+                .await
+                .expect("active device list")
+                .is_empty(),
+            "failed post-commit provisioning must not leave an active device"
+        );
+        let compensated_device = store
+            .get_device_for_owner_on_node(&owner, &nodes[0], "web-1")
+            .await
+            .expect("compensated device lookup")
+            .expect("compensated disabled device");
+        assert_eq!(compensated_device.provider_token(), None);
     }
 
     #[tokio::test]
