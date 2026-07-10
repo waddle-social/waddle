@@ -986,10 +986,10 @@ fn rejects_too_many_stanza_ids() {
 #[test]
 fn xep_0359_legacy_1to1_replay_emits_recipient_stanza_id() {
     let archived = ArchivedMessage {
-        id: "row-1".to_string(),
+        id: "archive-row-1".to_string(),
         body: Some("hi".to_string()),
         stanza_id: Some(StanzaId::new(
-            "row-1",
+            "wire-id-1",
             "bob@example.com".parse::<Jid>().expect("valid jid"),
         )),
         message_type: MessageType::Chat,
@@ -1001,7 +1001,11 @@ fn xep_0359_legacy_1to1_replay_emits_recipient_stanza_id() {
         .children()
         .find(|c| c.name() == "stanza-id" && c.ns() == STANZA_ID_NS)
         .expect("1:1 fallback reconstruction must include <stanza-id/>");
-    assert_eq!(sid.attr("id"), Some("row-1"));
+    assert_eq!(
+        sid.attr("id"),
+        Some("archive-row-1"),
+        "reconstruction must emit the canonical archive id, not the wire id"
+    );
     assert_eq!(sid.attr("by"), Some("bob@example.com"));
 }
 
@@ -1009,10 +1013,10 @@ fn xep_0359_legacy_1to1_replay_emits_recipient_stanza_id() {
 #[test]
 fn xep_0359_typed_1to1_replay_emits_recipient_stanza_id() {
     let archived = ArchivedMessage {
-        id: "row-2".to_string(),
+        id: "archive-row-2".to_string(),
         body: Some("hi".to_string()),
         stanza_id: Some(StanzaId::new(
-            "row-2",
+            "wire-id-2",
             "bob@example.com".parse::<Jid>().expect("valid jid"),
         )),
         message_type: MessageType::Chat,
@@ -1025,14 +1029,18 @@ fn xep_0359_typed_1to1_replay_emits_recipient_stanza_id() {
         .children()
         .find(|c| c.name() == "stanza-id" && c.ns() == STANZA_ID_NS)
         .expect("typed fallback reconstruction must include <stanza-id/>");
-    assert_eq!(sid.attr("id"), Some("row-2"));
+    assert_eq!(
+        sid.attr("id"),
+        Some("archive-row-2"),
+        "reconstruction must emit the canonical archive id, not the wire id"
+    );
     assert_eq!(sid.attr("by"), Some("bob@example.com"));
 }
 
 /// A 1:1 fallback row without a decoded stanza-id emits none (nothing
 /// to fabricate), and groupchat rows keep the room-stamped shape.
 #[test]
-fn xep_0359_fallback_replay_without_stanza_id_emits_none() {
+fn xep_0359_fallback_replay_without_by_attribution_emits_none() {
     let archived = ArchivedMessage {
         id: "row-3".to_string(),
         body: Some("hi".to_string()),
@@ -1044,6 +1052,6 @@ fn xep_0359_fallback_replay_without_stanza_id_emits_none() {
         !inner
             .children()
             .any(|c| c.name() == "stanza-id" && c.ns() == STANZA_ID_NS),
-        "no stanza-id row data → no fabricated stanza-id"
+        "no decode-reconstructed by attribution → no fabricated stanza-id"
     );
 }

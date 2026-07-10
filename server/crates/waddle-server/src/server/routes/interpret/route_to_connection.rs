@@ -573,7 +573,14 @@ async fn route_to_bare_jid(
                             | xmpp_parsers::message::MessageType::Normal,
                     )
             );
-            if is_dm_message && !live_targets.is_empty() {
+            // The pass runs whenever ANY deliverable target exists —
+            // including the detached-only case (live empty, detached
+            // non-empty): queueing the raw pre-pass stanza there would
+            // bypass recipient-side XEP-0191 filtering (and the
+            // blocked-sender bounce), MAM/stanza-id stamping, and the
+            // inbox projection until resume (Qodo review on this PR;
+            // same rule the full-JID detached path follows).
+            if is_dm_message && !(live_targets.is_empty() && detached_targets.is_empty()) {
                 // The carbon exclusion set is every client the
                 // original stanza is addressed to (XEP-0280 §6.3):
                 // the live delivery set PLUS the detached XEP-0198

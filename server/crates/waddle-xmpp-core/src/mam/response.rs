@@ -461,22 +461,25 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
 /// inner message.
 ///
 /// - **Groupchat** rows stamp `by` = the room JID (`archived.to`).
-/// - **1:1** rows stamp the archive owner's `<stanza-id/>` recorded on
-///   the row (`archived.stanza_id`, whose `by` is reconstructed from
-///   the archive JID at decode time). The live-delivered copy carries
-///   this stamp (XEP-0359 §3), so a reconstruction without it left
-///   legacy 1:1 rows un-dedupable against live copies (#1266 item 8).
-///   Rows persisted with `stanza_xml` already carry the stamp inline
-///   and never reach this fallback.
+/// - **1:1** rows stamp the archive row's canonical XEP-0359 id
+///   (`archived.id` — the value the live-delivered copy carried in its
+///   `<stanza-id/>` per XEP-0359 §3), attributed to the archive owner
+///   (`archived.stanza_id.by`, reconstructed from the archive JID at
+///   decode time). NOTE: `archived.stanza_id.id` is the message's WIRE
+///   id, not the archive id — emitting it here would advertise an id
+///   no client can correlate with the live copy. A reconstruction
+///   without any stanza-id left legacy 1:1 rows un-dedupable against
+///   live copies (#1266 item 8). Rows persisted with `stanza_xml`
+///   already carry the stamp inline and never reach this fallback.
 fn append_reconstructed_stanza_id(
     builder: minidom::ElementBuilder,
     archived: &ArchivedMessage,
     msg_type: &MessageType,
 ) -> minidom::ElementBuilder {
+    if archived.id.is_empty() {
+        return builder;
+    }
     if *msg_type == MessageType::Groupchat {
-        if archived.id.is_empty() {
-            return builder;
-        }
         return builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
@@ -487,15 +490,16 @@ fn append_reconstructed_stanza_id(
                 .build(),
         );
     }
+    // The archive owner's JID is only recorded on the row via the
+    // decode-reconstructed `stanza_id.by`; without it there is no
+    // trustworthy `by` to attribute (XEP-0359 §3 makes `by` REQUIRED),
+    // so emit nothing rather than fabricate an attribution.
     let Some(sid) = archived.stanza_id.as_ref() else {
         return builder;
     };
-    if sid.id.is_empty() {
-        return builder;
-    }
     builder.append(
         Element::builder("stanza-id", STANZA_ID_NS)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.id.as_str())
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
             .attr(
                 minidom::rxml::xml_ncname!("by").to_owned(),
                 sid.by.to_string(),
