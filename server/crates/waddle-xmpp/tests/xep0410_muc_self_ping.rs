@@ -263,3 +263,153 @@ fn xep_0410_self_ping_result_display_strings() {
     assert_eq!(SelfPingResult::Disconnected.to_string(), "disconnected");
     assert_eq!(SelfPingResult::Timeout.to_string(), "timeout");
 }
+
+// ── §3 server optimization — RoomActor `PingSelfCheck` (#1253) ────────
+//
+// The server-side optimized answer is authoritative: a joined session
+// MUST get an IQ result; only a not-joined session gets
+// `<not-acceptable/>`. `PingSelfCheck` is the RoomActor message the
+// websocket IQ handler asks; `Ok(())` maps to the IQ result and
+// `Err(HandlerError)` maps to `<not-acceptable/>`.
+
+use kameo::actor::{ActorRef, Spawn};
+use waddle_xmpp::muc::room_actor::{
+    GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, PingSelfCheck, RoomActor,
+};
+use waddle_xmpp::muc::{MucRoom, RoomConfig};
+use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
+use waddle_xmpp::Affiliation;
+
+fn spawn_room() -> ActorRef<RoomActor> {
+    let room_jid: jid::BareJid = "pingroom@muc.example.com".parse().expect("room jid");
+    let room = MucRoom::new(
+        room_jid,
+        "waddle-1".to_string(),
+        "channel-1".to_string(),
+        RoomConfig::default(),
+    );
+    let secret =
+        OccupantIdSecret::new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
+    RoomActor::spawn(RoomActor::new(room, secret))
+}
+
+fn session(resource: &str) -> jid::FullJid {
+    format!("alice@example.com/{resource}")
+        .parse()
+        .expect("full jid")
+}
+
+async fn join_as_alice(actor: &ActorRef<RoomActor>, jid: jid::FullJid) {
+    let admission_revision = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot")
+        .admission_revision;
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: jid,
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision,
+        })
+        .await
+        .expect("join");
+}
+
+/// #1253: a nick joined from multiple sessions must answer the
+/// self-ping with success for EVERY joined session — not just the
+/// first one recorded in `occupant.real_jid`. Pre-fix, the second
+/// device's periodic self-ping returned `<not-acceptable/>` and the
+/// client entered a perpetual rejoin loop.
+#[tokio::test]
+async fn xep_0410_self_ping_succeeds_for_every_session_of_a_multi_session_nick() {
+    let actor = spawn_room();
+    join_as_alice(&actor, session("web")).await;
+    join_as_alice(&actor, session("mobile")).await;
+
+    for resource in ["web", "mobile"] {
+        actor
+            .ask(PingSelfCheck {
+                nick: "alice".to_string(),
+                sender_jid: session(resource),
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("self-ping from joined session `{resource}` must succeed: {error:?}")
+            });
+    }
+}
+
+/// XEP-0410 server optimization: a session that is NOT joined under
+/// the pinged nick gets the not-joined answer — including a session
+/// of the same bare JID that never joined.
+#[tokio::test]
+async fn xep_0410_self_ping_rejects_session_not_joined_under_nick() {
+    let actor = spawn_room();
+    join_as_alice(&actor, session("web")).await;
+
+    let result = actor
+        .ask(PingSelfCheck {
+            nick: "alice".to_string(),
+            sender_jid: session("tablet-never-joined"),
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "a session that never joined must be told it is not joined"
+    );
+
+    let stranger: jid::FullJid = "mallory@example.com/pc".parse().expect("jid");
+    let result = actor
+        .ask(PingSelfCheck {
+            nick: "alice".to_string(),
+            sender_jid: stranger,
+        })
+        .await;
+    assert!(result.is_err(), "another user pinging alice's nick fails");
+}
+
+/// XEP-0410 server optimization: pinging a nick with no occupant at
+/// all is a not-joined answer.
+#[tokio::test]
+async fn xep_0410_self_ping_rejects_unknown_nick() {
+    let actor = spawn_room();
+    let result = actor
+        .ask(PingSelfCheck {
+            nick: "ghost".to_string(),
+            sender_jid: session("web"),
+        })
+        .await;
+    assert!(result.is_err());
+}
+
+/// #1253 regression shape: after the FIRST session leaves, the
+/// remaining session must still self-ping successfully (the occupant's
+/// `real_jid` belonged to the departed session).
+#[tokio::test]
+async fn xep_0410_self_ping_survives_first_session_departure() {
+    let actor = spawn_room();
+    join_as_alice(&actor, session("web")).await;
+    join_as_alice(&actor, session("mobile")).await;
+
+    let outcome = actor
+        .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
+            sender_jid: session("web"),
+        })
+        .await
+        .expect("leave first session")
+        .expect("web session was joined");
+    assert!(
+        !outcome.removed_last_session,
+        "mobile is still joined after web leaves"
+    );
+
+    actor
+        .ask(PingSelfCheck {
+            nick: "alice".to_string(),
+            sender_jid: session("mobile"),
+        })
+        .await
+        .expect("remaining session is still joined");
+}

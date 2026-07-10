@@ -2712,6 +2712,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
             "muc#roomconfig_maxusers",
             "muc#roomconfig_enablelogging",
             waddle_xmpp::xep::FIELD_FORUM_MODE,
+            "muc#roomconfig_allowpm",
             waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
         ]
     );
@@ -6034,4 +6035,94 @@ async fn xep0045_destroy_group_dm_revokes_member_permission_tuples() {
     .await
     .expect("channel lookup");
     assert!(channel.is_none(), "group-DM channel row wiped");
+}
+
+/// XEP-0410 clustered gap (race review P1 on PR #1277): a self-ping to
+/// a room with NO local actor must still answer the optimized "joined"
+/// result when THIS node admitted the session into that room on a
+/// remote node (recorded in `remote_muc_memberships`) — otherwise every
+/// cross-node occupant enters a perpetual leave/rejoin loop. A
+/// different nick (or absent membership) keeps the not-joined answer.
+#[tokio::test]
+async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let ready = ready_phase(&alice_jid);
+    let room_jid: BareJid = "remote-room@muc.example.com".parse().expect("room jid");
+
+    state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .record_join(&alice_jid, &room_jid, "alice");
+
+    let ping = |nick: &str, id: &str| {
+        let iq = xmpp_parsers::iq::Iq::Get {
+            from: Some(jid::Jid::from(alice_jid.clone())),
+            to: Some(format!("{room_jid}/{nick}").parse().expect("occupant jid")),
+            id: id.to_string(),
+            payload: Element::builder("ping", "urn:xmpp:ping").build(),
+        };
+        let element = Element::from(iq);
+        let mut bytes = Vec::new();
+        element.write_to(&mut bytes).expect("serialize ping");
+        String::from_utf8(bytes).expect("utf8 ping")
+    };
+
+    let responses = handle_iq(
+        &ping("alice", "sp-remote-1"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session.clone()),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1);
+    assert!(
+        responses[0].contains("type='result'"),
+        "recorded remote membership must answer the optimized joined result: {}",
+        responses[0]
+    );
+
+    // Wrong nick → authoritative not-joined answer.
+    let responses = handle_iq(
+        &ping("other-nick", "sp-remote-2"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session.clone()),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1);
+    assert!(
+        responses[0].contains("not-acceptable"),
+        "a nick not held by this session answers not-joined: {}",
+        responses[0]
+    );
+
+    // After the membership is tombstoned (leave/cleanup in flight),
+    // the not-joined answer returns.
+    let _ = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .take_for_occupant(&alice_jid);
+    let responses = handle_iq(
+        &ping("alice", "sp-remote-3"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1);
+    assert!(
+        responses[0].contains("not-acceptable"),
+        "a tombstoned membership answers not-joined: {}",
+        responses[0]
+    );
 }

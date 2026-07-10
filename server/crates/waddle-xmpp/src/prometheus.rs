@@ -31,6 +31,14 @@ static BROADCAST_DROPPED_CLOSED: AtomicU64 = AtomicU64::new(0);
 // backpressure — the enqueue-uncertain sibling of `broadcast_dropped_full`.
 static DELIVERY_TERMINAL_ERROR_DROP: AtomicU64 = AtomicU64::new(0);
 
+// #1263 delivery-loss surfacing: a frame (groupchat reflection, MUC
+// presence fan-out, or actor-path full-JID delivery) was dropped because
+// the recipient's outbound channel was STILL full after the bounded
+// in-line retries. A non-zero value means a live recipient missed a
+// stanza under sustained backpressure — for MUC presence the recipient's
+// occupant roster may be stale until their next rejoin/resync.
+static DELIVERY_RETRY_EXHAUSTED_DROP: AtomicU64 = AtomicU64::new(0);
+
 // ADR-0017 Phase 1 Slice 2: empty `UserActor`s reaped by the periodic reaper
 // after `try_deliver`'s closed-channel eviction removed their last resource
 // without the explicit unregister-prune path running. A non-zero value is the
@@ -407,6 +415,15 @@ pub fn increment_delivery_terminal_error_drop() {
     DELIVERY_TERMINAL_ERROR_DROP.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_delivery_retry_exhausted_drop() {
+    DELIVERY_RETRY_EXHAUSTED_DROP.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn delivery_retry_exhausted_drop_count() -> u64 {
+    DELIVERY_RETRY_EXHAUSTED_DROP.load(Ordering::Relaxed)
+}
+
 pub fn increment_user_actor_reaped() {
     USER_ACTOR_REAPED.fetch_add(1, Ordering::Relaxed);
 }
@@ -602,6 +619,7 @@ pub fn reset_metrics_for_test() {
     BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
     BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
     DELIVERY_TERMINAL_ERROR_DROP.store(0, Ordering::Release);
+    DELIVERY_RETRY_EXHAUSTED_DROP.store(0, Ordering::Release);
     USER_ACTOR_REAPED.store(0, Ordering::Release);
     SM_UNACKED_EVICTED.store(0, Ordering::Release);
     PENDING_DELIVERY_QUOTA_EXCEEDED.store(0, Ordering::Release);
@@ -645,6 +663,7 @@ pub fn render_metrics() -> String {
     let broadcast_dropped_full = BROADCAST_DROPPED_FULL.load(Ordering::Relaxed);
     let broadcast_dropped_closed = BROADCAST_DROPPED_CLOSED.load(Ordering::Relaxed);
     let delivery_terminal_error_drop = DELIVERY_TERMINAL_ERROR_DROP.load(Ordering::Relaxed);
+    let delivery_retry_exhausted_drop = DELIVERY_RETRY_EXHAUSTED_DROP.load(Ordering::Relaxed);
     let user_actor_reaped = USER_ACTOR_REAPED.load(Ordering::Relaxed);
     let sm_unacked_evicted = SM_UNACKED_EVICTED.load(Ordering::Relaxed);
     let pending_quota_exceeded = PENDING_DELIVERY_QUOTA_EXCEEDED.load(Ordering::Relaxed);
@@ -700,6 +719,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_delivery_terminal_error_drop_total Actor-path deliveries dropped after a terminal ask failure whose message may have been enqueued (ActorStopped / reply Timeout(None)); dropped instead of routed to the XEP-0198 detached buffer to avoid double-delivery.\n",
             "# TYPE waddle_delivery_terminal_error_drop_total counter\n",
             "waddle_delivery_terminal_error_drop_total {delivery_terminal_error_drop}\n",
+            "# HELP waddle_delivery_retry_exhausted_drop_total Frames dropped because the recipient's outbound channel was STILL full after the bounded in-line DroppedFull retries (#1263) — groupchat reflections, MUC presence fan-out, and actor-path full-JID deliveries. A non-zero value means a live recipient missed a stanza under sustained backpressure.\n",
+            "# TYPE waddle_delivery_retry_exhausted_drop_total counter\n",
+            "waddle_delivery_retry_exhausted_drop_total {delivery_retry_exhausted_drop}\n",
             "# HELP waddle_user_actor_reaped_total Empty UserActors reaped by the periodic reaper after delivery-path closed-channel eviction removed their last resource without the explicit unregister-prune path running.\n",
             "# TYPE waddle_user_actor_reaped_total counter\n",
             "waddle_user_actor_reaped_total {user_actor_reaped}\n",
@@ -783,6 +805,7 @@ pub fn render_metrics() -> String {
         broadcast_dropped_full = broadcast_dropped_full,
         broadcast_dropped_closed = broadcast_dropped_closed,
         delivery_terminal_error_drop = delivery_terminal_error_drop,
+        delivery_retry_exhausted_drop = delivery_retry_exhausted_drop,
         user_actor_reaped = user_actor_reaped,
         sm_unacked_evicted = sm_unacked_evicted,
         pending_quota_exceeded = pending_quota_exceeded,

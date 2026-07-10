@@ -1183,6 +1183,77 @@ async fn websocket_muc_self_ping_succeeds_for_joined_occupant() {
     let _ = client.close().await;
 }
 
+/// XEP-0410 server optimization (#1254): a self-ping to a room with no
+/// live actor (never created, reaped, or sealed-dormant) MUST be the
+/// authoritative not-joined answer `<not-acceptable/>` so the client
+/// rejoins. The previous `<item-not-found/>` is defined by XEP-0410
+/// clients as "still joined (mid-nick-change)" — after a reap the
+/// client never rejoined and silently stopped receiving messages.
+#[tokio::test]
+async fn websocket_muc_self_ping_to_reaped_room_returns_not_acceptable() {
+    let (_server, mut client) = setup().await;
+    let room = format!("self-ping-reaped-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="ws-muc-self-ping-reaped" to="{room}/admin"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send MUC self-ping");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-muc-self-ping-reaped"))
+        .await
+        .expect("self-ping response");
+    assert!(
+        response.contains("not-acceptable"),
+        "expected XEP-0410 not-joined answer <not-acceptable/>, got: {response}"
+    );
+    assert!(
+        !response.contains("item-not-found"),
+        "item-not-found reads as still-joined per XEP-0410; got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+/// XEP-0410 (#1253): a self-ping from a session that is NOT joined to
+/// an EXISTING room also gets `<not-acceptable/>`.
+#[tokio::test]
+async fn websocket_muc_self_ping_from_non_occupant_returns_not_acceptable() {
+    let (_server, mut client) = setup().await;
+    let room = format!("self-ping-nonocc-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    client
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" to="{room}/admin"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    // Ping a nick nobody holds — the pinging session is not joined
+    // under it, so the optimized answer is not-acceptable.
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="ws-muc-self-ping-nonocc" to="{room}/other-nick"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send MUC self-ping");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-muc-self-ping-nonocc"))
+        .await
+        .expect("self-ping response");
+    assert!(
+        response.contains("not-acceptable"),
+        "expected XEP-0410 not-joined answer <not-acceptable/>, got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
 #[tokio::test]
 async fn websocket_muc_room_disco_advertises_self_ping_optimization_only_on_rooms() {
     let (_server, mut client) = setup().await;

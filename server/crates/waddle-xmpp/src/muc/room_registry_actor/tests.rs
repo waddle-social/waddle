@@ -160,14 +160,14 @@ async fn test_destroy_room() {
         .await
         .expect("create");
 
-    let removed: bool = registry
+    let removed: DestroyRoomOutcome = registry
         .ask(DestroyRoom {
             room_jid: jid.clone(),
             reason: DestroyRoomReason::Destroy,
         })
         .await
         .expect("destroy");
-    assert!(removed);
+    assert_eq!(removed, DestroyRoomOutcome::Destroyed);
 
     let exists: bool = registry
         .ask(RoomExists { room_jid: jid })
@@ -384,14 +384,14 @@ async fn test_destroy_non_existent_room_returns_false() {
     let registry = spawn_registry().await;
     let jid = test_room_jid("ghost");
 
-    let removed: bool = registry
+    let removed: DestroyRoomOutcome = registry
         .ask(DestroyRoom {
             room_jid: jid,
             reason: DestroyRoomReason::Destroy,
         })
         .await
         .expect("destroy");
-    assert!(!removed);
+    assert_eq!(removed, DestroyRoomOutcome::NotRegistered);
 }
 
 #[tokio::test]
@@ -485,7 +485,7 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
         })
         .await
         .expect("destroy poisoned room");
-    assert!(destroyed);
+    assert_eq!(destroyed, DestroyRoomOutcome::Destroyed);
 
     let recreated: ActorRef<RoomActor> = registry
         .ask(GetOrCreateRoom {
@@ -995,8 +995,9 @@ mod ownership_claims_tests {
             })
             .await
             .expect("destroy ask");
-        assert!(
-            !destroyed,
+        assert_eq!(
+            destroyed,
+            DestroyRoomOutcome::DurableWipeFailed,
             "a destroy whose durable delete failed must not be acknowledged"
         );
         let still_there = registry

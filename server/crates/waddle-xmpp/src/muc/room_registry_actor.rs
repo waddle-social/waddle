@@ -598,16 +598,32 @@ pub enum DestroyRoomReason {
     LocalEviction,
 }
 
+/// Outcome of a [`DestroyRoom`] ask. Split three ways because callers
+/// must distinguish "the room simply was not registered" (fine for
+/// admin deletion of a dormant room) from "the fenced durable wipe
+/// failed and the room was deliberately kept alive for a retry"
+/// (which MUST fail the caller's operation — acknowledging it would
+/// leave rows that resurrect the room).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum DestroyRoomOutcome {
+    /// The room existed and was removed (durable rows wiped when the
+    /// reason was [`DestroyRoomReason::Destroy`]).
+    Destroyed,
+    /// No live or poisoned entry for this JID existed.
+    NotRegistered,
+    /// The epoch-fenced durable delete failed; the registry entry was
+    /// restored and nothing was destroyed.
+    DurableWipeFailed,
+}
+
 /// Destroy a room, removing it from the registry.
-///
-/// Returns `true` if the room existed and was removed.
 pub struct DestroyRoom {
     pub room_jid: BareJid,
     pub reason: DestroyRoomReason,
 }
 
 impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
-    type Reply = bool;
+    type Reply = DestroyRoomOutcome;
 
     async fn handle(
         &mut self,
@@ -644,7 +660,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                     if removed_poison {
                         self.poisoned_rooms.insert(msg.room_jid.clone());
                     }
-                    return false;
+                    return DestroyRoomOutcome::DurableWipeFailed;
                 }
             }
         }
@@ -662,10 +678,10 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         }
         if removed_room || removed_poison {
             info!(room = %msg.room_jid, "Destroyed room");
-            true
+            DestroyRoomOutcome::Destroyed
         } else {
             warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
-            false
+            DestroyRoomOutcome::NotRegistered
         }
     }
 }

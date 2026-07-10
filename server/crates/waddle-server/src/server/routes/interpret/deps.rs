@@ -62,7 +62,7 @@ pub struct InterpretOutcome {
     /// shared fan-out recipient pass (#1106) also needs them for the
     /// wire stanza it extracts BEFORE interpreting, so live/MAM id
     /// parity holds under origin-id retries.
-    pub(super) archive_id_rewrites: Vec<ArchiveIdRewrite>,
+    pub(crate) archive_id_rewrites: Vec<ArchiveIdRewrite>,
 }
 
 /// Typed timer instruction relayed from the state machine to the

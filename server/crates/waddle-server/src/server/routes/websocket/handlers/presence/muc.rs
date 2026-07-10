@@ -142,16 +142,45 @@ pub(crate) async fn route_room_presence_to_occupant(
     if try_deliver_registered_remote_resource(state, recipient, &stanza).await {
         return;
     }
-    match state
-        .deps
-        .protocol
-        .connection_registry
-        .try_send_to(recipient, stanza.clone())
-    {
-        waddle_xmpp::registry::BroadcastOutcome::Delivered
-        | waddle_xmpp::registry::BroadcastOutcome::DroppedFull => return,
-        waddle_xmpp::registry::BroadcastOutcome::NotConnected
-        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {}
+    // #1263: `DroppedFull` was previously treated as delivered, so a
+    // client whose channel was momentarily full silently missed a room
+    // presence and kept a stale occupant roster forever. The frame is
+    // provably never enqueued on `DroppedFull`, so retry ONCE
+    // immediately — but never sleep: this helper sits inside the
+    // sequential join/leave broadcast loops whose non-blocking contract
+    // is load-bearing (a zombied consumer must not stall the join path,
+    // or "Timed out waiting for self-presence" cascades return; SM
+    // review on PR #1277). A persistently full channel surfaces the
+    // loss (metric + warn) instead of reporting success — the
+    // recipient's roster is stale until its next rejoin/resync, and a
+    // genuinely wedged consumer is torn down by the send-stall
+    // backstop, whose disconnect cleanup re-syncs occupancy.
+    let mut retried = false;
+    loop {
+        match state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(recipient, stanza.clone())
+        {
+            waddle_xmpp::registry::BroadcastOutcome::Delivered => return,
+            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
+                if !retried {
+                    retried = true;
+                    continue;
+                }
+                waddle_xmpp::prometheus::increment_delivery_retry_exhausted_drop();
+                warn!(
+                    room = %room_jid,
+                    recipient = %recipient,
+                    "MUC presence fan-out: recipient channel full; dropped — \
+                     occupant roster stale until resync"
+                );
+                return;
+            }
+            waddle_xmpp::registry::BroadcastOutcome::NotConnected
+            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => break,
+        }
     }
     #[cfg(not(feature = "clustering"))]
     let _ = room_jid;

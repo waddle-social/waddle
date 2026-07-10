@@ -3327,40 +3327,55 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         }
     }
 
-    match state
+    // `NotRegistered` is fine (a dormant channel has no live actor);
+    // `DurableWipeFailed` means the registry deliberately kept the room
+    // because its fenced clustering wipe failed — the deletion must
+    // fail and roll back rather than record a destruction that will
+    // resurrect (#1261).
+    let destroy_result = state
         .room_registry
         .ask(DestroyRoom {
             room_jid: args.channel_jid.clone(),
             reason: DestroyRoomReason::Destroy,
         })
-        .await
-    {
-        Ok(_removed) => {}
-        Err(error) => {
-            restore_removed_channel_bookmarks(
-                state,
-                &removed_bookmarks,
-                &item_id,
-                channel_id.as_deref(),
-            )
-            .await;
-            if let (Some(channel_id), Some(snapshot)) =
-                (channel_id.as_deref(), catalog_snapshot.as_ref())
-            {
-                restore_channel_catalog_snapshot(state, channel_id, snapshot.as_ref()).await;
-            }
-            if let Some(link) = link.as_ref() {
-                if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
-                    tracing::warn!(
-                        error = %rollback_error,
-                        channel = %args.channel_jid,
-                        space = %link.space_jid,
-                        "channels:delete rollback failed to restore channel-space link",
-                    );
-                }
-            }
-            return Err(send_err("room_registry ask DestroyRoom")(error));
+        .await;
+    let failure = match destroy_result {
+        Ok(
+            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
+            | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+        ) => None,
+        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+            Some(internal_err(format!(
+                "room destroy refused for {}: durable room-state wipe failed",
+                args.channel_jid
+            )))
         }
+        Err(error) => Some(send_err("room_registry ask DestroyRoom")(error)),
+    };
+    if let Some(error) = failure {
+        restore_removed_channel_bookmarks(
+            state,
+            &removed_bookmarks,
+            &item_id,
+            channel_id.as_deref(),
+        )
+        .await;
+        if let (Some(channel_id), Some(snapshot)) =
+            (channel_id.as_deref(), catalog_snapshot.as_ref())
+        {
+            restore_channel_catalog_snapshot(state, channel_id, snapshot.as_ref()).await;
+        }
+        if let Some(link) = link.as_ref() {
+            if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
+                tracing::warn!(
+                    error = %rollback_error,
+                    channel = %args.channel_jid,
+                    space = %link.space_jid,
+                    "channels:delete rollback failed to restore channel-space link",
+                );
+            }
+        }
+        return Err(error);
     }
     Ok(())
 }

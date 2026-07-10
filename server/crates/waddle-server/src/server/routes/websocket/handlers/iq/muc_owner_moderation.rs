@@ -38,15 +38,22 @@ fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
 /// XEP-0045 §10.9 (#1261): "The room ... destroys the room, even if it
 /// was defined as persistent." Delete every waddle-side durable row the
 /// join path would otherwise rematerialize the destroyed room from,
-/// ordered least-consequential-first so a mid-sequence failure leaves
-/// the room maximally intact for a retry (every step is an idempotent
-/// delete, so retrying the destroy re-runs the sequence safely):
+/// ordered so that a mid-sequence failure is always FAIL-CLOSED —
+/// every prefix of the sequence only ever narrows someone's access,
+/// never widens it — and every step is an idempotent delete, so a
+/// failed destroy leaves the room live and a retry re-runs the
+/// sequence safely:
 ///
-/// 1. group-DM per-member archive-visibility boundaries;
-/// 2. the outstanding mediated-invite ledger (#1264);
-/// 3. for group DMs, each member's permission tuple (fail-hard — a
+/// 1. the outstanding mediated-invite ledger (#1264) — an
+///    undeclinable invite is the mildest possible consequence;
+/// 2. for group DMs, each member's permission tuple (fail-hard — a
 ///    surviving tuple is durable authorization for a dead room) and
 ///    XEP-0402 bookmark (best-effort — a stale bookmark is cosmetic);
+/// 3. group-DM per-member archive-visibility boundaries — deleted
+///    only AFTER the member tuples: an absent boundary row means
+///    full-history visibility, so dropping it while a member tuple
+///    still authorizes MAM reads would silently WIDEN that member's
+///    history access on an aborted destroy;
 /// 4. the managed-channel catalog row (`channels`) LAST — it is the
 ///    resurrection vector `handle_muc_join` rebuilds managed rooms
 ///    from, so it only falls once everything else committed.
@@ -61,20 +68,6 @@ async fn wipe_destroyed_room_durable_state(
     room: &waddle_xmpp::muc::MucRoom,
 ) -> Result<(), ()> {
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
-    if let Err(error) = db_actor
-        .ask(crate::db::actor::DbExecute {
-            sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
-            params: vec![room_jid.to_string().into()],
-        })
-        .await
-    {
-        warn!(
-            room = %room_jid,
-            error = %error,
-            "Failed to delete archive boundaries for destroyed room"
-        );
-        return Err(());
-    }
     if let Err(error) = crate::server::routes::websocket::muc_invites::delete_room_invites(
         db_actor.clone(),
         room_jid,
@@ -147,6 +140,23 @@ async fn wipe_destroyed_room_durable_state(
                     );
                 }
             }
+        }
+        // Boundaries fall only after the member tuples above: an
+        // absent boundary means full-history visibility, so this
+        // delete is only safe once no tuple authorizes MAM reads.
+        if let Err(error) = db_actor
+            .ask(crate::db::actor::DbExecute {
+                sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
+                params: vec![room_jid.to_string().into()],
+            })
+            .await
+        {
+            warn!(
+                room = %room_jid,
+                error = %error,
+                "Failed to delete archive boundaries for destroyed room"
+            );
+            return Err(());
         }
         if let Err(error) =
             crate::server::xmpp_channels::delete_xmpp_channel(db_actor.clone(), &channel_id).await
@@ -347,24 +357,38 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 }
             }
 
-            if destroy_room_actor(state, &room_jid).await {
-                debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-                let room_jid_string = room_jid.to_string();
-                frames.push(build_iq_result_xml(
-                    id,
-                    Some(room_jid_string.as_str()),
-                    response_to,
-                    None,
-                ));
-                return frames;
+            match destroy_room_actor(state, &room_jid).await {
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed => {
+                    debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
+                    let room_jid_string = room_jid.to_string();
+                    frames.push(build_iq_result_xml(
+                        id,
+                        Some(room_jid_string.as_str()),
+                        response_to,
+                        None,
+                    ));
+                    return frames;
+                }
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested item not found."),
+                    )];
+                }
+                // The registry refused because its fenced clustering
+                // wipe failed and it kept the room alive — surface a
+                // retryable error, never a success (#1261).
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
             }
-
-            return vec![build_iq_error_xml_typed(
-                id,
-                response_from,
-                response_to,
-                item_not_found_iq_error("Requested item not found."),
-            )];
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {

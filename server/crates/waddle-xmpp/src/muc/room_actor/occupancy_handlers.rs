@@ -522,11 +522,23 @@ impl kameo::message::Message<PingSelfCheck> for RoomActor {
         msg: PingSelfCheck,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let occupant = self
+        if self.room.get_occupant(&msg.nick).is_none() {
+            return Err(RoomActorError::OccupantNotFound(msg.nick.clone()));
+        }
+        // XEP-0410 server optimization: the self-ping succeeds iff THIS
+        // session is joined under the pinged nick. A multi-session nick
+        // (XEP-0045 multi-session join) keeps `occupant.real_jid` as the
+        // FIRST session's full JID and appends later resources to
+        // `occupant_sessions`, so the check must consult the full session
+        // set — comparing only `real_jid` made every secondary device's
+        // periodic self-ping fail with `not-acceptable` and rejoin-loop
+        // (#1253).
+        if !self
             .room
-            .get_occupant(&msg.nick)
-            .ok_or_else(|| RoomActorError::OccupantNotFound(msg.nick.clone()))?;
-        if occupant.real_jid != msg.sender_jid {
+            .get_occupant_sessions(&msg.nick)
+            .iter()
+            .any(|session| session == &msg.sender_jid)
+        {
             return Err(RoomActorError::OccupantNotFound(
                 "Self-ping only allowed for own occupant".to_string(),
             ));

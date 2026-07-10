@@ -6,6 +6,7 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::server::routes::websocket::WebSocketState;
+use tracing::warn;
 
 pub(super) async fn handle_muc_direct_message(
     incoming: &Message,
@@ -73,7 +74,7 @@ async fn handle_muc_private_message(
             "Internal server error.",
         )]);
     };
-    let Some(sender_nick) = snapshot.room.find_nick_by_real_jid(bound_jid) else {
+    let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
@@ -82,7 +83,22 @@ async fn handle_muc_private_message(
             "Only room occupants may send private messages.",
         )]);
     };
-    if snapshot.room.get_occupant(&target_nick).is_none() {
+    let sender_nick = sender_occupant.nick.clone();
+    // XEP-0045 `muc#roomconfig_allowpm` (#1257): honor the room's PM
+    // policy against the sender's current role.
+    if !snapshot.room.config.allow_pm.permits(sender_occupant.role) {
+        // RFC 6120 §8.3.3.5: <forbidden/> is associated with type='auth'
+        // (matches every §7/§8 example in XEP-0045 and this repo's
+        // groupchat forbidden_error helper).
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "Private messages are not allowed for your role in this room.",
+        )]);
+    }
+    let Some(target_occupant) = snapshot.room.get_occupant(&target_nick) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
@@ -90,9 +106,11 @@ async fn handle_muc_private_message(
             DefinedCondition::ItemNotFound,
             "Requested occupant not found.",
         )]);
-    }
+    };
+    let recipient_bare = target_occupant.real_jid.to_bare();
+    let recipient_sessions = snapshot.room.get_occupant_sessions(&target_nick);
 
-    let from_room_jid = match room_jid.clone().with_resource_str(sender_nick) {
+    let from_room_jid = match room_jid.clone().with_resource_str(&sender_nick) {
         Ok(jid) => jid,
         Err(_) => {
             return Some(vec![message_error_frame(
@@ -113,19 +131,206 @@ async fn handle_muc_private_message(
         &room_jid,
         &state.deps.occupant_id_secret,
     );
-    for recipient in snapshot.room.get_occupant_sessions(&target_nick) {
-        let mut routed = incoming.clone();
-        routed.from = Some(jid::Jid::from(from_room_jid.clone()));
-        routed.to = Some(jid::Jid::from(recipient.clone()));
-        canonicalize_muc_private_payloads(&mut routed, &sender_occupant_id);
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&recipient, Stanza::Message(routed));
+
+    // Canonical relayed form (XEP-0045 §7.5): from the sender's occupant
+    // JID, client MUC-service payloads stripped, empty muc#user marker +
+    // server occupant-id stamped (#1251/#1268).
+    let mut relayed = incoming.clone();
+    relayed.from = Some(jid::Jid::from(from_room_jid.clone()));
+    canonicalize_muc_private_payloads(&mut relayed, &sender_occupant_id);
+
+    let sender_bare = bound_jid.to_bare();
+    let mut sent_form = incoming.clone();
+    sent_form.from = Some(jid::Jid::from(bound_jid.clone()));
+    sent_form.to = Some(jid::Jid::from(target_occupant_jid.clone()));
+    canonicalize_muc_private_payloads(&mut sent_form, &sender_occupant_id);
+
+    // #1257: archive + carbons through the same interpreter arms the 1:1
+    // pipeline uses — and BEFORE the wire copies go out (review P1/P2 on
+    // PR #1277): stanza-ids are stamped ONLY on copies that are actually
+    // archived (body-less chat-state PMs get none — an id with no MAM
+    // row behind it is a lie), and interpreting the archive first lets
+    // an origin-id dedupe's ArchiveIdRewrite land on the wire copy, so
+    // live/MAM id parity holds under retries. Both user archives key
+    // the conversation by the room bare JID.
+    let should_archive = !incoming.bodies.is_empty();
+    let mut events: Vec<waddle_xmpp::protocol::OutboundEvent> = Vec::new();
+    if should_archive {
+        let recipient_sid = waddle_xmpp_core::xep0359::StanzaId::new(
+            uuid::Uuid::new_v4().to_string(),
+            jid::Jid::from(recipient_bare.clone()),
+        );
+        waddle_xmpp_core::xep0359::add_stanza_id(&mut relayed, &recipient_sid);
+        // Self-PM (own nick): only ONE archive row is written (the
+        // recipient/owner archive below), so the sent-carbon copy must
+        // carry that single backed id — a fresh sender-side id would
+        // reference a row that never exists (Greptile P1 on PR #1277).
+        let sender_sid = if recipient_bare == sender_bare {
+            recipient_sid.clone()
+        } else {
+            waddle_xmpp_core::xep0359::StanzaId::new(
+                uuid::Uuid::new_v4().to_string(),
+                jid::Jid::from(sender_bare.clone()),
+            )
+        };
+        waddle_xmpp_core::xep0359::add_stanza_id(&mut sent_form, &sender_sid);
+
+        let mut recipient_archive = relayed.clone();
+        recipient_archive.to = Some(jid::Jid::from(recipient_bare.clone()));
+        events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            archive_jid: recipient_bare.clone(),
+            from: room_jid.clone(),
+            to: recipient_bare.clone(),
+            message: Box::new(recipient_archive),
+        });
+        // A self-PM (own nick) would otherwise archive twice into the
+        // same owner's archive.
+        if recipient_bare != sender_bare {
+            events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: sender_bare.clone(),
+                from: sender_bare.clone(),
+                to: room_jid.clone(),
+                message: Box::new(sent_form.clone()),
+            });
+        }
+    }
+    // XEP-0280 eligibility (review P2 on PR #1277): honor §6.1
+    // `<private/>` and XEP-0334 `<no-copy/>` suppression — the shared
+    // `should_copy_message` rule the 1:1 CarbonsMessageHandler applies —
+    // since this path emits SendCarbons directly. The exclusion set is
+    // the original delivery set per §6.3: every session of the target
+    // nick PLUS the originating resource, so a self-PM (own nick) never
+    // double-delivers to a sibling resource that already got the live
+    // relayed copy. Ordered AFTER the archive events so the interpreter
+    // applies any ArchiveIdRewrite to the carbon inner message too.
+    // Deliberate SHOULD-level deviation: the copy goes to ALL other
+    // carbon-enabled resources, not only Multi-Session-Nick clients in
+    // this room — XEP-0280's note allows this (clients not joined
+    // "SHOULD either ignore such carbon copies, or provide a way for
+    // the user to join the MUC before answering").
+    if waddle_xmpp_core::carbons::should_copy_message(incoming) {
+        let mut exclude = recipient_sessions.clone();
+        if !exclude.contains(bound_jid) {
+            exclude.push(bound_jid.clone());
+        }
+        events.push(waddle_xmpp::protocol::OutboundEvent::SendCarbons {
+            owner: sender_bare,
+            message: Box::new(sent_form),
+            kind: waddle_xmpp::protocol::CarbonKind::Sent,
+            exclude,
+        });
+    }
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let nested = crate::server::routes::interpret::interpret(events, &deps).await;
+    if !nested.archive_id_rewrites.is_empty() {
+        crate::server::routes::interpret::rewrite_message_archive_ids(
+            &mut relayed,
+            &nested.archive_id_rewrites,
+        );
     }
 
-    Some(Vec::new())
+    // #1257: reliable delivery. Replace the previous fire-and-forget
+    // live-only `try_send_to` (which silently lost the PM for a
+    // recipient mid-SM-resume, detached, backpressured, or on another
+    // node) with the same actor delivery path 1:1 direct frames use:
+    // live channel first, XEP-0198 detached replay buffer as fallback,
+    // clustered remote-resource relay for occupant sessions whose
+    // socket lives on another node.
+    let mut any_session_handled = false;
+    for recipient in &recipient_sessions {
+        let mut routed = relayed.clone();
+        routed.to = Some(jid::Jid::from(recipient.clone()));
+        let stanza = Stanza::Message(routed);
+        let outcome = deliver_pm_to_session(state, &deps, recipient, &stanza).await;
+        // Explicit success set (codex review on PR #1277): Delivered /
+        // QueuedDetached are real deliveries; a clustered MaybeCommitted
+        // may have reached the target, so bouncing would risk a
+        // duplicate-visible error. Unavailable/Dropped never count.
+        let session_handled = match outcome {
+            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+            | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => true,
+            #[cfg(feature = "clustering")]
+            crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => true,
+            crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
+            | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => false,
+        };
+        if session_handled {
+            any_session_handled = true;
+        } else {
+            warn!(
+                room = %room_jid,
+                recipient = %recipient,
+                outcome = ?outcome,
+                "MUC private message: session delivery failed"
+            );
+        }
+    }
+    // XEP-0045 §7.5: the service is responsible for delivering the PM.
+    // An ARCHIVED PM that reached no live/detached session is still
+    // durable — the occupant sees it via MAM — so only an unarchivable
+    // (body-less) PM that reached nobody bounces to the sender; a
+    // wait-class error after the archive committed would misreport a
+    // message the recipient will in fact see.
+    if !any_session_handled {
+        if should_archive {
+            warn!(
+                room = %room_jid,
+                target_nick = %target_nick,
+                "MUC private message: no session reachable; archived copy remains durable"
+            );
+        } else {
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                ErrorType::Wait,
+                DefinedCondition::RecipientUnavailable,
+                "The occupant could not be reached; please retry.",
+            )]);
+        }
+    }
+
+    Some(nested.frames)
+}
+
+/// Deliver one MUC private-message wire copy to one occupant session
+/// (#1257): clustered remote-resource relay first (the session's socket
+/// may live on another node), then the actor path with its XEP-0198
+/// detached-buffer fallback — the same reliability envelope 1:1 direct
+/// frames get.
+async fn deliver_pm_to_session(
+    state: &WebSocketState,
+    deps: &crate::server::routes::interpret::Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> crate::server::routes::interpret::FullJidDeliveryOutcome {
+    #[cfg(feature = "clustering")]
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        if let Some(outcome) = bridge
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            )
+            .await
+        {
+            return outcome;
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    let _ = state;
+    crate::server::routes::interpret::deliver_direct_to_full(
+        deps.user_registry,
+        deps.sm_session_registry,
+        target,
+        stanza,
+    )
+    .await
 }
 
 /// XEP-0045 §7.8.2 mediated decline, hardened per #1264:

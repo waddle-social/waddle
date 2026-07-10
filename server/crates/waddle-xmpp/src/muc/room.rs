@@ -18,6 +18,59 @@ pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
     jid.domain().as_str() != local_domain
 }
 
+/// XEP-0045 `muc#roomconfig_allowpm` — which occupant roles may send
+/// private messages (§7.5) in this room. Wire values follow the XMPP
+/// Registrar's field registration: `anyone`, `participants`,
+/// `moderators`, `none`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AllowPm {
+    /// Any occupant may send PMs (registrar default).
+    #[default]
+    Anyone,
+    /// Occupants with role participant or moderator may send PMs.
+    Participants,
+    /// Only moderators may send PMs.
+    Moderators,
+    /// Private messages are disabled in this room.
+    None,
+}
+
+impl AllowPm {
+    /// Wire value used in the `muc#roomconfig_allowpm` data-form field.
+    pub fn as_form_value(self) -> &'static str {
+        match self {
+            AllowPm::Anyone => "anyone",
+            AllowPm::Participants => "participants",
+            AllowPm::Moderators => "moderators",
+            AllowPm::None => "none",
+        }
+    }
+
+    /// Parse from the data-form `<value>` text. Returns `Option::None`
+    /// for unknown / malformed values; callers keep the previous value.
+    pub fn from_form_value(value: &str) -> Option<Self> {
+        match value {
+            "anyone" => Some(AllowPm::Anyone),
+            "participants" => Some(AllowPm::Participants),
+            "moderators" => Some(AllowPm::Moderators),
+            "none" => Some(AllowPm::None),
+            _ => None,
+        }
+    }
+
+    /// Whether an occupant holding `role` may send a private message.
+    /// `Role::None` (not an occupant) never qualifies — §7.5 PMs are an
+    /// occupant-to-occupant exchange.
+    pub fn permits(self, role: Role) -> bool {
+        match self {
+            AllowPm::Anyone => !matches!(role, Role::None),
+            AllowPm::Participants => matches!(role, Role::Participant | Role::Moderator),
+            AllowPm::Moderators => matches!(role, Role::Moderator),
+            AllowPm::None => false,
+        }
+    }
+}
+
 /// MUC room configuration.
 ///
 /// Configuration knobs only — the live subject (text + setter +
@@ -54,6 +107,10 @@ pub struct RoomConfig {
     /// the standard XEP-0045 owner-config form.
     #[serde(default)]
     pub pin_permission: PinPermission,
+    /// XEP-0045 `muc#roomconfig_allowpm` (#1257): which occupant roles
+    /// may send §7.5 private messages. Default `anyone`.
+    #[serde(default)]
+    pub allow_pm: AllowPm,
     /// Federation permission policy retained for serialized room configs.
     ///
     /// Remote XMPP federation is not served by Waddle, so active joins must still be local
@@ -77,6 +134,7 @@ impl Default for RoomConfig {
             forum: false,
             group_dm: false,
             pin_permission: PinPermission::default(),
+            allow_pm: AllowPm::default(),
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),
         }
@@ -862,5 +920,42 @@ mod in_call_state_tests {
         r.upsert_in_call_state("alice", web, raised());
         r.remove_occupant("alice");
         assert!(r.in_call_sessions_for_nick("alice").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod allow_pm_tests {
+    use super::*;
+
+    /// XEP-0045 `muc#roomconfig_allowpm` (#1257): role-permission table.
+    #[test]
+    fn allow_pm_permission_table() {
+        for role in [Role::Visitor, Role::Participant, Role::Moderator] {
+            assert!(AllowPm::Anyone.permits(role));
+            assert!(!AllowPm::None.permits(role));
+        }
+        assert!(!AllowPm::Participants.permits(Role::Visitor));
+        assert!(AllowPm::Participants.permits(Role::Participant));
+        assert!(AllowPm::Participants.permits(Role::Moderator));
+        assert!(!AllowPm::Moderators.permits(Role::Visitor));
+        assert!(!AllowPm::Moderators.permits(Role::Participant));
+        assert!(AllowPm::Moderators.permits(Role::Moderator));
+        assert!(!AllowPm::Anyone.permits(Role::None));
+    }
+
+    /// Registrar wire values round-trip; unknown values are rejected so
+    /// callers keep the previous policy.
+    #[test]
+    fn allow_pm_form_value_round_trip() {
+        for value in [
+            AllowPm::Anyone,
+            AllowPm::Participants,
+            AllowPm::Moderators,
+            AllowPm::None,
+        ] {
+            assert_eq!(AllowPm::from_form_value(value.as_form_value()), Some(value));
+        }
+        assert_eq!(AllowPm::from_form_value("bogus"), Option::None);
+        assert_eq!(AllowPm::default(), AllowPm::Anyone);
     }
 }
