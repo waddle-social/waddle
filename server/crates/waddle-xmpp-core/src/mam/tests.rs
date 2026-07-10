@@ -457,7 +457,12 @@ fn builds_result_message_from_legacy_fields() {
         )
     };
 
-    let msg = build_result_messages("query-1", &jid("user@example.com"), &[archived]);
+    let msg = build_result_messages(
+        "query-1",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msg[0]
         .payloads
         .iter()
@@ -529,6 +534,8 @@ fn xep_0201_typed_replay_emits_thread_parent() {
     // own `<thread/>`.
     let archived = ArchivedMessage {
         rich: Some(ArchivedRichMessage {
+            occupant_id: None,
+            muc_sender: None,
             payload: None,
             reply: None,
             references: vec![],
@@ -536,7 +543,12 @@ fn xep_0201_typed_replay_emits_thread_parent() {
         }),
         ..nested_thread_archived_for_replay(None)
     };
-    let msgs = build_result_messages("q1", &jid("user@example.com"), &[archived]);
+    let msgs = build_result_messages(
+        "q1",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let thread = replay_inner_thread(&msgs[0]);
     assert_eq!(thread.text().trim(), "child-thread");
     assert_eq!(thread.attr("parent"), Some("root-thread"));
@@ -548,7 +560,12 @@ fn xep_0201_legacy_replay_emits_thread_parent() {
     // None — `build_legacy_inner_message` rebuilds purely from
     // scalar columns.
     let archived = nested_thread_archived_for_replay(None);
-    let msgs = build_result_messages("q2", &jid("user@example.com"), &[archived]);
+    let msgs = build_result_messages(
+        "q2",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let thread = replay_inner_thread(&msgs[0]);
     assert_eq!(thread.text().trim(), "child-thread");
     assert_eq!(thread.attr("parent"), Some("root-thread"));
@@ -580,7 +597,12 @@ fn xep_0201_groupchat_stanza_xml_replay_reinstalls_thread_and_strips_to() {
         )
     };
 
-    let msgs = build_result_messages("q-stanza-xml", &jid("bob@example.com/web"), &[archived]);
+    let msgs = build_result_messages(
+        "q-stanza-xml",
+        &jid("archive@example.com"),
+        &jid("bob@example.com/web"),
+        &[archived],
+    );
     let result = msgs[0]
         .payloads
         .iter()
@@ -628,7 +650,12 @@ fn xep_0201_replay_omits_thread_when_id_missing_even_with_parent() {
         rich: None,
         ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
     };
-    let msgs = build_result_messages("q3", &jid("user@example.com"), &[archived]);
+    let msgs = build_result_messages(
+        "q3",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msgs[0]
         .payloads
         .iter()
@@ -663,7 +690,12 @@ fn preserves_archived_stanza_payload() {
         )
     };
 
-    let msg = build_result_messages("query-2", &jid("user@example.com"), &[archived]);
+    let msg = build_result_messages(
+        "query-2",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msg[0]
         .payloads
         .iter()
@@ -740,6 +772,8 @@ fn stanza_xml_preferred_over_rich_payload() {
             "<message xmlns='jabber:client' from='room@conference.example.com/alice' type='groupchat' id='live-1'><body>live body with extension payload</body><item xmlns='urn:example:task-widget:1' id='task-123' status='open'/></message>".to_string(),
         ),
         rich: Some(ArchivedRichMessage {
+            occupant_id: None,
+            muc_sender: None,
             payload: None,
             reply: None,
             references: vec![],
@@ -751,7 +785,12 @@ fn stanza_xml_preferred_over_rich_payload() {
         )
     };
 
-    let msg = build_result_messages("query-priority", &jid("user@example.com"), &[archived]);
+    let msg = build_result_messages(
+        "query-priority",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msg[0]
         .payloads
         .iter()
@@ -792,6 +831,8 @@ fn stanza_xml_preserves_reply_fallback() {
             to: Some(jid("room@conference.example.com/alice")),
         }),
         rich: Some(ArchivedRichMessage {
+            occupant_id: None,
+            muc_sender: None,
             payload: None,
             reply: Some(ArchivedReply {
                 id: RichMessageId("orig-1".to_string()),
@@ -806,7 +847,12 @@ fn stanza_xml_preserves_reply_fallback() {
         )
     };
 
-    let msg = build_result_messages("query-fallback", &jid("user@example.com"), &[archived]);
+    let msg = build_result_messages(
+        "query-fallback",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msg[0]
         .payloads
         .iter()
@@ -854,7 +900,12 @@ fn stanza_xml_strips_to_for_groupchat() {
         )
     };
 
-    let msg = build_result_messages("query-strip-to", &jid("user@example.com"), &[archived]);
+    let msg = build_result_messages(
+        "query-strip-to",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msg[0]
         .payloads
         .iter()
@@ -890,7 +941,12 @@ fn stanza_xml_strips_to_for_groupchat_on_raw_element_fallback() {
         )
     };
 
-    let msg = build_result_messages("query-strip-raw", &jid("user@example.com"), &[archived]);
+    let msg = build_result_messages(
+        "query-strip-raw",
+        &jid("archive@example.com"),
+        &jid("user@example.com"),
+        &[archived],
+    );
     let result = msg[0]
         .payloads
         .iter()
@@ -977,4 +1033,116 @@ fn rejects_too_many_stanza_ids() {
     let iq = build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, refs)]);
     let err = parse_mam_query(&iq).expect_err("must reject");
     assert!(matches!(err, CoreError::BadRequest(_)));
+}
+
+/// XEP-0313 §Security "Sender Impersonation" (#1250): the result
+/// envelope MUST carry `from` = the queried archive JID so conformant
+/// clients can match it against their open query instead of discarding
+/// it as unsolicited. For a MUC archive that is the room bare JID.
+#[test]
+fn result_envelope_from_is_the_queried_archive_jid() {
+    let archived = ArchivedMessage {
+        id: "row-1".to_string(),
+        body: Some("hi".to_string()),
+        message_type: MessageType::Groupchat,
+        ..ArchivedMessage::for_test(
+            jid("room@conference.example.com/alice"),
+            jid("room@conference.example.com"),
+        )
+    };
+
+    let msgs = build_result_messages(
+        "q-from",
+        &jid("room@conference.example.com"),
+        &jid("hag66@shakespeare.lit/pda"),
+        &[archived],
+    );
+
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        msgs[0].from.as_ref().map(|j| j.to_string()),
+        Some("room@conference.example.com".to_string()),
+        "result envelope `from` must be the queried archive JID"
+    );
+    assert_eq!(
+        msgs[0].to.as_ref().map(|j| j.to_string()),
+        Some("hag66@shakespeare.lit/pda".to_string())
+    );
+}
+
+/// XEP-0421 Business Rules + XEP-0313 §MUC Archives (#1268): the typed
+/// fallback reconstruction (row without `stanza_xml`) must re-emit the
+/// sender's `<occupant-id/>` and the room-authored non-anonymous
+/// real-JID `<x xmlns='muc#user'><item jid=…/></x>` captured in the
+/// rich projection.
+#[test]
+fn typed_fallback_emits_occupant_id_and_muc_user_item() {
+    let rich = ArchivedRichMessage {
+        occupant_id: ArchivedOccupantId::new("stable-occupant-id"),
+        muc_sender: Some(ArchivedMucSender {
+            jid: jid("crone1@shakespeare.lit/desktop"),
+            affiliation: crate::types::Affiliation::Owner,
+            role: crate::types::Role::Participant,
+        }),
+        ..ArchivedRichMessage::default()
+    };
+    let archived = ArchivedMessage {
+        id: "row-2".to_string(),
+        body: Some("Thrice the brinded cat hath mew'd.".to_string()),
+        message_type: MessageType::Groupchat,
+        rich: Some(rich),
+        ..ArchivedMessage::for_test(
+            jid("coven@chat.shakespeare.lit/firstwitch"),
+            jid("coven@chat.shakespeare.lit"),
+        )
+    };
+
+    let inner = archived_inner_message(&archived);
+
+    let occupant_id = inner
+        .children()
+        .find(|c| c.name() == "occupant-id" && c.ns() == OCCUPANT_ID_NS)
+        .expect("typed fallback must emit <occupant-id/>");
+    assert_eq!(occupant_id.attr("id"), Some("stable-occupant-id"));
+
+    let x = inner
+        .children()
+        .find(|c| c.name() == "x" && c.ns() == MUC_USER_NS)
+        .expect("typed fallback must emit muc#user <x/>");
+    let item = x.get_child("item", MUC_USER_NS).expect("item child");
+    assert_eq!(item.attr("jid"), Some("crone1@shakespeare.lit/desktop"));
+    assert_eq!(item.attr("affiliation"), Some("owner"));
+    assert_eq!(item.attr("role"), Some("participant"));
+}
+
+/// The MUC identity payloads are groupchat-only: a 1:1 chat row whose
+/// rich projection somehow carried them must NOT leak occupant-id /
+/// muc#user into the reconstructed 1:1 message.
+#[test]
+fn typed_fallback_omits_muc_identity_for_non_groupchat_rows() {
+    let rich = ArchivedRichMessage {
+        occupant_id: ArchivedOccupantId::new("stray-id"),
+        muc_sender: Some(ArchivedMucSender {
+            jid: jid("alice@example.com/web"),
+            affiliation: crate::types::Affiliation::Member,
+            role: crate::types::Role::Participant,
+        }),
+        ..ArchivedRichMessage::default()
+    };
+    let archived = ArchivedMessage {
+        id: "row-3".to_string(),
+        body: Some("hi".to_string()),
+        message_type: MessageType::Chat,
+        rich: Some(rich),
+        ..ArchivedMessage::for_test(jid("alice@example.com"), jid("bob@example.com"))
+    };
+
+    let inner = archived_inner_message(&archived);
+
+    assert!(
+        !inner
+            .children()
+            .any(|c| c.ns() == OCCUPANT_ID_NS || c.ns() == MUC_USER_NS),
+        "1:1 rows must not emit MUC identity payloads"
+    );
 }

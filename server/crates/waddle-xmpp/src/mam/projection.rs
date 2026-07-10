@@ -287,6 +287,11 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
             reply,
             references,
             mentions,
+            // 1:1 archive rows have no MUC occupant identity; the
+            // groupchat projection (`rich_archive_payload` in the
+            // interpreter) is the path that captures these.
+            occupant_id: None,
+            muc_sender: None,
         })
     }
 }

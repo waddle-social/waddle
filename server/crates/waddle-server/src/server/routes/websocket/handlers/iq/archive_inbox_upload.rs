@@ -210,8 +210,14 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             )];
         };
 
+        // XEP-0313 §Security "Sender Impersonation": result envelopes
+        // MUST come from the queried archive JID — the room bare JID
+        // for MUC archives, the user's own bare JID for personal
+        // archives (#1250). `target_bare` is exactly that queried
+        // archive address for both cases.
+        let archive_jid = jid::Jid::from(target_bare.clone());
         let mut responses: Vec<String> =
-            build_result_messages(&query_id, &recipient_jid, &result.messages)
+            build_result_messages(&query_id, &archive_jid, &recipient_jid, &result.messages)
                 .into_iter()
                 .map(|message| stanza_to_xml(&Stanza::Message(message)))
                 .collect();

@@ -58,3 +58,23 @@ pub use room_registry_handle::{
     ROOM_REGISTRY_REPLY_TIMEOUT, ROOM_REGISTRY_SLOW_ASK_WARN,
 };
 pub use subject::{RoomSubjectTexts, SubjectState};
+
+/// True when `ns` is a MUC *service* namespace whose payloads are
+/// authored by the room service, never by an occupant client:
+/// `http://jabber.org/protocol/muc` and its `#user` / `#admin` /
+/// `#owner` fragments.
+///
+/// XEP-0313 §Security "MUC message spoofing" and XEP-0045
+/// anti-spoofing require the service to strip any occupant-supplied
+/// payload in these namespaces from both groupchat messages (before
+/// reflect/archive) and private messages (before routing), so an
+/// occupant cannot forge affiliation/role/status/invite signalling
+/// that appears to come from `room/nick` (#1251, #1268). Shared by the
+/// groupchat canonicalizer and the MUC-PM canonicalizer so both agree
+/// on the exact namespace set.
+pub fn is_muc_service_namespace(ns: &str) -> bool {
+    matches!(
+        ns,
+        presence::NS_MUC | presence::NS_MUC_USER | NS_MUC_ADMIN | NS_MUC_OWNER
+    )
+}

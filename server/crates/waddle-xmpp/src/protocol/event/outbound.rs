@@ -111,11 +111,21 @@ pub enum OutboundEvent {
     /// chain via `RoomContext`) so the archive arm can stamp the
     /// archive row without a second `RoomActor::GetRoomSnapshot`
     /// round-trip (Copilot review on PR #279).
+    ///
+    /// `sender_item` is the sender's typed authority snapshot
+    /// (real JID + affiliation + role) captured at dispatch time.
+    /// XEP-0313 §MUC Archives requires non-anonymous rooms to
+    /// disclose the sender's real JID in archived messages via a
+    /// room-authored `<x xmlns='muc#user'><item jid=…/></x>`; the
+    /// interpreter bakes it into the archived copy only — the live
+    /// reflection never carries it (#1268). `None` for synthetic
+    /// dispatches with no occupant snapshot.
     ArchiveGroupchat {
         room: BareJid,
         sender: FullJid,
         message: Box<Message>,
         sender_nickname_generation: u64,
+        sender_item: Option<waddle_xmpp_core::mam::ArchivedMucSender>,
     },
     /// Persist a one-to-one direct message to the MAM archive.
     ///
