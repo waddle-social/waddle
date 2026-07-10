@@ -5,6 +5,10 @@ use waddle_xmpp::muc::roominfo::MucRoomInfo;
 /// XEP-0045 §7.12 well-known disco node for reserved-nick discovery.
 const NODE_ROOMUSER_ITEM: &str = "x-roomuser-item";
 
+/// Snapshot-ask deadline for reserved-nick discovery: a wedged room
+/// actor must not stall disco#info handling.
+const RESERVED_NICK_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// XEP-0030 routing classification for a disco#info target as seen by the
 /// MUC dispatcher.
 ///
@@ -306,7 +310,11 @@ pub(super) async fn handle_muc_disco_info<'a>(
                 }
             });
         };
-        let reserved_nick = match room_actor.ask(GetSnapshot).await {
+        let reserved_nick = match room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(RESERVED_NICK_ASK_TIMEOUT)
+            .await
+        {
             // Nicknames are locked to the user IDENTITY (bare JID), so
             // any of the user's resources sees the same reserved nick —
             // not only the session that joined.
