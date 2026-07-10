@@ -1253,6 +1253,8 @@ async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
             reply: None,
             references: Vec::new(),
             mentions: Vec::new(),
+            occupant_id: None,
+            muc_sender: None,
         }),
         nickname_generation: None,
     };

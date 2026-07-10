@@ -26,5 +26,10 @@ pub(super) fn apply_tombstone(
         reply: None,
         references: Vec::new(),
         mentions: Vec::new(),
+        // XEP-0424 §Tombstones: the occupant-id and real-JID item
+        // identify the original sender and MUST NOT survive the
+        // tombstone replacement.
+        occupant_id: None,
+        muc_sender: None,
     });
 }

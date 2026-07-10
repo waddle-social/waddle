@@ -142,14 +142,35 @@ async fn explicit_mentions_route_and_replay_from_mam() {
         .recv_until(|frame| frame.contains("mam-mention") && frame.contains("<fin"))
         .await
         .expect("MAM frames");
+    // XEP-0513: the replayed mention MUST still identify its target by
+    // occupant-id, never by a raw JID inside the `<mention/>` element.
+    let mention_frame = frames
+        .iter()
+        .find(|frame| frame.contains("urn:xmpp:mentions:0") && frame.contains(&occupant_id))
+        .unwrap_or_else(|| panic!("MAM did not replay mention: {frames:?}"));
+    // XEP-0313 §MUC Archives: for a non-anonymous room the *archived*
+    // result additionally discloses the sender's real JID via a
+    // room-authored `<x xmlns='muc#user'><item jid=…/></x>` (#1268).
+    // The disclosure lives in that item, NOT in the `<mention/>`
+    // element — assert the mention element itself stays JID-free while
+    // the muc#user item carries the real JID.
+    let mention_element_start = mention_frame
+        .find("<mention ")
+        .expect("mention element present in replay");
+    let mention_element_end = mention_frame[mention_element_start..]
+        .find("/>")
+        .map(|offset| mention_element_start + offset)
+        .expect("mention element is self-closing");
+    let mention_element = &mention_frame[mention_element_start..mention_element_end];
     assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("urn:xmpp:mentions:0")
-                && frame.contains(&occupant_id)
-                && !frame.contains("jid='admin@localhost")
-                && !frame.contains("jid='admin@localhost")),
-        "MAM did not replay mention: {frames:?}"
+        !mention_element.contains("jid="),
+        "MUC mention element leaked a JID despite occupant-id support: {mention_element}"
+    );
+    assert!(
+        mention_frame.contains("http://jabber.org/protocol/muc#user")
+            && mention_frame.contains("jid='admin@localhost"),
+        "XEP-0313 §MUC Archives: non-anonymous MAM replay must disclose the real JID \
+         via the muc#user item: {mention_frame}"
     );
 
     let _ = client.close().await;

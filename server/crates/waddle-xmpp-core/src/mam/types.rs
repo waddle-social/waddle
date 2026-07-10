@@ -123,12 +123,106 @@ pub enum ArchivedRichPayload {
     Tombstone(ArchivedTombstone),
 }
 
+/// XEP-0421 occupant-id captured for an archived groupchat row.
+///
+/// Typed newtype (not a raw `String` field) per the typed-payloads
+/// hard rule. Carried in the `rich_payload` projection so the
+/// non-`stanza_xml` fallback reconstruction can re-emit the
+/// `<occupant-id/>` element XEP-0421 Business Rules require on every
+/// message sent by a MUC — including MAM history (#1268).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedOccupantId(String);
+
+impl ArchivedOccupantId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// XEP-0313 §MUC Archives real-JID disclosure for an archived
+/// groupchat row: "In the case of non-anonymous rooms … the archive
+/// message will use extended message information in an `<x/>` element
+/// qualified by the 'http://jabber.org/protocol/muc#user' namespace
+/// and containing an `<item/>` child with a 'jid' attribute
+/// specifying the occupant's full JID."
+///
+/// The room chain captures the sender's authority at dispatch time so
+/// MAM replay (both the `stanza_xml` path and the typed fallback) can
+/// reproduce the room-authored `<x/>` without re-resolving room state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedMucSender {
+    /// The sender's real JID (full JID for live occupants).
+    pub jid: Jid,
+    /// XEP-0045 affiliation at message time.
+    pub affiliation: crate::types::Affiliation,
+    /// XEP-0045 role at message time.
+    pub role: crate::types::Role,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ArchivedRichMessage {
     pub payload: Option<ArchivedRichPayload>,
     pub reply: Option<ArchivedReply>,
     pub references: Vec<ArchivedReference>,
     pub mentions: Vec<ArchivedMention>,
+    /// XEP-0421 occupant-id of the sender (groupchat rows only).
+    /// `#[serde(default)]` keeps previously-serialized rich payloads
+    /// decodable.
+    #[serde(default)]
+    pub occupant_id: Option<ArchivedOccupantId>,
+    /// XEP-0313 §MUC Archives non-anonymous real-JID item
+    /// (groupchat rows only).
+    #[serde(default)]
+    pub muc_sender: Option<ArchivedMucSender>,
+}
+
+impl ArchivedRichMessage {
+    /// Return a clone with the server-derived MUC identity fields
+    /// cleared. These fields ([`Self::occupant_id`],
+    /// [`Self::muc_sender`]) are stamped by the room service per
+    /// dispatch, not authored by the client — in particular
+    /// `muc_sender.jid` carries the sender's *per-session* full JID
+    /// (a fresh random resource each reconnect). They MUST be excluded
+    /// from XEP-0359 origin-id retry-dedup comparisons: a client that
+    /// resends the same origin-id from a fresh session is the same
+    /// logical message even though its resource (and possibly its
+    /// affiliation/role) changed. Comparing the identity fields would
+    /// break dedup and duplicate the row in the archive.
+    pub fn content_only(&self) -> Self {
+        Self {
+            occupant_id: None,
+            muc_sender: None,
+            ..self.clone()
+        }
+    }
+
+    /// True when this payload carries no client-authored content
+    /// (`payload` / `reply` / `references` / `mentions`) and no
+    /// server-derived MUC identity (`occupant_id` / `muc_sender`).
+    pub fn is_empty(&self) -> bool {
+        self.payload.is_none()
+            && self.reply.is_none()
+            && self.references.is_empty()
+            && self.mentions.is_empty()
+            && self.occupant_id.is_none()
+            && self.muc_sender.is_none()
+    }
+
+    /// The content-only projection used for XEP-0359 origin-id retry
+    /// dedup, normalized so an *empty* projection is `None` rather than
+    /// `Some(default)`. This makes "a row whose only rich content was
+    /// the server-stamped occupant-id / real-JID" compare equal to a
+    /// row that carried no `rich_payload` at all — the two are the same
+    /// logical message for dedup purposes.
+    pub fn dedup_content(&self) -> Option<Self> {
+        let content = self.content_only();
+        (!content.is_empty()).then_some(content)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

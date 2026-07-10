@@ -54,11 +54,24 @@ impl RoomHandler for MucArchiveHandler {
     fn handle(&self, message: &mut Message, ctx: &RoomContext<'_>) -> RoomHandlerOutcome {
         let mut events = Vec::new();
         if is_archivable(message) {
+            // XEP-0313 §MUC Archives: capture the sender's typed
+            // authority (real JID + affiliation + role) so the
+            // interpreter can bake the non-anonymous real-JID
+            // disclosure `<x xmlns='muc#user'>` into the archived
+            // copy (#1268). Waddle rooms are all `muc_nonanonymous`.
+            let sender_item =
+                ctx.sender_snapshot()
+                    .map(|snapshot| waddle_xmpp_core::mam::ArchivedMucSender {
+                        jid: jid::Jid::from(snapshot.full_jid.clone()),
+                        affiliation: snapshot.affiliation,
+                        role: snapshot.role,
+                    });
             events.push(OutboundEvent::ArchiveGroupchat {
                 room: ctx.room.clone(),
                 sender: ctx.sender_full.clone(),
                 message: Box::new(message.clone()),
                 sender_nickname_generation: ctx.sender_nickname_generation,
+                sender_item,
             });
         }
         if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message)

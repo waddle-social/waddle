@@ -568,7 +568,20 @@ fn test_build_destroy_notification() {
         password: None,
     };
 
-    let presence = build_destroy_notification(&room_jid, "user", &occupant_jid, &request, true);
+    let secret = test_secret();
+    let occupant_bare = occupant_jid.to_bare();
+    let presence = build_destroy_notification(
+        &room_jid,
+        "user",
+        &occupant_jid,
+        &request,
+        true,
+        &OccupantIdentity {
+            bare_jid: &occupant_bare,
+            real_jid: Some(&occupant_jid),
+            secret: &secret,
+        },
+    );
 
     assert!(matches!(presence.type_, PresenceType::Unavailable));
     assert!(presence.from.is_some());
@@ -602,6 +615,14 @@ fn test_build_destroy_notification() {
         status_110.is_some(),
         "self-presence must carry status code 110"
     );
+
+    // XEP-0421 Business Rules: occupant-id MUST be on every presence
+    // sent by a MUC — the destroy notification included (#1268).
+    let occupant_id = crate::xep::xep0421::extract_occupant_id_from_presence(&presence)
+        .expect("destroy presence carries occupant-id");
+    let expected =
+        crate::xep::xep0421::generate_occupant_id(&occupant_jid.to_bare(), &room_jid, &secret);
+    assert_eq!(occupant_id, expected);
 }
 
 /// XEP-0045 §10.9: a destroy notification addressed to a different
@@ -612,12 +633,19 @@ fn test_build_destroy_notification_not_self_minimal() {
     use jid::BareJid;
     let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
     let occupant_jid: FullJid = "bob@example.com/desk".parse().unwrap();
+    let secret = test_secret();
+    let occupant_bare = occupant_jid.to_bare();
     let presence = build_destroy_notification(
         &room_jid,
         "alice",
         &occupant_jid,
         &DestroyRequest::default(),
         false,
+        &OccupantIdentity {
+            bare_jid: &occupant_bare,
+            real_jid: Some(&occupant_jid),
+            secret: &secret,
+        },
     );
     let x_elem = presence
         .payloads

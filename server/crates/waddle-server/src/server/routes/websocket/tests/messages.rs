@@ -3780,10 +3780,25 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             .is_none(),
         "routed MUC PM must not preserve caller-supplied muc#user metadata: {xml}"
     );
-    assert!(
-        routed
-            .get_child("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
-            .is_none(),
+    // XEP-0421 Business Rules (#1268): the caller-supplied occupant-id
+    // is stripped and the server stamps its own stable value derived
+    // from the SENDER's bare JID.
+    let stamped_occupant_id = routed
+        .get_child("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
+        .expect("routed MUC PM must carry the server-stamped occupant-id");
+    let expected_occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
+        &alice_jid.to_bare(),
+        &room_jid,
+        &state.deps.occupant_id_secret,
+    );
+    assert_eq!(
+        stamped_occupant_id.attr("id"),
+        Some(expected_occupant_id.as_str()),
+        "routed MUC PM occupant-id must be the server-derived sender id: {xml}"
+    );
+    assert_ne!(
+        stamped_occupant_id.attr("id"),
+        Some("spoofed-occupant"),
         "routed MUC PM must not preserve caller-supplied occupant-id: {xml}"
     );
     // Strongest invariant: the server strips ALL client-supplied stanza-ids

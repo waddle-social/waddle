@@ -541,6 +541,7 @@ async fn interpret_with_depth(
                 sender,
                 message,
                 sender_nickname_generation,
+                sender_item,
             } => {
                 match archive_groupchat_event(
                     deps,
@@ -548,6 +549,7 @@ async fn interpret_with_depth(
                     sender,
                     message,
                     sender_nickname_generation,
+                    sender_item,
                 )
                 .await
                 {
