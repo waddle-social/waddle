@@ -182,11 +182,23 @@ fn parse_push_service_jid(raw: &str) -> Option<BareJid> {
 }
 
 fn parse_publish_options_form(parent: &Element) -> PublishOptionsParse {
-    let Some(form) = parent.children().find(|child| {
+    // Strict shape: EXACTLY ONE submitted form, carrying the
+    // publish-options FORM_TYPE. Multiple submit forms are ambiguous
+    // (which one would the server honor?), and a wrong/missing
+    // FORM_TYPE on any submit form means the client asked for
+    // something we would otherwise silently drop — both are Invalid
+    // (XEP-0068 §4.1 → bad-request), never silently degraded.
+    // (Greptile review: a valid form followed by an invalid one must
+    // not slip through on first-match.)
+    let mut submit_forms = parent.children().filter(|child| {
         child.name() == "x" && child.ns() == NS_DATA_FORMS && child.attr("type") == Some("submit")
-    }) else {
+    });
+    let Some(form) = submit_forms.next() else {
         return PublishOptionsParse::Absent;
     };
+    if submit_forms.next().is_some() {
+        return PublishOptionsParse::Invalid;
+    }
 
     match data_form_type(form).as_deref() {
         Some(NS_PUBSUB_PUBLISH_OPTIONS) => PublishOptionsParse::Valid(form.clone()),

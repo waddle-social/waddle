@@ -295,6 +295,33 @@ fn test_parse_push_enable_missing_publish_options_form_type_is_invalid() {
     assert_eq!(enable.publish_options, PublishOptionsParse::Invalid);
 }
 
+// Greptile review: a VALID publish-options form followed by a second
+// submit form (wrong FORM_TYPE or even another valid one) must not
+// slip through on first-match — multiple submit forms are ambiguous
+// and therefore Invalid.
+#[test]
+fn test_parse_push_enable_multiple_submit_forms_are_invalid() {
+    let mut enable_elem = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
+        .build();
+    enable_elem.append_child(submit_form_with_form_type(Some(
+        "http://jabber.org/protocol/pubsub#publish-options",
+    )));
+    enable_elem.append_child(submit_form_with_form_type(Some("jabber:x:oob")));
+    let iq = Iq::Set {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: enable_elem,
+    };
+
+    let enable = parse_push_enable(&iq).expect("enable");
+    assert_eq!(enable.publish_options, PublishOptionsParse::Invalid);
+}
+
 #[test]
 fn test_parse_push_enable_missing_jid() {
     let elem = Element::builder("enable", NS_PUSH).build();
