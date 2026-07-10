@@ -7,6 +7,37 @@ export interface RegisterDeviceResult {
   deviceId: string;
 }
 
+export interface RegisterPushDeviceRejection {
+  code: string;
+  message: string;
+}
+
+export function parseRegisterPushDeviceRejection(error: unknown): RegisterPushDeviceRejection | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as { code?: unknown; message?: unknown };
+  if (typeof candidate.code !== "string" || typeof candidate.message !== "string") {
+    return null;
+  }
+  return { code: candidate.code, message: candidate.message };
+}
+
+export async function retryRegisterPushDeviceAfterSessionExpired<T>(
+  register: () => Promise<T | null>,
+): Promise<T | null> {
+  try {
+    return await register();
+  } catch (error) {
+    const rejection = parseRegisterPushDeviceRejection(error);
+    if (rejection?.code !== "session-expired") return null;
+  }
+
+  try {
+    return await register();
+  } catch {
+    return null;
+  }
+}
+
 /// Parse the raw `register_push_device` result into the typed
 /// `(node, deviceId)` pair the chat persists.
 ///

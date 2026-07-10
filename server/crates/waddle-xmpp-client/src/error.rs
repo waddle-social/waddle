@@ -4,6 +4,7 @@ use minidom::Element;
 use thiserror::Error;
 
 use crate::bootstrap::{RequiredStreamFeature, SaslFailureCondition};
+use crate::push::PushRegistrationError;
 use crate::request::{RequestId, StanzaId};
 use crate::state::{ClientState, SessionPhase};
 
@@ -13,6 +14,7 @@ pub type ClientResult<T> = Result<T, ClientError>;
 /// protocol flows.
 pub const STANZA_CONDITION_ITEM_NOT_FOUND: &str = "item-not-found";
 pub const STANZA_CONDITION_PRECONDITION_NOT_MET: &str = "precondition-not-met";
+pub const STANZA_CONDITION_SESSION_EXPIRED: &str = "session-expired";
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -81,6 +83,8 @@ pub enum ClientError {
     RequestCancelled,
     #[error("the XMPP session is disconnected")]
     Disconnected,
+    #[error(transparent)]
+    PushRegistration(#[from] PushRegistrationError),
     #[error("server returned a stanza error: {0}")]
     StanzaError(#[from] StanzaError),
 }
@@ -102,6 +106,21 @@ pub struct StanzaError {
     pub condition: String,
     /// Optional human-readable `<text/>` content.
     pub text: Option<String>,
+    /// Optional application-specific error condition (RFC 6120 §8.3.4):
+    /// the first `<error/>` child outside the stanzas namespace, e.g.
+    /// XEP-0050 `<session-expired xmlns='http://jabber.org/protocol/commands'/>`.
+    /// Carried ALONGSIDE the defined `condition` — a conformant server
+    /// always includes both, so consumers branching on an application
+    /// condition must read this field, not `condition`.
+    pub application_condition: Option<ApplicationCondition>,
+}
+
+/// Application-specific error condition child (RFC 6120 §8.3.4),
+/// identified by its element name and namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationCondition {
+    pub namespace: String,
+    pub name: String,
 }
 
 /// Values of the `type` attribute on an XMPP `<error/>` element (RFC 6120 §8.3.2).
@@ -143,8 +162,8 @@ pub fn parse_stanza_error(element: &Element) -> StanzaError {
         })
         .unwrap_or(StanzaErrorType::Unknown);
 
-    let (condition, text) = match error_el {
-        None => ("unknown".to_string(), None),
+    let (condition, text, application_condition) = match error_el {
+        None => ("unknown".to_string(), None, None),
         Some(err) => {
             let condition = err
                 .children()
@@ -154,7 +173,20 @@ pub fn parse_stanza_error(element: &Element) -> StanzaError {
 
             let text = err.get_child("text", NS_STANZAS).map(|t| t.text());
 
-            (condition, text)
+            // RFC 6120 §8.3.4: an application MAY include its own
+            // condition child alongside the defined condition. Capture
+            // the first non-stanzas child so consumers (e.g. the
+            // XEP-0050 `<session-expired/>` retry surface) can branch
+            // on it without re-parsing XML.
+            let application_condition =
+                err.children()
+                    .find(|c| c.ns() != NS_STANZAS)
+                    .map(|c| ApplicationCondition {
+                        namespace: c.ns().to_string(),
+                        name: c.name().to_string(),
+                    });
+
+            (condition, text, application_condition)
         }
     };
 
@@ -162,6 +194,7 @@ pub fn parse_stanza_error(element: &Element) -> StanzaError {
         error_type,
         condition,
         text,
+        application_condition,
     }
 }
 

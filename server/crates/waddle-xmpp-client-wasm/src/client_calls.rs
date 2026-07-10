@@ -492,6 +492,7 @@ mod tests {
             error_type: waddle_xmpp_client::StanzaErrorType::Auth,
             condition: "forbidden".to_string(),
             text: Some("Jingle terminator is not a participant in this call".to_string()),
+            application_condition: None,
         };
         assert!(is_orphaned_dm_call_terminate(&orphaned));
 
@@ -499,6 +500,7 @@ mod tests {
             error_type: waddle_xmpp_client::StanzaErrorType::Auth,
             condition: "forbidden".to_string(),
             text: Some("Jingle responder was not invited to this call party".to_string()),
+            application_condition: None,
         };
         assert!(!is_orphaned_dm_call_terminate(&generic_forbidden));
 
@@ -506,6 +508,7 @@ mod tests {
             error_type: waddle_xmpp_client::StanzaErrorType::Cancel,
             condition: "remote-server-timeout".to_string(),
             text: None,
+            application_condition: None,
         };
         assert!(!is_orphaned_dm_call_terminate(&transportish));
     }

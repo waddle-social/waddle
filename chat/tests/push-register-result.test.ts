@@ -6,7 +6,11 @@
 // down sibling devices on the same XEP-0357 node.
 
 import { describe, expect, test } from "bun:test";
-import { parseRegisterDeviceResult } from "../src/lib/xmpp/push-register-result";
+import {
+  parseRegisterDeviceResult,
+  parseRegisterPushDeviceRejection,
+  retryRegisterPushDeviceAfterSessionExpired,
+} from "../src/lib/xmpp/push-register-result";
 
 describe("parseRegisterDeviceResult", () => {
   test("accepts a well-formed (node, deviceId) pair", () => {
@@ -46,5 +50,56 @@ describe("parseRegisterDeviceResult", () => {
     expect(
       parseRegisterDeviceResult({ node: "node-1", deviceId: "device-1", leaked: "secret" }),
     ).toEqual({ node: "node-1", deviceId: "device-1" });
+  });
+});
+
+describe("registerPushDevice session-expired retry", () => {
+  test("parses structured wasm rejection objects", () => {
+    expect(
+      parseRegisterPushDeviceRejection({
+        code: "session-expired",
+        message: "XEP-0050 command session expired",
+      }),
+    ).toEqual({
+      code: "session-expired",
+      message: "XEP-0050 command session expired",
+    });
+    expect(parseRegisterPushDeviceRejection("session expired")).toBeNull();
+  });
+
+  test("retries exactly once after session-expired", async () => {
+    let calls = 0;
+    const result = await retryRegisterPushDeviceAfterSessionExpired(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw { code: "session-expired", message: "expired" };
+      }
+      return { node: "node-1", deviceId: "device-1" };
+    });
+
+    expect(result).toEqual({ node: "node-1", deviceId: "device-1" });
+    expect(calls).toBe(2);
+  });
+
+  test("does not retry non-session failures", async () => {
+    let calls = 0;
+    const result = await retryRegisterPushDeviceAfterSessionExpired(async () => {
+      calls += 1;
+      throw { code: "stanza-error", message: "forbidden" };
+    });
+
+    expect(result).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  test("gives up after one failed session-expired retry", async () => {
+    let calls = 0;
+    const result = await retryRegisterPushDeviceAfterSessionExpired(async () => {
+      calls += 1;
+      throw { code: "session-expired", message: "expired" };
+    });
+
+    expect(result).toBeNull();
+    expect(calls).toBe(2);
   });
 });
