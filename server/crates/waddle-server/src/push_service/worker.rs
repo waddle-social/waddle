@@ -10,7 +10,10 @@ use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
 use waddle_xmpp::XmppError;
 
-use super::devices::{active_devices_with_subscription_for_node_tx, mark_device_disabled_tx};
+use super::devices::{
+    active_devices_with_subscription_for_node_tx, count_active_devices_for_node_tx,
+    mark_device_disabled_tx,
+};
 use super::dispatch;
 use super::nodes::get_node_tx;
 use super::publish_jobs::{
@@ -800,6 +803,7 @@ impl DatabasePushServiceStore {
                 return Ok(());
             }
         }
+        let mut any_device_disabled = false;
         for attempt in attempts {
             tx.execute(
                 r#"
@@ -863,6 +867,38 @@ impl DatabasePushServiceStore {
                     now_ms,
                 )
                 .await?;
+                any_device_disabled = true;
+            }
+        }
+        // XEP-0357 §6 forward cleanup (#775): §6 disables at
+        // (JID, node) granularity, with §6.1 latitude to stay enabled
+        // "until a sufficient number of errors have been received".
+        // Our criterion: the node can no longer deliver at all — this
+        // pass disabled a device AND no active device remains.
+        // Transition the user-server registration in the SAME tx, so
+        // the outbound target resolver (`get_for_user`, filtered on
+        // status='enabled') stops producing candidates for this node
+        // instead of enqueueing jobs that fail phase-1 forever.
+        if any_device_disabled {
+            if let Some(push_service_jid) = job.push_service_jid() {
+                if count_active_devices_for_node_tx(&mut tx, job.node()).await? == 0 {
+                    let disabled = crate::push_registrations::disable_registration_tx(
+                        &mut tx,
+                        job.owner_bare_jid(),
+                        push_service_jid,
+                        job.node(),
+                        "XEP-0357 §6: all devices permanently unreachable (subscription gone/invalid)",
+                    )
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                    if disabled > 0 {
+                        tracing::info!(
+                            owner = %job.owner_bare_jid(),
+                            node = %job.node(),
+                            "XEP-0357 §6 forward cleanup: last active device gone; registration disabled"
+                        );
+                    }
+                }
             }
         }
         let any_transient = attempts

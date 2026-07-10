@@ -15,6 +15,7 @@ use waddle_xmpp::xep::NS_DATA_FORMS;
 use crate::db::{Database, IntoParams};
 
 pub(crate) const STATUS_ENABLED: &str = "enabled";
+pub(crate) const STATUS_DISABLED: &str = "disabled";
 const PROVIDER_CREDENTIAL_FIELD_VARS: &[&str] = &[
     "endpoint",
     "p256dh",
@@ -225,6 +226,46 @@ pub(crate) async fn register_subscription_tx(
     .await
     .map_err(|error| PushError::StorageError(error.to_string()))?;
     Ok(())
+}
+
+/// XEP-0357 §6 forward cleanup (#775): transition an ENABLED
+/// (owner, service, node) registration to `disabled`, recording why.
+/// Called by the publish-job worker inside ITS transaction when the
+/// last active device on the node was disabled by a permanent
+/// provider error (410 GONE et al.) — push service and user server
+/// share a process and database, so the §6 "IQ-error back to the
+/// publisher" reduces to this in-proc transition. Once disabled,
+/// `get_for_user` (the outbound target resolver's source) stops
+/// returning the row and no further candidates enqueue. Returns the
+/// number of rows transitioned (0 = already disabled or unknown).
+pub(crate) async fn disable_registration_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &jid::BareJid,
+    service_jid: &str,
+    node: &str,
+    last_error: &str,
+) -> Result<u64, PushError> {
+    let now_ms = crate::time::now_ms();
+    tx.execute(
+        r#"
+        UPDATE push_registrations
+        SET status = ?,
+            last_error = ?,
+            updated_at_ms = ?
+        WHERE owner_bare_jid = ? AND push_service_jid = ? AND node = ? AND status = ?
+        "#,
+        crate::db_params![
+            STATUS_DISABLED,
+            last_error,
+            now_ms,
+            owner_bare_jid.to_string(),
+            service_jid,
+            node,
+            STATUS_ENABLED,
+        ],
+    )
+    .await
+    .map_err(|error| PushError::StorageError(error.to_string()))
 }
 
 pub(crate) async fn registered_nodes_for_disable_tx(

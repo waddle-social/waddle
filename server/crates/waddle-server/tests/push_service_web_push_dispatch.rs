@@ -360,6 +360,133 @@ async fn delivered_outcome_keeps_device_active() {
     assert_eq!(attempts[0].status(), ATTEMPT_STATUS_WEB_DELIVERED);
 }
 
+// #775 — XEP-0357 §6 forward cleanup: when the LAST active device on
+// a node is disabled by a 410 GONE, the user-server's (jid, node)
+// registration must transition to disabled in the same transaction,
+// so `get_for_user` (the outbound-DM target resolver's source) stops
+// producing targets and no further candidates enqueue.
+#[tokio::test]
+async fn last_gone_device_disables_the_xep0357_registration() {
+    let (store, _sender) =
+        store_with_web_push_provider(WebPushOutcome::SubscriptionGone { status: 410 }).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    register_web_device(&store, &owner, node.node(), "web-1", "gone-device").await;
+    let registrations =
+        waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            .await
+            .expect("registration store");
+    store
+        .register_first_party_node_for_owner(&owner, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party registration");
+    use waddle_xmpp::push::PushSubscriptionStore as _;
+    assert_eq!(
+        registrations
+            .get_for_user(owner.to_string().as_str())
+            .await
+            .expect("registrations before")
+            .len(),
+        1,
+        "registration enabled before the 410"
+    );
+
+    // Use the REGISTERED publish boundary (what the notification
+    // outbox uses) so the job carries the push_service_jid the §6
+    // cleanup keys the registration on.
+    store
+        .publish_registered_notification_from_user_server_with_publish_options(
+            "push.example.com",
+            node.node(),
+            &web_push_notification_item("gone-cleanup-1", "alice@example.com", "dm", 1),
+            &owner,
+            None,
+        )
+        .await
+        .expect("publish");
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("drain");
+
+    assert_eq!(
+        device_status(&store, node.node(), "web-1").await,
+        DEVICE_STATUS_DISABLED
+    );
+    assert!(
+        registrations
+            .get_for_user(owner.to_string().as_str())
+            .await
+            .expect("registrations after")
+            .is_empty(),
+        "#775: the (jid, node) registration must be disabled once no active devices remain"
+    );
+}
+
+// #775 companion: a 410 on ONE device while a sibling stays active
+// must NOT disable the registration — XEP-0357 §6 grants latitude to
+// keep the service enabled while the node can still deliver.
+#[tokio::test]
+async fn gone_device_with_live_sibling_keeps_registration_enabled() {
+    let sender = PerEndpointSender::new(vec![
+        (
+            "gone-device".to_string(),
+            WebPushOutcome::SubscriptionGone { status: 410 },
+        ),
+        (
+            "live-device".to_string(),
+            WebPushOutcome::Delivered { status: 201 },
+        ),
+    ]);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    register_web_device(&store, &owner, node.node(), "web-gone", "gone-device").await;
+    register_web_device(&store, &owner, node.node(), "web-live", "live-device").await;
+    let registrations =
+        waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            .await
+            .expect("registration store");
+    store
+        .register_first_party_node_for_owner(&owner, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party registration");
+    use waddle_xmpp::push::PushSubscriptionStore as _;
+
+    store
+        .publish_registered_notification_from_user_server_with_publish_options(
+            "push.example.com",
+            node.node(),
+            &web_push_notification_item("gone-sibling-1", "alice@example.com", "dm", 1),
+            &owner,
+            None,
+        )
+        .await
+        .expect("publish");
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("drain");
+
+    assert_eq!(
+        device_status(&store, node.node(), "web-gone").await,
+        DEVICE_STATUS_DISABLED
+    );
+    assert_eq!(
+        device_status(&store, node.node(), "web-live").await,
+        DEVICE_STATUS_ACTIVE
+    );
+    assert_eq!(
+        registrations
+            .get_for_user(owner.to_string().as_str())
+            .await
+            .expect("registrations")
+            .len(),
+        1,
+        "a live sibling keeps the registration enabled (§6 latitude)"
+    );
+}
+
 #[tokio::test]
 async fn transient_outcome_keeps_device_active_and_requeues() {
     let (store, sender) = store_with_web_push_provider(WebPushOutcome::Transient {
