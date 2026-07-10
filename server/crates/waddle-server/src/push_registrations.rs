@@ -241,7 +241,7 @@ pub(crate) async fn register_subscription_tx(
 pub(crate) async fn disable_registration_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner_bare_jid: &jid::BareJid,
-    service_jid: &str,
+    service_jid: &jid::BareJid,
     node: &str,
     last_error: &str,
 ) -> Result<u64, PushError> {
@@ -259,7 +259,7 @@ pub(crate) async fn disable_registration_tx(
             last_error,
             now_ms,
             owner_bare_jid.to_string(),
-            service_jid,
+            service_jid.to_string(),
             node,
             STATUS_ENABLED,
         ],

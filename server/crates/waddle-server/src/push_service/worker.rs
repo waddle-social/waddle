@@ -882,10 +882,20 @@ impl DatabasePushServiceStore {
         if any_device_disabled {
             if let Some(push_service_jid) = job.push_service_jid() {
                 if count_active_devices_for_node_tx(&mut tx, job.node()).await? == 0 {
+                    // Parse the stored service JID at this boundary —
+                    // the job row predates typed storage; a malformed
+                    // value is an internal invariant break, not a
+                    // reason to skip §6 cleanup silently.
+                    let push_service_jid: jid::BareJid =
+                        push_service_jid.parse().map_err(|error| {
+                            XmppError::internal(format!(
+                                "stored push_service_jid is not a bare JID: {error}"
+                            ))
+                        })?;
                     let disabled = crate::push_registrations::disable_registration_tx(
                         &mut tx,
                         job.owner_bare_jid(),
-                        push_service_jid,
+                        &push_service_jid,
                         job.node(),
                         "XEP-0357 §6: all devices permanently unreachable (subscription gone/invalid)",
                     )
