@@ -367,7 +367,11 @@ pub fn server_features() -> Vec<Feature> {
         Feature::replies(),
         Feature::message_correction(),
         Feature::chat_markers(),
-        Feature::receipts(),
+        // XEP-0184 receipts are deliberately NOT advertised: the disco
+        // feature announces "I will generate acks", which is the
+        // receiving client's job. The server only routes `<request/>`
+        // and `<received/>` payloads verbatim (#1247 removed the
+        // server-side receipt fabricator).
         Feature::message_retraction(),
         Feature::message_retraction_tombstone(),
         Feature::reactions(),

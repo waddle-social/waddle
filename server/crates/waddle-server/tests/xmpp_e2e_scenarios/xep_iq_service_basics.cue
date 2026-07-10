@@ -53,7 +53,6 @@ scenario: #Scenario & {
 				"jabber:iq:roster",
 				"urn:xmpp:carbons:2",
 				"urn:xmpp:carbons:rules:0",
-				"urn:xmpp:receipts",
 				"msgoffline",
 				"vcard-temp",
 				"urn:ietf:params:xml:ns:vcard-4.0",

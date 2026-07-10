@@ -65,6 +65,35 @@ impl MessageHandler for CanonicalizeHandler {
         let local_archive = ctx.full_jid.to_bare();
         let by_jid = Jid::from(local_archive.clone());
 
+        // #1266 item 7 (self-DM): on the recipient pass of a message
+        // whose sender IS this archive (alice → alice, bare or
+        // cross-resource), the sender pass has already stripped any
+        // client-forged `by=alice` ids and stamped the single
+        // authoritative one — the same authority this pass would
+        // claim. Re-stamping here would orphan the delivered wire copy
+        // from the sender-pass archive row (and, combined with the
+        // recipient-side archive write, produce two identical rows
+        // under different ids). Keep the existing stamp instead. The
+        // gate is spoof-safe: `from` is server-stamped at intake, so
+        // `from.bare == local_archive` can only be true when the
+        // sender-pass authority for this archive already ran.
+        let sender_is_local_archive = message
+            .from
+            .as_ref()
+            .map(|j| j.to_bare() == local_archive)
+            .unwrap_or(false);
+        if matches!(ctx.locality, Locality::Recipient) && sender_is_local_archive {
+            let already_stamped = message.payloads.iter().any(|p| {
+                is_stanza_id_element(p)
+                    && p.attr("by")
+                        .and_then(|raw| raw.parse::<BareJid>().ok())
+                        .is_some_and(|parsed| parsed == local_archive)
+            });
+            if already_stamped {
+                return HandlerOutcome::Continue(Vec::new());
+            }
+        }
+
         // Strip any pre-existing `<stanza-id>` siblings whose `by=`
         // matches this archive (XEP-0359 §5). Compare via typed
         // [`BareJid`] equality so semantically equivalent JIDs in
@@ -291,5 +320,67 @@ mod tests {
         run_with_id(&local, &mut msg, "should-not-stamp");
 
         assert!(extract_stanza_ids(&msg).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // #1266 item 7 — self-DM recipient pass keeps the sender stamp
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn self_dm_recipient_pass_keeps_sender_pass_stamp() {
+        // alice/web -> alice (self-DM) arriving on the recipient pass
+        // (local = alice/phone). The sender pass already stamped
+        // by=alice; re-stamping would orphan the wire copy from the
+        // sender-pass archive row.
+        let local = full("alice@example.com/phone");
+        let mut msg = chat_msg("alice@example.com/web", "alice@example.com");
+        msg.payloads.push(build_stanza_id_element(
+            "sender-pass-id",
+            &jid("alice@example.com"),
+        ));
+
+        run_with_id(&local, &mut msg, "would-be-restamp");
+
+        let stamps = extract_stanza_ids(&msg);
+        let alice = jid("alice@example.com");
+        let alice_stamps: Vec<_> = stamps.iter().filter(|s| s.by == alice).collect();
+        assert_eq!(alice_stamps.len(), 1);
+        assert_eq!(alice_stamps[0].id, "sender-pass-id");
+    }
+
+    #[test]
+    fn self_dm_recipient_pass_without_stamp_still_stamps_fresh() {
+        // Defensive: a self-addressed message that somehow reaches the
+        // recipient pass unstamped (custom chain, fixtures) still gets
+        // a canonical id so downstream archive/inbox stay coherent.
+        let local = full("alice@example.com/phone");
+        let mut msg = chat_msg("alice@example.com/web", "alice@example.com");
+
+        run_with_id(&local, &mut msg, "fresh-self-id");
+
+        let stamps = extract_stanza_ids(&msg);
+        let alice = jid("alice@example.com");
+        let alice_stamps: Vec<_> = stamps.iter().filter(|s| s.by == alice).collect();
+        assert_eq!(alice_stamps.len(), 1);
+        assert_eq!(alice_stamps[0].id, "fresh-self-id");
+    }
+
+    #[test]
+    fn non_self_recipient_pass_still_strips_forged_local_by() {
+        // bob receives from alice carrying a forged by=bob stanza-id:
+        // the anti-spoof strip+stamp MUST still fire (the self-DM
+        // keep-stamp gate requires from.bare == local archive).
+        let local = full("bob@example.com/desk");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
+        msg.payloads
+            .push(build_stanza_id_element("forged", &jid("bob@example.com")));
+
+        run_with_id(&local, &mut msg, "fresh-id-9");
+
+        let stamps = extract_stanza_ids(&msg);
+        let bob = jid("bob@example.com");
+        let bob_stamps: Vec<_> = stamps.iter().filter(|s| s.by == bob).collect();
+        assert_eq!(bob_stamps.len(), 1);
+        assert_eq!(bob_stamps[0].id, "fresh-id-9");
     }
 }
