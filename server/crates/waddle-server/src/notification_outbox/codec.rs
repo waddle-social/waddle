@@ -58,6 +58,7 @@ pub(super) fn decode_candidate(
         no_store: row.get::<i64>(10)? != 0,
         no_permanent_store: row.get::<i64>(11)? != 0,
         last_message_body: row.get::<Option<String>>(12)?,
+        reaction: row.get::<i64>(13)? != 0,
     })
 }
 

@@ -349,7 +349,8 @@ async fn insert_groupchat_notification_candidate(
                 message,
                 waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
             ),
-        );
+        )
+        .with_reaction(waddle_xmpp::xep::xep0444::is_reaction_only_message(message));
     let candidate = match crate::notification_outbox::NotificationCandidate::groupchat_with_hints(
         owner.clone(),
         room.clone(),

@@ -229,6 +229,17 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
         });
     }
 
+    // #780: XEP-0444 reaction-only messages are archived (MAM is the
+    // right place for them) but never fire an OS push — matching the
+    // wider XMPP client ecosystem (Conversations, Snikket, Movim).
+    // Message-frozen like `<noping/>`, so it runs ONLY at T1Drain for
+    // the same audit-row reason documented above.
+    if stage == PushEvalStage::T1Drain && candidate.reaction() {
+        return Ok(T1PushDispatchOutcome::Suppressed {
+            reason: SuppressedReason::Xep0444Reaction,
+        });
+    }
+
     let (conversation_kind, is_mention) = match candidate.class() {
         NotificationClass::DirectMessage => (
             crate::notification_settings_projection::ConversationKind::Direct,
@@ -677,6 +688,46 @@ mod tests {
                 }
             ),
             "T1Drain must suppress noping with the typed Xep0513Noping reason; got {t1:?}"
+        );
+
+        // #780: XEP-0444 reaction-only follows the same stage split —
+        // T0 persists the row, T1 suppresses with the typed reason.
+        let reaction_candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            "bob@example.com/web".parse().expect("full sender"),
+            StanzaId::new("stage-split-reaction", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_reaction(true),
+        )
+        .expect("candidate");
+        let t0 = evaluate_push_gate_at_dispatch(
+            PushEvalStage::T0Emit,
+            eval_deps,
+            &reaction_candidate,
+            &mut eval_caches,
+        )
+        .await
+        .expect("t0 eval");
+        assert!(
+            matches!(t0, T1PushDispatchOutcome::Deliver { .. }),
+            "T0Emit must NOT suppress on message-frozen reaction-only so the candidate persists; got {t0:?}"
+        );
+        let t1 = evaluate_push_gate_at_dispatch(
+            PushEvalStage::T1Drain,
+            eval_deps,
+            &reaction_candidate,
+            &mut eval_caches,
+        )
+        .await
+        .expect("t1 eval");
+        assert!(
+            matches!(
+                t1,
+                T1PushDispatchOutcome::Suppressed {
+                    reason: SuppressedReason::Xep0444Reaction
+                }
+            ),
+            "T1Drain must suppress reaction-only with the typed Xep0444Reaction reason; got {t1:?}"
         );
 
         // Contrast: XEP-0334 storage hints are NOT push suppressors.

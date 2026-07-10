@@ -651,6 +651,15 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
         .expect("Waddle push context");
     assert_eq!(context.attr("conversation"), Some("admin@localhost"));
     assert_eq!(context.attr("class"), Some("dm"));
+    // #779: the context carries the originating message's XEP-0359
+    // stanza-id so the SW's in-band-vs-Web-Push dedupe key matches
+    // what the foreground tab posts.
+    assert!(
+        context
+            .attr("stanza-id")
+            .is_some_and(|stanza_id| !stanza_id.is_empty()),
+        "context must carry the XEP-0359 stanza-id"
+    );
     assert!(
         !payload_xml.contains("durable notification body"),
         "minimal XEP-0357 payload must not leak the message body"
@@ -658,6 +667,141 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
     assert_eq!(
         notification_candidate_count(&database_url, "bob@localhost").await,
         1
+    );
+
+    let _ = admin.close().await;
+}
+
+/// Poll until the recipient's candidate row records a
+/// `suppressed_reason`, returning it. Panics after ~10s.
+async fn wait_for_candidate_suppressed_reason(database_url: &str, recipient: &str) -> String {
+    for _ in 0..100 {
+        let db = waddle_server::db::Database::from_config(
+            "xep0357-test-observer",
+            &waddle_server::db::DatabaseConfig::new(
+                waddle_server::db::DatabaseDriver::Sqlite,
+                database_url.to_string(),
+            ),
+        )
+        .await
+        .expect("observer db");
+        let conn = db.guard().await.expect("db guard");
+        let mut rows = conn
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates \
+                 WHERE recipient_bare_jid = ? AND suppressed_reason IS NOT NULL",
+                waddle_server::db_params![recipient],
+            )
+            .await
+            .expect("query");
+        if let Some(row) = rows.next().await.expect("row") {
+            return row.get::<String>(0).expect("reason");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("candidate for {recipient} never recorded a suppressed_reason");
+}
+
+// #780: a XEP-0444 reaction-only DM to an offline recipient is
+// archived and produces a candidate, but the T1 evaluator suppresses
+// it with the typed `xep0444_reaction` reason — no publish job, no
+// OS push for "Alice reacted 👍".
+#[tokio::test]
+async fn xep0444_reaction_only_dm_is_suppressed_not_published() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("xep0444-reaction-push.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("bob", "bob-password")]);
+    let ws_url = server.ws_url();
+    let mut bob = WsXmppClient::connect_and_auth(
+        &ws_url,
+        DOMAIN,
+        "bob",
+        "bob-password",
+        &format!("xep0444-bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+    let node = register_web_push_device_via_xep0050(
+        &mut bob,
+        "bob-reaction-push",
+        "web",
+        "https://push.example.com/endpoint/bob-reaction",
+        "bob-p256-key",
+        "bob-provider-secret",
+    )
+    .await;
+    let enable = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
+        .build();
+    let enable_response = send_iq(
+        &mut bob,
+        iq_frame("set", "bob-reaction-enable", DOMAIN, enable),
+        "bob-reaction-enable",
+    )
+    .await;
+    parse_iq_element(&enable_response, "bob-reaction-enable", "result");
+    let _ = bob.close().await;
+
+    let mut admin = WsXmppClient::connect_and_auth(
+        &ws_url,
+        DOMAIN,
+        USERNAME,
+        server.fixed_account_password(),
+        &format!("xep0444-admin-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("admin connection");
+    let reaction_message = element_to_xml(
+        Element::builder("message", CLIENT_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), "bob@localhost")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "reaction-only-dm-1",
+            )
+            .append(waddle_xmpp::xep::xep0444::build_reactions_element(
+                "some-earlier-message-id",
+                &["👍"],
+            ))
+            .build(),
+    );
+    admin
+        .send(&reaction_message)
+        .await
+        .expect("send reaction-only dm");
+
+    let reason = wait_for_candidate_suppressed_reason(&database_url, "bob@localhost").await;
+    assert_eq!(reason, "xep0444_reaction");
+    // The suppression is terminal at T1: no durable publish job for
+    // the node may exist.
+    let db = waddle_server::db::Database::from_config(
+        "xep0357-test-observer-jobs",
+        &waddle_server::db::DatabaseConfig::new(
+            waddle_server::db::DatabaseDriver::Sqlite,
+            database_url.clone(),
+        ),
+    )
+    .await
+    .expect("observer db");
+    let conn = db.guard().await.expect("db guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM push_publish_jobs WHERE node = ?",
+            waddle_server::db_params![node.as_str()],
+        )
+        .await
+        .expect("job count query");
+    let row = rows.next().await.expect("row").expect("count row");
+    assert_eq!(
+        row.get::<i64>(0).expect("count"),
+        0,
+        "a reaction-only message must not enqueue a push publish job"
     );
 
     let _ = admin.close().await;

@@ -100,6 +100,44 @@ async fn claimed_outbox_job_builds_stable_xep0357_pubsub_item() {
     assert_eq!(item.id.as_deref(), Some(jobs[0].job_id().as_str()));
     let payload = item.payload.expect("payload");
     assert!(payload.is("notification", waddle_xmpp::xep::xep0357::NS_PUSH));
+    // #779: the context carries the originating message's XEP-0359
+    // stanza-id (the SW dedup key) while the pubsub item id above
+    // stays the job id (coalesce/idempotency stability).
+    let context = payload
+        .children()
+        .find(|child| child.is("context", WADDLE_PUSH_CONTEXT_NS))
+        .expect("waddle context");
+    assert_eq!(context.attr("stanza-id"), Some("archive-1"));
+}
+
+// #779: coalescing must keep the context's stanza-id pointing at the
+// LATEST message merged into the job — that is the id the foreground
+// tab most recently posted to the SW dedup store.
+#[tokio::test]
+async fn coalesced_job_context_names_latest_stanza_id() {
+    let store = store().await;
+    let target = target();
+    enqueue_jobs_for_test(
+        &store,
+        &candidate("archive-first"),
+        std::slice::from_ref(&target),
+    )
+    .await;
+    enqueue_jobs_for_test(&store, &candidate("archive-second"), &[target]).await;
+
+    let jobs = store.claim_due_outbox_jobs(16).await.expect("claim");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].message_count(), 2, "coalesced into one job");
+    let payload = jobs[0].to_xep0357_pubsub_item().payload.expect("payload");
+    let context = payload
+        .children()
+        .find(|child| child.is("context", WADDLE_PUSH_CONTEXT_NS))
+        .expect("waddle context");
+    assert_eq!(
+        context.attr("stanza-id"),
+        Some("archive-second"),
+        "merge must overwrite the context with the newest candidate's stanza-id"
+    );
 }
 
 #[tokio::test]
