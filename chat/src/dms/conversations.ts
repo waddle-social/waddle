@@ -7,6 +7,18 @@ function peerUsername(peerJid: string): string {
   return jidLocalpart(peerJid);
 }
 
+/**
+ * Display name for a MUC-PM conversation: "nick (room)" — the room
+ * provenance keeps an occupant's self-chosen nick from rendering
+ * byte-identical to a real account's DM entry (#1256 hardening). The
+ * nick is the full resource (XEP-0045 nicks may contain '/').
+ */
+function mucPmDisplayName(occupantJid: string): string {
+  const slash = occupantJid.indexOf("/");
+  const nick = slash >= 0 ? occupantJid.slice(slash + 1) : occupantJid;
+  return `${nick} (${jidLocalpart(occupantJid)})`;
+}
+
 function conversationTimestamp(value?: string): number {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -88,14 +100,22 @@ export function useDirectMessageConversations(
       const parsed = JSON.parse(raw) as { conversations?: DmConversation[]; activePeerJid?: string | null };
       conversations.value = sortByRecent((parsed.conversations ?? []).map((c) => ({
         ...c,
-        peerJid: barePeerJid(c.peerJid),
-        peerUsername: c.peerUsername || peerUsername(c.peerJid),
+        // #1256: MUC-PM conversations are keyed by the FULL occupant JID —
+        // bare-folding on restore would re-key them to the room bare JID
+        // (a reply from that row would broadcast to the room).
+        peerJid: c.mucPm ? c.peerJid : barePeerJid(c.peerJid),
+        peerUsername: c.peerUsername || (c.mucPm ? mucPmDisplayName(c.peerJid) : peerUsername(c.peerJid)),
         unreadCount: c.unreadCount ?? 0,
         // Clear any idle age from an older persisted blob — it starts empty and
         // only repopulates from live presence updates.
         presenceIdleSince: undefined,
       })));
-      activePeerJid.value = parsed.activePeerJid ? barePeerJid(parsed.activePeerJid) : null;
+      const restoredActive = parsed.activePeerJid ?? null;
+      activePeerJid.value = restoredActive
+        ? (conversations.value.some((c) => c.peerJid === restoredActive.trim())
+          ? restoredActive.trim()
+          : barePeerJid(restoredActive))
+        : null;
       for (const c of conversations.value) {
         if (c.presenceShow) {
           presenceByJid.value[c.peerJid] = c.presenceShow;
@@ -109,21 +129,26 @@ export function useDirectMessageConversations(
 
   /**
    * Canonical store key for a peer: MUC-PM conversations (#1256) are
-   * keyed by the FULL occupant JID (`room@service/nick`), so an exact
-   * match on an existing conversation wins before bare-JID folding.
+   * keyed by the FULL occupant JID (`room@service/nick`). An exact match
+   * on an existing conversation wins; otherwise a resource-carrying JID
+   * whose bare part is a known MUC room stays occupant-keyed (so
+   * initiating a PM never folds to the room bare JID, where a reply
+   * would broadcast); everything else folds to the bare JID.
    */
   function conversationKeyFor(peerJid: string): string {
     const trimmed = peerJid.trim();
     if (conversations.value.some((c) => c.peerJid === trimmed)) return trimmed;
+    if (xmppClient.value?.isMucPmPeer?.(trimmed)) return trimmed;
     return barePeerJid(trimmed);
   }
 
-  function ensureConversation(key: string, username?: string): DmConversation {
+  function ensureConversation(key: string, username?: string, mucPmRoomJid?: string): DmConversation {
     const existing = conversations.value.find((c) => c.peerJid === key);
     if (existing) return existing;
     const created: DmConversation = {
       peerJid: key,
       peerUsername: username ?? peerUsername(key),
+      ...(mucPmRoomJid ? { mucPm: true, mucPmRoomJid } : {}),
       unreadCount: 0,
       presenceShow: presenceByJid.value[key] ?? "offline",
       presenceIdleSince: presenceIdleByJid.value[key],
@@ -215,6 +240,11 @@ export function useDirectMessageConversations(
     for (const entry of entries) {
       if (entry.kind !== "direct") continue;
       const bare = barePeerJid(entry.partner);
+      // #1256: the server's inbox projects MUC PMs under the room bare
+      // JID (it can't attribute the occupant yet — #1257). Merging that
+      // entry would create a phantom room-bare "DM" alongside the
+      // occupant-keyed conversation and double-count unread — skip it.
+      if (xmppClient.value?.isKnownMucRoom?.(bare)) continue;
       rememberInboxAccountedMessage(entry);
       merged.set(bare, mergeInboxEntry(merged.get(bare), entry));
     }
@@ -330,10 +360,13 @@ export function useDirectMessageConversations(
 
   function receiveIncomingDm(msg: LiveDmMessage) {
     // XEP-0045 §7.5 (#1256): MUC PMs file under the full occupant JID —
-    // never the room bare JID, where a reply would broadcast.
+    // never the room bare JID, where a reply would broadcast. The
+    // displayed name carries room provenance ("nick (room)") so a room
+    // occupant's self-chosen nick can never render byte-identical to a
+    // real account's DM entry (nick-spoofing hardening).
     const bare = msg.mucPm ? msg.peerJid : barePeerJid(msg.peerJid);
-    const mucPmNick = msg.mucPm ? msg.peerJid.split("/")[1] : undefined;
-    const existing = ensureConversation(bare, mucPmNick);
+    const mucPmUsername = msg.mucPm ? mucPmDisplayName(msg.peerJid) : undefined;
+    const existing = ensureConversation(bare, mucPmUsername, msg.mucPm ? barePeerJid(msg.peerJid) : undefined);
     const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
     const isActiveConversation = activePeerJid.value === bare;
     // Archive-decoded arrivals are MAM catch-up re-emissions: the message

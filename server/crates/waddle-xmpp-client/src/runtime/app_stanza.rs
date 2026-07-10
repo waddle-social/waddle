@@ -147,6 +147,19 @@ enum CarbonOutcome {
     NotCarbon,
 }
 
+/// XEP-0280 §6.1/§6.2 + §11: the wrapping message's `from` MUST be the
+/// Carbons-enabled user's **bare** JID — a full JID (even one of the
+/// account's own resources) is not a server-generated carbon envelope
+/// and MUST be ignored. A missing `from` is also rejected: every
+/// XEP-0280 envelope shape stamps it, and accepting an absent `from`
+/// would widen the trust boundary for no conformant sender.
+fn carbon_envelope_from_own_bare(element: &Element, account: &jid::BareJid) -> bool {
+    element
+        .attr("from")
+        .and_then(|from| from.parse::<jid::Jid>().ok())
+        .is_some_and(|from| from.resource().is_none() && &from.to_bare() == account)
+}
+
 /// Probe `element` for a XEP-0280 `<sent/>`/`<received/>` carbon and
 /// extract the forwarded inner `<message>` after the §11 own-bare-JID
 /// forgery check.
@@ -157,11 +170,7 @@ fn unwrap_carbon(element: &Element, account: &jid::BareJid) -> CarbonOutcome {
         return CarbonOutcome::NotCarbon;
     };
 
-    let verified_own_bare = element
-        .attr("from")
-        .and_then(|from| from.parse::<jid::Jid>().ok())
-        .is_some_and(|from| &from.to_bare() == account);
-    if !verified_own_bare {
+    if !carbon_envelope_from_own_bare(element, account) {
         return CarbonOutcome::Forged;
     }
 
@@ -199,8 +208,7 @@ fn parse_carbon_call_event(
     if element.name() != "message" {
         return None;
     }
-    let outer_from = element.attr("from")?.parse::<jid::Jid>().ok()?.to_bare();
-    if &outer_from != account {
+    if !carbon_envelope_from_own_bare(element, account) {
         return None;
     }
 

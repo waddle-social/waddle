@@ -12,7 +12,7 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import { buildDmCallOutcomeAnchor, type DmCallOutcomeAnchor } from "@/lib/calls/dm-call-anchor";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
-import { bareJidKey, barePeerJid, jidDomain } from "./jid";
+import { bareJidKey, barePeerJid } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { classifyMamError, isMamCursorNotFound } from "./mam";
 import type { ReconnectCatchup } from "./reconnect-catchup";
@@ -219,6 +219,13 @@ type MamPagerDeps = {
   roomJidForChannel: (channelId: string) => string;
   /** Identity + liveness gate for a specific WASM handle mid-pagination. */
   isCurrentConnected: (xmpp: MamWasmClient, sessionJid: string) => boolean;
+  /**
+   * XEP-0045 §7.5 (#1256): classify a raw DM-path stanza as a MUC private
+   * message (counterpart is `room@service/nick` for a known room) so
+   * archived/catch-up re-emissions key by the occupant JID exactly like
+   * the live path. Optional so bare unit-test pagers keep working.
+   */
+  classifyMucPm?: (message: WasmMessage) => { occupantJid: string; nick: string } | undefined;
 };
 
 export class MamPager {
@@ -228,11 +235,13 @@ export class MamPager {
     return barePeerJid(this.deps.sessionJid());
   }
 
-  /** XEP-0359 archiving authorities for a DM: the user's own account
-   * bare JID and its server domain (either may stamp the stanza-id). */
+  /** XEP-0359 archiving authorities for a DM. §Business Rules: "for
+   * one-on-one messages the assigning entity is the account" — the
+   * server stamps `by=<own bare>` and only strips spoofed elements
+   * claiming that bare, so nothing else (not even the server domain)
+   * may be trusted for dedupe. */
   private dmStanzaIdAuthorities(): string[] {
-    const selfBare = this.selfBare();
-    return [selfBare, jidDomain(selfBare)];
+    return [this.selfBare()];
   }
 
   private roomPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
@@ -248,7 +257,10 @@ export class MamPager {
       ? []
       : this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
     const messages = page.messages
-      .map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() }))
+      .map((message) => {
+        const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
+        return converted ? this.applyMucPmClassification(message, converted) : null;
+      })
       .filter((message): message is LiveDmMessage => !!message);
     const outcomeMessages = outcomeAnchors.map((outcome) =>
       this.dmCallOutcomeAnchorToLiveMessage(outcome),
@@ -301,6 +313,19 @@ export class MamPager {
       if (outcomeAnchor) outcomeAnchors.push({ anchor: outcomeAnchor, terminalMessage: message });
     }
     return outcomeAnchors;
+  }
+
+  /** Apply the #1256 occupant re-keying to a converted DM message. */
+  private applyMucPmClassification(raw: WasmMessage, converted: LiveDmMessage): LiveDmMessage {
+    const occupant = this.deps.classifyMucPm?.(raw);
+    if (!occupant) return converted;
+    const isSelf = barePeerJid(raw.from ?? "") === this.selfBare();
+    return {
+      ...converted,
+      peerJid: occupant.occupantJid,
+      mucPm: true,
+      ...(isSelf ? {} : { nick: occupant.nick }),
+    };
   }
 
   private recordRoomWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
@@ -703,8 +728,10 @@ export class MamPager {
       this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
     }
     for (const message of page?.messages ?? []) {
-      const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
-      if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      const decoded = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
+      if (!decoded) continue;
+      const converted = this.applyMucPmClassification(message, decoded);
+      if (shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.deps.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       this.deps.events.emit("directMessage", converted);
       if (options.stats) options.stats.messages += 1;

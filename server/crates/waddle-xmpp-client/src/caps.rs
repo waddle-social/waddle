@@ -3,9 +3,7 @@ use minidom::Element;
 use sha1::{Digest, Sha1};
 
 use crate::discovery::DISCO_INFO_NS;
-use crate::messaging::{
-    NS_CHAT_MARKERS, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS,
-};
+use crate::messaging::{NS_CHAT_MARKERS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS};
 
 pub const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 pub const CAPS_NODE: &str = "https://waddle.social/caps";
@@ -37,11 +35,13 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // XEP-0424 §Discovering support: a client implementing message
         // retraction MUST advertise this.
         NS_MESSAGE_RETRACT,
-        // XEP-0425: the client requests moderation (moderator UI) and
-        // renders moderated tombstones; advertised so peers/tooling can
-        // discover the capability (the room service advertises its own
-        // support separately, per §Discovering support).
-        NS_MESSAGE_MODERATE,
+        // NOTE: urn:xmpp:message-moderate:1 is deliberately NOT
+        // advertised. XEP-0425 defines the feature for the groupchat
+        // SERVICE only ("If a groupchat supports moderated message
+        // retraction, it MUST specify ..."); no clause assigns meaning
+        // to a client advertising it, and the repo hard rule forbids
+        // official namespaces without XEP-defined semantics.
+        //
         // XEP-0444 §Discovering support: MUST for clients implementing
         // reactions.
         NS_REACTIONS,
@@ -170,20 +170,26 @@ mod tests {
         assert!(client_caps_features().contains(&crate::pep::NS_STATUS_PREFERENCE_NOTIFY));
     }
 
-    /// #1258 implement ⇒ advertise: XEP-0424 retraction (MUST), XEP-0425
-    /// moderation, XEP-0444 reactions (MUST), XEP-0308 correction (MUST),
-    /// and XEP-0359 stanza-id (SHOULD) are all implemented by this client
-    /// and must therefore appear in its disco/caps feature set.
+    /// #1258 implement ⇒ advertise: XEP-0424 retraction (MUST), XEP-0444
+    /// reactions (MUST), XEP-0308 correction (MUST), and XEP-0359
+    /// stanza-id (SHOULD) are all implemented by this client and must
+    /// therefore appear in its disco/caps feature set. XEP-0425
+    /// moderation is a groupchat-SERVICE feature with no client-side
+    /// disco semantics, so a client caps advertisement would be an
+    /// official namespace without XEP-defined meaning — asserted absent.
     #[test]
     fn caps_advertise_implemented_messaging_features() {
         let features = client_caps_features();
         assert!(features.contains(&NS_MESSAGE_RETRACT), "XEP-0424");
-        assert!(features.contains(&NS_MESSAGE_MODERATE), "XEP-0425");
         assert!(features.contains(&NS_REACTIONS), "XEP-0444");
         assert!(features.contains(&NS_MESSAGE_CORRECT), "XEP-0308");
         assert!(
             features.contains(&crate::messaging::NS_STANZA_ID),
             "XEP-0359"
+        );
+        assert!(
+            !features.contains(&crate::messaging::NS_MESSAGE_MODERATE),
+            "XEP-0425 defines no client-side feature"
         );
     }
 

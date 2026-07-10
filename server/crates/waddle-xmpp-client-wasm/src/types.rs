@@ -934,6 +934,8 @@ pub struct WaddleSendOptions {
     pub thread: Option<WaddleThreadTarget>,
     pub link_preview_token: Option<String>,
     pub request_displayed_marker: bool,
+    /// XEP-0045 §7.5 MUC private message marker (see `SendMessageOptions::muc_pm`).
+    pub muc_pm: bool,
     pub shared_files: Vec<WaddleSharedFile>,
     pub markup_spans: Vec<WaddleMarkupSpanInput>,
     pub references: Vec<WaddleReference>,

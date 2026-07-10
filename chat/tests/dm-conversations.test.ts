@@ -291,7 +291,11 @@ describe("useDirectMessageConversations", () => {
     // keying by the room bare JID would make a reply broadcast.
     expect(composable.conversations.value[0]).toMatchObject({
       peerJid: "room@muc.example.com/juliet",
-      peerUsername: "juliet",
+      // Room provenance in the display name keeps an occupant nick from
+      // rendering byte-identical to a real account's DM entry.
+      peerUsername: "juliet (room)",
+      mucPm: true,
+      mucPmRoomJid: "room@muc.example.com",
       lastMessageBody: "occupant whisper",
     });
 
@@ -300,6 +304,74 @@ describe("useDirectMessageConversations", () => {
     await composable.openDm("room@muc.example.com/juliet");
     expect(composable.activePeerJid.value).toBe("room@muc.example.com/juliet");
     expect(composable.conversations.value).toHaveLength(1);
+  });
+
+  test("persist/restore round-trips occupant-keyed MUC-PM conversations", async () => {
+    // #1256 P1 regression guard: restore() must NOT bare-fold an
+    // occupant key back to the room bare JID — a reply from the folded
+    // row would broadcast to the room.
+    //
+    // bun tests have no DOM: install a minimal window.sessionStorage so
+    // the persist/restore pair actually executes.
+    const store = new Map<string, string>();
+    (globalThis as unknown as { window?: unknown }).window = {
+      sessionStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    };
+    const { composable, session } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({
+      mucPm: true,
+      peerJid: "room@muc.example.com/juliet",
+      fromJid: "room@muc.example.com/juliet",
+      nick: "juliet",
+      body: "before reload",
+    }));
+    await composable.openDm("room@muc.example.com/juliet");
+    await nextTick(); // flush the deep persist watcher
+
+    // Simulate a reload: a fresh composable for the same session
+    // restores the persisted blob via its immediate session watch.
+    const { composable: reloaded } = makeComposable({ jid: session.value!.jid });
+    await nextTick();
+
+    expect(reloaded.conversations.value[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      mucPm: true,
+    });
+    expect(reloaded.activePeerJid.value).toBe("room@muc.example.com/juliet");
+    delete (globalThis as unknown as { window?: unknown }).window;
+  });
+
+  test("inbox entries for known MUC rooms are skipped (no phantom room-bare DM)", async () => {
+    const client = makeClient([
+      {
+        partner: "room@muc.example.com",
+        kind: "direct",
+        lastStanzaId: "sid-pm",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 1,
+        preview: "occupant whisper",
+      },
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:05:00Z"),
+        unread: 0,
+        preview: "hi",
+      },
+    ]);
+    (client as unknown as { isKnownMucRoom: (jid: string) => boolean }).isKnownMucRoom =
+      (jid: string) => jid === "room@muc.example.com";
+    (client as unknown as { isMucPmPeer: (jid: string) => boolean }).isMucPmPeer = () => false;
+    const { composable } = makeComposable({ client });
+
+    await composable.hydrateFromInbox();
+
+    expect(composable.conversations.value.map((c) => c.peerJid)).toEqual(["bob@example.com"]);
   });
 
   test("receiveIncomingDm does not increment unread for active conversation", async () => {

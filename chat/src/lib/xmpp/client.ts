@@ -29,7 +29,7 @@ import {
   isInCallReactionForActiveCall,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
-import { barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, roomBareJidFor } from "./jid";
+import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, roomBareJidFor } from "./jid";
 import { TypedEventBus } from "./client-events";
 import type {
   CatchupConversationFailure,
@@ -544,6 +544,10 @@ export class BrowserXmppClient {
       roomJidForChannel: (channelId) => this.roomJidForChannel(channelId),
       isCurrentConnected: (xmpp, sessionJid) =>
         this.xmpp === xmpp && this.connected && !this.destroying && this.session.jid === sessionJid,
+      // XEP-0045 §7.5 (#1256): archived/catch-up DM re-emissions get the
+      // same occupant classification as the live path, so a MUC PM never
+      // re-files under the room bare JID after a reconnect.
+      classifyMucPm: (message) => this.mucPmOccupant(message),
     });
     this.mucAdmin = new MucAdmin({
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
@@ -1456,9 +1460,12 @@ export class BrowserXmppClient {
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
     if (!body.trim() && !opts.files?.length) return null;
     const normalizedPeerJid = this.directMessageAddress(peerJid);
+    // XEP-0045 §7.5: mark MUC PMs so the builder appends the muc#user
+    // <x/> element (sent-carbon classification on our other devices).
+    const mucPm = normalizedPeerJid.includes("/");
     if (this.canUseConnectedSession() && this.xmpp) {
       const outboundId = opts.id ?? crypto.randomUUID();
-      const sendOpts = { ...opts, id: outboundId };
+      const sendOpts = { ...opts, id: outboundId, ...(mucPm ? { mucPm: true } : {}) };
       this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
       let id: string | null;
       try {
@@ -1471,7 +1478,7 @@ export class BrowserXmppClient {
       this.outboundQueue.notePendingSend(id, "dm");
       return { id, state: "sending" };
     }
-    return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, opts);
+    return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
   }
 
   async sendChatState(spaceId: string, channelId: string, state: ChatStateType, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state, thread); }
@@ -1573,7 +1580,7 @@ export class BrowserXmppClient {
   async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, this.directMessageAddress(peerJid), "chat", messageId, thread); }
   async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"], preview?: Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, thread?: { id: string; parent?: string }): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
-    const opts: SendDirectMessageOptions = { markup, references, ...preview };
+    const opts: SendDirectMessageOptions = { markup, references, ...preview, ...(this.directMessageAddress(peerJid).includes("/") ? { mucPm: true } : {}) };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
     return await this.compatSendCorrection(xmpp, this.directMessageAddress(peerJid), "chat", body, replacesId, opts);
@@ -2491,18 +2498,31 @@ export class BrowserXmppClient {
     if (inboxPush) { this.events.emit("inboxPush", inboxPush); return; }
     if (message.carbon?.sent || message.carbon?.received) {
       // XEP-0280 (#1243): the WASM core unwrapped a verified carbon and
-      // this IS the inner message. Remember its id so a duplicate direct
-      // delivery of the same stanza (e.g. bare-JID fan-out racing the
-      // carbon) drops below, then continue through the normal pipeline.
-      if (message.id) this.rememberCarbonId(message.id);
+      // this IS the inner message.
+      //
       // A carbon-SENT chat state or displayed marker mirrors OUR OWN
       // activity on another device; surfacing it as peer state would
       // render "peer is typing" / "peer read this" for ourselves.
       // (Cross-device read sync travels via XEP-0490 MDS instead.)
+      // Dropped BEFORE any dedupe bookkeeping so a typing burst can't
+      // flood the bounded set and evict ids still guarding real rows.
       if (message.carbon.sent && ((message.chat_state && !message.body) || message.displayed_marker_id)) return;
-    } else if (message.id && this.carbonDedupIds.has(message.id)) {
-      this.carbonDedupIds.delete(message.id);
-      return;
+      // Remember row-producing carbon ids (scoped by sender — stanza
+      // ids are only unique per sender) so a duplicate direct delivery
+      // of the same stanza drops below, and an SM-replayed copy of the
+      // carbon itself drops here. Ephemeral chat states never enter
+      // the set.
+      const dedupeKey = this.carbonDedupKey(message);
+      if (dedupeKey) {
+        if (this.carbonDedupIds.has(dedupeKey)) return; // SM-replayed carbon
+        this.rememberCarbonId(dedupeKey);
+      }
+    } else {
+      const dedupeKey = this.carbonDedupKey(message);
+      if (dedupeKey && this.carbonDedupIds.has(dedupeKey)) {
+        this.carbonDedupIds.delete(dedupeKey);
+        return;
+      }
     }
     if (message.call_event) {
       applyDmCallEvent({
@@ -2589,7 +2609,11 @@ export class BrowserXmppClient {
         converted.mucPm = true;
         if (barePeerJid(message.from ?? "") !== selfBare) converted.nick = occupant.nick;
       }
-      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message, [selfBare, jidDomain(selfBare)]));
+      // XEP-0359: for 1:1 the assigning entity is the ACCOUNT — the
+      // server stamps by=<own bare> and only strips spoofed elements
+      // claiming that same bare, so a by=<domain> element is
+      // sender-controlled and must not feed dedupe.
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message, [selfBare]));
       this.events.emit("directMessage", converted);
     }
   }
@@ -2601,11 +2625,25 @@ export class BrowserXmppClient {
     return fromBare === selfBare ? toBare : fromBare;
   }
 
-  /** Bounded XEP-0280 dedupe memory: a carbon's wire id is remembered so
-   * a duplicate direct delivery of the same stanza drops; capped so the
-   * set cannot grow monotonically over a long-lived session. */
-  private rememberCarbonId(id: string) {
-    this.carbonDedupIds.add(id);
+  /**
+   * XEP-0280 dedupe key for a carbon-copied stanza and its potential
+   * duplicate direct delivery: sender-scoped (stanza ids are only
+   * unique per sender, so a bare `id` key would let Bob's carbon
+   * swallow Carol's unrelated message). `undefined` for stanzas that
+   * never produce a duplicate pair (groupchat, id-less, chat-state-only
+   * ephemera).
+   */
+  private carbonDedupKey(message: InboundWasmMessage): string | undefined {
+    if (message.is_muc || !message.id) return undefined;
+    if (message.chat_state && !message.body) return undefined;
+    return `${bareJidKey(message.from ?? "")}|${message.id}`;
+  }
+
+  /** Bounded XEP-0280 dedupe memory: a carbon's sender-scoped wire id is
+   * remembered so a duplicate direct delivery of the same stanza drops;
+   * capped so the set cannot grow monotonically over a long session. */
+  private rememberCarbonId(key: string) {
+    this.carbonDedupIds.add(key);
     if (this.carbonDedupIds.size > 512) {
       const oldest = this.carbonDedupIds.values().next().value;
       if (oldest !== undefined) this.carbonDedupIds.delete(oldest);
@@ -2636,9 +2674,26 @@ export class BrowserXmppClient {
     const selfBare = barePeerJid(this.session.jid);
     const from = message.from ?? "";
     const counterpart = barePeerJid(from) === selfBare ? (message.to ?? "") : from;
-    const nick = counterpart.split("/")[1] ?? "";
+    // The nick is the FULL resource — XEP-0045 nicks may themselves
+    // contain '/', so split-once, never split-all.
+    const slash = counterpart.indexOf("/");
+    const nick = slash >= 0 ? counterpart.slice(slash + 1) : "";
     if (!nick || !this.isKnownMucRoomBare(barePeerJid(counterpart))) return undefined;
     return { occupantJid: counterpart, nick };
+  }
+
+  /** Public: whether `bareJid` is a MUC room this session knows about.
+   * Consumed by the DM conversations store to keep occupant-keyed MUC-PM
+   * conversations from folding to (or being duplicated under) the room
+   * bare JID (#1256). */
+  isKnownMucRoom(bareJid: string): boolean {
+    return this.isKnownMucRoomBare(barePeerJid(bareJid));
+  }
+
+  /** Public: whether `peerJid` is a MUC occupant JID (`room@service/nick`)
+   * of a known room — i.e. a MUC-PM conversation identity. */
+  isMucPmPeer(peerJid: string): boolean {
+    return peerJid.includes("/") && this.isKnownMucRoomBare(barePeerJid(peerJid));
   }
   private runReconnectCatchup(
     xmpp: XmppClientInstance,

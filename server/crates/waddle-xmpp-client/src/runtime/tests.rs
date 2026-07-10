@@ -299,6 +299,64 @@ fn app_stanza_ignores_forged_carbon_wrapped_message_entirely() {
     );
 }
 
+/// XEP-0280 §6.1/§6.2: the wrapping 'from' MUST be the account's BARE
+/// JID. A carbon-shaped stanza from one of the account's own FULL JIDs
+/// (a sibling resource, not the server) must be ignored, or an
+/// authenticated device could smuggle an inner message forged as any
+/// sender.
+#[test]
+fn app_stanza_ignores_carbon_envelope_from_own_full_jid() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com/attacker' to='alice@example.com/macbook' type='chat'>
+        <received xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/phone' type='chat' id='f2'>
+              <body>forged via sibling resource</body>
+            </message>
+          </forwarded>
+        </received>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(
+        events.is_empty(),
+        "full-JID carbon envelope must be fully ignored, got {events:?}"
+    );
+}
+
+/// Same strictness on the call-carbon path: a JMI event wrapped in a
+/// carbon envelope from the account's own FULL JID is not a
+/// server-generated carbon.
+#[test]
+fn app_stanza_ignores_carbon_wrapped_call_from_own_full_jid() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com/attacker' to='alice@example.com/macbook'>
+        <sent xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='alice@example.com/phone' to='bob@example.com/desktop'>
+              <finish xmlns='urn:xmpp:jingle-message:0' id='call-9'/>
+            </message>
+          </forwarded>
+        </sent>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Call(_))),
+        "full-JID carbon envelope must not surface a call event"
+    );
+}
+
 /// A directly received message (no carbon envelope) must not be stamped
 /// with a carbon direction.
 #[test]

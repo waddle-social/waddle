@@ -60,9 +60,10 @@ export function assignCorrectionFields(
  * someone else's message).
  *
  * Guards (#1267 item 5):
- * - sender identity via `policy.senderMatches` (bare JID for DMs, full
- *   occupant JID + real-JID continuity for MUC — XEP-0308 §Business
- *   Rules);
+ * - sender identity via `policy.senderMatches` (bare JID for DMs; full
+ *   occupant JID for MUC/MUC-PM, plus real-JID continuity where both
+ *   sides carry a real JID — full occupancy-continuity tracking needs
+ *   server occupant-id support, #1268);
  * - a retracted message is never corrected: XEP-0424 tombstones are
  *   final, and a correction targeting one would resurrect content the
  *   sender (or a moderator) removed.

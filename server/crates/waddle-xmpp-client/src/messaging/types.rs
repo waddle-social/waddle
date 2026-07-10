@@ -798,6 +798,12 @@ pub struct SendMessageOptions {
     /// XEP-0333 `<markable/>` request for displayed markers on this
     /// outbound chat/groupchat message.
     pub request_displayed_marker: bool,
+    /// XEP-0045 §7.5: this message is a MUC private message addressed to
+    /// an occupant JID. The builder appends an
+    /// `<x xmlns='http://jabber.org/protocol/muc#user'/>` element so the
+    /// user's other clients can classify the sent-carbon copy as a MUC PM
+    /// without knowing the room.
+    pub muc_pm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

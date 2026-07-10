@@ -799,6 +799,9 @@ export function buildWasmSendOptions(
   if (opts.requestDisplayedMarker) {
     wasmOpts.request_displayed_marker = true;
   }
+  if ((opts as SendDirectMessageOptions).mucPm) {
+    wasmOpts.muc_pm = true;
+  }
   if (opts.files?.length) {
     wasmOpts.shared_files = opts.files.map((file) => ({
       url: file.url,

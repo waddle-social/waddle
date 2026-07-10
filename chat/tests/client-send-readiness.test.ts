@@ -3029,6 +3029,58 @@ describe("carbon forwarding", () => {
     }));
   });
 
+  test("an SM-replayed carbon copy dispatches only once", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    const carbonCopy = {
+      id: "c-replay-1",
+      type: "chat",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/tablet",
+      body: "replayed after resume",
+      carbon: { sent: false, received: true },
+    };
+    xmpp.emit("message", carbonCopy);
+    // XEP-0198 resume replays the unacked carbon verbatim.
+    xmpp.emit("message", carbonCopy);
+
+    expect(dmHandler).toHaveBeenCalledTimes(1);
+  });
+
+  test("carbon dedupe is sender-scoped: same id from another sender still delivers", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", {
+      id: "1",
+      type: "chat",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/tablet",
+      body: "carbon from bob",
+      carbon: { sent: false, received: true },
+    });
+    // Stanza ids are only unique per sender — Carol's unrelated message
+    // sharing the id must NOT be swallowed by Bob's carbon entry.
+    xmpp.emit("message", {
+      id: "1",
+      type: "chat",
+      from: "carol@example.com/desktop",
+      to: "alice@example.com/tablet",
+      body: "unrelated from carol",
+    });
+
+    expect(dmHandler).toHaveBeenCalledTimes(2);
+  });
+
   test("drops carbon-sent chat states and displayed markers (own activity elsewhere)", () => {
     const client = new BrowserXmppClient(session());
     const chatStateHandler = mock(() => undefined);

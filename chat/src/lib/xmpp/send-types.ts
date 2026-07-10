@@ -53,6 +53,12 @@ export interface SendDirectMessageOptions {
   parentThreadId?: string;
   id?: string;
   requestDisplayedMarker?: boolean;
+  /**
+   * XEP-0045 §7.5: this send addresses a MUC occupant JID. The wasm
+   * builder appends `<x xmlns='http://jabber.org/protocol/muc#user'/>`
+   * so the sender's other clients can classify the sent-carbon copy.
+   */
+  mucPm?: boolean;
 }
 
 export function buildReplyFallbackPrefix(parentBody: string | undefined): { prefix: string; length: number } {

@@ -2311,6 +2311,45 @@ fn build_retraction_message_marks_body_as_xep0428_fallback() {
     assert_eq!(fallback.attr("for"), Some(NS_MESSAGE_RETRACT));
 }
 
+/// XEP-0045 §7.5: a MUC private message send carries the empty
+/// `<x xmlns='http://jabber.org/protocol/muc#user'/>` marker so the
+/// sender's other clients can classify the sent-carbon copy; normal DMs
+/// and groupchat messages never carry it.
+#[test]
+fn build_outbound_message_marks_muc_pm_with_muc_user_x() {
+    let options = SendMessageOptions {
+        muc_pm: true,
+        ..SendMessageOptions::default()
+    };
+    let (_, stanza) = build_outbound_message("room@muc.example/juliet", "chat", "psst", &options)
+        .expect("builds");
+    assert!(stanza.get_child("x", NS_MUC_USER).is_some());
+
+    let (_, plain_dm) = build_outbound_message(
+        "bob@example.com",
+        "chat",
+        "hi",
+        &SendMessageOptions::default(),
+    )
+    .expect("builds");
+    assert!(plain_dm.get_child("x", NS_MUC_USER).is_none());
+
+    let (_, groupchat) = build_outbound_message(
+        "room@muc.example",
+        "groupchat",
+        "hi all",
+        &SendMessageOptions {
+            muc_pm: true,
+            ..SendMessageOptions::default()
+        },
+    )
+    .expect("builds");
+    assert!(
+        groupchat.get_child("x", NS_MUC_USER).is_none(),
+        "muc#user marker is a chat-typed PM shape only"
+    );
+}
+
 /// XEP-0045 §7.2.15 (#1255): the join presence always requests zero
 /// discussion history — MAM catch-up is the authoritative history
 /// source, so accepting default join history would double-deliver.

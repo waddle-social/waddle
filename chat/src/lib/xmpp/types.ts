@@ -387,6 +387,15 @@ export interface ReactionEvent {
 export interface DmConversation {
   peerJid: string;
   peerUsername: string;
+  /**
+   * XEP-0045 §7.5 (#1256): this is a MUC private-message conversation.
+   * `peerJid` is the FULL occupant JID (`room@service/nick`) and
+   * `mucPmRoomJid` carries the room for provenance rendering — an
+   * occupant nick must never be displayed as if it were an account
+   * identity (nick spoofing).
+   */
+  mucPm?: boolean;
+  mucPmRoomJid?: string;
   peerAvatarUrl?: string | null;
   lastMessageBody?: string;
   lastMessageAt?: string;
