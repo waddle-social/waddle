@@ -385,6 +385,10 @@ export function useDirectMessageConversations(
   }
 
   function receiveIncomingDm(msg: LiveDmMessage) {
+    // XEP-0280 restamp pass: the dispatch exists only to upgrade the
+    // already-rendered row's timestamp — the direct copy already
+    // updated the conversation and unread count.
+    if (msg.timestampRefreshOnly) return;
     // XEP-0045 §7.5 (#1256): MUC PMs file under the full occupant JID —
     // never the room bare JID, where a reply would broadcast. The
     // displayed name carries room provenance ("nick (room)") so a room

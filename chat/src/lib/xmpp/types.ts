@@ -253,6 +253,14 @@ export interface LiveDmMessage {
    * resource would broadcast to the whole room.
    */
   mucPm?: boolean;
+  /**
+   * XEP-0280 restamp pass (#1267 item 6): this dispatch exists ONLY to
+   * upgrade an already-rendered row's fallback timestamp with the
+   * carbon's authoritative forwarded <delay/>. The timeline merge
+   * consumes it; unread accounting and notifications MUST skip it —
+   * the direct copy already produced those side effects.
+   */
+  timestampRefreshOnly?: boolean;
   peerJid: string;
   fromJid: string;
   nick: string;

@@ -3137,6 +3137,10 @@ describe("carbon forwarding", () => {
     expect(received).toHaveLength(2);
     expect(received[0]?.createdAtSource).toBe("fallback");
     expect(received[1]?.createdAtSource).toBe("delay");
+    // The pass-through is restamp-only: unread accounting and
+    // notifications must skip it (the direct copy already counted).
+    expect((received[0] as { timestampRefreshOnly?: boolean }).timestampRefreshOnly).toBeUndefined();
+    expect((received[1] as { timestampRefreshOnly?: boolean }).timestampRefreshOnly).toBe(true);
   });
 
   test("carbon dedupe keys MUC-PM senders by the full occupant JID (#1256)", () => {

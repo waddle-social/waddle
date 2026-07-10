@@ -120,7 +120,13 @@ impl RoomHandler for MucCanonicalizeHandler {
             if !is_stanza_id_element(p) {
                 return true;
             }
-            match p.attr("by").and_then(|raw| raw.parse::<BareJid>().ok()) {
+            // Trim before parsing — see the DM-path canonicalize note:
+            // a whitespace-padded `by=` must not evade the §5 strip.
+            match p
+                .attr("by")
+                .map(str::trim)
+                .and_then(|raw| raw.parse::<BareJid>().ok())
+            {
                 Some(parsed) => parsed != *ctx.room,
                 None => true,
             }

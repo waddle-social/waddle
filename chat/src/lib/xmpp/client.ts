@@ -188,6 +188,10 @@ export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-c
 type InboundWasmMessage = WasmMessage & {
   inboxPush?: InboxEntry;
   inbox_push?: WasmInboxConversation;
+  /** Set by the carbon dedupe when a delay-carrying carbon completes a
+   * direct-first pair: dispatch for timestamp upgrade only (no unread /
+   * notification side effects downstream). */
+  restampOnly?: true;
 };
 
 // Safety-net ceiling for a MUC join. XEP-0045 §7.2.2 has the service
@@ -2527,8 +2531,11 @@ export class BrowserXmppClient {
           // wire id and `pickAuthoritativeTimestamp` upgrades the
           // fallback stamp — dropping it would strand the row on
           // `Date.now()` (#1267 item 6). Timestamp-less duplicates drop.
+          // The pass-through is restamp-ONLY: the direct copy already
+          // incremented unread and fired notifications.
           this.rememberCarbonId(dedupeKey, "carbon");
           if (!message.timestamp) return;
+          message = { ...message, restampOnly: true };
         } else {
           this.rememberCarbonId(dedupeKey, "carbon");
         }
@@ -2635,6 +2642,7 @@ export class BrowserXmppClient {
         converted.mucPm = true;
         if (barePeerJid(message.from ?? "") !== selfBare) converted.nick = occupant.nick;
       }
+      if (message.restampOnly) converted.timestampRefreshOnly = true;
       // XEP-0359: the DM authorities mirror the decode path
       // (`assignedStanzaIdBy`): account bare + server domain. Seen-ids
       // and row wireIds must never diverge (see dmStanzaIdAuthorities).

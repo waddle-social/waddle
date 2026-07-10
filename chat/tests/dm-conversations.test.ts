@@ -411,6 +411,20 @@ describe("useDirectMessageConversations", () => {
     expect(composable.conversations.value.map((c) => c.peerJid)).toEqual(["bob@example.com"]);
   });
 
+  test("restamp-only dispatches never touch conversations or unread", () => {
+    const { composable } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({ body: "real copy" }));
+    expect(composable.conversations.value[0].unreadCount).toBe(1);
+
+    // The carbon restamp pass for the same stanza must be a no-op here.
+    composable.receiveIncomingDm(makeDmMessage({
+      body: "real copy",
+      timestampRefreshOnly: true,
+    }));
+    expect(composable.conversations.value[0].unreadCount).toBe(1);
+    expect(composable.conversations.value).toHaveLength(1);
+  });
+
   test("receiveIncomingDm does not increment unread for active conversation", async () => {
     const { composable } = makeComposable();
     await composable.openDm("bob@example.com");
