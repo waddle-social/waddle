@@ -250,9 +250,29 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
         ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
     };
 
+    // A retry whose rich projection is entirely absent (`None`) — e.g.
+    // a legacy row or a path that didn't capture identity — must STILL
+    // dedup against an identity-only stored row: the identity-only
+    // projection normalizes to "no dedup-relevant content", same as
+    // `None` (codex second-pass finding).
+    let retry_no_rich = ArchivedMessage {
+        id: "archive-session-retry-no-rich".to_string(),
+        timestamp: base_timestamp,
+        body: Some("resent across sessions".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(3),
+        rich: None,
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+
     let first_id = storage.store_message(&archive, &first).await.unwrap();
     let retry_id = storage
         .store_message(&archive, &retry_fresh_session)
+        .await
+        .unwrap();
+    let retry_no_rich_id = storage
+        .store_message(&archive, &retry_no_rich)
         .await
         .unwrap();
 
@@ -260,6 +280,10 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
     assert_eq!(
         retry_id, first_id,
         "fresh-session retry must dedup despite a differing per-session muc_sender"
+    );
+    assert_eq!(
+        retry_no_rich_id, first_id,
+        "a rich=None retry must dedup against an identity-only stored row"
     );
 
     let result = storage

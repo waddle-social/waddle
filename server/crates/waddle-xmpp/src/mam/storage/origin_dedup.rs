@@ -53,7 +53,10 @@ fn archived_content_matches(existing: &ArchivedMessage, incoming: &ArchivedMessa
 }
 
 fn rich_content_matches(existing: &ArchivedMessage, incoming: &ArchivedMessage) -> bool {
-    let existing = existing.rich.as_ref().map(|rich| rich.content_only());
-    let incoming = incoming.rich.as_ref().map(|rich| rich.content_only());
+    // `dedup_content` normalizes an identity-only projection to `None`
+    // so a row whose only rich content was the server-stamped
+    // occupant-id / real-JID compares equal to a `rich: None` row.
+    let existing = existing.rich.as_ref().and_then(|rich| rich.dedup_content());
+    let incoming = incoming.rich.as_ref().and_then(|rich| rich.dedup_content());
     existing == incoming
 }

@@ -200,6 +200,29 @@ impl ArchivedRichMessage {
             ..self.clone()
         }
     }
+
+    /// True when this payload carries no client-authored content
+    /// (`payload` / `reply` / `references` / `mentions`) and no
+    /// server-derived MUC identity (`occupant_id` / `muc_sender`).
+    pub fn is_empty(&self) -> bool {
+        self.payload.is_none()
+            && self.reply.is_none()
+            && self.references.is_empty()
+            && self.mentions.is_empty()
+            && self.occupant_id.is_none()
+            && self.muc_sender.is_none()
+    }
+
+    /// The content-only projection used for XEP-0359 origin-id retry
+    /// dedup, normalized so an *empty* projection is `None` rather than
+    /// `Some(default)`. This makes "a row whose only rich content was
+    /// the server-stamped occupant-id / real-JID" compare equal to a
+    /// row that carried no `rich_payload` at all — the two are the same
+    /// logical message for dedup purposes.
+    pub fn dedup_content(&self) -> Option<Self> {
+        let content = self.content_only();
+        (!content.is_empty()).then_some(content)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

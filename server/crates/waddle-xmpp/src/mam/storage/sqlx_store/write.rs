@@ -573,17 +573,25 @@ fn parse_dedup_jid(archive_id: &str, column: &'static str, value: &str) -> Optio
 /// fails to decode falls back to raw-string equality (defensive:
 /// corrupt/foreign JSON should never spuriously dedup two rows).
 fn rich_payload_content_matches(existing: Option<&str>, incoming: Option<&str>) -> bool {
-    fn decode_content(value: Option<&str>) -> Option<ArchivedRichMessage> {
-        value
-            .filter(|value| !value.trim().is_empty())
-            .and_then(|value| serde_json::from_str::<ArchivedRichMessage>(value).ok())
-            .map(|rich| rich.content_only())
+    // `Ok(Some(_))` decoded to a non-empty content projection;
+    // `Ok(None)` is "absent, empty, or identity-only" (all normalize to
+    // no dedup-relevant content); `Err(())` is present-but-undecodable.
+    fn normalized(value: Option<&str>) -> Result<Option<ArchivedRichMessage>, ()> {
+        match value {
+            None => Ok(None),
+            Some(value) if value.trim().is_empty() => Ok(None),
+            Some(value) => match serde_json::from_str::<ArchivedRichMessage>(value) {
+                Ok(rich) => Ok(rich.dedup_content()),
+                Err(_) => Err(()),
+            },
+        }
     }
 
-    match (decode_content(existing), decode_content(incoming)) {
-        (Some(existing), Some(incoming)) => existing == incoming,
-        // At least one side is absent or undecodable — fall back to
-        // exact string equality (both `None` ⇒ trivially equal).
+    match (normalized(existing), normalized(incoming)) {
+        (Ok(existing), Ok(incoming)) => existing == incoming,
+        // At least one side is present-but-undecodable — fall back to
+        // conservative exact string equality (never spuriously merge
+        // two rows whose payloads we could not parse).
         _ => existing == incoming,
     }
 }
@@ -633,7 +641,7 @@ fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
     let dedup_rich = message
         .rich
         .as_ref()
-        .map(|rich| rich.content_only())
+        .and_then(|rich| rich.dedup_content())
         .as_ref()
         .and_then(|rich| serde_json::to_string(rich).ok());
     update_hash_part(&mut hasher, "rich_payload", dedup_rich.as_deref());
