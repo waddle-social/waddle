@@ -2464,7 +2464,7 @@ fn broadcast_group_dm_leave(
             &from_jid,
             leaving_real_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(true, true),
+            waddle_xmpp::muc::MucPresenceStatus::new(true, false),
             &identity,
         );
         let _ = connections.try_send_to(leaving_real_jid, Stanza::Presence(presence));
@@ -2477,7 +2477,7 @@ fn broadcast_group_dm_leave(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(false, true),
+            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
             &identity,
         );
         let _ = connections.try_send_to(occupant_jid, Stanza::Presence(presence));
@@ -2566,6 +2566,42 @@ async fn rollback_room_config_if_revision(
         })
         .await
         .unwrap_or(false)
+}
+
+/// XEP-0045 §10.2.1: broadcast `<message><x xmlns='muc#user'><status/></x></message>`
+/// config-change codes to every occupant session after an admin-path
+/// room configuration change (#1265 item 15).
+async fn broadcast_admin_config_change(
+    connections: &ConnectionRegistry,
+    actor: &ActorRef<RoomActor>,
+    room_jid: &BareJid,
+    previous: &RoomConfig,
+    updated: &RoomConfig,
+) {
+    let status_codes = waddle_xmpp::muc::config_change_status_codes(previous, updated);
+    if status_codes.is_empty() {
+        return;
+    }
+    let Ok(snapshot) = actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await
+    else {
+        tracing::warn!(room = %room_jid, "Failed to snapshot room for config-change broadcast");
+        return;
+    };
+    for occupant in snapshot.room.occupants.values() {
+        for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+            let message = waddle_xmpp::muc::build_config_change_message(
+                room_jid,
+                &recipient_jid,
+                &status_codes,
+            );
+            let _ = connections
+                .send_to(&recipient_jid, Stanza::Message(message))
+                .await;
+        }
+    }
 }
 
 async fn broadcast_presence_updates(
@@ -3110,6 +3146,13 @@ async fn run_update(
             .map_err(send_err("room actor EnforceMembersOnlyAffiliations"))?;
         broadcast_presence_updates(connections, updates).await;
     }
+
+    // XEP-0045 §10.2.1 (#1265 item 15): a config change applied through
+    // the admin channels path notifies occupants exactly like the
+    // muc#owner IQ path — status 104 (plus 170/171 when the logging
+    // knob flips).
+    broadcast_admin_config_change(connections, &actor, &args.channel_jid, &existing, &updated)
+        .await;
 
     Ok(ChannelRef {
         channel_jid: args.channel_jid.clone(),

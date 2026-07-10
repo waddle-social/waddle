@@ -523,6 +523,41 @@ describe("dmMessageFromArchived", () => {
     expect(result?.stanzaIdBy).toBe("example.com");
   });
 
+  test("stanza-id authority matching is case-folded like the seen-id path", () => {
+    // Greptile P1: `rawMessageSeenIds` folds the trusted `by` via
+    // bareJidKey; the decoded-row identity must fold identically or a
+    // mixed-case authority (by="Example.COM") is recorded as seen while
+    // the row's identity omits it → duplicate on reconnect.
+    const result = dmMessageFromArchived({
+      mam_id: "mam-case",
+      id: "wire-case",
+      from: "bob@example.com/desk",
+      to: "alice@example.com",
+      body: "mixed-case authority",
+      message_type: "chat",
+      timestamp: "2026-07-01T10:00:00Z",
+      reaction_emojis: [],
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_muc: false,
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      stanza_ids: [
+        { id: "case-folded-id", by: "Example.COM" },
+      ],
+    } as unknown as WasmArchivedMessage, "alice@example.com");
+
+    expect(result).not.toBeNull();
+    expect(result?.stanzaId).toBe("case-folded-id");
+    expect(result?.wireIds).toContain("case-folded-id");
+    // The row carries the NORMALIZED authority, not the wire casing —
+    // downstream strict-equality lookups (MDS) must never see
+    // "Example.COM".
+    expect(result?.stanzaIdBy).toBe("example.com");
+  });
+
   test("does not expose a DM MDS stanza-id assigned only by a foreign domain", () => {
     const result = dmMessageFromArchived({
       ...baseArchivedDm,

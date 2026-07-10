@@ -86,7 +86,7 @@ pub(crate) async fn broadcast_muc_leave_to_remaining(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(false, true),
+            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
             &identity,
         );
         super::handlers::presence::route_room_presence_to_occupant(
@@ -140,7 +140,7 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
                 occupant_jid,
                 outcome.affiliation,
                 outcome.role,
-                waddle_xmpp::muc::MucPresenceStatus::new(is_self, true),
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
                 &identity,
             );
             if !muji.is_empty() {
@@ -1274,6 +1274,27 @@ pub(crate) async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) 
         Ok(is_muc_jid) => is_muc_jid,
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to validate MUC JID");
+            false
+        }
+    }
+}
+
+/// Phase-one fenced clustering wipe for an explicit destroy (#1261):
+/// deletes the room's clustering durable rows without touching the
+/// registry entry. `false` = the fenced delete failed and the destroy
+/// must not proceed (the room stays fully intact).
+pub(crate) async fn prepare_destroy_wipe(state: &WebSocketState, room_jid: &BareJid) -> bool {
+    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .prepare_destroy_wipe(room_jid.clone())
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = %error,
+                "Preparatory destroy wipe ask failed"
+            );
             false
         }
     }

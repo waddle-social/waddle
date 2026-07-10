@@ -37,8 +37,8 @@ use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
-    DestroyRoomReason, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, ReapSealedRoom,
-    RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    DestroyRoomReason, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, PrepareDestroyWipe,
+    ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
     WireClusteringClaims,
 };
 use super::RoomConfig;
@@ -315,7 +315,16 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Destroy a room, returning whether it existed.
+        /// Phase-one fenced clustering wipe for an explicit destroy
+        /// (#1261); the registry entry is untouched. `false` = the
+        /// fenced delete failed and the destroy must not proceed.
+        prepare_destroy_wipe(room_jid: BareJid) -> bool,
+        "prepare_destroy_wipe",
+        PrepareDestroyWipe { room_jid }
+    );
+
+    registry_method!(
+        /// Destroy a room, returning the typed outcome.
         destroy_room(room_jid: BareJid) -> DestroyRoomOutcome,
         "destroy_room",
         DestroyRoom {

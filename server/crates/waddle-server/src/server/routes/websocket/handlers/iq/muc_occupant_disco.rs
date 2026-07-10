@@ -1,0 +1,71 @@
+use super::*;
+use xmpp_parsers::stanza_error::StanzaError;
+
+/// Snapshot-ask deadline: a wedged room actor must not stall the
+/// requester's whole IQ pipeline (mirrors `ADMIN_ROOM_ASK_TIMEOUT`).
+const OCCUPANT_DISCO_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// XEP-0045 §6.6: a disco request addressed to an occupant JID
+/// (`room@service/nick`) must not be answered with room information.
+///
+/// Returns `Some(error)` when `target_to` is a full JID on the MUC
+/// domain (#1265 item 10):
+/// - requester is NOT an occupant of the room → `<bad-request/>`
+///   (§6.6 MUST);
+/// - requester IS an occupant → Waddle does not implement the
+///   optional §6.6 pass-through to the occupant's client, so the
+///   truthful answer is `<feature-not-implemented/>`.
+///
+/// Returns `None` for every other target so callers fall through to
+/// their normal routing.
+pub(super) async fn muc_occupant_disco_error(
+    state: &WebSocketState,
+    target_to: Option<&str>,
+    muc_domain: &str,
+    requester: Option<&FullJid>,
+) -> Option<StanzaError> {
+    let room_jid = target_to
+        .and_then(|target| target.split_once('/').map(|(bare, _)| bare))
+        .and_then(|bare| bare.parse::<BareJid>().ok())
+        .filter(|room_jid| room_jid.domain().as_str() == muc_domain && room_jid.node().is_some())?;
+
+    let is_occupant = match requester {
+        None => false,
+        Some(requester) => match get_room_actor(state, &room_jid).await {
+            None => false,
+            Some(room_actor) => match room_actor
+                .ask(GetSnapshot)
+                .reply_timeout(OCCUPANT_DISCO_ASK_TIMEOUT)
+                .await
+            {
+                // Occupancy is an identity property: any resource of
+                // the same bare JID counts as the occupant, not only
+                // the session that joined.
+                Ok(snapshot) => {
+                    let requester_bare = requester.to_bare();
+                    snapshot
+                        .room
+                        .occupants
+                        .values()
+                        .any(|occupant| occupant.real_jid.to_bare() == requester_bare)
+                }
+                Err(error) => {
+                    // A wedged/timed-out room actor is a server fault,
+                    // not evidence the requester is a non-occupant.
+                    warn!(
+                        room = %room_jid,
+                        error = ?error,
+                        "Failed to load room snapshot for occupant-JID disco"
+                    );
+                    return Some(internal_server_error_iq_error("Internal server error."));
+                }
+            },
+        },
+    };
+
+    Some(if is_occupant {
+        feature_not_implemented_iq_error("Disco pass-through to occupants is not supported.")
+    } else {
+        bad_request_iq_error("Disco requests to occupant JIDs are not allowed for non-occupants.")
+    })
+}

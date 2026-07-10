@@ -38,7 +38,13 @@ export interface PersistedQueuedRoomMessage extends PersistedQueuedMessageBase {
 
 export interface PersistedQueuedDmMessage extends PersistedQueuedMessageBase {
   kind: "dm";
+  /**
+   * XEP-0045 §7.5 (#1256): for a MUC private message this is the FULL
+   * occupant JID (`room@service/nick`) and `mucPm` is set — the drain
+   * must send to it verbatim; bare-folding would broadcast to the room.
+   */
   peerJid: string;
+  mucPm?: boolean;
 }
 
 type PersistedQueuedMessage =

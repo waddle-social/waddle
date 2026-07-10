@@ -6,11 +6,12 @@
 //! moderator exemption, per-occupant isolation, leave/clear resets).
 //!
 use std::time::Duration;
+use waddle_xmpp::muc::roominfo::MucRoomInfo;
 use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0500::{
-    build_muc_slow_mode_roominfo_form, build_roominfo_slow_mode_duration_field,
-    parse_slow_mode_duration, SlowModeCheck, SlowModeConfig, SlowModeTracker,
-    FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION, SLOW_MODE_DISABLED,
+    build_roominfo_slow_mode_duration_field, parse_slow_mode_duration, SlowModeCheck,
+    SlowModeConfig, SlowModeTracker, FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION,
+    SLOW_MODE_DISABLED,
 };
 
 // ── Config field + value parsing ─────────────────────────────────────
@@ -81,7 +82,9 @@ fn xep0500_roominfo_field_uses_spec_var() {
 
 #[test]
 fn xep0500_roominfo_form_carries_duration_field() {
-    let form = build_muc_slow_mode_roominfo_form(0);
+    // The duration field rides in the room's single `muc#roominfo`
+    // form (#1259: one FORM_TYPE per disco#info response).
+    let form = MucRoomInfo::default().to_form_element();
     assert_eq!(form.name(), "x");
     assert_eq!(form.ns(), NS_DATA_FORMS);
     assert_eq!(form.attr("type"), Some("result"));

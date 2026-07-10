@@ -280,6 +280,20 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     internal_server_error_iq_error("Internal server error."),
                 )];
             };
+            // Phase one (#1261, Greptile P1): run the epoch-fenced
+            // CLUSTERING durable wipe before anything else is deleted
+            // anywhere. The common destroy failure mode (durable
+            // backend down / fencing lost) therefore aborts with the
+            // room fully intact — no catalog rows, tuples, boundaries,
+            // or ledger entries have been touched yet.
+            if !super::super::super::prepare_destroy_wipe(state, &room_jid).await {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
             // XEP-0045 §10.9 (#1261): destroy removes the room even if
             // persistent. Wipe the durable resurrection vectors FIRST —
             // the managed-channel catalog row (config/name/policy),

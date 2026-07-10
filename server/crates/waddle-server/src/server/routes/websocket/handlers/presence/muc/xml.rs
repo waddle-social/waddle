@@ -11,7 +11,7 @@ pub(crate) struct MucJoinPresence<'a> {
     pub(crate) disclose_real_jid: bool,
     pub(crate) include_self_status: bool,
     pub(crate) room_created: bool,
-    pub(crate) include_nonanonymous_status: bool,
+    pub(crate) warn_nonanonymous_join: bool,
     /// Optional XEP-0272 `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
     /// payload to append to the resulting presence stanza. Used by
     /// the join-replay path to surface "in call" indicators for
@@ -53,7 +53,7 @@ pub(super) fn build_muc_join_presence_stanza(
         waddle_xmpp::muc::MucPresenceStatus {
             is_self: params.include_self_status,
             room_created: params.room_created,
-            include_nonanonymous_status: params.include_nonanonymous_status,
+            warn_nonanonymous_join: params.warn_nonanonymous_join,
         },
         &waddle_xmpp::xep::xep0421::OccupantIdentity {
             bare_jid: &real_bare,
@@ -155,7 +155,7 @@ pub(super) fn build_muc_self_unavailable_xml(
     room_jid: &BareJid,
     nick: &str,
     sender_jid: &FullJid,
-    include_nonanonymous_status: bool,
+    affiliation: Affiliation,
 ) -> String {
     let from_jid = room_jid
         .clone()
@@ -163,11 +163,14 @@ pub(super) fn build_muc_self_unavailable_xml(
         .unwrap_or_else(|_| sender_jid.clone());
 
     let sender_bare = sender_jid.to_bare();
+    // XEP-0045 §7.14: the self-leave echo carries the leaver's REAL
+    // affiliation — hardcoding `member` showed owners/admins as members
+    // in their own leave presence (#1265 item 2).
     let presence = waddle_xmpp::muc::build_leave_presence(
         &from_jid,
         sender_jid,
-        Affiliation::Member,
-        waddle_xmpp::muc::MucPresenceStatus::new(true, include_nonanonymous_status),
+        affiliation,
+        waddle_xmpp::muc::MucPresenceStatus::new(true, false),
         &waddle_xmpp::xep::xep0421::OccupantIdentity {
             bare_jid: &sender_bare,
             real_jid: Some(sender_jid),

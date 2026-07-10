@@ -308,7 +308,24 @@ pub fn build_disco_info_response_with_extensions(
         query_builder = query_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), n);
     }
 
+    // XEP-0115 §5.4 step 2.4 well-formedness: a disco#info response with
+    // duplicate identity tuples or duplicate feature vars is ill-formed and
+    // caps-verifying clients MUST discard it (#1259). Dedupe here so no
+    // call site can compose an ill-formed response; first occurrence wins,
+    // preserving caller ordering.
+    let mut seen_identities: std::collections::HashSet<(&str, &str, Option<&str>, Option<&str>)> =
+        std::collections::HashSet::new();
+    let mut seen_features: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
     for identity in identities {
+        if !seen_identities.insert((
+            identity.category.as_str(),
+            identity.type_.as_str(),
+            identity.lang.as_deref(),
+            identity.name.as_deref(),
+        )) {
+            continue;
+        }
         let mut id_builder = Element::builder("identity", DISCO_INFO_NS)
             .attr(
                 minidom::rxml::xml_ncname!("category").to_owned(),
@@ -335,6 +352,9 @@ pub fn build_disco_info_response_with_extensions(
     }
 
     for feature in features {
+        if !seen_features.insert(feature.0.as_str()) {
+            continue;
+        }
         query_builder = query_builder.append(
             Element::builder("feature", DISCO_INFO_NS)
                 .attr(minidom::rxml::xml_ncname!("var").to_owned(), &feature.0)
@@ -497,6 +517,10 @@ pub fn muc_service_features() -> Vec<Feature> {
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::muc(),
+        // XEP-0045 §7.4: reflected groupchat messages keep the sender's
+        // original `id` (enforced in the room dispatch path), so the
+        // service advertises stable-id support (#1265 item 14).
+        Feature::muc_stable_id(),
     ]
 }
 
@@ -556,10 +580,18 @@ pub fn muc_room_features(
         Feature::explicit_mentions(),
         Feature::channel_mentions(),
         Feature::muc_nonanonymous(),
+        // Waddle rooms have no password support, so every room is
+        // truthfully `muc_unsecured` (#1265 item 13; XEP-0045 §6.4).
+        Feature::muc_unsecured(),
+        // XEP-0045 §7.4: reflected message ids are preserved
+        // (#1265 item 14).
+        Feature::muc_stable_id(),
     ];
 
     if persistent {
         features.push(Feature::muc_persistent());
+    } else {
+        features.push(Feature::muc_temporary());
     }
 
     if members_only {

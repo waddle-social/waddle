@@ -12,7 +12,6 @@ const NS_PUBSUB_NODE_CONFIG = "http://jabber.org/protocol/pubsub#node_config";
 
 type HybridClient = Partial<WaddleClient> & {
   send_raw_iq?: (xml: string) => Promise<string>;
-  join_room_without_history?: (roomJid: string, nick: string) => Promise<unknown>;
 };
 
 export const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
@@ -61,10 +60,8 @@ async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: str
 }
 
 async function joinRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
-  if (client.join_room_without_history) {
-    await client.join_room_without_history(roomJid, nick);
-    return;
-  }
+  // #1255: `join_room` itself always requests `<history maxstanzas='0'/>`
+  // (XEP-0045 §7.2.15) — MAM catch-up is the authoritative history source.
   if (!client.join_room) throw new Error("XMPP session is not ready");
   await client.join_room(roomJid, nick);
 }

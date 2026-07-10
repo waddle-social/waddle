@@ -115,6 +115,28 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-1", "dm-2", "dm-3"]);
   });
 
+  test("MUC-PM drains to the full occupant JID, never the room bare JID (#1256)", async () => {
+    const sent: Array<{ peer: string; mucPm?: boolean }> = [];
+    const { queue } = createQueue({
+      sendDirect: async (peer, _body, opts) => {
+        sent.push({ peer, ...(opts.mucPm ? { mucPm: true } : {}) });
+        return opts.id;
+      },
+    });
+
+    queue.queueDirectMessage("room@muc.example.com/juliet", "psst", { id: "pm-1", mucPm: true });
+    queue.queueDirectMessage("bob@example.com/desktop", "hi", { id: "dm-1" });
+
+    await queue.flushDirect();
+
+    expect(sent.sort((a, b) => a.peer.localeCompare(b.peer))).toEqual([
+      // Normal DM sends stay bare-folded.
+      { peer: "bob@example.com" },
+      // Occupant address preserved verbatim + the muc#user marker option.
+      { peer: "room@muc.example.com/juliet", mucPm: true },
+    ]);
+  });
+
   test("flushDirect skips entries already in flight and stops when the session drops", async () => {
     let connected = true;
     const sent: string[] = [];

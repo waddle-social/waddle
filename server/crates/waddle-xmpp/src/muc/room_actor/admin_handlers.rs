@@ -66,7 +66,7 @@ fn removal_presence_updates(
                 &from_room_jid,
                 &recipient,
                 status_code,
-                MucPresenceStatus::new(is_self, true),
+                MucPresenceStatus::new(is_self, false),
                 actor,
                 &occupant_identity,
             );
@@ -123,7 +123,7 @@ fn apply_affiliation_change(
                 let presence = build_ban_presence(
                     &from_room_jid,
                     &recipient,
-                    MucPresenceStatus::new(is_self, true),
+                    MucPresenceStatus::new(is_self, false),
                     reason,
                     actor,
                     &occupant_identity,
@@ -184,7 +184,7 @@ fn apply_affiliation_change(
                 &recipient,
                 new_affiliation,
                 occupant.role,
-                MucPresenceStatus::new(is_self, true),
+                MucPresenceStatus::new(is_self, false),
                 &occupant_identity,
             );
             (recipient, presence)
@@ -433,7 +433,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             &from_room_jid,
                             &recipient,
                             target_occupant.affiliation,
-                            MucPresenceStatus::new(is_self, true),
+                            MucPresenceStatus::new(is_self, false),
                             item.reason.as_deref(),
                             Some(&msg.sender_jid.to_bare()),
                             &target_identity,
@@ -462,7 +462,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             &recipient,
                             target_occupant.affiliation,
                             new_role,
-                            MucPresenceStatus::new(is_self, true),
+                            MucPresenceStatus::new(is_self, false),
                             &target_identity,
                         );
                         presence_updates.push((recipient, presence));

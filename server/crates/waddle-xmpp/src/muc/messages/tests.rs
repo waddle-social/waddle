@@ -352,3 +352,28 @@ fn build_subject_message_delay_stamp_round_trips_as_xep_0082_datetime() {
 
     assert_eq!(delay.stamp, original_stamp);
 }
+
+/// #1265 items 8+15: flipping `muc#roomconfig_changesubject` (or
+/// `maxusers`) alone is a non-privacy configuration change and MUST
+/// surface status 104 to occupants (XEP-0045 §10.2.1).
+#[test]
+fn changesubject_and_maxusers_flips_emit_status_104() {
+    let previous = RoomConfig::default();
+    let next = RoomConfig {
+        occupants_may_change_subject: true,
+        ..previous.clone()
+    };
+    assert_eq!(
+        config_change_status_codes(&previous, &next),
+        vec![MucConfigStatusCode::NonPrivacyConfigurationChange]
+    );
+
+    let next = RoomConfig {
+        max_occupants: 25,
+        ..previous.clone()
+    };
+    assert_eq!(
+        config_change_status_codes(&previous, &next),
+        vec![MucConfigStatusCode::NonPrivacyConfigurationChange]
+    );
+}

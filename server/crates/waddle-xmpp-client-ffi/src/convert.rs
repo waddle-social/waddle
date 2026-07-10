@@ -489,6 +489,9 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
         markup_spans: vec![],
         references: vec![],
         request_displayed_marker: opts.request_displayed_marker,
+        // The Apple FFI has no MUC-PM send surface yet; the marker is a
+        // wasm/chat-side concern (#1256). Wire shape unchanged for FFI.
+        muc_pm: false,
         link_preview_token: opts
             .link_preview_token
             .map(messaging::LinkPreviewToken::new)

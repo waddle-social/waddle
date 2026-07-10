@@ -265,6 +265,15 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
             .map(pubsub_event_to_js)
             .collect(),
         inbox_push: None,
+        carbon: message.carbon.map(carbon_to_js),
+    }
+}
+
+/// XEP-0280 typed direction → JS `{ sent, received }` marker (#1243).
+fn carbon_to_js(direction: messaging::CarbonDirection) -> WaddleCarbonMarker {
+    WaddleCarbonMarker {
+        sent: direction == messaging::CarbonDirection::Sent,
+        received: direction == messaging::CarbonDirection::Received,
     }
 }
 
@@ -384,6 +393,7 @@ pub(crate) fn inbox_push_to_js(
         extension_body_fallback: false,
         pubsub_events: Vec::new(),
         inbox_push: Some(inbox_entry_to_js(entry)),
+        carbon: None,
     }
 }
 
@@ -1465,6 +1475,47 @@ mod inbound_to_js_tests {
         );
 
         assert!(archived_to_js(archived).is_none());
+    }
+
+    /// XEP-0280 (#1243): the typed carbon direction crosses the JS
+    /// boundary as `{ sent, received }` so the chat layer can dedupe and
+    /// attribute unwrapped copies; direct messages carry no marker.
+    #[test]
+    fn inbound_to_js_serializes_carbon_direction_marker() {
+        let mut sent = parse_message_element(
+            "<message xmlns='jabber:client' type='chat' id='c1' \
+                      from='alice@example.com/phone' to='bob@example.com'>\
+               <body>sent elsewhere</body>\
+             </message>",
+        );
+        sent.carbon = Some(messaging::CarbonDirection::Sent);
+        let value = serde_json::to_value(inbound_to_js(sent)).expect("serializes");
+        assert_eq!(
+            value.get("carbon"),
+            Some(&serde_json::json!({ "sent": true, "received": false }))
+        );
+
+        let mut received = parse_message_element(
+            "<message xmlns='jabber:client' type='chat' id='c2' \
+                      from='bob@example.com/desktop' to='alice@example.com/phone'>\
+               <body>received elsewhere</body>\
+             </message>",
+        );
+        received.carbon = Some(messaging::CarbonDirection::Received);
+        let value = serde_json::to_value(inbound_to_js(received)).expect("serializes");
+        assert_eq!(
+            value.get("carbon"),
+            Some(&serde_json::json!({ "sent": false, "received": true }))
+        );
+
+        let direct = parse_message_element(
+            "<message xmlns='jabber:client' type='chat' id='c3' \
+                      from='bob@example.com/desktop' to='alice@example.com/phone'>\
+               <body>direct</body>\
+             </message>",
+        );
+        let value = serde_json::to_value(inbound_to_js(direct)).expect("serializes");
+        assert_eq!(value.get("carbon"), None);
     }
 
     #[test]

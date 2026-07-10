@@ -114,6 +114,24 @@ describe("#1221 reconnect catch-up is bounded per conversation", () => {
     expect(failures).toEqual([{ kind: "dm", key: "bob@example.com" }]);
   });
 
+  test("RESUMED page-budget exhaustion emits catchupFailure (gap affordance, #1267)", async () => {
+    // A transient failure on a resumed stream stays silent (the stream
+    // itself is gap-free), but budget exhaustion means messages beyond
+    // the cap were genuinely not replayed — a real archive gap that the
+    // wholesale-reload fallback must close.
+    const { state, failures } = makeClient();
+    const fetch_room_history_page = forwardPages();
+    const xmpp = { fetch_room_history_page };
+    state.xmpp = xmpp;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:00.000Z", "archive-0");
+
+    await state.runSessionReady(xmpp, { type: "resumed" });
+
+    expect(fetch_room_history_page).toHaveBeenCalledTimes(MAX_PAGES);
+    expect(failures).toEqual([{ kind: "room", key: "c1@muc.example.com" }]);
+  });
+
   test("dm timestamp catch-up stops at the page budget and fails over", async () => {
     const { state, failures } = makeClient();
     const fetch_dm_history_page = backwardPages();

@@ -120,7 +120,13 @@ impl RoomHandler for MucCanonicalizeHandler {
             if !is_stanza_id_element(p) {
                 return true;
             }
-            match p.attr("by").and_then(|raw| raw.parse::<BareJid>().ok()) {
+            // Trim before parsing — see the DM-path canonicalize note:
+            // a whitespace-padded `by=` must not evade the §5 strip.
+            match p
+                .attr("by")
+                .map(str::trim)
+                .and_then(|raw| raw.parse::<BareJid>().ok())
+            {
                 Some(parsed) => parsed != *ctx.room,
                 None => true,
             }
@@ -228,6 +234,7 @@ mod tests {
             durable_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated: false,
+            room_occupants_may_change_subject: false,
             room_members_only: false,
             pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,
@@ -281,6 +288,7 @@ mod tests {
             durable_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated: false,
+            room_occupants_may_change_subject: false,
             room_members_only: false,
             pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,

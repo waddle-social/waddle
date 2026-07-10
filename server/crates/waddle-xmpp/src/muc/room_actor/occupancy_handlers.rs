@@ -4,8 +4,8 @@ use jid::{BareJid, FullJid};
 use kameo::message::Context;
 
 use super::{
-    affiliation_overflows_full_room, JoinExistingOccupant, JoinOutcome, LeaveOutcome,
-    PresenceUpdateOutcome, RoomActor, RoomActorError,
+    affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
+    LeaveOutcome, PresenceUpdateOutcome, RoomActor, RoomActorError,
 };
 use crate::muc::RoomConfig;
 use crate::types::Affiliation;
@@ -101,9 +101,17 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         }
 
         if !self.room.can_user_join(&msg.sender_jid.to_bare()) {
-            return Err(RoomActorError::JoinForbidden {
-                members_only: self.room.config.members_only,
-            });
+            // XEP-0045 §7.2.8: a ban (outcast) is <forbidden/> even in a
+            // members-only room — never <registration-required/>, which
+            // would invite the banned user to apply for membership
+            // (#1265 item 1).
+            let reason =
+                if self.room.get_affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast {
+                    JoinDenialReason::Banned
+                } else {
+                    JoinDenialReason::MembersOnly
+                };
+            return Err(RoomActorError::JoinForbidden { reason });
         }
         // #1107: the same FULL JID must never hold two occupancies.
         // Sibling sessions of the same BARE jid legitimately share one

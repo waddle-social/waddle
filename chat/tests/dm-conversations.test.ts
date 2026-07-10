@@ -276,6 +276,155 @@ describe("useDirectMessageConversations", () => {
     expect(composable.totalUnreadCount.value).toBe(1);
   });
 
+  test("receiveIncomingDm files a MUC PM under the full occupant JID (#1256)", async () => {
+    const { composable } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({
+      mucPm: true,
+      peerJid: "room@muc.example.com/juliet",
+      fromJid: "room@muc.example.com/juliet",
+      nick: "juliet",
+      body: "occupant whisper",
+    }));
+
+    expect(composable.conversations.value).toHaveLength(1);
+    // XEP-0045 §7.5: the conversation identity is the occupant JID —
+    // keying by the room bare JID would make a reply broadcast.
+    expect(composable.conversations.value[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      // Room provenance in the display name keeps an occupant nick from
+      // rendering byte-identical to a real account's DM entry.
+      peerUsername: "juliet (room)",
+      mucPm: true,
+      mucPmRoomJid: "room@muc.example.com",
+      lastMessageBody: "occupant whisper",
+    });
+
+    // Opening/marking the occupant conversation must not fold it back
+    // into a room-bare-keyed sibling.
+    await composable.openDm("room@muc.example.com/juliet");
+    expect(composable.activePeerJid.value).toBe("room@muc.example.com/juliet");
+    expect(composable.conversations.value).toHaveLength(1);
+  });
+
+  test("persist/restore round-trips occupant-keyed MUC-PM conversations", async () => {
+    // #1256 P1 regression guard: restore() must NOT bare-fold an
+    // occupant key back to the room bare JID — a reply from the folded
+    // row would broadcast to the room.
+    //
+    // bun tests have no DOM: install a minimal window.sessionStorage so
+    // the persist/restore pair actually executes.
+    const store = new Map<string, string>();
+    (globalThis as unknown as { window?: unknown }).window = {
+      sessionStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    };
+    const { composable, session } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({
+      mucPm: true,
+      peerJid: "room@muc.example.com/juliet",
+      fromJid: "room@muc.example.com/juliet",
+      nick: "juliet",
+      body: "before reload",
+    }));
+    await composable.openDm("room@muc.example.com/juliet");
+    await nextTick(); // flush the deep persist watcher
+
+    // Simulate a reload: a fresh composable for the same session
+    // restores the persisted blob via its immediate session watch.
+    const { composable: reloaded } = makeComposable({ jid: session.value!.jid });
+    await nextTick();
+
+    expect(reloaded.conversations.value[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      mucPm: true,
+    });
+    expect(reloaded.activePeerJid.value).toBe("room@muc.example.com/juliet");
+    delete (globalThis as unknown as { window?: unknown }).window;
+  });
+
+  test("restore keeps occupant keys even in blobs persisted before the mucPm flag", async () => {
+    const store = new Map<string, string>();
+    (globalThis as unknown as { window?: unknown }).window = {
+      sessionStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    };
+    // A blob written by an older build: occupant-keyed row without the
+    // flag. Normal DM rows are always persisted bare, so the resource
+    // heuristic must keep the key instead of folding it to the room.
+    store.set("waddle.chat.dms.alice@example.com", JSON.stringify({
+      conversations: [{
+        peerJid: "room@muc.example.com/juliet",
+        peerUsername: "juliet (room)",
+        unreadCount: 0,
+      }],
+      activePeerJid: null,
+    }));
+
+    const { composable } = makeComposable();
+    await nextTick();
+
+    expect(composable.conversations.value[0]?.peerJid).toBe("room@muc.example.com/juliet");
+    delete (globalThis as unknown as { window?: unknown }).window;
+  });
+
+  test("inbox entries for known MUC rooms are skipped (no phantom room-bare DM)", async () => {
+    const client = makeClient([
+      {
+        partner: "room@muc.example.com",
+        kind: "direct",
+        lastStanzaId: "sid-pm",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 1,
+        preview: "occupant whisper",
+      },
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:05:00Z"),
+        unread: 0,
+        preview: "hi",
+      },
+    ]);
+    (client as unknown as { isKnownMucRoom: (jid: string) => boolean }).isKnownMucRoom =
+      (jid: string) => jid === "room@muc.example.com";
+    (client as unknown as { isMucPmPeer: (jid: string) => boolean }).isMucPmPeer = () => false;
+    const { composable } = makeComposable({ client });
+
+    // A phantom room-bare conversation left over from before the room
+    // became known must be purged by the hydrate.
+    composable.receiveIncomingDm(makeDmMessage({
+      peerJid: "room@muc.example.com",
+      fromJid: "room@muc.example.com",
+      nick: "room",
+      body: "old misfiled row",
+    }));
+
+    await composable.hydrateFromInbox();
+
+    expect(composable.conversations.value.map((c) => c.peerJid)).toEqual(["bob@example.com"]);
+  });
+
+  test("restamp-only dispatches never touch conversations or unread", () => {
+    const { composable } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({ body: "real copy" }));
+    expect(composable.conversations.value[0].unreadCount).toBe(1);
+
+    // The carbon restamp pass for the same stanza must be a no-op here.
+    composable.receiveIncomingDm(makeDmMessage({
+      body: "real copy",
+      timestampRefreshOnly: true,
+    }));
+    expect(composable.conversations.value[0].unreadCount).toBe(1);
+    expect(composable.conversations.value).toHaveLength(1);
+  });
+
   test("receiveIncomingDm does not increment unread for active conversation", async () => {
     const { composable } = makeComposable();
     await composable.openDm("bob@example.com");

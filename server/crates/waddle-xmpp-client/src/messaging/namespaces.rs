@@ -1,5 +1,7 @@
 pub(crate) const NS_DELAY: &str = "urn:xmpp:delay";
-pub(crate) const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
+/// `urn:xmpp:sid:0` — XEP-0359 Unique and Stable Stanza IDs. `pub` so the
+/// XEP-0115 caps advertisement references the canonical constant.
+pub const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
 pub(crate) const NS_ORIGIN_ID: &str = "urn:xmpp:sid:0";
 pub const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
 pub(crate) const NS_MARKUP: &str = "urn:xmpp:markup:0";
@@ -29,7 +31,6 @@ pub(crate) const NS_RDF_SYNTAX: &str = "http://www.w3.org/1999/02/22-rdf-syntax-
 pub(crate) const NS_OPENGRAPH: &str = "https://ogp.me/ns#";
 pub(crate) const NS_OPENGRAPH_IMAGE: &str = "https://ogp.me/ns#image:";
 pub(crate) const NS_OPENGRAPH_VIDEO: &str = "https://ogp.me/ns#video:";
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub(crate) const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub(crate) const NS_STICKERS: &str = "urn:xmpp:stickers:0";
