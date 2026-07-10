@@ -114,7 +114,7 @@ in parallel; within a bundle, top-to-bottom.
 **J1 — Client chat `[one PR bundle]`**
 1. ✅ **#1243 — High: WASM core now unwraps normal XEP-0280 carbons (§11 own-bare-JID verified, forged envelopes fully ignored) and surfaces the inner message with a `carbon` direction marker; TS renders/dedupes it (dead `carbon:*` compat handlers deleted). DONE (PR #1273).**
 2. ✅ **#1256 — MUC PMs (`type=chat` from a known room's occupant JID) file under the full occupant JID; replies/chat-states/reactions/corrections address `room@service/nick` with full-occupant-JID sender checks. DONE (PR #1273).**
-3. ✅ **#1258 — caps now advertise message-retract:1, message-moderate:1, reactions:0, message-correct:0, sid:0 (implement ⇒ advertise; ver-string recomputed). DONE (PR #1273).**
+3. ✅ **#1258 — caps now advertise message-retract:1, reactions:0, message-correct:0, sid:0 (implement ⇒ advertise; ver-string recomputed). moderate:1 deliberately omitted — XEP-0425 defines it for the groupchat service only. DONE (PR #1273).**
 4. ✅ **#1255 — `join_room` always sends `<history maxstanzas='0'/>` (XEP-0045 §7.2.15); MAM catch-up is authoritative; `join_room_without_history` variant deleted. DONE (PR #1273).**
 5. ✅ **#1267 — client 1:1 minor cluster: 0424 fallback marker, `by`-verified catch-up dedupe (#466 residual), first-stanza-id consumers fixed, resumed catch-up budget-gap affordance, correction guards (no tombstone resurrection, occupant-JID match); `Date.now` item = forwarded-`<delay>` propagation (residual merge-window documented in PR #1273). DONE (PR #1273).**
 

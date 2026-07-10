@@ -2537,7 +2537,10 @@ export class BrowserXmppClient {
       const dedupeKey = this.carbonDedupKey(message);
       if (dedupeKey) {
         if (this.carbonDedupIds.has(dedupeKey)) {
-          this.carbonDedupIds.delete(dedupeKey);
+          // Duplicate/replayed copy — drop, but KEEP the entry: deleting
+          // it here would let an SM-replayed carbon of the same stanza
+          // look unseen and dispatch again (double unread/notification).
+          // The bounded map evicts entries by age instead.
           return;
         }
         // Remember direct deliveries too, so the pair collapses in
@@ -2664,8 +2667,12 @@ export class BrowserXmppClient {
     // with direct deliveries remembered too, a bare-folded key would let
     // one occupant's id swallow another occupant's message.
     const from = message.from ?? "";
+    const bare = bareJidKey(from);
+    // No sender identity → no sender-scoped key. A `|<id>` key would
+    // collide across unrelated from-less stanzas and mis-drop them.
+    if (!bare) return undefined;
     const slash = from.indexOf("/");
-    const sender = slash >= 0 ? `${bareJidKey(from)}/${from.slice(slash + 1)}` : bareJidKey(from);
+    const sender = slash >= 0 ? `${bare}/${from.slice(slash + 1)}` : bare;
     return `${sender}|${message.id}`;
   }
 

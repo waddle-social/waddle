@@ -3169,6 +3169,31 @@ describe("carbon forwarding", () => {
     expect(dmHandler).toHaveBeenCalledTimes(2);
   });
 
+  test("a replayed carbon after its direct duplicate was dropped still dedupes", () => {
+    // Qodo: deleting the dedupe entry when dropping the paired direct
+    // delivery let an SM-replayed carbon look unseen and dispatch again.
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    const carbonCopy = {
+      id: "c-replay-2",
+      type: "chat",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/tablet",
+      body: "carbon → direct dup → carbon replay",
+      carbon: { sent: false, received: true },
+    };
+    xmpp.emit("message", carbonCopy);
+    xmpp.emit("message", { ...carbonCopy, carbon: undefined }); // duplicate direct delivery
+    xmpp.emit("message", carbonCopy); // XEP-0198 replay of the carbon
+
+    expect(dmHandler).toHaveBeenCalledTimes(1);
+  });
+
   test("drops carbon-sent chat states and displayed markers (own activity elsewhere)", () => {
     const client = new BrowserXmppClient(session());
     const chatStateHandler = mock(() => undefined);
