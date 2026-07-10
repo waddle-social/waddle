@@ -633,18 +633,15 @@ async fn live_public_instant_room_items(
     // no per-room DB query — so only true instant rooms, normally zero
     // to a handful, cost one snapshot ask each, capped hard.
     const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
+    let mut candidates: Vec<BareJid> = room_jids
+        .into_iter()
+        .filter(|room_jid| room_jid.domain().as_str() == muc_domain)
+        .collect();
+    channel_backed
+        .retain_instant_rooms(state, &mut candidates)
+        .await;
     let mut items = Vec::new();
-    let mut scanned = 0usize;
-    for room_jid in room_jids {
-        if room_jid.domain().as_str() != muc_domain
-            || channel_backed.contains(state, &room_jid).await
-        {
-            continue;
-        }
-        scanned += 1;
-        if scanned > MAX_INSTANT_ROOM_SCAN {
-            break;
-        }
+    for room_jid in candidates.into_iter().take(MAX_INSTANT_ROOM_SCAN) {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };
@@ -733,19 +730,60 @@ struct ChannelBackedRooms {
 }
 
 impl ChannelBackedRooms {
-    /// Whether `room_jid` is catalog-backed. In-memory for the common
-    /// case; only a truncated catalog fetch falls back to a per-room
-    /// lookup for JIDs missing from the set.
-    async fn contains(&self, state: &WebSocketState, room_jid: &BareJid) -> bool {
-        if self.jids.contains(room_jid) {
-            return true;
+    /// Drop every catalog-backed room from `candidates`. In-memory for
+    /// the common (untruncated) case; a truncated catalog fetch issues
+    /// ONE batched membership query for the JIDs missing from the set
+    /// instead of a per-room lookup.
+    async fn retain_instant_rooms(&self, state: &WebSocketState, candidates: &mut Vec<BareJid>) {
+        candidates.retain(|room_jid| !self.jids.contains(room_jid));
+        if !self.truncated || candidates.is_empty() {
+            return;
         }
-        if !self.truncated {
-            return false;
+        let channel_ids: Vec<(BareJid, String)> = candidates
+            .iter()
+            .filter_map(|room_jid| {
+                waddle_xmpp::parse_managed_room_jid(room_jid)
+                    .map(|channel_id| (room_jid.clone(), channel_id))
+            })
+            .collect();
+        if channel_ids.is_empty() {
+            return;
         }
-        matches!(
-            get_managed_channel_for_room(state, room_jid).await,
-            Ok(Some(_))
-        )
+        let placeholders = vec!["?"; channel_ids.len()].join(", ");
+        let rows = state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQuery {
+                sql: format!("SELECT id FROM channels WHERE id IN ({placeholders})"),
+                params: channel_ids
+                    .iter()
+                    .map(|(_, channel_id)| channel_id.clone().into())
+                    .collect(),
+            })
+            .await;
+        let known: std::collections::HashSet<String> = match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| match row.into_iter().next() {
+                    Some(crate::db::Value::Text(id)) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+            Err(error) => {
+                warn!(error = %error, "Failed batched channel membership check for disco#items");
+                // Fail closed for listing purposes: treat lookup failure
+                // as "unknown", keeping candidates (their snapshot config
+                // still gates what gets listed).
+                return;
+            }
+        };
+        let backed: std::collections::HashSet<&BareJid> = channel_ids
+            .iter()
+            .filter(|(_, channel_id)| known.contains(channel_id))
+            .map(|(room_jid, _)| room_jid)
+            .collect();
+        candidates.retain(|room_jid| !backed.contains(room_jid));
     }
 }
