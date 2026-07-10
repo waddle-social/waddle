@@ -1,5 +1,6 @@
 import { computed, ref, watch } from "vue";
 import { barePeerJid, jidDomainOrEmpty, type BrowserXmppClient, type NotifyMode } from "@/lib/xmpp-client";
+import { retryRegisterPushDeviceAfterSessionExpired } from "@/lib/xmpp/push-register-result";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
 import {
@@ -465,14 +466,17 @@ export function usePushNotifications() {
     // app-id) push node, binds the browser's PushSubscription, and
     // returns BOTH the assigned XEP-0357 node id and the Push
     // Service-assigned device id in the stage-4 result form.
-    const registered = await xmppClient.registerPushDevice({
+    const registerOptions = {
       serviceJid,
       appId: APP_ID_WEB,
       environment: PUSH_ENVIRONMENT,
       endpoint,
       p256dh,
       auth,
-    });
+    } as const;
+    const registered = await retryRegisterPushDeviceAfterSessionExpired(() =>
+      xmppClient.registerPushDevice(registerOptions),
+    );
     if (!registered) {
       console.warn(
         "[notifications] XEP-0050 register-device failed; push subscription will not be delivered",

@@ -24,6 +24,7 @@ fn parse_error() -> ClientError {
         error_type: StanzaErrorType::Cancel,
         condition: "bad-request".to_string(),
         text: Some("response could not be parsed".to_string()),
+        application_condition: None,
     })
 }
 
@@ -257,6 +258,7 @@ impl DiscoveryExt for ClientHandle {
                         error_type: StanzaErrorType::Cancel,
                         condition: "bad-request".to_string(),
                         text: Some(format!("invalid MUC fallback JID: {e}")),
+                        application_condition: None,
                     })
                 })?;
         let fallback_spaces: BareJid =
@@ -267,6 +269,7 @@ impl DiscoveryExt for ClientHandle {
                         error_type: StanzaErrorType::Cancel,
                         condition: "bad-request".to_string(),
                         text: Some(format!("invalid Spaces fallback JID: {e}")),
+                        application_condition: None,
                     })
                 })?;
 

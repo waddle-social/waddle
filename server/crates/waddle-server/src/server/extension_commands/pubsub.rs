@@ -238,6 +238,7 @@ pub(crate) async fn extension_command_result(
     }
 
     waddle_xmpp::commands::CommandResult::Completed {
+        session_id: None,
         form: result_form,
         notes,
     }
@@ -301,6 +302,7 @@ mod tests {
                 .await;
 
         let CommandResult::Completed {
+            session_id: None,
             form: Some(_),
             notes,
         } = result

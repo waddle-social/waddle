@@ -178,6 +178,84 @@ async fn prune_disabled_nodes_for_owner_tx(
     Ok(())
 }
 
+fn validate_app_id(app_id: &str) -> Result<(), XmppError> {
+    if app_id.is_empty() {
+        return Err(XmppError::bad_request(Some(
+            "Push Service app-id is required".to_string(),
+        )));
+    }
+    validate_len("Push Service app-id", app_id, MAX_APP_ID_LEN)
+}
+
+pub(super) async fn ensure_node_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &BareJid,
+    app_id: &str,
+    now_ms: i64,
+) -> Result<PushServiceNode, XmppError> {
+    validate_app_id(app_id)?;
+    lock_owner_tx(tx, owner_bare_jid, now_ms).await?;
+    if let Some(node) = find_node_by_owner_app_tx(tx, owner_bare_jid, app_id).await? {
+        if node.status == PushNodeStatus::Active {
+            return Ok(node);
+        }
+        if count_active_nodes_for_owner_tx(tx, owner_bare_jid).await? >= MAX_PUSH_NODES_PER_OWNER {
+            return Err(XmppError::bad_request(Some(format!(
+                "Push Service active node quota exceeded; max {MAX_PUSH_NODES_PER_OWNER} active nodes per owner"
+            ))));
+        }
+        tx.execute(
+            r#"
+            UPDATE push_nodes
+            SET status = ?, updated_at_ms = ?
+            WHERE node = ?
+            "#,
+            crate::db_params![PushNodeStatus::Active.as_str(), now_ms, node.node()],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        return get_node_tx(tx, node.node())
+            .await?
+            .ok_or_else(|| XmppError::internal("Push Service node was not persisted"));
+    }
+    prune_disabled_nodes_for_owner_tx(tx, owner_bare_jid, MAX_RETAINED_DISABLED_NODES_PER_OWNER)
+        .await?;
+    if count_active_nodes_for_owner_tx(tx, owner_bare_jid).await? >= MAX_PUSH_NODES_PER_OWNER {
+        return Err(XmppError::bad_request(Some(format!(
+            "Push Service active node quota exceeded; max {MAX_PUSH_NODES_PER_OWNER} active nodes per owner"
+        ))));
+    }
+
+    let node_name = format!("urn:waddle:push-node:{}", uuid::Uuid::new_v4());
+    tx.execute(
+        r#"
+        INSERT INTO push_nodes (
+            node,
+            owner_bare_jid,
+            app_id,
+            status,
+            created_at_ms,
+            updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(owner_bare_jid, app_id) DO NOTHING
+        "#,
+        crate::db_params![
+            node_name,
+            owner_bare_jid.to_string(),
+            app_id,
+            PushNodeStatus::Active.as_str(),
+            now_ms,
+            now_ms,
+        ],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+
+    find_node_by_owner_app_tx(tx, owner_bare_jid, app_id)
+        .await?
+        .ok_or_else(|| XmppError::internal("Push Service node was not persisted"))
+}
+
 fn decode_node(row: &crate::db::Row) -> Result<PushServiceNode, XmppError> {
     let owner_bare_jid: String = row
         .get(1)
@@ -211,105 +289,13 @@ impl DatabasePushServiceStore {
         owner_bare_jid: &BareJid,
         app_id: &str,
     ) -> Result<PushServiceNode, XmppError> {
-        if app_id.is_empty() {
-            return Err(XmppError::bad_request(Some(
-                "Push Service app-id is required".to_string(),
-            )));
-        }
-        validate_len("Push Service app-id", app_id, MAX_APP_ID_LEN)?;
-        if let Some(node) = self.find_node_by_owner_app(owner_bare_jid, app_id).await? {
-            if node.status == PushNodeStatus::Active {
-                self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
-                    .await?;
-                return Ok(node);
-            }
-        }
-
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
-        if let Some(node) = find_node_by_owner_app_tx(&mut tx, owner_bare_jid, app_id).await? {
-            if node.status == PushNodeStatus::Active {
-                tx.commit()
-                    .await
-                    .map_err(|error| XmppError::internal(error.to_string()))?;
-                self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
-                    .await?;
-                return Ok(node);
-            }
-            if count_active_nodes_for_owner_tx(&mut tx, owner_bare_jid).await?
-                >= MAX_PUSH_NODES_PER_OWNER
-            {
-                return Err(XmppError::bad_request(Some(format!(
-                    "Push Service active node quota exceeded; max {MAX_PUSH_NODES_PER_OWNER} active nodes per owner"
-                ))));
-            }
-            tx.execute(
-                r#"
-                UPDATE push_nodes
-                SET status = ?, updated_at_ms = ?
-                WHERE node = ?
-                "#,
-                crate::db_params![PushNodeStatus::Active.as_str(), now_ms, node.node()],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-            let node = get_node_tx(&mut tx, node.node())
-                .await?
-                .ok_or_else(|| XmppError::internal("Push Service node was not persisted"))?;
-            tx.commit()
-                .await
-                .map_err(|error| XmppError::internal(error.to_string()))?;
-            self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
-                .await?;
-            return Ok(node);
-        }
-        prune_disabled_nodes_for_owner_tx(
-            &mut tx,
-            owner_bare_jid,
-            MAX_RETAINED_DISABLED_NODES_PER_OWNER,
-        )
-        .await?;
-        if count_active_nodes_for_owner_tx(&mut tx, owner_bare_jid).await?
-            >= MAX_PUSH_NODES_PER_OWNER
-        {
-            return Err(XmppError::bad_request(Some(format!(
-                "Push Service active node quota exceeded; max {MAX_PUSH_NODES_PER_OWNER} active nodes per owner"
-            ))));
-        }
-
-        let node_name = format!("urn:waddle:push-node:{}", uuid::Uuid::new_v4());
-        tx.execute(
-            r#"
-            INSERT INTO push_nodes (
-                node,
-                owner_bare_jid,
-                app_id,
-                status,
-                created_at_ms,
-                updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(owner_bare_jid, app_id) DO NOTHING
-            "#,
-            crate::db_params![
-                node_name,
-                owner_bare_jid.to_string(),
-                app_id,
-                PushNodeStatus::Active.as_str(),
-                now_ms,
-                now_ms,
-            ],
-        )
-        .await
-        .map_err(|error| XmppError::internal(error.to_string()))?;
-
-        let node = find_node_by_owner_app_tx(&mut tx, owner_bare_jid, app_id)
-            .await?
-            .ok_or_else(|| XmppError::internal("Push Service node was not persisted"))?;
+        let node = ensure_node_tx(&mut tx, owner_bare_jid, app_id, now_ms).await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -466,31 +452,6 @@ impl DatabasePushServiceStore {
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         Ok(affected_devices)
-    }
-
-    async fn find_node_by_owner_app(
-        &self,
-        owner_bare_jid: &BareJid,
-        app_id: &str,
-    ) -> Result<Option<PushServiceNode>, XmppError> {
-        let mut rows = self
-            .query(
-                r#"
-                SELECT node, owner_bare_jid, app_id, status, created_at_ms, updated_at_ms
-                FROM push_nodes
-                WHERE owner_bare_jid = ? AND app_id = ?
-                "#,
-                crate::db_params![owner_bare_jid.to_string(), app_id],
-            )
-            .await?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(decode_node(&row)?))
     }
 }
 

@@ -64,6 +64,24 @@ fn bare_jid(value: &str) -> jid::BareJid {
     value.parse().expect("valid bare jid")
 }
 
+fn submit_form_with_form_type(form_type: Option<&str>) -> Element {
+    let mut form = Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    if let Some(form_type) = form_type {
+        form = form.append(
+            Element::builder("field", NS_DATA_FORMS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .append(
+                    Element::builder("value", NS_DATA_FORMS)
+                        .append(form_type)
+                        .build(),
+                )
+                .build(),
+        );
+    }
+    form.build()
+}
+
 #[test]
 fn test_ns_push_constant() {
     assert_eq!(NS_PUSH, "urn:xmpp:push:0");
@@ -170,7 +188,10 @@ fn test_parse_push_enable_with_options() {
     assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert_eq!(enable.options.len(), 2);
-    assert!(enable.publish_options.is_some());
+    assert!(matches!(
+        enable.publish_options,
+        PublishOptionsParse::Valid(_)
+    ));
 
     assert!(enable
         .options
@@ -190,7 +211,7 @@ fn test_parse_push_enable_without_options() {
     assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert!(enable.options.is_empty());
-    assert!(enable.publish_options.is_none());
+    assert_eq!(enable.publish_options, PublishOptionsParse::Absent);
 }
 
 #[test]
@@ -219,7 +240,7 @@ fn test_parse_push_enable_ignores_provider_attribute_options() {
     assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert!(enable.options.is_empty());
-    assert!(enable.publish_options.is_none());
+    assert_eq!(enable.publish_options, PublishOptionsParse::Absent);
 }
 
 #[test]
@@ -229,7 +250,76 @@ fn test_parse_push_enable_without_node() {
 
     assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert!(enable.node.is_none());
-    assert!(enable.publish_options.is_none());
+    assert_eq!(enable.publish_options, PublishOptionsParse::Absent);
+}
+
+#[test]
+fn test_parse_push_enable_wrong_publish_options_form_type_is_invalid() {
+    let mut enable_elem = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
+        .build();
+    enable_elem.append_child(submit_form_with_form_type(Some("jabber:x:oob")));
+    let iq = Iq::Set {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: enable_elem,
+    };
+
+    let enable = parse_push_enable(&iq).expect("enable");
+    assert!(enable.options.is_empty());
+    assert_eq!(enable.publish_options, PublishOptionsParse::Invalid);
+}
+
+#[test]
+fn test_parse_push_enable_missing_publish_options_form_type_is_invalid() {
+    let mut enable_elem = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
+        .build();
+    enable_elem.append_child(submit_form_with_form_type(None));
+    let iq = Iq::Set {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: enable_elem,
+    };
+
+    let enable = parse_push_enable(&iq).expect("enable");
+    assert!(enable.options.is_empty());
+    assert_eq!(enable.publish_options, PublishOptionsParse::Invalid);
+}
+
+// Greptile review: a VALID publish-options form followed by a second
+// submit form (wrong FORM_TYPE or even another valid one) must not
+// slip through on first-match — multiple submit forms are ambiguous
+// and therefore Invalid.
+#[test]
+fn test_parse_push_enable_multiple_submit_forms_are_invalid() {
+    let mut enable_elem = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
+        .build();
+    enable_elem.append_child(submit_form_with_form_type(Some(
+        "http://jabber.org/protocol/pubsub#publish-options",
+    )));
+    enable_elem.append_child(submit_form_with_form_type(Some("jabber:x:oob")));
+    let iq = Iq::Set {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: enable_elem,
+    };
+
+    let enable = parse_push_enable(&iq).expect("enable");
+    assert_eq!(enable.publish_options, PublishOptionsParse::Invalid);
 }
 
 #[test]
@@ -483,24 +573,13 @@ fn test_parse_data_form_with_missing_var() {
 
 #[test]
 fn test_non_publish_options_form_is_not_registration_publish_options() {
-    let value = Element::builder("value", NS_DATA_FORMS)
-        .append("not-publish-options")
-        .build();
-    let field = Element::builder("field", NS_DATA_FORMS)
-        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
-        .append(value)
-        .build();
-    let form = Element::builder("x", NS_DATA_FORMS)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
-        .append(field)
-        .build();
     let mut enable_elem = Element::builder("enable", NS_PUSH)
         .attr(
             minidom::rxml::xml_ncname!("jid").to_owned(),
             "push.example.com",
         )
         .build();
-    enable_elem.append_child(form);
+    enable_elem.append_child(submit_form_with_form_type(Some("not-publish-options")));
     let iq = Iq::Set {
         from: None,
         to: None,
@@ -510,7 +589,7 @@ fn test_non_publish_options_form_is_not_registration_publish_options() {
 
     let enable = parse_push_enable(&iq).expect("enable");
     assert!(enable.options.is_empty());
-    assert!(enable.publish_options.is_none());
+    assert_eq!(enable.publish_options, PublishOptionsParse::Invalid);
 }
 
 #[test]
@@ -519,7 +598,7 @@ fn test_push_enable_struct_debug() {
         jid: bare_jid("push.example.com"),
         node: Some("web-push".to_string()),
         options: vec![("key".to_string(), "val".to_string())],
-        publish_options: None,
+        publish_options: PublishOptionsParse::Absent,
     };
     let debug = format!("{:?}", enable);
     assert!(debug.contains("push.example.com"));
@@ -542,7 +621,7 @@ fn test_push_enable_clone_eq() {
         jid: bare_jid("push.example.com"),
         node: Some("node1".to_string()),
         options: vec![("k".to_string(), "v".to_string())],
-        publish_options: None,
+        publish_options: PublishOptionsParse::Absent,
     };
     let cloned = enable.clone();
     assert_eq!(enable, cloned);

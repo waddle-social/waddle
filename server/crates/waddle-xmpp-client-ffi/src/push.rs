@@ -66,6 +66,23 @@ impl WaddleClient {
         let handle = self.clone_handle().await?;
         let env: waddle_xmpp_client::push::PushEnvironment = environment.into();
         let creds: waddle_xmpp_client::push::PushDeviceCredentials = credentials.into();
+        let push_service_jid =
+            match waddle_xmpp_client::push::PushServiceJid::new(&push_service_jid) {
+                Ok(value) => value,
+                Err(e) => {
+                    self.listener
+                        .on_error(format!("register_push_device failed: {e}"));
+                    return None;
+                }
+            };
+        let app_id = match waddle_xmpp_client::push::PushAppId::new(&app_id) {
+            Ok(value) => value,
+            Err(e) => {
+                self.listener
+                    .on_error(format!("register_push_device failed: {e}"));
+                return None;
+            }
+        };
         match waddle_xmpp_client::push::register_push_device(
             &handle,
             &push_service_jid,

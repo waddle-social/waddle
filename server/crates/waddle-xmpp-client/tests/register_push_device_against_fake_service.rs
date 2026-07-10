@@ -7,10 +7,13 @@
 use std::cell::RefCell;
 
 use minidom::Element;
-use waddle_xmpp_client::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
+use waddle_xmpp_client::error::{
+    parse_stanza_error, ClientError, ClientResult, StanzaError, StanzaErrorType,
+};
 use waddle_xmpp_client::push::{
-    register_push_device, CommandDriver, PushDeviceCredentials, PushEnvironment,
-    REGISTER_DEVICE_FORM_TYPE, REGISTER_DEVICE_NODE,
+    register_push_device, CommandDriver, PushAppId, PushDeviceCredentials, PushEnvironment,
+    PushRegistrationError, PushServiceJid, RegisterDeviceResult, REGISTER_DEVICE_FORM_TYPE,
+    REGISTER_DEVICE_NODE,
 };
 use waddle_xmpp_client::xep::xep0050::NS_COMMANDS;
 
@@ -52,7 +55,19 @@ fn protocol_error(text: &str) -> ClientError {
         error_type: StanzaErrorType::Cancel,
         condition: "bad-request".to_string(),
         text: Some(text.to_string()),
+        application_condition: None,
     })
+}
+
+async fn register_test_device(
+    driver: &ScriptedDriver,
+    app_id: &str,
+    environment: PushEnvironment,
+    credentials: &PushDeviceCredentials,
+) -> ClientResult<RegisterDeviceResult> {
+    let push_service_jid = PushServiceJid::new("push.example.com")?;
+    let app_id = PushAppId::new(app_id)?;
+    register_push_device(driver, &push_service_jid, &app_id, environment, credentials).await
 }
 
 fn iq_with_command(command: Element) -> Element {
@@ -148,6 +163,29 @@ fn completed_response_with_outcome(session_id: &str, node_id: &str, device_id: &
     iq_with_command(command)
 }
 
+fn session_expired_iq_error() -> Element {
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "push.example.com",
+        )
+        .append(
+            Element::builder("error", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "cancel")
+                // Conformant RFC 6120 §8.3 shape: the defined condition
+                // (`not-allowed`, what the real server renders for
+                // session-expired) PLUS the XEP-0050 application
+                // condition. The client must key on the latter.
+                .append(
+                    Element::builder("not-allowed", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+                )
+                .append(Element::builder("session-expired", NS_COMMANDS).build())
+                .build(),
+        )
+        .build()
+}
+
 #[tokio::test]
 async fn register_push_device_completes_multi_step_dance() {
     let driver = ScriptedDriver::new(vec![
@@ -163,9 +201,8 @@ async fn register_push_device_completes_multi_step_dance() {
         p256dh: "p256-key".to_string(),
         auth: "auth-secret".to_string(),
     };
-    let outcome = register_push_device(
+    let outcome = register_test_device(
         &driver,
-        "push.example.com",
         "app-web",
         PushEnvironment::Production,
         &credentials,
@@ -256,28 +293,13 @@ async fn register_push_device_rejects_completed_with_mismatched_sessionid() {
     let credentials = PushDeviceCredentials::Apns {
         device_token: "t".to_string(),
     };
-    let err = register_push_device(
-        &driver,
-        "push.example.com",
-        "app-ios",
-        PushEnvironment::Sandbox,
-        &credentials,
-    )
-    .await
-    .expect_err("mismatched sessionid rejected");
-    match err {
-        ClientError::StanzaError(stanza_err) => {
-            assert!(
-                stanza_err
-                    .text
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("sessionid"),
-                "diagnostic must name the sessionid mismatch; got: {stanza_err:?}"
-            );
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    let err = register_test_device(&driver, "app-ios", PushEnvironment::Sandbox, &credentials)
+        .await
+        .expect_err("mismatched sessionid rejected");
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::SessionIdMismatch)
+    ));
     // Both IQs went out, but the attacker's outcome was NOT persisted —
     // the composer returned an error instead of a RegisterDeviceResult.
     assert_eq!(driver.transcript().len(), 2);
@@ -289,18 +311,41 @@ async fn register_push_device_propagates_transport_error_from_stage_1() {
     let credentials = PushDeviceCredentials::Apns {
         device_token: "apns-token".to_string(),
     };
-    let err = register_push_device(
-        &driver,
-        "push.example.com",
-        "app-ios",
-        PushEnvironment::Sandbox,
-        &credentials,
-    )
-    .await
-    .expect_err("transport error propagates");
+    let err = register_test_device(&driver, "app-ios", PushEnvironment::Sandbox, &credentials)
+        .await
+        .expect_err("transport error propagates");
     assert!(matches!(err, ClientError::Disconnected));
     // We MUST NOT have sent stage 3 after stage 1 failed.
     assert_eq!(driver.transcript().len(), 1);
+}
+
+#[tokio::test]
+async fn register_push_device_maps_stage_4_session_expired_stanza_error() {
+    let session_expired = session_expired_iq_error();
+    let driver = ScriptedDriver::new(vec![
+        Ok(executing_response_with_form("session-1")),
+        Err(ClientError::StanzaError(parse_stanza_error(
+            &session_expired,
+        ))),
+    ]);
+    let credentials = PushDeviceCredentials::WebPush {
+        endpoint: "e".to_string(),
+        p256dh: "p".to_string(),
+        auth: "a".to_string(),
+    };
+    let err = register_test_device(
+        &driver,
+        "app-web",
+        PushEnvironment::Production,
+        &credentials,
+    )
+    .await
+    .expect_err("session-expired stanza error rejected");
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::SessionExpired)
+    ));
+    assert_eq!(driver.transcript().len(), 2);
 }
 
 #[tokio::test]
@@ -321,28 +366,18 @@ async fn register_push_device_rejects_stage_2_without_session_id() {
     let credentials = PushDeviceCredentials::Fcm {
         registration_token: "t".to_string(),
     };
-    let err = register_push_device(
+    let err = register_test_device(
         &driver,
-        "push.example.com",
         "app-android",
         PushEnvironment::Production,
         &credentials,
     )
     .await
     .expect_err("missing sessionid rejected");
-    match err {
-        ClientError::StanzaError(stanza_err) => {
-            assert!(
-                stanza_err
-                    .text
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("sessionid"),
-                "diagnostic text must name the missing sessionid; got: {stanza_err:?}"
-            );
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::MissingSessionId)
+    ));
 }
 
 #[tokio::test]
@@ -387,16 +422,13 @@ async fn register_push_device_rejects_completed_without_device_id_field() {
     let credentials = PushDeviceCredentials::Apns {
         device_token: "t".to_string(),
     };
-    let err = register_push_device(
-        &driver,
-        "push.example.com",
-        "app-ios",
-        PushEnvironment::Sandbox,
-        &credentials,
-    )
-    .await
-    .expect_err("missing device-id field rejected");
-    assert!(matches!(err, ClientError::StanzaError(_)));
+    let err = register_test_device(&driver, "app-ios", PushEnvironment::Sandbox, &credentials)
+        .await
+        .expect_err("missing device-id field rejected");
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::MalformedResultForm { .. })
+    ));
 }
 
 #[tokio::test]
@@ -429,9 +461,8 @@ async fn register_push_device_rejects_completed_without_node_field() {
         p256dh: "p".to_string(),
         auth: "a".to_string(),
     };
-    let err = register_push_device(
+    let err = register_test_device(
         &driver,
-        "push.example.com",
         "app-web",
         PushEnvironment::Production,
         &credentials,
@@ -439,8 +470,8 @@ async fn register_push_device_rejects_completed_without_node_field() {
     .await
     .expect_err("missing node field rejected");
     match err {
-        ClientError::StanzaError(stanza_err) => {
-            assert!(stanza_err.text.as_deref().unwrap_or("").contains("'node'"));
+        ClientError::PushRegistration(PushRegistrationError::MalformedResultForm { reason }) => {
+            assert!(reason.contains("'node'"));
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -470,16 +501,21 @@ async fn register_push_device_rejects_stage_4_canceled_status() {
         p256dh: "p".to_string(),
         auth: "a".to_string(),
     };
-    let err = register_push_device(
+    let err = register_test_device(
         &driver,
-        "push.example.com",
         "app-web",
         PushEnvironment::Production,
         &credentials,
     )
     .await
     .expect_err("stage 4 canceled rejected");
-    assert!(matches!(err, ClientError::StanzaError(_)));
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::UnexpectedStatus {
+            stage: "stage 4",
+            expected: "completed",
+        })
+    ));
 }
 
 #[tokio::test]
@@ -508,16 +544,16 @@ async fn register_push_device_rejects_stage_4_still_executing() {
     let credentials = PushDeviceCredentials::Apns {
         device_token: "t".to_string(),
     };
-    let err = register_push_device(
-        &driver,
-        "push.example.com",
-        "app-ios",
-        PushEnvironment::Sandbox,
-        &credentials,
-    )
-    .await
-    .expect_err("stage 4 still-executing rejected");
-    assert!(matches!(err, ClientError::StanzaError(_)));
+    let err = register_test_device(&driver, "app-ios", PushEnvironment::Sandbox, &credentials)
+        .await
+        .expect_err("stage 4 still-executing rejected");
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::UnexpectedStatus {
+            stage: "stage 4",
+            expected: "completed",
+        })
+    ));
 }
 
 #[tokio::test]
@@ -556,16 +592,18 @@ async fn register_push_device_rejects_response_with_spoofed_from() {
         p256dh: "p".to_string(),
         auth: "a".to_string(),
     };
-    let err = register_push_device(
+    let err = register_test_device(
         &driver,
-        "push.example.com",
         "app-web",
         PushEnvironment::Production,
         &credentials,
     )
     .await
     .expect_err("spoofed `from=` must reject");
-    assert!(matches!(err, ClientError::StanzaError(_)));
+    assert!(matches!(
+        err,
+        ClientError::PushRegistration(PushRegistrationError::MalformedResultForm { .. })
+    ));
     // We MUST NOT have proceeded to stage 3 after the spoofed stage 2.
     assert_eq!(
         driver.transcript().len(),
@@ -603,9 +641,8 @@ async fn register_push_device_rejects_response_without_from_attr() {
     let credentials = PushDeviceCredentials::Fcm {
         registration_token: "fcm".to_string(),
     };
-    let err = register_push_device(
+    let err = register_test_device(
         &driver,
-        "push.example.com",
         "app-android",
         PushEnvironment::Production,
         &credentials,
@@ -613,8 +650,8 @@ async fn register_push_device_rejects_response_without_from_attr() {
     .await
     .expect_err("absent `from=` must reject");
     match err {
-        ClientError::StanzaError(stanza) => {
-            assert!(stanza.text.as_deref().unwrap_or("").contains("no `from`"));
+        ClientError::PushRegistration(PushRegistrationError::MalformedResultForm { reason }) => {
+            assert!(reason.contains("no `from`"));
         }
         other => panic!("unexpected error: {other:?}"),
     }

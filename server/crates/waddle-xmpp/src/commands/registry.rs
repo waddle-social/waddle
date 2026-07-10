@@ -18,6 +18,10 @@ use crate::XmppError;
 
 /// Time-to-live for command sessions (5 minutes)
 const SESSION_TTL: Duration = Duration::from_secs(300);
+/// How long to remember timed-out session ids after cleanup.
+const EXPIRED_SESSION_GRACE: Duration = Duration::from_secs(300);
+/// Upper bound for the recently-expired session cache.
+const MAX_RECENTLY_EXPIRED_SESSIONS: usize = 1024;
 
 /// Result of executing a command handler.
 pub enum CommandResult {
@@ -38,11 +42,15 @@ pub enum CommandResult {
     },
     /// Command completed successfully.
     Completed {
+        session_id: Option<String>,
         form: Option<DataForm>,
         notes: Vec<Note>,
     },
     /// Command was canceled.
-    Canceled { notes: Vec<Note> },
+    Canceled {
+        session_id: Option<String>,
+        notes: Vec<Note>,
+    },
     /// Command failed with an error.
     Error(XmppError),
 }
@@ -124,12 +132,21 @@ impl CommandSession {
     }
 }
 
+struct ExpiredCommandSession {
+    expired_at: Instant,
+    node: String,
+    from: Jid,
+}
+
 /// Registry for ad-hoc commands.
 pub struct CommandRegistry {
     /// Registered command metadata by node
     commands: RwLock<HashMap<String, CommandMetadata>>,
     /// Active command sessions
     sessions: RwLock<HashMap<String, CommandSession>>,
+    /// Recently timed-out sessions retained to distinguish
+    /// `<session-expired/>` from unknown or foreign session ids.
+    recently_expired_sessions: RwLock<HashMap<String, ExpiredCommandSession>>,
 }
 
 impl CommandRegistry {
@@ -138,6 +155,7 @@ impl CommandRegistry {
         Self {
             commands: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
+            recently_expired_sessions: RwLock::new(HashMap::new()),
         }
     }
 
@@ -257,18 +275,9 @@ impl CommandRegistry {
                 if let Some(ref session_id) = ctx.command.session_id {
                     let session = self.sessions.read().await.get(session_id).cloned();
                     if !session_matches_request(session.as_ref(), node, from) {
-                        // §4.4 bad-sessionid: the sessionid is not valid
-                        // for this requester/node (unknown, expired, or
-                        // owned by someone else — indistinguishable once
-                        // the session has been evicted, so we report the
-                        // honest "cannot accept this sessionid").
-                        return CommandResult::Error(XmppError::ad_hoc_command(
-                            AdHocCommandCondition::BadSessionId,
-                            Some(
-                                "Session not found, expired, or owned by another requester"
-                                    .to_string(),
-                            ),
-                        ));
+                        return CommandResult::Error(
+                            self.session_id_error(session_id, node, from).await,
+                        );
                     }
                     self.sessions.write().await.remove(session_id);
                     debug!(
@@ -277,7 +286,10 @@ impl CommandRegistry {
                         "Canceled command session"
                     );
                 }
-                return CommandResult::Canceled { notes: vec![] };
+                return CommandResult::Canceled {
+                    session_id: ctx.command.session_id,
+                    notes: vec![],
+                };
             }
             Action::Complete | Action::Next | Action::Prev => {
                 if ctx.command.session_id.is_none() {
@@ -293,24 +305,21 @@ impl CommandRegistry {
                 }
                 // Touch the session to update last_accessed
                 if let Some(ref session_id) = ctx.command.session_id {
-                    if let Some(session) = self.sessions.write().await.get_mut(session_id) {
-                        if !session_matches_request(Some(session), node, from) {
-                            // §4.4 bad-sessionid (see Cancel arm).
-                            return CommandResult::Error(XmppError::ad_hoc_command(
-                                AdHocCommandCondition::BadSessionId,
-                                Some(
-                                    "Session not found, expired, or owned by another requester"
-                                        .to_string(),
-                                ),
-                            ));
+                    let session_matches = {
+                        let mut sessions = self.sessions.write().await;
+                        match sessions.get_mut(session_id) {
+                            Some(session) if session_matches_request(Some(session), node, from) => {
+                                session.touch();
+                                true
+                            }
+                            Some(_) => false,
+                            None => false,
                         }
-                        session.touch();
-                    } else {
-                        // §4.4 bad-sessionid: no such active session.
-                        return CommandResult::Error(XmppError::ad_hoc_command(
-                            AdHocCommandCondition::BadSessionId,
-                            Some("Session not found or expired".to_string()),
-                        ));
+                    };
+                    if !session_matches {
+                        return CommandResult::Error(
+                            self.session_id_error(session_id, node, from).await,
+                        );
                     }
                 }
             }
@@ -333,6 +342,28 @@ impl CommandRegistry {
                 session_id,
                 notes,
                 actions,
+            },
+            (
+                Some(session_id),
+                CommandResult::Completed {
+                    session_id: None,
+                    form,
+                    notes,
+                },
+            ) => CommandResult::Completed {
+                session_id: Some(session_id),
+                form,
+                notes,
+            },
+            (
+                Some(session_id),
+                CommandResult::Canceled {
+                    session_id: None,
+                    notes,
+                },
+            ) => CommandResult::Canceled {
+                session_id: Some(session_id),
+                notes,
             },
             (_, result) => result,
         };
@@ -386,10 +417,98 @@ impl CommandRegistry {
             .map(|(id, _)| id.clone())
             .collect();
 
+        let mut expired_sessions = Vec::with_capacity(expired.len());
         for id in expired {
-            sessions.remove(&id);
+            if let Some(session) = sessions.remove(&id) {
+                expired_sessions.push(session);
+            }
             debug!(session_id = %id, "Cleaned up expired command session");
         }
+        drop(sessions);
+
+        self.record_expired_sessions(expired_sessions).await;
+    }
+
+    async fn record_expired_sessions(&self, sessions: Vec<CommandSession>) {
+        if sessions.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let mut recently_expired = self.recently_expired_sessions.write().await;
+        prune_recently_expired_sessions(&mut recently_expired, now);
+
+        for session in sessions {
+            recently_expired.insert(
+                session.id,
+                ExpiredCommandSession {
+                    expired_at: now,
+                    node: session.node,
+                    from: session.from,
+                },
+            );
+        }
+
+        cap_recently_expired_sessions(&mut recently_expired);
+    }
+
+    async fn recently_expired_session_matches_request(
+        &self,
+        session_id: &str,
+        node: &str,
+        from: &Jid,
+    ) -> bool {
+        let now = Instant::now();
+        let mut recently_expired = self.recently_expired_sessions.write().await;
+        prune_recently_expired_sessions(&mut recently_expired, now);
+
+        recently_expired
+            .get(session_id)
+            .is_some_and(|session| session.node == node && session.from == *from)
+    }
+
+    async fn session_id_error(&self, session_id: &str, node: &str, from: &Jid) -> XmppError {
+        if self
+            .recently_expired_session_matches_request(session_id, node, from)
+            .await
+        {
+            XmppError::ad_hoc_command(
+                AdHocCommandCondition::SessionExpired,
+                Some("Command session has expired".to_string()),
+            )
+        } else {
+            XmppError::ad_hoc_command(
+                AdHocCommandCondition::BadSessionId,
+                Some("Session not found or owned by another requester".to_string()),
+            )
+        }
+    }
+}
+
+fn prune_recently_expired_sessions(
+    recently_expired: &mut HashMap<String, ExpiredCommandSession>,
+    now: Instant,
+) {
+    recently_expired
+        .retain(|_, session| now.duration_since(session.expired_at) <= EXPIRED_SESSION_GRACE);
+}
+
+fn cap_recently_expired_sessions(recently_expired: &mut HashMap<String, ExpiredCommandSession>) {
+    let excess = recently_expired
+        .len()
+        .saturating_sub(MAX_RECENTLY_EXPIRED_SESSIONS);
+    if excess == 0 {
+        return;
+    }
+
+    let mut oldest: Vec<(String, Instant)> = recently_expired
+        .iter()
+        .map(|(id, session)| (id.clone(), session.expired_at))
+        .collect();
+    oldest.sort_by_key(|(_, expired_at)| *expired_at);
+
+    for (id, _) in oldest.into_iter().take(excess) {
+        recently_expired.remove(&id);
     }
 }
 
@@ -417,7 +536,12 @@ mod tests {
             .register(
                 "test:command",
                 "Test Command",
-                |_ctx: CommandContext| async { CommandResult::Canceled { notes: vec![] } },
+                |_ctx: CommandContext| async {
+                    CommandResult::Canceled {
+                        session_id: None,
+                        notes: vec![],
+                    }
+                },
             )
             .await;
 
@@ -477,5 +601,106 @@ mod tests {
 
         assert!(!session_id.is_empty());
         assert!(registry.get_session(&session_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_expired_session_returns_session_expired() {
+        let registry = CommandRegistry::new();
+
+        registry
+            .register(
+                "test:command",
+                "Test Command",
+                |ctx: CommandContext| async move {
+                    CommandResult::Executing {
+                        form: DataForm::new(crate::xep::xep0004::FormType::Form),
+                        session_id: ctx.command.session_id.unwrap_or_default(),
+                        notes: vec![],
+                        actions: None,
+                    }
+                },
+            )
+            .await;
+
+        let result = registry
+            .dispatch(test_context(
+                Command::new("test:command").with_action(Action::Execute),
+            ))
+            .await;
+        let session_id = match result {
+            CommandResult::Executing { session_id, .. } => session_id,
+            _ => panic!("expected executing result"),
+        };
+
+        {
+            let mut sessions = registry.sessions.write().await;
+            let session = sessions
+                .get_mut(&session_id)
+                .expect("execute created a session");
+            session.last_accessed = Instant::now() - SESSION_TTL - Duration::from_secs(1);
+        }
+
+        let result = registry
+            .dispatch(test_context(
+                Command::new("test:command")
+                    .with_action(Action::Next)
+                    .with_session_id(session_id),
+            ))
+            .await;
+
+        match result {
+            CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
+                assert_eq!(condition, AdHocCommandCondition::SessionExpired);
+            }
+            _ => panic!("expected session-expired error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unknown_session_returns_bad_sessionid() {
+        let registry = CommandRegistry::new();
+
+        registry
+            .register(
+                "test:command",
+                "Test Command",
+                |_ctx: CommandContext| async {
+                    CommandResult::Completed {
+                        session_id: None,
+                        form: None,
+                        notes: vec![],
+                    }
+                },
+            )
+            .await;
+
+        let result = registry
+            .dispatch(test_context(
+                Command::new("test:command")
+                    .with_action(Action::Complete)
+                    .with_session_id("unknown-session"),
+            ))
+            .await;
+
+        match result {
+            CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
+                assert_eq!(condition, AdHocCommandCondition::BadSessionId);
+            }
+            _ => panic!("expected bad-sessionid error"),
+        }
+    }
+
+    fn test_context(command: Command) -> CommandContext {
+        CommandContext {
+            from: "user@localhost".parse().expect("test jid"),
+            authenticated_user_id: Some("user-123".to_string()),
+            iq: Iq::Set {
+                from: None,
+                to: None,
+                id: "test-iq".to_string(),
+                payload: "<query xmlns='urn:test'/>".parse().expect("test payload"),
+            },
+            command,
+        }
     }
 }

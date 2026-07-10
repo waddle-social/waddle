@@ -643,6 +643,55 @@ async fn handle_iq_command_request_routes_to_registry() {
 }
 
 #[tokio::test]
+async fn handle_iq_single_shot_completed_command_carries_generated_sessionid() {
+    let state = create_test_websocket_state().await;
+    state
+        .deps
+        .protocol
+        .command_registry
+        .register(
+            "test:single-shot-command",
+            "Single Shot Command",
+            |_ctx: CommandContext| async move {
+                CommandResult::Completed {
+                    session_id: None,
+                    form: None,
+                    notes: vec![],
+                }
+            },
+        )
+        .await;
+
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+    let frame = r#"<iq xmlns="jabber:client" id="cmd-complete-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:single-shot-command" action="execute"/></iq>"#;
+    let responses = handle_iq(
+        frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&sender_jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1);
+    let response = responses.first().expect("command response");
+    let element = Element::from_str(response).expect("parse command response");
+    assert_eq!(element.attr("type"), Some("result"));
+    let command = element
+        .children()
+        .find(|child| child.name() == "command")
+        .expect("command payload");
+    assert_eq!(command.attr("status"), Some("completed"));
+    let session_id = command.attr("sessionid").expect("completed sessionid");
+    assert!(
+        !session_id.is_empty(),
+        "completed command sessionid must be non-empty: {response}"
+    );
+}
+
+#[tokio::test]
 async fn handle_iq_command_request_requires_ready_phase() {
     let state = create_test_websocket_state().await;
     state

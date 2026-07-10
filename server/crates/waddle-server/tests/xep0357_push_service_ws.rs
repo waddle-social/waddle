@@ -886,6 +886,35 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     let disable_iq = parse_iq_element(&disable_response, "push-disable-first-party", "result");
     assert!(disable_iq.children().next().is_none());
 
+    let enable_with_wrong_publish_options_form_type = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
+        .append(submit_form("jabber:x:oob", &[]))
+        .build();
+    let wrong_form_type_response = send_iq(
+        &mut client,
+        iq_frame(
+            "set",
+            "push-enable-wrong-publish-options-form-type",
+            DOMAIN,
+            enable_with_wrong_publish_options_form_type,
+        ),
+        "push-enable-wrong-publish-options-form-type",
+    )
+    .await;
+    assert_iq_error_condition(
+        &wrong_form_type_response,
+        "push-enable-wrong-publish-options-form-type",
+        "bad-request",
+    );
+    assert!(
+        wrong_form_type_response.contains("FORM_TYPE"),
+        "bad-request text should name the FORM_TYPE requirement: {wrong_form_type_response}"
+    );
+
     let enable_with_publish_options = Element::builder("enable", NS_PUSH)
         .attr(
             minidom::rxml::xml_ncname!("jid").to_owned(),

@@ -59,11 +59,15 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let opts: RegisterPushDeviceOptions = serde_wasm_bindgen::from_value(options)
-                .map_err(|err| JsValue::from_str(&err.to_string()))?;
-            let service_jid = opts.service_jid.clone();
-            let app_id = opts.app_id.clone();
+                .map_err(|err| push_registration_js_error("protocol-shape", err.to_string()))?;
+            let service_jid = waddle_xmpp_client::push::PushServiceJid::new(&opts.service_jid)
+                .map_err(push_registration_client_js_error)?;
+            let app_id = waddle_xmpp_client::push::PushAppId::new(&opts.app_id)
+                .map_err(push_registration_client_js_error)?;
             let environment = opts.environment;
-            let credentials = opts.into_credentials().map_err(js_error)?;
+            let credentials = opts
+                .into_credentials()
+                .map_err(|err| push_registration_js_error("protocol-shape", err))?;
             let driver = WasmCommandDriver { inner };
             let outcome = waddle_xmpp_client::push::register_push_device(
                 &driver,
@@ -73,7 +77,7 @@ impl WaddleClient {
                 &credentials,
             )
             .await
-            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            .map_err(push_registration_client_js_error)?;
             to_js_value(&WaddleRegisterDeviceResult {
                 node: outcome.node.into_string(),
                 device_id: outcome.device_id.into_string(),
@@ -749,6 +753,36 @@ impl WaddleClient {
             to_js_value(&profile)
         })
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterPushDeviceError {
+    code: &'static str,
+    message: String,
+}
+
+fn push_registration_js_error(code: &'static str, message: impl ToString) -> JsValue {
+    to_js_value(&RegisterPushDeviceError {
+        code,
+        message: message.to_string(),
+    })
+    .unwrap_or_else(|_| JsValue::from_str(&message.to_string()))
+}
+
+fn push_registration_client_js_error(error: impl Into<ClientError>) -> JsValue {
+    let error = error.into();
+    let code = match &error {
+        ClientError::PushRegistration(
+            waddle_xmpp_client::push::PushRegistrationError::SessionExpired,
+        ) => "session-expired",
+        ClientError::PushRegistration(_) => "protocol-shape",
+        ClientError::StanzaError(_) => "stanza-error",
+        ClientError::Disconnected => "disconnected",
+        ClientError::TransportClosed | ClientError::RequestCancelled => "disconnected",
+        _ => "error",
+    };
+    push_registration_js_error(code, error.to_string())
 }
 
 /// Build the `<extensions xmlns='urn:xmpp:bookmarks:1'>…</extensions>`

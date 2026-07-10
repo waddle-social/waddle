@@ -526,6 +526,7 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
     };
     match run_list(&state, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_list_form(&result)),
             notes: vec![],
         },
@@ -543,6 +544,7 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_create(&state, &args).await {
         Ok(channel) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_channel_form(&channel)),
             notes: vec![],
         },
@@ -557,6 +559,7 @@ async fn handle_group_dm_create(ctx: CommandContext, state: Arc<AppState>) -> Co
     };
     match run_group_dm_create(&state, &ctx.from.to_bare(), &args).await {
         Ok(group_dm) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_group_dm_form(&group_dm)),
             notes: vec![],
         },
@@ -598,6 +601,7 @@ async fn handle_group_dm_leave(
     .await
     {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_group_dm_leave_form(&result)),
             notes: vec![],
         },
@@ -627,6 +631,7 @@ async fn handle_group_dm_rename(
     }
     match run_group_dm_rename(&state, &connections, &caller_full, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_group_dm_rename_form(&result)),
             notes: vec![],
         },
@@ -648,6 +653,7 @@ async fn handle_update(
     };
     match run_update(&state, &connections, &args).await {
         Ok(channel) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_channel_form(&channel)),
             notes: vec![],
         },
@@ -665,6 +671,7 @@ async fn handle_delete(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_delete(&state, &args).await {
         Ok(()) => CommandResult::Completed {
+            session_id: None,
             form: None,
             notes: vec![],
         },
@@ -682,6 +689,7 @@ async fn handle_occupants(ctx: CommandContext, state: Arc<AppState>) -> CommandR
     };
     match run_occupants(&state, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_occupants_form(&result)),
             notes: vec![],
         },
@@ -699,6 +707,7 @@ async fn handle_affiliations(ctx: CommandContext, state: Arc<AppState>) -> Comma
     };
     match run_affiliations(&state, &args).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_affiliations_form(&result)),
             notes: vec![],
         },
@@ -722,6 +731,7 @@ async fn handle_set_affiliation(
     };
     match run_set_affiliation(&state, &connections, &caller_bare, &args, sfu.as_ref()).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_set_affiliation_form(&result)),
             notes: vec![],
         },
@@ -763,6 +773,7 @@ async fn handle_kick(
     };
     match run_kick(&state, &connections, &caller_full, &args, sfu.as_ref()).await {
         Ok(result) => CommandResult::Completed {
+            session_id: None,
             form: Some(build_kick_form(&result)),
             notes: vec![],
         },

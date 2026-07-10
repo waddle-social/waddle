@@ -249,6 +249,7 @@ mod tests {
             error_type: StanzaErrorType::Cancel,
             condition: condition.to_string(),
             text: None,
+            application_condition: None,
         })
     }
 

@@ -100,7 +100,11 @@ import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { createGroupDm, type CreateGroupDmResult } from "./group-dm";
 import { ReconnectCatchup } from "./reconnect-catchup";
-import { parseRegisterDeviceResult, type RegisterDeviceResult } from "./push-register-result";
+import {
+  parseRegisterDeviceResult,
+  parseRegisterPushDeviceRejection,
+  type RegisterDeviceResult,
+} from "./push-register-result";
 import {
   createLocalStorageResumePersistence,
   type ResumePersistence,
@@ -1976,6 +1980,10 @@ export class BrowserXmppClient {
       }
       return parsed;
     } catch (error) {
+      const rejection = parseRegisterPushDeviceRejection(error);
+      if (rejection?.code === "session-expired") {
+        throw error;
+      }
       console.warn("[xmpp] XEP-0050 register-device rejected:", error);
       return null;
     }

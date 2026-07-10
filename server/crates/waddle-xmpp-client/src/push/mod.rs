@@ -18,10 +18,14 @@
 //! `waddle-server`) is unchanged by the XEP-0050 cutover — only the
 //! wire shape changes.
 
+use std::str::FromStr;
+
+use jid::BareJid;
 use minidom::Element;
+use thiserror::Error;
 use xmpp_parsers::data_forms::{DataForm, DataFormType, Field, FieldType};
 
-use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
+use crate::error::{ClientError, ClientResult, StanzaError};
 use crate::xep::xep0050::{
     build_xep0050_command_request, build_xep0050_command_request_with_session,
     parse_command_response, AdHocAction, AdHocStatus,
@@ -82,6 +86,87 @@ pub enum PushEnvironment {
     Production,
     #[serde(rename = "sandbox")]
     Sandbox,
+}
+
+/// Validated Push Service component JID used by the XEP-0050
+/// `register-device` composer. The public FFI/WASM boundaries still
+/// accept strings and construct this value at the edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushServiceJid(BareJid);
+
+impl PushServiceJid {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(PushRegistrationError::MalformedResultForm {
+                reason: "push service JID must not be empty".to_string(),
+            });
+        }
+        let jid =
+            BareJid::from_str(value).map_err(|_| PushRegistrationError::MalformedResultForm {
+                reason: "push service JID must be a parseable bare JID".to_string(),
+            })?;
+        // A Push Service is a pure-domain XEP-0114 component
+        // (`push.<domain>`); a localpart means the caller swapped the
+        // arguments or addressed a user — reject at the type boundary
+        // so the misaddressed IQ never reaches the wire.
+        if jid.node().is_some() {
+            return Err(PushRegistrationError::MalformedResultForm {
+                reason: "push service JID must be a domain-only component JID".to_string(),
+            });
+        }
+        Ok(Self(jid))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// Application identifier submitted to the Push Service. It scopes the
+/// stable per-(user, app-id) node, so an empty value is rejected before
+/// any IQ is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushAppId(String);
+
+impl PushAppId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(PushRegistrationError::MalformedResultForm {
+                reason: "push app id must not be empty".to_string(),
+            });
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Typed failures raised by the XEP-0050 `register-device` composer
+/// when the Push Service response shape violates the expected
+/// protocol choreography.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PushRegistrationError {
+    #[error("missing <command/> response during {stage}")]
+    MissingCommandResponse { stage: &'static str },
+    #[error("unexpected command status during {stage}; expected {expected}")]
+    UnexpectedStatus {
+        stage: &'static str,
+        expected: &'static str,
+    },
+    #[error("missing sessionid in stage 2")]
+    MissingSessionId,
+    #[error("stage 4 sessionid did not match the session opened in stage 2")]
+    SessionIdMismatch,
+    #[error("missing result form in stage 4")]
+    MissingResultForm,
+    #[error("malformed register-device result form: {reason}")]
+    MalformedResultForm { reason: String },
+    #[error("XEP-0050 command session expired")]
+    SessionExpired,
 }
 
 impl PushEnvironment {
@@ -309,12 +394,37 @@ fn text_single(var: &str, value: &str) -> Field {
     }
 }
 
-fn protocol_error(text: &str) -> ClientError {
-    ClientError::StanzaError(StanzaError {
-        error_type: StanzaErrorType::Cancel,
-        condition: "bad-request".to_string(),
-        text: Some(text.to_string()),
+fn push_registration_error(error: PushRegistrationError) -> ClientError {
+    ClientError::PushRegistration(error)
+}
+
+fn malformed_response(reason: impl Into<String>) -> ClientError {
+    push_registration_error(PushRegistrationError::MalformedResultForm {
+        reason: reason.into(),
     })
+}
+
+fn map_submit_error(error: ClientError) -> ClientError {
+    match error {
+        ClientError::StanzaError(stanza) if is_xep0050_session_expired(&stanza) => {
+            PushRegistrationError::SessionExpired.into()
+        }
+        other => other,
+    }
+}
+
+fn is_xep0050_session_expired(stanza: &StanzaError) -> bool {
+    // XEP-0050 §4.3 ships `<session-expired/>` as an APPLICATION
+    // condition in the commands namespace, alongside the RFC 6120
+    // defined condition (`not-allowed` on our server) — so the check
+    // must read the application condition, never `condition`.
+    stanza
+        .application_condition
+        .as_ref()
+        .is_some_and(|application| {
+            application.namespace == "http://jabber.org/protocol/commands"
+                && application.name == "session-expired"
+        })
 }
 
 /// Defense-in-depth check against an IQ response whose `from` doesn't
@@ -331,17 +441,17 @@ fn protocol_error(text: &str) -> ClientError {
 /// Push Service JIDs are pure-domain XEP-0114 components, so a
 /// `service_jid/resource` form is rejected even via case-insensitive
 /// equality.
-fn verify_iq_from_matches(iq: &Element, push_service_jid: &str) -> ClientResult<()> {
+fn verify_iq_from_matches(iq: &Element, push_service_jid: &PushServiceJid) -> ClientResult<()> {
     let from = iq.attr("from").ok_or_else(|| {
-        protocol_error(
+        malformed_response(
             "Push Service IQ response carries no `from`; RFC 6120 §8.1.2.1 \
              requires components to stamp `from`. Refusing to trust the response.",
         )
     })?;
-    if from.eq_ignore_ascii_case(push_service_jid) {
+    if from.eq_ignore_ascii_case(push_service_jid.as_str()) {
         Ok(())
     } else {
-        Err(protocol_error(
+        Err(malformed_response(
             "Push Service IQ response `from` does not match the addressed Push \
              Service JID; refusing to trust the response.",
         ))
@@ -360,14 +470,14 @@ fn verify_iq_from_matches(iq: &Element, push_service_jid: &str) -> ClientResult<
 /// never stringly-typed payloads (CLAUDE.md typed-payloads hard rule).
 pub async fn register_push_device<D: CommandDriver>(
     driver: &D,
-    push_service_jid: &str,
-    app_id: &str,
+    push_service_jid: &PushServiceJid,
+    app_id: &PushAppId,
     environment: PushEnvironment,
     credentials: &PushDeviceCredentials,
 ) -> ClientResult<RegisterDeviceResult> {
     // Stage 1 → 2: execute, expect executing + form back + sessionid.
     let initial = build_xep0050_command_request(
-        push_service_jid,
+        push_service_jid.as_str(),
         REGISTER_DEVICE_NODE,
         AdHocAction::Execute,
         None,
@@ -375,31 +485,39 @@ pub async fn register_push_device<D: CommandDriver>(
     let executing_iq = driver.send_iq(initial).await?;
     verify_iq_from_matches(&executing_iq, push_service_jid)?;
     let executing = parse_command_response(&executing_iq)
-        .ok_or_else(|| protocol_error("expected <command/> response in stage 2"))?;
+        .ok_or(PushRegistrationError::MissingCommandResponse { stage: "stage 2" })?;
     if executing.status != AdHocStatus::Executing {
-        return Err(protocol_error("expected status='executing' in stage 2"));
+        return Err(PushRegistrationError::UnexpectedStatus {
+            stage: "stage 2",
+            expected: "executing",
+        }
+        .into());
     }
     let session_id = executing
         .session_id
         .clone()
-        .ok_or_else(|| protocol_error("missing sessionid in stage 2"))?;
+        .ok_or(PushRegistrationError::MissingSessionId)?;
 
     // Stage 3 → 4: submit the platform-specific form, expect
     // completed + result form with the assigned node id.
-    let submit_form = build_register_device_submit_form(app_id, environment, credentials);
+    let submit_form = build_register_device_submit_form(app_id.as_str(), environment, credentials);
     let complete = build_xep0050_command_request_with_session(
-        push_service_jid,
+        push_service_jid.as_str(),
         REGISTER_DEVICE_NODE,
         &session_id,
         AdHocAction::Complete,
         Some(submit_form),
     );
-    let completed_iq = driver.send_iq(complete).await?;
+    let completed_iq = driver.send_iq(complete).await.map_err(map_submit_error)?;
     verify_iq_from_matches(&completed_iq, push_service_jid)?;
     let completed = parse_command_response(&completed_iq)
-        .ok_or_else(|| protocol_error("expected <command/> response in stage 4"))?;
+        .ok_or(PushRegistrationError::MissingCommandResponse { stage: "stage 4" })?;
     if completed.status != AdHocStatus::Completed {
-        return Err(protocol_error("expected status='completed' in stage 4"));
+        return Err(PushRegistrationError::UnexpectedStatus {
+            stage: "stage 4",
+            expected: "completed",
+        }
+        .into());
     }
     // XEP-0050 §3.4: the responder echoes the sessionid so the requester
     // can correlate the response to the session it opened in stage 2.
@@ -410,19 +528,19 @@ pub async fn register_push_device<D: CommandDriver>(
     match completed.session_id.as_deref() {
         Some(returned) if returned == session_id => {}
         _ => {
-            return Err(protocol_error(
-                "stage 4 sessionid did not match the session opened in stage 2",
-            ));
+            return Err(PushRegistrationError::SessionIdMismatch.into());
         }
     }
     let result_form = completed
         .form
-        .ok_or_else(|| protocol_error("missing result form in stage 4"))?;
+        .ok_or(PushRegistrationError::MissingResultForm)?;
     parse_register_device_result(&result_form).ok_or_else(|| {
-        protocol_error(
-            "stage 4 result form is malformed: wrong FORM_TYPE, wrong type='result', \
-             or missing/empty 'node' / 'device-id' field",
-        )
+        PushRegistrationError::MalformedResultForm {
+            reason: "wrong FORM_TYPE, wrong type='result', or missing/empty 'node' / \
+                     'device-id' field"
+                .to_string(),
+        }
+        .into()
     })
 }
 
@@ -634,30 +752,31 @@ mod tests {
 
     #[test]
     fn verify_iq_from_accepts_exact_match() {
-        assert!(verify_iq_from_matches(
-            &iq_with_from(Some("push.example.com")),
-            "push.example.com"
-        )
-        .is_ok());
+        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        assert!(
+            verify_iq_from_matches(&iq_with_from(Some("push.example.com")), &service_jid).is_ok()
+        );
     }
 
     #[test]
     fn verify_iq_from_accepts_case_variation_on_domain() {
         // RFC 6122 §2.4: domainpart comparison is case-insensitive.
-        assert!(verify_iq_from_matches(
-            &iq_with_from(Some("Push.Example.COM")),
-            "push.example.com"
-        )
-        .is_ok());
+        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        assert!(
+            verify_iq_from_matches(&iq_with_from(Some("Push.Example.COM")), &service_jid).is_ok()
+        );
     }
 
     #[test]
     fn verify_iq_from_rejects_absent_from() {
-        let err = verify_iq_from_matches(&iq_with_from(None), "push.example.com")
+        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let err = verify_iq_from_matches(&iq_with_from(None), &service_jid)
             .expect_err("missing `from` must reject");
         match err {
-            ClientError::StanzaError(stanza) => {
-                assert!(stanza.text.as_deref().unwrap_or("").contains("no `from`"));
+            ClientError::PushRegistration(PushRegistrationError::MalformedResultForm {
+                reason,
+            }) => {
+                assert!(reason.contains("no `from`"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -665,26 +784,29 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_unrelated_jid() {
-        let err = verify_iq_from_matches(&iq_with_from(Some("attacker.tld")), "push.example.com")
+        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let err = verify_iq_from_matches(&iq_with_from(Some("attacker.tld")), &service_jid)
             .expect_err("unrelated `from` must reject");
-        assert!(matches!(err, ClientError::StanzaError(_)));
+        assert!(matches!(err, ClientError::PushRegistration(_)));
     }
 
     #[test]
     fn verify_iq_from_rejects_prefix_substring_collision() {
         // `push.example.com` MUST NOT match `push.example.com.attacker.tld`.
+        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(
             &iq_with_from(Some("push.example.com.attacker.tld")),
-            "push.example.com",
+            &service_jid,
         )
         .expect_err("substring collision must reject");
-        assert!(matches!(err, ClientError::StanzaError(_)));
+        assert!(matches!(err, ClientError::PushRegistration(_)));
     }
 
     #[test]
     fn verify_iq_from_rejects_empty_from() {
-        let err = verify_iq_from_matches(&iq_with_from(Some("")), "push.example.com")
+        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let err = verify_iq_from_matches(&iq_with_from(Some("")), &service_jid)
             .expect_err("empty `from` must reject");
-        assert!(matches!(err, ClientError::StanzaError(_)));
+        assert!(matches!(err, ClientError::PushRegistration(_)));
     }
 }

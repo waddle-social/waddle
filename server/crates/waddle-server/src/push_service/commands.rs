@@ -267,24 +267,25 @@ async fn handle_register_device(
     let owner = ctx.from.to_bare();
 
     // Allocate (or reuse) the XEP-0357 push node bound to (owner,
-    // app_id). The custom-namespace handler used a separate
-    // `ensure-node` round-trip; the XEP-0050 dance folds that step
-    // into stage 3 so the chat client never sees the node id until
-    // the result form returns it. Storage layout is unchanged.
+    // app_id), then register the device in the same write transaction.
+    // The custom-namespace handler used a separate `ensure-node`
+    // round-trip; the XEP-0050 dance folds that step into stage 3 so
+    // the chat client never sees the node id until the result form
+    // returns it. Storage layout is unchanged.
     let app_id = request.app_id().to_string();
-    let push_node = match push_service.ensure_node(&owner, &app_id).await {
-        Ok(node) => node,
-        Err(error) => return CommandResult::Error(error),
-    };
-
     let device_id = generate_device_id();
-    let registration = build_registration(&request, &device_id, push_node.node());
-    let device = match push_service.upsert_device(&owner, registration).await {
-        Ok(device) => device,
+    let (_push_node, device) = match push_service
+        .register_device_for_owner(&owner, &app_id, |node| {
+            build_registration(&request, &device_id, node)
+        })
+        .await
+    {
+        Ok(registered) => registered,
         Err(error) => return CommandResult::Error(error),
     };
 
     CommandResult::Completed {
+        session_id: None,
         form: Some(build_register_device_result_form(
             device.node(),
             device.device_id(),
@@ -348,6 +349,7 @@ async fn handle_disable_device(
         // typed IQ stanza error — so a stale/typo'd device-id is reported
         // honestly instead of as a false success.
         Ok(()) => CommandResult::Completed {
+            session_id: None,
             form: None,
             notes: vec![],
         },
