@@ -27,14 +27,25 @@ export async function retryRegisterPushDeviceAfterSessionExpired<T>(
   try {
     return await register();
   } catch (error) {
+    // Only the structured session-expired rejection is retryable —
+    // any other exception (e.g. a transient connection failure BEFORE
+    // the WASM call) must keep propagating exactly as it did before
+    // this helper existed, so the caller's persisted node/deviceId
+    // are not cleared over a blip.
     const rejection = parseRegisterPushDeviceRejection(error);
-    if (rejection?.code !== "session-expired") return null;
+    if (rejection?.code !== "session-expired") throw error;
   }
 
+  // Single retry from stage 1 with a fresh XEP-0050 session. A SECOND
+  // session-expired is a terminal registration failure (the caller's
+  // null-path clears the persisted ids, matching the pre-retry
+  // behavior for terminal failures); anything else propagates.
   try {
     return await register();
-  } catch {
-    return null;
+  } catch (error) {
+    const rejection = parseRegisterPushDeviceRejection(error);
+    if (rejection?.code === "session-expired") return null;
+    throw error;
   }
 }
 

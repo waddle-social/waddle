@@ -106,6 +106,15 @@ impl PushServiceJid {
             BareJid::from_str(value).map_err(|_| PushRegistrationError::MalformedResultForm {
                 reason: "push service JID must be a parseable bare JID".to_string(),
             })?;
+        // A Push Service is a pure-domain XEP-0114 component
+        // (`push.<domain>`); a localpart means the caller swapped the
+        // arguments or addressed a user — reject at the type boundary
+        // so the misaddressed IQ never reaches the wire.
+        if jid.node().is_some() {
+            return Err(PushRegistrationError::MalformedResultForm {
+                reason: "push service JID must be a domain-only component JID".to_string(),
+            });
+        }
         Ok(Self(jid))
     }
 

@@ -379,12 +379,25 @@ fn decode_device(
     })
 }
 
+/// Whether [`upsert_device_tx`] wakes queued publish jobs for the node
+/// inside the same transaction. The combined register path defers the
+/// wake until AFTER the post-commit XEP-0060 backing-node provisioning
+/// succeeds — waking earlier lets a worker claim a job whose phase-1
+/// backing validation is guaranteed to fail, burning a retry cycle at
+/// the exact moment a device (re)registers (Qodo review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeQueuedJobs {
+    InTx,
+    Deferred,
+}
+
 pub(super) async fn upsert_device_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner_bare_jid: &BareJid,
     registration: PushDeviceRegistration,
     secrets: &PushSecretCipher,
     now_ms: i64,
+    wake: WakeQueuedJobs,
 ) -> Result<PushServiceDevice, XmppError> {
     if registration.device_id.is_empty()
         || registration.node.is_empty()
@@ -476,7 +489,9 @@ pub(super) async fn upsert_device_tx(
     )
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;
-    wake_queued_publish_jobs_for_node_tx(tx, &registration.node, now_ms).await?;
+    if wake == WakeQueuedJobs::InTx {
+        wake_queued_publish_jobs_for_node_tx(tx, &registration.node, now_ms).await?;
+    }
     get_device_for_owner_on_node_tx(tx, owner_bare_jid, &registration.node, &device_id, secrets)
         .await?
         .ok_or_else(|| XmppError::internal("Push Service device was not persisted"))
@@ -494,8 +509,15 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        let device =
-            upsert_device_tx(&mut tx, owner_bare_jid, registration, &self.secrets, now_ms).await?;
+        let device = upsert_device_tx(
+            &mut tx,
+            owner_bare_jid,
+            registration,
+            &self.secrets,
+            now_ms,
+            WakeQueuedJobs::InTx,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -516,8 +538,18 @@ impl DatabasePushServiceStore {
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let node = ensure_node_tx(&mut tx, owner_bare_jid, app_id, now_ms).await?;
         let registration = registration_for_node(node.node());
-        let device =
-            upsert_device_tx(&mut tx, owner_bare_jid, registration, &self.secrets, now_ms).await?;
+        let device = upsert_device_tx(
+            &mut tx,
+            owner_bare_jid,
+            registration,
+            &self.secrets,
+            now_ms,
+            // The wake happens after the XEP-0060 provisioning below —
+            // a job woken here could be claimed before the backing
+            // node exists and would burn a retry cycle.
+            WakeQueuedJobs::Deferred,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -556,6 +588,18 @@ impl DatabasePushServiceStore {
             }
             return Err(error);
         }
+        // Backing node is provisioned — NOW queued publish jobs for
+        // this node can run without failing phase-1 validation.
+        let mut wake_tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        wake_queued_publish_jobs_for_node_tx(&mut wake_tx, node.node(), now_ms).await?;
+        wake_tx
+            .commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
         Ok((node, device))
     }
 

@@ -83,23 +83,61 @@ describe("registerPushDevice session-expired retry", () => {
 
   test("does not retry non-session failures", async () => {
     let calls = 0;
-    const result = await retryRegisterPushDeviceAfterSessionExpired(async () => {
-      calls += 1;
-      throw { code: "stanza-error", message: "forbidden" };
-    });
+    let thrown: unknown = null;
+    try {
+      await retryRegisterPushDeviceAfterSessionExpired(async () => {
+        calls += 1;
+        throw { code: "stanza-error", message: "forbidden" };
+      });
+    } catch (error) {
+      thrown = error;
+    }
 
-    expect(result).toBeNull();
+    // Non-session failures PROPAGATE (they are not retryable and the
+    // caller's error handling must see them unchanged — swallowing
+    // into null would wrongly clear persisted push ids over a blip).
+    expect(thrown).toEqual({ code: "stanza-error", message: "forbidden" });
     expect(calls).toBe(1);
   });
 
-  test("gives up after one failed session-expired retry", async () => {
+  test("a transient pre-WASM exception propagates untouched", async () => {
+    let thrown: unknown = null;
+    try {
+      await retryRegisterPushDeviceAfterSessionExpired(async () => {
+        throw new Error("xmpp not connected");
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+  });
+
+  test("second session-expired is terminal: null after the single retry", async () => {
     let calls = 0;
     const result = await retryRegisterPushDeviceAfterSessionExpired(async () => {
       calls += 1;
       throw { code: "session-expired", message: "expired" };
     });
 
+    // Terminal registration failure → the caller's null-path clears
+    // the persisted ids (same as any terminal register failure).
     expect(result).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  test("a non-session failure on the retry attempt propagates", async () => {
+    let calls = 0;
+    let thrown: unknown = null;
+    try {
+      await retryRegisterPushDeviceAfterSessionExpired(async () => {
+        calls += 1;
+        if (calls === 1) throw { code: "session-expired", message: "expired" };
+        throw new Error("network dropped mid-retry");
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
     expect(calls).toBe(2);
   });
 });
