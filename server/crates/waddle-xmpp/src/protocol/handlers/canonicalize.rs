@@ -112,9 +112,7 @@ impl MessageHandler for CanonicalizeHandler {
                 return true;
             }
             match p.attr("by").and_then(|raw| raw.parse::<BareJid>().ok()) {
-                Some(parsed) => {
-                    parsed != local_archive && Some(&parsed) != server_domain.as_ref()
-                }
+                Some(parsed) => parsed != local_archive && Some(&parsed) != server_domain.as_ref(),
                 // Malformed `by=` — leave the element alone; the
                 // server can't claim ownership of an unparseable bare.
                 None => true,
@@ -208,14 +206,18 @@ mod tests {
     fn xep_0359_strips_spoofed_domain_claimed_stanza_ids() {
         let local = full("alice@example.com/web");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
-        msg.payloads
-            .push(build_stanza_id_element("spoofed-domain", &jid("example.com")));
+        msg.payloads.push(build_stanza_id_element(
+            "spoofed-domain",
+            &jid("example.com"),
+        ));
         msg.payloads.push(build_stanza_id_element(
             "spoofed-domain-case",
             &jid("Example.COM"),
         ));
-        msg.payloads
-            .push(build_stanza_id_element("spoofed-bare", &jid("alice@example.com")));
+        msg.payloads.push(build_stanza_id_element(
+            "spoofed-bare",
+            &jid("alice@example.com"),
+        ));
 
         run_with_id(&local, &mut msg, "fresh-id-2");
 
