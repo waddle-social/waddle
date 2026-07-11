@@ -10,14 +10,11 @@ use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, MamQuery, MamStorage
 use waddle_xmpp_core::xep0359::{add_stanza_id, OriginId, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::ns::{JABBER_CLIENT as NS_CLIENT, MAM as NS_MAM, MUC as NS_MUC, SID as NS_SID};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 const ALICE: &str = "alice";
-const NS_CLIENT: &str = "jabber:client";
-const NS_MAM: &str = "urn:xmpp:mam:2";
-const NS_MUC: &str = "http://jabber.org/protocol/muc";
-const NS_SID: &str = "urn:xmpp:sid:0";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
