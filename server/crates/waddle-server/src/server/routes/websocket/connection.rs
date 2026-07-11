@@ -764,6 +764,19 @@ async fn handle_inbound_text(
         BatchWriteOutcome::TransportClosed => return false,
     }
 
+    // A timed-out message/presence dispatch was cancelled before the server
+    // accepted XEP-0198 responsibility. End this transport without moving to
+    // `Closing`: normal cleanup must persist the resumable session with the
+    // pre-hole inbound `h`, prompting the sender to replay the stanza.
+    if conn.sm_inbound_completion.has_unhandled_hole() {
+        warn!(
+            jid = ?conn.phase.bound_jid(),
+            inbound_h = conn.sm_state.get_inbound_count(),
+            "Closing stream after unhandled stanza dispatch timeout; preserving sender responsibility"
+        );
+        return false;
+    }
+
     if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
         let _ = close_ws_connection(
             ws_sender,
@@ -812,6 +825,25 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
     if !conn.sm_inbound_completion.has_pending() {
         return;
     }
+    if conn.sm_inbound_completion.has_unhandled_hole() {
+        // The stream is already terminal and the sender will replay from the
+        // hole. Consume only completions that are ready now; waiting for an
+        // earlier ordered relay would make disconnect/shutdown cleanup
+        // unbounded. Under-acknowledging that earlier stanza is safe because
+        // XEP-0198 deliberately leaves it in the sender's replay queue.
+        while let Ok(completion) = handoff_rx.try_recv() {
+            conn.sm_inbound_completion
+                .complete(completion.inbound_sequence, &mut conn.sm_state);
+            let replies = serialize_ordered_relay_handoff_replies(completion.replies);
+            batch_write::record_remaining_for_replay(
+                conn,
+                replies.into_iter(),
+                BatchSmPolicy::Record,
+            );
+        }
+        conn.sm_inbound_completion.reset();
+        return;
+    }
     while conn.sm_inbound_completion.has_pending() {
         let Some(completion) = handoff_rx.recv().await else {
             break;
@@ -856,6 +888,16 @@ async fn process_deferred_inbound_after_transport_loss(
     state: &WebSocketState,
     conn: &mut WsConnState,
 ) {
+    if conn.sm_inbound_completion.has_unhandled_hole() {
+        let dropped = discard_deferred_inbound_after_unhandled_hole(conn);
+        if dropped > 0 {
+            warn!(
+                dropped,
+                "Dropping deferred inbound frames after XEP-0198 handled-count hole; sender will replay"
+            );
+        }
+        return;
+    }
     while let Some(text) = conn.deferred_inbound.pop_front() {
         let responses = handle_xmpp_frame(&text, domain, state, conn).await;
         conn.sync_state_machine_phase();
@@ -866,7 +908,23 @@ async fn process_deferred_inbound_after_transport_loss(
             BatchSmPolicy::Record
         };
         batch_write::record_remaining_for_replay(conn, responses.into_iter(), policy);
+        if conn.sm_inbound_completion.has_unhandled_hole() {
+            let dropped = discard_deferred_inbound_after_unhandled_hole(conn);
+            if dropped > 0 {
+                warn!(
+                    dropped,
+                    "Dropping later deferred inbound frames after XEP-0198 handled-count hole; sender will replay"
+                );
+            }
+            break;
+        }
     }
+}
+
+fn discard_deferred_inbound_after_unhandled_hole(conn: &mut WsConnState) -> usize {
+    let dropped = conn.deferred_inbound.len();
+    conn.deferred_inbound.clear();
+    dropped
 }
 
 fn ensure_websocket_stream_close_for_closing_phase(
@@ -893,6 +951,47 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn abandoned_inbound_slot_does_not_block_handoff_cleanup() {
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("stream-timeout".to_string(), true, Some(300));
+        let _earlier_pending = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        conn.sm_inbound_completion.abandon(abandoned);
+
+        // Keep the sender alive: a naive cleanup that still considers the
+        // terminal hole pending would wait forever for the earlier ordered
+        // relay. Under-acknowledging that earlier stanza is safe; hanging
+        // detach is not.
+        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn),
+        )
+        .await
+        .expect("abandoned sequence must not block cleanup");
+
+        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    }
+
+    #[test]
+    fn later_deferred_frames_are_discarded_after_unhandled_hole() {
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("stream-timeout".to_string(), true, Some(300));
+        let sequence = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        conn.sm_inbound_completion.abandon(sequence);
+        conn.deferred_inbound.extend([
+            axum::extract::ws::Utf8Bytes::from_static("<message id='later-1'/>"),
+            axum::extract::ws::Utf8Bytes::from_static("<presence/>"),
+        ]);
+
+        assert_eq!(discard_deferred_inbound_after_unhandled_hole(&mut conn), 2);
+        assert!(conn.deferred_inbound.is_empty());
+        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    }
 
     #[test]
     fn closing_phase_appends_websocket_stream_close_frame() {

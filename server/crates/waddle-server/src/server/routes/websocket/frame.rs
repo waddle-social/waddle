@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    frame_backstop::{run_with_backstop, StanzaBackstop},
+    frame_backstop::{run_with_backstop, InboundDisposition, StanzaBackstop},
     isr_resume::handle_isr_resume_authenticate,
     parse_errors::{is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
@@ -312,14 +312,82 @@ async fn handle_xmpp_frame_impl(
                     }
                 }
             };
-            let responses = run_with_backstop(backstop, dispatch).await;
-            if let Some(inbound_sequence) = reserved_inbound_for_sm {
-                if !ordered_relay_origin_was_deferred(&ordered_relay_origin) {
-                    sm_inbound_completion.complete(inbound_sequence, sm_state);
-                }
-            }
-            responses
+            let outcome = run_with_backstop(backstop, dispatch).await;
+            settle_inbound_dispatch(
+                outcome.disposition,
+                ordered_relay_origin_was_deferred(&ordered_relay_origin),
+                reserved_inbound_for_sm,
+                sm_inbound_completion,
+                sm_state,
+            );
+            outcome.responses
         }
+    }
+}
+
+pub(super) fn settle_inbound_dispatch(
+    disposition: InboundDisposition,
+    ordered_relay_deferred: bool,
+    inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
+    completion: &mut crate::server::routes::interpret::SmInboundCompletionTracker,
+    sm_state: &mut waddle_xmpp::stream_management::StreamManagementState,
+) {
+    let Some(inbound_sequence) = inbound_sequence else {
+        return;
+    };
+    match disposition {
+        InboundDisposition::Handled => {
+            if !ordered_relay_deferred {
+                completion.complete(inbound_sequence, sm_state);
+            }
+        }
+        InboundDisposition::Unhandled => {
+            // A timeout cancels dispatch. Remove the slot from the set cleanup
+            // waits for, but preserve a permanent `h` hole so responsibility
+            // stays with the sender. This overrides ordered-relay deferral: a
+            // late handoff must not convert a cancelled dispatch into an ack.
+            completion.abandon(inbound_sequence);
+        }
+    }
+}
+
+#[cfg(test)]
+mod inbound_dispatch_tests {
+    use super::*;
+
+    fn enabled_sm() -> waddle_xmpp::stream_management::StreamManagementState {
+        let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
+        state.enable("dispatch-test".to_string(), true, Some(300));
+        state
+    }
+
+    #[test]
+    fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
+        let mut state = enabled_sm();
+        let mut completion =
+            crate::server::routes::interpret::SmInboundCompletionTracker::default();
+        let sequence = completion.reserve(&state);
+
+        settle_inbound_dispatch(
+            InboundDisposition::Handled,
+            false,
+            Some(sequence),
+            &mut completion,
+            &mut state,
+        );
+
+        assert_eq!(state.get_inbound_count(), 1);
+
+        let deferred = completion.reserve(&state);
+        settle_inbound_dispatch(
+            InboundDisposition::Handled,
+            true,
+            Some(deferred),
+            &mut completion,
+            &mut state,
+        );
+        assert_eq!(state.get_inbound_count(), 1);
+        assert!(completion.has_pending());
     }
 }
 
