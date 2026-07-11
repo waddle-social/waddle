@@ -280,64 +280,36 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     internal_server_error_iq_error("Internal server error."),
                 )];
             };
-            // Single commit point (#1261, #1276 Greptile P1s). Three
-            // non-transactional stores must be torn down: the CLUSTERING
-            // durable state (config/subject/affiliations incl. bans — the
-            // security-sensitive resurrection vector), the in-memory
-            // registry entry, and the app-level waddle-side rows (catalog
-            // row, group-DM tuples/bookmarks, archive boundaries, invite
-            // ledger). To keep every failure either fully-restorable or
-            // fully-committed — never split — they run in strict order:
-            //
-            //   1. prepare_destroy_wipe   — CLUSTERING wipe, REVERSIBLE
-            //                               via `RepersistDurableState`.
-            //   2. destroy_room_actor_prepared — the registry destroy is
-            //                               the POINT OF NO RETURN.
-            //   3. wipe_destroyed_room_durable_state — irreversible
-            //                               app-level deletes, only AFTER
-            //                               the commit.
-            //
-            // Any failure at or before step 2 rolls the clustering wipe
-            // back and returns a retryable error with the room fully
-            // intact; a step-3 failure is post-commit (the room is
-            // already destroyed and its ban/affiliation state already
-            // gone) so it is logged best-effort, never a split live room.
-            if !super::super::super::prepare_destroy_wipe(state, &room_jid).await {
-                return vec![build_iq_error_xml_typed(
-                    id,
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            }
-            // Best-effort rollback of the reversible step-1 clustering
-            // wipe: re-persist the live actor's config/subject/every
-            // affiliation from its in-memory truth (the actor's durable
-            // store is the same instance PrepareDestroyWipe deleted from,
-            // handed over at spawn via `RestoreDurableRoomState`), so a
-            // pre-commit abort leaves the still-live room restorable
-            // across restart/reclaim.
-            let repersist_clustering_state = || async {
-                if let Err(error) = room_actor
-                    .ask(waddle_xmpp::muc::room_actor::RepersistDurableState)
-                    .await
-                {
-                    warn!(
-                        room = %room_jid,
-                        error = %error,
-                        "Failed to re-persist durable room state after an aborted \
-                         destroy; the room is live but not restart-restorable until \
-                         its next durable mutation or a destroy retry"
-                    );
-                }
-            };
-            match super::super::super::destroy_room_actor_prepared(state, &room_jid).await {
+            // Single atomic commit point (#1261, #1276 Greptile P1s).
+            // `destroy_room_actor` (the registry `DestroyRoom` handler)
+            // removes the in-memory entry AND wipes the clustering durable
+            // state (config/subject/affiliations incl. bans — the
+            // security-sensitive resurrection vector) under one claim
+            // fence: on a durable-delete failure it restores the entry and
+            // reports `DurableWipeFailed`, so the room ends up either fully
+            // destroyed or fully intact. There is no separate pre-wipe to
+            // roll back, so no fail-open window can leave a live room
+            // stripped of its bans/affiliations. Only the irreversible
+            // app-level rows (catalog row, group-DM tuples/bookmarks,
+            // archive boundaries, invite ledger) are wiped afterwards,
+            // strictly AFTER this commit.
+            match super::super::super::destroy_room_actor(state, &room_jid).await {
                 Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed) => {}
-                // A concurrent destroy already removed the room between
-                // the `get_room_actor` lookup above and here. It is
-                // genuinely gone, so `item-not-found` is correct and the
-                // clustering rows stay wiped (restoring them would
-                // resurrect a room another actor just destroyed).
+                // The clustering durable wipe failed and the registry
+                // atomically restored the room — nothing was torn down, so
+                // answer retryable, never a false success.
+                Ok(
+                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
+                ) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+                // A concurrent destroy already removed the room between the
+                // `get_room_actor` lookup above and here — genuinely gone.
                 Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered) => {
                     return vec![build_iq_error_xml_typed(
                         id,
@@ -346,32 +318,15 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         item_not_found_iq_error("Requested item not found."),
                     )];
                 }
-                // Neither a transport failure (Err) nor a durable-wipe
-                // failure (unreachable for a prepared destroy — no
-                // durable delete runs) may leave a split live room: only
-                // the reversible clustering wipe has run, so roll it back
-                // and answer retryable. #1276 Greptile P1 "Prepared Ask
-                // Splits State": the irreversible app-level wipe has NOT
-                // run yet, so nothing is stranded.
-                Ok(
-                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
-                ) => {
-                    repersist_clustering_state().await;
-                    return vec![build_iq_error_xml_typed(
-                        id,
-                        response_from,
-                        response_to,
-                        internal_server_error_iq_error("Internal server error."),
-                    )];
-                }
+                // A transport-level ask failure: the atomic handler either
+                // fully applied or not at all, so there is no split state.
+                // Answer retryable, never `item-not-found` (#1276 P1-B).
                 Err(error) => {
                     warn!(
                         room = %room_jid,
                         error = %error,
-                        "Prepared destroy ask failed; rolling back the clustering \
-                         wipe and returning a retryable error"
+                        "Destroy ask failed; returning a retryable error"
                     );
-                    repersist_clustering_state().await;
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,
@@ -380,10 +335,10 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     )];
                 }
             }
-            // COMMITTED. The registry entry is gone and the clustering
-            // ban/affiliation state was wiped in step 1, so the room can
-            // never resurrect with its old grants. Now tear down the
-            // irreversible app-level rows (#1261): the managed-channel
+            // COMMITTED: the registry entry and the clustering ban/
+            // affiliation state are both gone, so the room can never
+            // resurrect with its old grants. Tear down the irreversible
+            // app-level rows (#1261) post-commit: the managed-channel
             // catalog row, group-DM member tuples/bookmarks, archive
             // boundaries, and the outstanding mediated-invite ledger.
             // These are idempotent deletes; a post-commit failure leaves

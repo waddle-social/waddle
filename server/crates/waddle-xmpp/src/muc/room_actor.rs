@@ -905,34 +905,6 @@ impl kameo::message::Message<GetInfo> for RoomActor {
     }
 }
 
-/// Compensating re-persist of the room's full durable state — config,
-/// subject, and every affiliation entry — from the live actor's
-/// in-memory truth (#1276 Greptile P1). The owner-IQ destroy runs the
-/// fenced clustering wipe (`PrepareDestroyWipe`) BEFORE the waddle-side
-/// wipe; when the waddle-side wipe then fails and the destroy aborts,
-/// this restores the just-deleted clustering rows so the still-live
-/// room remains restorable across restart/reclaim. No-op without a
-/// configured durable store.
-pub struct RepersistDurableState;
-
-impl kameo::message::Message<RepersistDurableState> for RoomActor {
-    type Reply = Result<(), DurablePersistError>;
-
-    async fn handle(
-        &mut self,
-        _msg: RepersistDurableState,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.persist_config().await?;
-        self.persist_subject().await?;
-        for entry in self.room.get_all_affiliations() {
-            self.persist_affiliation(&entry.jid, entry.affiliation)
-                .await?;
-        }
-        Ok(())
-    }
-}
-
 /// Get the current room configuration.
 pub struct GetConfig;
 

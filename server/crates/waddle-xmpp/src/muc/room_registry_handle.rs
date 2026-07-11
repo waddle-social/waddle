@@ -37,8 +37,8 @@ use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
-    DestroyRoomReason, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, PrepareDestroyWipe,
-    ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    DestroyRoomReason, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, ReapSealedRoom,
+    RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
     WireClusteringClaims,
 };
 use super::RoomConfig;
@@ -315,34 +315,17 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Phase-one fenced clustering wipe for an explicit destroy
-        /// (#1261); the registry entry is untouched. `false` = the
-        /// fenced delete failed and the destroy must not proceed.
-        prepare_destroy_wipe(room_jid: BareJid) -> bool,
-        "prepare_destroy_wipe",
-        PrepareDestroyWipe { room_jid }
-    );
-
-    registry_method!(
-        /// Destroy a room, returning the typed outcome.
+        /// Destroy a room, returning the typed outcome. The handler
+        /// removes the registry entry and wipes the room's clustering
+        /// durable rows (config/subject/affiliations incl. bans) under
+        /// one claim fence, restoring the entry and reporting
+        /// [`DestroyRoomOutcome::DurableWipeFailed`] if the durable delete
+        /// fails — the destroy is therefore all-or-nothing (#1261, #1276).
         destroy_room(room_jid: BareJid) -> DestroyRoomOutcome,
         "destroy_room",
         DestroyRoom {
             room_jid,
             reason: DestroyRoomReason::Destroy
-        }
-    );
-
-    registry_method!(
-        /// Destroy a room whose durable rows were already wiped by a
-        /// successful [`prepare_destroy_wipe`](Self::prepare_destroy_wipe)
-        /// — no durable delete runs, so this cannot return
-        /// [`DestroyRoomOutcome::DurableWipeFailed`].
-        destroy_room_prepared(room_jid: BareJid) -> DestroyRoomOutcome,
-        "destroy_room_prepared",
-        DestroyRoom {
-            room_jid,
-            reason: DestroyRoomReason::DestroyPrepared
         }
     );
 

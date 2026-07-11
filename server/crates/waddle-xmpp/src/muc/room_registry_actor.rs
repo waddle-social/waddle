@@ -590,13 +590,6 @@ pub enum DestroyRoomReason {
     /// ceases to exist, so its durable rows (config, subject,
     /// affiliations incl. bans) are deleted with it.
     Destroy,
-    /// The caller already ran [`PrepareDestroyWipe`] successfully: the
-    /// durable rows are gone, so this removal performs NO durable
-    /// delete and therefore cannot fail — after a successful prepare
-    /// there is no remaining fallible step that could leave a live
-    /// room with its durable state half-removed (Greptile P1 on
-    /// #1276).
-    DestroyPrepared,
     /// This node merely lost the room (fenced ownership check saw a
     /// steal): evict the LOCAL actor only. The room lives on under its
     /// new owner — its durable rows MUST survive. Without this split,
@@ -621,44 +614,6 @@ pub enum DestroyRoomOutcome {
     /// The epoch-fenced durable delete failed; the registry entry was
     /// restored and nothing was destroyed.
     DurableWipeFailed,
-}
-
-/// Phase one of an explicit XEP-0045 §10.9 destroy (#1261): run the
-/// epoch-fenced clustering durable delete for `room_jid` WITHOUT
-/// touching the registry entry. The owner-IQ destroy calls this before
-/// deleting any waddle-side rows so the common failure mode (durable
-/// backend down, fencing lost) aborts the destroy with the room fully
-/// intact — nothing deleted anywhere. `true` when the rows are gone
-/// (or no durable store is configured); `false` when the fenced delete
-/// failed and the destroy must not proceed. The later [`DestroyRoom`]
-/// re-runs the same idempotent delete as its own backstop.
-pub struct PrepareDestroyWipe {
-    pub room_jid: BareJid,
-}
-
-impl kameo::message::Message<PrepareDestroyWipe> for RoomRegistryActor {
-    type Reply = bool;
-
-    async fn handle(
-        &mut self,
-        msg: PrepareDestroyWipe,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let Some(store) = &self.durable_store else {
-            return true;
-        };
-        match store.delete_room_state(&msg.room_jid).await {
-            Ok(()) => true,
-            Err(error) => {
-                warn!(
-                    room = %msg.room_jid,
-                    %error,
-                    "Preparatory durable room-state delete failed; refusing the destroy"
-                );
-                false
-            }
-        }
-    }
 }
 
 /// Destroy a room, removing it from the registry.

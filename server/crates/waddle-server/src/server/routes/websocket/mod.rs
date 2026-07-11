@@ -107,8 +107,7 @@ pub use state::{
 };
 
 pub(crate) use cleanup::{
-    destroy_room_actor_prepared, get_or_create_room_actor, get_room_actor, is_muc_room_jid,
-    prepare_destroy_wipe,
+    destroy_room_actor, get_or_create_room_actor, get_room_actor, is_muc_room_jid,
 };
 pub(crate) use muc_call_sfu::{
     note_participant_left_by_call_id, note_participant_left_from_webhook,

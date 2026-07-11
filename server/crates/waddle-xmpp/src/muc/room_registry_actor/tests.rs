@@ -1013,61 +1013,6 @@ mod ownership_claims_tests {
         );
     }
 
-    /// A PREPARED destroy (the caller already ran `PrepareDestroyWipe`
-    /// successfully) performs no durable delete of its own — even a
-    /// store that would refuse the delete cannot fail it, so after a
-    /// successful prepare nothing can leave a live room with
-    /// half-removed durable state (Greptile P1 on #1276).
-    #[tokio::test]
-    async fn prepared_destroy_never_fails_on_the_durable_store() {
-        let registry = spawn_registry().await;
-        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
-        let durable_store = Arc::new(RecordingDurableStore {
-            fail_deletes: true,
-            ..RecordingDurableStore::default()
-        });
-        registry
-            .ask(WireClusteringClaims {
-                claim_store: Arc::clone(&claim_store),
-                node_identity: SharedNodeIdentity::new(this_identity()),
-                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
-                rollout_backoff: None,
-            })
-            .await
-            .expect("wire");
-
-        let jid = test_room_jid("prepared-destroy");
-        registry
-            .ask(GetOrCreateRoom {
-                room_jid: jid.clone(),
-                waddle_id: "w-1".to_string(),
-                channel_id: "c-1".to_string(),
-                config: RoomConfig::default(),
-            })
-            .await
-            .expect("get_or_create_room");
-
-        let destroyed = registry
-            .ask(DestroyRoom {
-                room_jid: jid.clone(),
-                reason: DestroyRoomReason::DestroyPrepared,
-            })
-            .await
-            .expect("destroy ask");
-        assert_eq!(
-            destroyed,
-            DestroyRoomOutcome::Destroyed,
-            "a prepared destroy runs no durable delete and cannot fail on it"
-        );
-        let gone = registry
-            .ask(GetRoom {
-                room_jid: jid.clone(),
-            })
-            .await
-            .expect("get room");
-        assert!(gone.is_none(), "the prepared destroy removed the room");
-    }
-
     /// The deposed-node eviction path (fenced fan-out check observed a
     /// steal) evicts the LOCAL actor only — the room lives on under
     /// its new owner, so `DestroyRoomReason::LocalEviction` MUST NOT
