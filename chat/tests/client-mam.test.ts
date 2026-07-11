@@ -363,6 +363,48 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
     expect(search.map((message) => message.body)).toEqual(["matching alice"]);
   });
 
+  test("explicit restored occupant scope isolates page, thread, and search before discovery or catchup", async () => {
+    const mixed = page([
+      archivedMucPm("restored-bob", CUSTOM_MUC_PM_BOB, "bob secret", "2026-07-01T10:00:00.000Z"),
+      archivedMucPm("restored-alice", CUSTOM_MUC_PM_ALICE, "alice secret", "2026-07-01T10:00:01.000Z"),
+    ], { complete: true });
+    const requestedPeers: string[] = [];
+    const xmpp: MamWasmClient = {
+      fetch_dm_history_page: async (peerJid) => { requestedPeers.push(peerJid); return mixed; },
+      fetch_dm_history_by_thread: async (peerJid) => { requestedPeers.push(peerJid); return mixed; },
+      search_dm_history: async (peerJid) => { requestedPeers.push(peerJid); return mixed; },
+    };
+    const { pager } = createPager(xmpp, {
+      classifyMucPm: () => undefined,
+      isMucPmPeer: () => false,
+    });
+
+    const history = await pager.queryPersonalMamPage(
+      CUSTOM_MUC_PM_ALICE,
+      100,
+      { type: "latest" },
+      "muc-occupant",
+    );
+    const thread = await pager.queryPersonalMamThreadPage(
+      CUSTOM_MUC_PM_ALICE,
+      "thread-1",
+      100,
+      { type: "latest" },
+      "muc-occupant",
+    );
+    const search = await pager.searchDmMessages(
+      CUSTOM_MUC_PM_ALICE,
+      "secret",
+      20,
+      "muc-occupant",
+    );
+
+    expect(requestedPeers).toEqual(Array(3).fill(CUSTOM_MUC_PM_ALICE));
+    expect(history.messages.map((message) => message.body)).toEqual(["alice secret"]);
+    expect(thread.messages.map((message) => message.body)).toEqual(["alice secret"]);
+    expect(search.map((message) => message.body)).toEqual(["alice secret"]);
+  });
+
   test("cold-reload catch-up retains custom MUC occupant scope before topology discovery", async () => {
     const catchup = new ReconnectCatchup();
     catchup.onSessionStarted();

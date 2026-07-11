@@ -2,6 +2,7 @@ import { getCurrentScope, nextTick, onScopeDispose, ref, watch, type Ref } from 
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type {
   BrowserXmppClient,
+  DmConversationScope,
   DmChatStateEvent,
   DmDisplayedEvent,
   DmReactionEvent,
@@ -9,6 +10,7 @@ import type {
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
 import { barePeerJid, dmConversationIdentityKey, jidLocalpart } from "@/lib/xmpp-client";
+import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
 import type { CatchupConversationFailure } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
@@ -48,6 +50,7 @@ export function useDirectMessages(
   normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
   clearActionError: () => void,
+  activeConversationScope?: Readonly<Ref<DmConversationScope | null>>,
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
   const peerNameFromJid = (jid: string) => jidLocalpart(jid);
@@ -79,7 +82,19 @@ export function useDirectMessages(
     notifyComposing,
   } = chatStates;
 
-  const readMarkers = useDmReadMarkers({ xmppClient, activePeerJid, messages });
+  function conversationScope(peerJid: string): DmConversationScope {
+    if (activePeerJid.value === peerJid && activeConversationScope?.value) {
+      return activeConversationScope.value;
+    }
+    return xmppClient.value?.isMucPmPeer?.(peerJid) === true ? "muc-occupant" : "account";
+  }
+
+  const readMarkers = useDmReadMarkers({
+    xmppClient,
+    activePeerJid,
+    messages,
+    conversationScope,
+  });
   const {
     firstUnseenId,
     latestRemoteMessageId,
@@ -93,6 +108,7 @@ export function useDirectMessages(
     actionError,
     clearActionError,
     normalizeError,
+    conversationScope,
   });
   const {
     searchResults,
@@ -268,6 +284,7 @@ export function useDirectMessages(
     isFeedVisible,
     persistLastSeen,
     dmLoadErrorMessage,
+    conversationScope,
   });
   const {
     isLoadingMessages,
@@ -384,9 +401,25 @@ export function useDirectMessages(
 
   function applyMdsDisplayed(chatId: string, displayed: MdsDisplayedState): boolean {
     const peerJid = activePeerJid.value;
-    if (!peerJid || barePeerJid(chatId) !== barePeerJid(peerJid)) return false;
+    const client = xmppClient.value;
+    if (!peerJid || !client) return false;
+    // Inbound XEP-0490 item IDs have already crossed the typed Rust
+    // boundary: a resource-bearing id is an occupant identity and must
+    // compare exactly even before custom-service discovery completes.
+    const chatIdentity = resourceOf(chatId)
+      ? fullJidIdentityKey(chatId)
+      : bareJidKey(chatId);
+    const explicitScope = activePeerJid.value === peerJid
+      ? activeConversationScope?.value
+      : null;
+    const peerIdentity = dmConversationIdentityKey(peerJid, () =>
+      explicitScope
+        ? explicitScope === "muc-occupant"
+        : resourceOf(chatId) !== "" || conversationScope(peerJid) === "muc-occupant"
+    );
+    if (chatIdentity !== peerIdentity) return false;
     const feedTimeline = messages.value.filter(isFeedVisible);
-    const key = mdsChatKey(barePeerJid(peerJid));
+    const key = mdsChatKey(chatIdentity);
     if (!displayedStateCanAdvance(feedTimeline, getMdsDisplayed(key), displayed)) return false;
     firstUnseenId.value = firstUnseenIdAfterDisplayedState(
       feedTimeline,

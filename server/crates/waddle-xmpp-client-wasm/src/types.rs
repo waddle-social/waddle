@@ -878,13 +878,12 @@ pub struct WaddleVCard4 {
 /// One XEP-0490 §3 displayed entry surfaced to the chat client.
 #[derive(Debug, Serialize)]
 pub struct WaddleMdsDisplayedEntry {
-    /// The PEP item id — the bare JID of the chat (DM contact or
-    /// MUC room).
+    /// The PEP item id — bare for DMs/rooms, full occupant for MUC PMs.
     pub chat_id: String,
     /// XEP-0359 stanza-id of the displayed message.
     pub stanza_id: String,
-    /// JID that injected the stanza-id (the MUC room for group
-    /// chats; the user's own server for 1:1 chats).
+    /// JID that injected the stanza-id (the room for groupchat; the
+    /// user's own server for DMs and MUC PMs).
     pub stanza_id_by: String,
 }
 

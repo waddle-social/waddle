@@ -100,7 +100,11 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { createGroupDm, type CreateGroupDmResult } from "./group-dm";
-import { ReconnectCatchup, type ReconnectCatchupEntry } from "./reconnect-catchup";
+import {
+  ReconnectCatchup,
+  type DmConversationScope,
+  type ReconnectCatchupEntry,
+} from "./reconnect-catchup";
 import {
   parseRegisterDeviceResult,
   parseRegisterPushDeviceRejection,
@@ -559,7 +563,7 @@ export class BrowserXmppClient {
       // same occupant classification as the live path, so a MUC PM never
       // re-files under the room bare JID after a reconnect.
       classifyMucPm: (message) => this.mucPmOccupant(message),
-      isMucPmPeer: (peerJid) => this.isMucServiceOccupant(peerJid),
+      isMucPmPeer: (peerJid) => this.isMucPmPeer(peerJid),
     });
     this.mucAdmin = new MucAdmin({
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
@@ -1477,15 +1481,9 @@ export class BrowserXmppClient {
    * occupant JID and replies MUST go to `room@service/nick` — sending to
    * the room bare JID would broadcast. Everything else addresses the
    * bare peer JID. */
-  private directMessageAddress(peerJid: string): string {
-    const hasResource = peerJid.includes("/");
-    return hasResource && (
-      this.isMucServiceOccupant(peerJid)
-      || this.isKnownMucRoomBare(barePeerJid(peerJid))
-      || this.catchup.getDmScope(peerJid) === "muc-occupant"
-    )
-      ? peerJid
-      : barePeerJid(peerJid);
+  private directMessageAddress(peerJid: string, scope?: DmConversationScope): string {
+    const mucPm = scope ? scope === "muc-occupant" : this.isMucPmPeer(peerJid);
+    return mucPm ? peerJid : barePeerJid(peerJid);
   }
 
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
@@ -1607,7 +1605,7 @@ export class BrowserXmppClient {
     return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);
   }
   async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, this.directMessageAddress(peerJid), "chat", state, thread); }
-  async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, this.directMessageAddress(peerJid), "chat", messageId, thread); }
+  async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
   async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, this.directMessageAddress(peerJid), "chat", messageId, thread); }
   async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"], preview?: Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, thread?: { id: string; parent?: string }): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
@@ -1621,7 +1619,8 @@ export class BrowserXmppClient {
 
   /**
    * XEP-0490 §3 multi-device "read up to here" publish. `chatId` is
-   * the bare JID of the chat (DM contact or MUC room); `stanzaId` is
+   * bare for a DM contact or room, and the full occupant JID for a MUC PM;
+   * `stanzaId` is
    * the XEP-0359 id of the latest displayed message; `stanzaIdBy` is
    * the JID that injected that stanza-id (room for MUC, user's own
    * server for 1:1). Failures are intentionally silent — MDS is a
@@ -2174,12 +2173,12 @@ export class BrowserXmppClient {
   async queryMamByThread(spaceId: string, channelId: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> { return this.mam.queryMamByThread(spaceId, channelId, threadId, max); }
   async queryMamThreadPage(spaceId: string, channelId: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> { return this.mam.queryMamThreadPage(spaceId, channelId, threadId, max, pageParam); }
   async searchMessages(_spaceId: string, channelId: string, query: string, max = 20): Promise<MessageSearchResult[]> { return this.mam.searchMessages(channelId, query, max); }
-  async queryPersonalMam(peerJid: string, max = 100): Promise<LiveDmMessage[]> { return this.mam.queryPersonalMam(peerJid, max); }
-  async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> { return this.mam.queryPersonalMamPage(peerJid, max, pageParam); }
-  async queryPersonalMamThreadPage(peerJid: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> { return this.mam.queryPersonalMamThreadPage(peerJid, threadId, max, pageParam); }
+  async queryPersonalMam(peerJid: string, max = 100, scope?: DmConversationScope): Promise<LiveDmMessage[]> { return this.mam.queryPersonalMam(peerJid, max, scope); }
+  async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }, scope?: DmConversationScope): Promise<MamHistoryPage<LiveDmMessage>> { return this.mam.queryPersonalMamPage(peerJid, max, pageParam, scope); }
+  async queryPersonalMamThreadPage(peerJid: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }, scope?: DmConversationScope): Promise<MamHistoryPage<LiveDmMessage>> { return this.mam.queryPersonalMamThreadPage(peerJid, threadId, max, pageParam, scope); }
   async hydrateRecentDmCallActivity(peerJid: string, options: DmCallActivityHydrationOptions = {}): Promise<void> { return this.mam.hydrateRecentDmCallActivity(peerJid, options); }
   async hydrateRecentDmCallActivities(options: DmCallActivityHydrationOptions = {}): Promise<void> { return this.mam.hydrateRecentDmCallActivities(options); }
-  async searchDmMessages(peerJid: string, query: string, max = 20): Promise<MessageSearchResult[]> { return this.mam.searchDmMessages(peerJid, query, max); }
+  async searchDmMessages(peerJid: string, query: string, max = 20, scope?: DmConversationScope): Promise<MessageSearchResult[]> { return this.mam.searchDmMessages(peerJid, query, max, scope); }
   async subscribeToPeerPresence(peerJid: string): Promise<void> { return this.presence.subscribeToPeerPresence(peerJid); }
   async setPresence(show: BroadcastShow, idleSince?: number | null): Promise<void> { return this.presence.setPresence(show, idleSince); }
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jidLocalpart(jid) || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
@@ -2775,10 +2774,13 @@ export class BrowserXmppClient {
     return this.isKnownMucRoomBare(barePeerJid(bareJid));
   }
 
-  /** Public: whether `peerJid` is a full occupant JID on the session's
-   * authoritative MUC service (fallback or service discovery result). */
+  /** Public: whether `peerJid` is a full occupant JID proven by the
+   * configured MUC service, a discovered room, or persisted catch-up scope. */
   isMucPmPeer(peerJid: string): boolean {
-    return this.isMucServiceOccupant(peerJid);
+    if (!resourceOf(peerJid)) return false;
+    return this.isMucServiceOccupant(peerJid)
+      || this.isKnownMucRoomBare(barePeerJid(peerJid))
+      || this.catchup.getDmScope(peerJid) === "muc-occupant";
   }
   private runReconnectCatchup(
     xmpp: XmppClientInstance,

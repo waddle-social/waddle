@@ -6,7 +6,7 @@
 //! `<displayed/>` payload enforces the XEP-0490 shape strictly so the
 //! typed `MdsDisplayed` value flows end-to-end.
 
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use minidom::Element;
 
 use crate::request::StanzaId;
@@ -27,12 +27,12 @@ const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsu
 /// Typed representation of one MDS catch-up entry. `chat_id` is the
 /// PEP item id (= JID of the chat). `stanza_id` is the XEP-0359 id of
 /// the displayed message; `stanza_id_by` is the JID that injected the
-/// stanza-id (the room for MUC, the user's server for 1:1).
+/// stanza-id (the room for groupchat, the user's server for DMs and MUC PMs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsCatchupEntry {
-    pub chat_id: BareJid,
+    pub chat_id: Jid,
     pub stanza_id: StanzaId,
-    pub stanza_id_by: BareJid,
+    pub stanza_id_by: Jid,
 }
 
 fn build_publish_options_form() -> Element {
@@ -75,7 +75,7 @@ fn field(var: &str, value: &str) -> Element {
         .build()
 }
 
-fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &BareJid) -> Element {
+fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &Jid) -> Element {
     Element::builder("displayed", NS_MDS)
         .append(
             Element::builder("stanza-id", NS_STANZA_ID)
@@ -97,9 +97,9 @@ fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &BareJid) -> Elem
 /// the user's own PEP service per XEP-0163.
 pub fn build_mds_publish_iq(
     iq_id: &str,
-    chat_id: &BareJid,
+    chat_id: &Jid,
     stanza_id: &StanzaId,
-    stanza_id_by: &BareJid,
+    stanza_id_by: &Jid,
 ) -> Element {
     let item = Element::builder("item", NS_PUBSUB)
         .attr(
@@ -159,7 +159,7 @@ pub fn build_mds_subscribe_iq(iq_id: &str, subscriber_bare_jid: &str) -> Element
 }
 
 fn parse_displayed_into_entry(item: &Element) -> Option<MdsCatchupEntry> {
-    let chat_id = item.attr("id")?.parse::<BareJid>().ok()?;
+    let chat_id = item.attr("id")?.parse::<Jid>().ok()?;
     let displayed = item.get_child("displayed", NS_MDS)?;
     let (stanza_id, stanza_id_by) = parse_displayed_payload(displayed)?;
     Some(MdsCatchupEntry {
@@ -208,7 +208,7 @@ pub fn parse_mds_event(message: &Element) -> Option<Vec<MdsCatchupEntry>> {
     Some(entries)
 }
 
-fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, BareJid)> {
+fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, Jid)> {
     if !displayed.is("displayed", NS_MDS) {
         return None;
     }
@@ -220,7 +220,7 @@ fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, BareJid)> {
         return None;
     }
     let stanza_id = StanzaId::new(stanza_id_elem.attr("id")?).ok()?;
-    let stanza_id_by = stanza_id_elem.attr("by")?.parse::<BareJid>().ok()?;
+    let stanza_id_by = stanza_id_elem.attr("by")?.parse::<Jid>().ok()?;
     Some((stanza_id, stanza_id_by))
 }
 
@@ -247,8 +247,8 @@ mod tests {
         String::from(elem)
     }
 
-    fn bare_jid(value: &str) -> BareJid {
-        value.parse().expect("test bare JID parses")
+    fn jid(value: &str) -> Jid {
+        value.parse().expect("test JID parses")
     }
 
     fn stanza_id(value: &str) -> StanzaId {
@@ -256,7 +256,7 @@ mod tests {
     }
 
     fn displayed_payload(id: &str, by: &str) -> Element {
-        build_displayed_payload(&stanza_id(id), &bare_jid(by))
+        build_displayed_payload(&stanza_id(id), &jid(by))
     }
 
     fn stanza_id_element(id: &str, by: &str) -> Element {
@@ -326,9 +326,9 @@ mod tests {
     fn publish_iq_carries_spec_publish_options() {
         let iq = build_mds_publish_iq(
             "iq-1",
-            &bare_jid("romeo@montague.lit"),
+            &jid("romeo@montague.lit"),
             &stanza_id("stanza-id-1"),
-            &bare_jid("juliet@capulet.lit"),
+            &jid("juliet@capulet.lit"),
         );
         let xml = xml_of(&iq);
         // `minidom` serialises namespace attributes with single
@@ -393,16 +393,16 @@ mod tests {
         ]);
         let entries = parse_mds_catchup_result(&iq);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].chat_id, bare_jid("romeo@montague.lit"));
+        assert_eq!(entries[0].chat_id, jid("romeo@montague.lit"));
         assert_eq!(entries[0].stanza_id, stanza_id("dm-sid"));
-        assert_eq!(entries[0].stanza_id_by, bare_jid("juliet@capulet.lit"));
+        assert_eq!(entries[0].stanza_id_by, jid("juliet@capulet.lit"));
         assert_eq!(
             entries[1].chat_id,
-            bare_jid("example@conference.shakespeare.lit")
+            jid("example@conference.shakespeare.lit")
         );
         assert_eq!(
             entries[1].stanza_id_by,
-            bare_jid("example@conference.shakespeare.lit")
+            jid("example@conference.shakespeare.lit")
         );
     }
 
@@ -435,7 +435,7 @@ mod tests {
         ]);
         let entries = parse_mds_catchup_result(&iq);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].chat_id, bare_jid("valid@example.com"));
+        assert_eq!(entries[0].chat_id, jid("valid@example.com"));
         assert_eq!(entries[0].stanza_id, stanza_id("sid-valid"));
     }
 
@@ -448,7 +448,7 @@ mod tests {
         )]);
         let entries = parse_mds_event(&msg).expect("is MDS event");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].chat_id, bare_jid("romeo@montague.lit"));
+        assert_eq!(entries[0].chat_id, jid("romeo@montague.lit"));
         assert_eq!(entries[0].stanza_id, stanza_id("evt-sid"));
     }
 

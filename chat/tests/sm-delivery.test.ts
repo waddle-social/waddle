@@ -1,7 +1,12 @@
 import { describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { roomBareJidFor, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
+import {
+  roomBareJidFor,
+  type DmConversationScope,
+  type LiveDmMessage,
+  type LiveRoomMessage,
+} from "../src/lib/xmpp-client";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
 import { dmMessageFromArchived, roomMessageFromArchived } from "../src/lib/xmpp/client";
@@ -43,6 +48,7 @@ function makeRoomClient(queryMamResults: LiveRoomMessage[] = []) {
 function makeDmMessaging(
   xmppClient: ReturnType<typeof makeDmClient>,
   activePeerJid = "bob@example.com",
+  conversationScope?: DmConversationScope,
 ) {
   const actionError = ref("");
   const dm = useDirectMessages(
@@ -54,6 +60,7 @@ function makeDmMessaging(
     () => {
       actionError.value = "";
     },
+    conversationScope ? ref(conversationScope) : undefined,
   );
   return { dm, actionError };
 }
@@ -641,6 +648,7 @@ describe("XEP-0198 delivery status (DM)", () => {
     expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith(
       "room@muc.example.com/bob",
       100,
+      "muc-occupant",
     );
   });
 
@@ -648,7 +656,11 @@ describe("XEP-0198 delivery status (DM)", () => {
     // Cold reload: topology discovery has not yet updated the client's MUC
     // service, so persisted cursor scope is the authoritative signal.
     const client = makeDmClient([], () => false);
-    const { dm } = makeDmMessaging(client, "room@rooms.waddle.example/bob");
+    const { dm } = makeDmMessaging(
+      client,
+      "room@rooms.waddle.example/bob",
+      "muc-occupant",
+    );
     dm.messages.value = [{
       id: "pm-old",
       author: "bob",
@@ -673,6 +685,7 @@ describe("XEP-0198 delivery status (DM)", () => {
     expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith(
       "room@rooms.waddle.example/bob",
       100,
+      "muc-occupant",
     );
   });
 
@@ -716,7 +729,7 @@ describe("XEP-0198 delivery status (DM)", () => {
     const clientAny = client as unknown as {
       value: { queryPersonalMam: ReturnType<typeof mock> };
     };
-    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100);
+    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100, "account");
   });
 
   test("a failed DM fallback reload restores the pre-reload timeline instead of wiping it", async () => {
@@ -838,7 +851,7 @@ describe("XEP-0198 delivery status (DM)", () => {
     const clientAny = client as unknown as {
       value: { queryPersonalMam: ReturnType<typeof mock> };
     };
-    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100);
+    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100, "account");
   });
 
   test("MAM-replayed DM reactions attach to the original message after a fresh load", async () => {

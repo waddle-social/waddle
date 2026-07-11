@@ -1,6 +1,6 @@
 import { nextTick, ref, type Ref } from "vue";
-import type { BrowserXmppClient, LiveDmMessage } from "@/lib/xmpp-client";
-import { barePeerJid } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, DmConversationScope, LiveDmMessage } from "@/lib/xmpp-client";
+import { dmConversationIdentityKey } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { TimelineLoadResult } from "@/lib/timeline-load-result";
@@ -46,8 +46,9 @@ type UseDmMamPagingDeps = {
   appendQueuedMessages: (timeline: TimelineMessage[], peerJid: string) => TimelineMessage[];
   scrollToPinnedEdgeAndPin: () => Promise<boolean>;
   isFeedVisible: (m: TimelineMessage) => boolean;
-  persistLastSeen: (peerJid: string, messageId: string) => void;
+  persistLastSeen: (peerJid: string, messageId: string, capturedConversationId?: string) => void;
   dmLoadErrorMessage: (peerJid: string, opts?: { queuedOnly?: boolean }) => string;
+  conversationScope?: (peerJid: string) => DmConversationScope;
 };
 
 export function useDmMamPaging(deps: UseDmMamPagingDeps) {
@@ -70,7 +71,18 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     isFeedVisible,
     persistLastSeen,
     dmLoadErrorMessage,
+    conversationScope,
   } = deps;
+
+  function scopeForPeer(peerJid: string): DmConversationScope {
+    const client = xmppClient.value;
+    return conversationScope?.(peerJid)
+      ?? (client?.isMucPmPeer?.(peerJid) === true ? "muc-occupant" : "account");
+  }
+
+  function conversationIdForPeer(peerJid: string, scope: DmConversationScope): string {
+    return dmConversationIdentityKey(peerJid, () => scope === "muc-occupant");
+  }
 
   const isLoadingMessages = ref(false);
   const isLoadingOlderMessages = ref(false);
@@ -97,6 +109,11 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
 
   async function loadMessages(peerJid: string, unreadAtLoad = 0): Promise<TimelineLoadResult> {
     if (!session.value) return "aborted";
+    // Capture the typed conversation scope before the async MAM request.
+    // A disconnect/client replacement while awaiting the page must not
+    // reclassify a full occupant JID as an ordinary bare-resource DM.
+    const dmScope = scopeForPeer(peerJid);
+    const conversationId = conversationIdForPeer(peerJid, dmScope);
     const requestId = ++messageRequestId;
     initialLatestPagePinned = false;
     isLoadingMessages.value = true;
@@ -113,12 +130,12 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
 
     try {
       const page = xmppClient.value && "queryPersonalMamPage" in xmppClient.value
-        ? await xmppClient.value.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "latest" })
+        ? await xmppClient.value.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "latest" }, dmScope)
         : null;
       const mamResults = page
         ? page.messages
         : xmppClient.value
-          ? await xmppClient.value.queryPersonalMam(peerJid, PAGE_SIZE)
+          ? await xmppClient.value.queryPersonalMam(peerJid, PAGE_SIZE, dmScope)
           : [];
       if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
       loadErrorPeerJid.value = null;
@@ -145,7 +162,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       if (requestId === messageRequestId) isLoadingMessages.value = false;
 
       const feedTimeline = timelineWithQueue.filter(isFeedVisible);
-      const mdsKey = mdsChatKey(barePeerJid(peerJid));
+      const mdsKey = mdsChatKey(conversationId);
       const displayed = latestDisplayedStateOnTimeline(
         feedTimeline,
         getMdsDisplayedCandidates(mdsKey),
@@ -170,7 +187,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       if (!pinned) return "loaded";
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
-      if (newest) persistLastSeen(peerJid, newest.id);
+      if (newest) persistLastSeen(peerJid, newest.id, conversationId);
       return "loaded";
     } catch {
       if (requestId !== messageRequestId) return "aborted";
@@ -218,7 +235,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     const previousTop = el?.scrollTop ?? 0;
     isLoadingOlderMessages.value = true;
     try {
-      const page = await client.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "before", before });
+      const page = await client.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "before", before }, scopeForPeer(peerJid));
       if (!isCurrentRequest()) return;
       const advanced = advanceCursorWithBeforePage({
         prior: { oldestArchiveId, hasOlderMessages: hasOlderMessages.value },
@@ -271,7 +288,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       const previousBefore = before;
       let page: Awaited<ReturnType<typeof client.queryPersonalMamPage>>;
       try {
-        page = await client.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "before", before });
+        page = await client.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "before", before }, scopeForPeer(peerJid));
       } catch (e) {
         const classified = classifyMamError(e);
         if (isMamCursorNotFound(classified)) {
@@ -333,7 +350,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       activePeerJid.value === peerJid;
     let page: Awaited<ReturnType<typeof client.queryPersonalMamThreadPage>>;
     try {
-      page = await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "latest" });
+      page = await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "latest" }, scopeForPeer(peerJid));
     } catch (e) {
       if (isCurrentRequest()) {
         threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
@@ -372,7 +389,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       activePeerJid.value === peerJid;
     loadingOlderThreadIds.value = new Set([...loadingOlderThreadIds.value, threadId]);
     try {
-      const page = await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "before", before });
+      const page = await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "before", before }, scopeForPeer(peerJid));
       if (!isCurrentRequest()) return;
       const advanced = advanceThreadCursor({ prior: { oldestId: before }, page });
       if (advanced.oldestId !== undefined) oldestThreadArchiveIds.set(threadId, advanced.oldestId);

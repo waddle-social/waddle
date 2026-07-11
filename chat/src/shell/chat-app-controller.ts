@@ -126,6 +126,7 @@ export function useChatAppController() {
     ui.normalizeError,
     ui.actionError,
     ui.clearActionError,
+    dmConversations.activeConversationScope,
   );
 
   // --- Shared reactive state wired explicitly between the feature
