@@ -160,7 +160,8 @@ const NS_DATA_FORMS: &str = "jabber:x:data";
 ///
 /// `ill_formed` is true when the response violates one of XEP-0115
 /// §5.4 step 2.4's well-formedness rules — duplicate identities,
-/// duplicate features, or multi-FORM_TYPE extension forms. The
+/// duplicate features, multi-FORM_TYPE extension forms, or repeated
+/// FORM_TYPE values across extension forms. The
 /// parser still surfaces what it could read so callers can log
 /// diagnostics, but XEP-0115 verification MUST treat such a reply
 /// as invalid (do not cache).
@@ -194,6 +195,7 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
     let mut seen_identities: std::collections::HashSet<(String, String, String, String)> =
         std::collections::HashSet::new();
     let mut seen_features: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_form_types: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut ill_formed = false;
 
     for child in query.children() {
@@ -246,6 +248,10 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
             ("x", NS_DATA_FORMS) => {
                 if has_multiple_form_types(child) {
                     ill_formed = true;
+                } else if let Some(form_type) = caps_form_type(child) {
+                    if !seen_form_types.insert(form_type) {
+                        ill_formed = true;
+                    }
                 }
                 extensions.push(child.clone());
             }
@@ -282,6 +288,29 @@ fn has_multiple_form_types(form: &Element) -> bool {
         }
     }
     form_type_fields > 1 || form_type_values > 1
+}
+
+/// Return the FORM_TYPE used by a well-formed XEP-0128 result form.
+/// Forms with an absent, non-hidden, or valueless FORM_TYPE do not
+/// participate in XEP-0115 verification and are ignored per §5.4.
+fn caps_form_type(form: &Element) -> Option<String> {
+    if form.attr("type") != Some("result") {
+        return None;
+    }
+
+    let field = form.children().find(|child| {
+        child.name() == "field"
+            && child.ns() == NS_DATA_FORMS
+            && child.attr("var") == Some("FORM_TYPE")
+    })?;
+    if field.attr("type") != Some("hidden") {
+        return None;
+    }
+
+    field
+        .children()
+        .find(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
+        .map(Element::text)
 }
 
 /// Build a disco#info response IQ.

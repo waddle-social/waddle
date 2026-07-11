@@ -1,5 +1,26 @@
 use super::*;
 
+fn form_type_field(values: &[&str]) -> Element {
+    let mut field = Element::builder("field", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden");
+    for value in values {
+        field = field.append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append(*value)
+                .build(),
+        );
+    }
+    field.build()
+}
+
+fn result_form(form_type: &str) -> Element {
+    Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(form_type_field(&[form_type]))
+        .build()
+}
+
 #[test]
 fn test_is_disco_info_query() {
     let query_elem = Element::builder("query", DISCO_INFO_NS).build();
@@ -118,6 +139,59 @@ fn test_build_disco_info_response_dedupes_features_and_identities() {
         ],
         "first occurrence wins; order preserved"
     );
+}
+
+#[test]
+fn test_parse_disco_info_response_rejects_duplicate_form_types_across_forms() {
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(result_form(form_type))
+        .append(result_form(form_type))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(
+        parsed.ill_formed,
+        "XEP-0115 §5.4 requires duplicate FORM_TYPE values across forms to invalidate the response"
+    );
+}
+
+#[test]
+fn test_parse_disco_info_response_accepts_distinct_form_types() {
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(result_form("urn:xmpp:dataforms:softwareinfo"))
+        .append(result_form("urn:xmpp:dataforms:clientinfo"))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(!parsed.ill_formed);
+    assert_eq!(parsed.extensions.len(), 2);
+}
+
+#[test]
+fn test_parse_disco_info_response_retains_within_form_rejection() {
+    let duplicate_fields = Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(form_type_field(&["urn:xmpp:dataforms:first"]))
+        .append(form_type_field(&["urn:xmpp:dataforms:second"]))
+        .build();
+    let duplicate_values = Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(form_type_field(&[
+            "urn:xmpp:dataforms:first",
+            "urn:xmpp:dataforms:second",
+        ]))
+        .build();
+
+    for malformed_form in [duplicate_fields, duplicate_values] {
+        let query = Element::builder("query", DISCO_INFO_NS)
+            .append(malformed_form)
+            .build();
+        let parsed = parse_disco_info_response(&query).expect("parseable response");
+        assert!(parsed.ill_formed);
+    }
 }
 
 #[test]

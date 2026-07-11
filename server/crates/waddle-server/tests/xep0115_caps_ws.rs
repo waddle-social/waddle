@@ -14,6 +14,8 @@
 //!   and MUST NOT trigger resolution (§6.1 legacy format).
 //! - An ill-formed reply (duplicate feature var, §5.4 step 2.4) is
 //!   discarded whole and the next advert re-resolves.
+//! - Extension forms that repeat a FORM_TYPE are discarded and never
+//!   cached, even when the advertised hash matches the malformed set.
 //! - A reply arriving from a different resource than the one queried
 //!   is dropped and never cached.
 //! - Re-advertising the same `(hash, ver)` while a resolution is
@@ -124,6 +126,52 @@ fn caps_verification_string_with_softwareinfo_form(
         )
         .build();
     compute_caps_hash_with_extensions(&identities, &features, std::slice::from_ref(&form))
+}
+
+fn caps_verification_string_with_forms(
+    identity_name: &str,
+    features: &[&str],
+    forms: &[(&str, &str)],
+) -> String {
+    use waddle_xmpp::disco::info::{Feature, Identity};
+    use waddle_xmpp::xep::xep0115::compute_caps_hash_with_extensions;
+    use xmpp_parsers::minidom::Element;
+
+    let identities = vec![Identity::new("client", "pc", Some(identity_name))];
+    let features: Vec<Feature> = features
+        .iter()
+        .map(|feature| Feature::new(feature))
+        .collect();
+    let extensions = forms
+        .iter()
+        .map(|(form_type, software)| {
+            Element::builder("x", "jabber:x:data")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+                .append(
+                    Element::builder("field", "jabber:x:data")
+                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                        .append(
+                            Element::builder("value", "jabber:x:data")
+                                .append(*form_type)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .append(
+                    Element::builder("field", "jabber:x:data")
+                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
+                        .append(
+                            Element::builder("value", "jabber:x:data")
+                                .append(*software)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build()
+        })
+        .collect::<Vec<_>>();
+    compute_caps_hash_with_extensions(&identities, &features, &extensions)
 }
 
 /// Send a ping IQ and wait for its result. Used as a deterministic
@@ -995,6 +1043,80 @@ async fn caps_duplicate_feature_reply_is_ill_formed_and_not_cached() {
         })
         .await
         .expect("ill-formed reply MUST NOT be cached; next advert MUST re-resolve (§5.4 step 2.4)");
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+}
+
+// ============================================================================
+// Test 10b — duplicate FORM_TYPE values across forms are not cached
+// ============================================================================
+//
+// XEP-0115 §5.4: two extended discovery forms with the same
+// FORM_TYPE make the entire response ill-formed. The advertised hash
+// deliberately matches the malformed form set, proving rejection is
+// a structural check rather than an incidental hash mismatch.
+#[tokio::test]
+async fn caps_duplicate_form_types_across_forms_are_ill_formed_and_not_cached() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-duplicate-forms-1").await;
+    let admin_full_jid = admin.full_jid.clone().expect("full jid");
+
+    let node = "https://example.test/caps#duplicate-forms";
+    let identity_name = "Duplicate Form Client";
+    let features = ["urn:xmpp:ping"];
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let forms = [(form_type, "Client A"), (form_type, "Client B")];
+    let ver = caps_verification_string_with_forms(identity_name, &features, &forms);
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send caps presence");
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    let iq_id = extract_iq_id(&disco_query);
+    let forms_xml: String = forms
+        .iter()
+        .map(|(form_type, software)| {
+            format!(
+                r#"<x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE" type="hidden"><value>{form_type}</value></field><field var="software"><value>{software}</value></field></x>"#
+            )
+        })
+        .collect();
+
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{admin_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="{identity_name}"/><feature var="urn:xmpp:ping"/>{forms_xml}</query></iq>"#
+        ))
+        .await
+        .expect("send duplicate-form response");
+    ping_anchor(&mut admin, "caps-duplicate-forms-anchor-1").await;
+
+    let mut admin2 = admin_client(&server, "caps-duplicate-forms-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 sends caps");
+    let _re_query = admin2
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("duplicate FORM_TYPE response MUST NOT be cached; next advert must re-resolve");
 
     let _ = admin.close().await;
     let _ = admin2.close().await;

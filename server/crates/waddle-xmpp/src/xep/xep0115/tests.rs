@@ -473,6 +473,33 @@ fn test_compute_caps_hash_with_extensions_complex_example() {
 }
 
 #[test]
+fn test_compute_caps_hash_with_distinct_forms_is_order_independent() {
+    let identities = vec![Identity::server(Some("Waddle"))];
+    let features = vec![Feature::disco_info()];
+    let software_info = software_info_form();
+    let client_info = Element::builder("x", DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(data_form_field(
+            FORM_TYPE_FIELD,
+            Some("hidden"),
+            &["urn:xmpp:dataforms:clientinfo"],
+        ))
+        .append(data_form_field("client", None, &["Waddle Web"]))
+        .build();
+
+    let forward = compute_caps_hash_with_extensions(
+        &identities,
+        &features,
+        &[software_info.clone(), client_info.clone()],
+    );
+    let reverse =
+        compute_caps_hash_with_extensions(&identities, &features, &[client_info, software_info]);
+
+    assert_eq!(forward, reverse);
+    assert_ne!(forward, compute_caps_hash(&identities, &features));
+}
+
+#[test]
 fn test_compute_caps_hash_ignores_non_result_forms() {
     let identities = vec![Identity::server(Some("Waddle"))];
     let features = vec![Feature::disco_info(), Feature::disco_items()];
