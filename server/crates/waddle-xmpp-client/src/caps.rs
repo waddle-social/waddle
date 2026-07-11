@@ -3,7 +3,9 @@ use minidom::Element;
 use sha1::{Digest, Sha1};
 
 use crate::discovery::DISCO_INFO_NS;
-use crate::messaging::{NS_CHAT_MARKERS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS};
+use crate::messaging::{
+    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
+};
 
 pub const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 pub const CAPS_NODE: &str = "https://waddle.social/caps";
@@ -31,6 +33,10 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // implemented by this client (builders + parse + UI), and its
         // XEP requires/recommends the disco feature on supporting
         // clients.
+        //
+        // XEP-0085 §Determining Support: an implementing entity MUST
+        // advertise the chatstates namespace in disco#info.
+        NS_CHAT_STATES,
         //
         // XEP-0424 §Discovering support: a client implementing message
         // retraction MUST advertise this.
@@ -193,6 +199,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn caps_advertise_xep0085_chatstates_exactly_once() {
+        let count = client_caps_features()
+            .into_iter()
+            .filter(|feature| *feature == crate::messaging::NS_CHAT_STATES)
+            .count();
+        assert_eq!(count, 1, "XEP-0085 chatstates feature cardinality");
+    }
+
+    /// XEP-0115 §5.1 golden vector for Waddle's concrete client identity and
+    /// feature set. The expected SHA-1/Base64 value was calculated outside
+    /// this implementation from the byte-sorted verification string using
+    /// `openssl dgst -sha1 -binary | openssl base64 -A`. Pinning the literal
+    /// makes this sensitive to identity fields, feature membership, octet
+    /// ordering, and every required `<` separator.
+    #[test]
+    fn client_caps_verification_hash_matches_fixed_golden_vector() {
+        let mut features = client_caps_features();
+        features.sort_unstable();
+        assert_eq!(
+            features,
+            vec![
+                crate::pep::NS_ACTIVITY_NOTIFY,
+                NS_CAPS,
+                crate::messaging::NS_CHAT_STATES,
+                DISCO_INFO_NS,
+                crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
+                NS_CHAT_MARKERS,
+                crate::mds::NS_MDS_NOTIFY,
+                NS_MESSAGE_CORRECT,
+                NS_MESSAGE_RETRACT,
+                NS_REACTIONS,
+                crate::messaging::NS_STANZA_ID,
+            ],
+            "the golden hash is valid only for this exact concrete feature set"
+        );
+        assert_eq!(
+            client_caps_verification_string(),
+            "xOykj9pu3F2sZWOM/yD+WvlIkgU="
+        );
+    }
+
     /// XEP-0115 §5.1: the ver string is derived from the sorted feature
     /// set, so every advertised feature must be unique or the hash is
     /// ill-formed (§5.4 validation would reject it).
@@ -253,6 +301,18 @@ mod tests {
                 && child.ns() == DISCO_INFO_NS
                 && child.attr("var") == Some(crate::mds::NS_MDS_NOTIFY)
         }));
+        assert_eq!(
+            query
+                .children()
+                .filter(|child| {
+                    child.name() == "feature"
+                        && child.ns() == DISCO_INFO_NS
+                        && child.attr("var") == Some(crate::messaging::NS_CHAT_STATES)
+                })
+                .count(),
+            1,
+            "the current caps node must disclose XEP-0085 exactly once"
+        );
     }
 
     #[test]
