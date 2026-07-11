@@ -30,6 +30,104 @@ fn archive_alice(archive: &BareJid) -> Jid {
         .expect("valid jid")
 }
 
+async fn assert_sender_origin_lookup_precedence_and_room_scope(storage: &dyn MamStorage) {
+    use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
+
+    let personal_archive = bare("alice@example.com");
+    let collision = OriginId::new("collision-id");
+    let base = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    storage
+        .store_message(
+            &personal_archive,
+            &ArchivedMessage {
+                id: "legacy-wire-collision".to_string(),
+                timestamp: base,
+                stanza_id: Some(StanzaId::new(
+                    collision.as_str(),
+                    Jid::from(personal_archive.clone()),
+                )),
+                ..ArchivedMessage::for_test(
+                    jid("alice@example.com/phone"),
+                    jid("bob@example.com/laptop"),
+                )
+            },
+        )
+        .await
+        .expect("store wire-id collision");
+    storage
+        .store_message(
+            &personal_archive,
+            &ArchivedMessage {
+                id: "explicit-origin-target".to_string(),
+                timestamp: base + ChronoDuration::seconds(1),
+                origin_id: Some(collision.clone()),
+                stanza_id: Some(StanzaId::new(
+                    "explicit-wire-id",
+                    Jid::from(personal_archive.clone()),
+                )),
+                ..ArchivedMessage::for_test(
+                    jid("alice@example.com/tablet"),
+                    jid("bob@example.com/laptop"),
+                )
+            },
+        )
+        .await
+        .expect("store explicit origin target");
+
+    let personal = storage
+        .get_message_by_sender_and_origin_id(
+            &personal_archive,
+            MamArchiveKind::Personal,
+            &jid("alice@example.com"),
+            &collision,
+        )
+        .await
+        .expect("personal lookup")
+        .expect("personal target");
+    assert_eq!(personal.id, "explicit-origin-target");
+
+    let room = bare("room@conference.example");
+    for (id, sender) in [
+        ("alice-room-message", "room@conference.example/alice"),
+        ("bob-room-message", "room@conference.example/bob"),
+    ] {
+        storage
+            .store_message(
+                &room,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    origin_id: Some(OriginId::new("shared-room-origin")),
+                    ..ArchivedMessage::for_test(jid(sender), jid("room@conference.example"))
+                },
+            )
+            .await
+            .expect("store room occupant row");
+    }
+    let room_target = storage
+        .get_message_by_sender_and_origin_id(
+            &room,
+            MamArchiveKind::Room,
+            &jid("room@conference.example/alice"),
+            &OriginId::new("shared-room-origin"),
+        )
+        .await
+        .expect("room lookup")
+        .expect("room target");
+    assert_eq!(room_target.id, "alice-room-message");
+}
+
+#[tokio::test]
+async fn inmemory_sender_origin_lookup_prefers_origin_and_scopes_room_occupants() {
+    assert_sender_origin_lookup_precedence_and_room_scope(&InMemoryMamStorage::new()).await;
+}
+
+#[tokio::test]
+async fn sqlite_sender_origin_lookup_prefers_origin_and_scopes_room_occupants() {
+    assert_sender_origin_lookup_precedence_and_room_scope(&create_test_storage().await).await;
+}
+
 #[tokio::test]
 async fn test_store_and_retrieve_message() {
     let storage = create_test_storage().await;
@@ -705,38 +803,20 @@ async fn assert_owner_with_returns_only_self_chat_rows(storage: &dyn MamStorage)
     assert_eq!(ids, vec!["self-chat-one", "self-chat-two"]);
     assert_eq!(bare_owner.count, Some(2));
 
-    let first_page = storage
+    let full_owner_resource = storage
         .query_messages(
             &archive,
             MamArchiveKind::Personal,
             &MamQuery {
                 with: Some(jid("juliet@example.com/query-device")),
-                max: Some(1),
                 ..Default::default()
             },
         )
         .await
-        .expect("query first self-chat page with full owner JID");
-    assert_eq!(first_page.messages[0].id, "self-chat-one");
-    assert_eq!(first_page.count, Some(2));
-    assert!(!first_page.complete);
-
-    let second_page = storage
-        .query_messages(
-            &archive,
-            MamArchiveKind::Personal,
-            &MamQuery {
-                with: Some(jid("juliet@example.com/query-device")),
-                after_id: first_page.last_id,
-                max: Some(1),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("query second self-chat page with full owner JID");
-    assert_eq!(second_page.messages[0].id, "self-chat-two");
-    assert_eq!(second_page.count, Some(2));
-    assert!(second_page.complete);
+        .expect("query exact full owner resource");
+    assert!(full_owner_resource.messages.is_empty());
+    assert_eq!(full_owner_resource.count, Some(0));
+    assert!(full_owner_resource.complete);
 
     let ordinary_bare = storage
         .query_messages(

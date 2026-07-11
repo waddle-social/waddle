@@ -19,7 +19,7 @@ fn muc_room_disco_advertises_mam_extended_for_supported_id_filters() {
 }
 
 /// XEP-0313 §4.3.1: querying a personal archive with `with` equal to
-/// the archive owner (bare or full) is a self-chat query. Both archived
+/// the archive owner's bare JID is a self-chat query. Both archived
 /// endpoints must match the owner's bare JID; ordinary contacts and
 /// unrelated rows must not leak into the result set or its RSM count.
 #[tokio::test]
@@ -66,7 +66,7 @@ async fn owner_with_filters_self_chat_before_rsm_pagination() {
             &archive,
             MamArchiveKind::Personal,
             &MamQuery {
-                with: Some("juliet@example.com/query-device".parse().unwrap()),
+                with: Some("juliet@example.com".parse().unwrap()),
                 max: Some(1),
                 ..Default::default()
             },
@@ -82,7 +82,7 @@ async fn owner_with_filters_self_chat_before_rsm_pagination() {
             &archive,
             MamArchiveKind::Personal,
             &MamQuery {
-                with: Some("juliet@example.com/query-device".parse().unwrap()),
+                with: Some("juliet@example.com".parse().unwrap()),
                 after_id: first.last_id,
                 max: Some(1),
                 ..Default::default()
@@ -99,7 +99,7 @@ async fn owner_with_filters_self_chat_before_rsm_pagination() {
             &archive,
             MamArchiveKind::Personal,
             &MamQuery {
-                with: Some("juliet@example.com/query-device".parse().unwrap()),
+                with: Some("juliet@example.com".parse().unwrap()),
                 after_id: second.last_id,
                 max: Some(1),
                 ..Default::default()

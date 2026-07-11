@@ -800,6 +800,15 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
         ) -> Result<Option<ArchivedMessage>, MamStorageError> {
             Ok(None)
         }
+        async fn get_message_by_sender_and_origin_id(
+            &self,
+            _: &jid::BareJid,
+            _: waddle_xmpp::mam::MamArchiveKind,
+            _: &jid::Jid,
+            _: &waddle_xmpp_core::xep0359::OriginId,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            Ok(None)
+        }
         async fn get_message_by_archive_or_stanza_id(
             &self,
             _: &jid::BareJid,
@@ -1088,7 +1097,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
         archive: archive_jid.clone(),
         archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::OriginId {
-            sender: alice_bare.clone(),
+            sender: alice_bare.clone().into(),
             origin_id: OriginId::new("collision"),
         },
     }];
@@ -1109,7 +1118,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
     }
 }
 
-async fn assert_origin_lookup_pages_past_sender_decoys(mam: Arc<dyn MamStorage>) {
+async fn assert_origin_lookup_finds_targets_beyond_default_page(mam: Arc<dyn MamStorage>) {
     use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind};
     use waddle_xmpp_core::xep0359::OriginId;
 
@@ -1146,9 +1155,9 @@ async fn assert_origin_lookup_pages_past_sender_decoys(mam: Arc<dyn MamStorage>)
         Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
     let deps = Deps::test_with_storage(&registry, &mam, &inbox);
 
-    // Personal owner-origin lookup cannot use `with=owner`: place a
-    // cross-sender collision and enough ordinary rows ahead of the target to
-    // force the authoritative sender check onto page two.
+    // Place a cross-sender collision and enough ordinary rows ahead of the
+    // target to prove lookup is sender-indexed rather than bounded by the
+    // default MAM page.
     let owner_archive: jid::BareJid = "owner@example.com".parse().expect("owner archive");
     store_row(
         mam.as_ref(),
@@ -1197,20 +1206,19 @@ async fn assert_origin_lookup_pages_past_sender_decoys(mam: Arc<dyn MamStorage>)
         &owner_archive,
         MamArchiveKind::Personal,
         &MessageRef::OriginId {
-            sender: owner_archive.clone(),
+            sender: owner_archive.clone().into(),
             origin_id: OriginId::new("owner-target"),
         },
     )
     .await
-    .expect("owner target beyond first page");
+    .expect("owner target beyond default page boundary");
     assert_eq!(
         owner_result.message.bodies.get("").map(String::as_str),
         Some("owner page two target")
     );
 
-    // A non-owner `with=sender` query can still contain rows where that JID
-    // is the recipient. Those rows must not exhaust the first page and hide a
-    // later row actually authored by the requested sender.
+    // Recipient-side decoys with the same origin id must not hide a later row
+    // actually authored by the requested sender.
     let peer_archive: jid::BareJid = "archive@example.com".parse().expect("peer archive");
     for index in 0..=100 {
         store_row(
@@ -1250,12 +1258,12 @@ async fn assert_origin_lookup_pages_past_sender_decoys(mam: Arc<dyn MamStorage>)
         &peer_archive,
         MamArchiveKind::Personal,
         &MessageRef::OriginId {
-            sender,
+            sender: sender.into(),
             origin_id: OriginId::new("peer-target"),
         },
     )
     .await
-    .expect("sender target beyond first matching page");
+    .expect("sender target beyond default page boundary");
     assert_eq!(
         peer_result.message.bodies.get("").map(String::as_str),
         Some("sender page two target")
@@ -1263,19 +1271,19 @@ async fn assert_origin_lookup_pages_past_sender_decoys(mam: Arc<dyn MamStorage>)
 }
 
 #[tokio::test]
-async fn origin_lookup_pages_past_sender_decoys_in_memory() {
-    assert_origin_lookup_pages_past_sender_decoys(Arc::new(
+async fn origin_lookup_finds_targets_beyond_default_page_in_memory() {
+    assert_origin_lookup_finds_targets_beyond_default_page(Arc::new(
         waddle_xmpp::mam::InMemoryMamStorage::new(),
     ))
     .await;
 }
 
 #[tokio::test]
-async fn origin_lookup_pages_past_sender_decoys_in_sqlite() {
+async fn origin_lookup_finds_targets_beyond_default_page_in_sqlite() {
     let storage = waddle_xmpp::mam::SqlxMamStorage::open_in_memory()
         .await
         .expect("SQLite MAM storage");
-    assert_origin_lookup_pages_past_sender_decoys(Arc::new(storage)).await;
+    assert_origin_lookup_finds_targets_beyond_default_page(Arc::new(storage)).await;
 }
 
 #[tokio::test]
@@ -1349,6 +1357,21 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
             Ok(None)
         }
 
+        async fn get_message_by_sender_and_origin_id(
+            &self,
+            _: &jid::BareJid,
+            archive_kind: MamArchiveKind,
+            _: &jid::Jid,
+            _: &OriginId,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            assert_eq!(
+                archive_kind,
+                MamArchiveKind::Room,
+                "event archive kind must reach MamStorage"
+            );
+            Ok(Some(self.row.clone()))
+        }
+
         async fn get_message_by_archive_or_stanza_id(
             &self,
             _: &jid::BareJid,
@@ -1401,7 +1424,9 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
             archive: room.clone(),
             archive_kind: MamArchiveKind::Room,
             reference: MessageRef::OriginId {
-                sender: room,
+                sender: "room@conference.example/alice"
+                    .parse()
+                    .expect("occupant JID"),
                 origin_id: OriginId::new("room-origin-1"),
             },
         }],
@@ -1465,7 +1490,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_rejects_cross_sender_coll
         archive: archive_jid,
         archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::OriginId {
-            sender: charlie_bare,
+            sender: charlie_bare.into(),
             origin_id: OriginId::new("oid-1"),
         },
     }];

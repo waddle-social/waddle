@@ -28,9 +28,8 @@ pub(super) struct WithFilter {
     /// in that case the SQL emits an exact-equality match against the
     /// full form. `None` when the query `with` is bare.
     full: Option<String>,
-    /// Whether this is a personal archive whose `with`, ignoring any
-    /// resource, is the archive owner. This case requires both archived
-    /// endpoints to match `bare`.
+    /// Whether this is a personal archive queried with the owner's bare JID.
+    /// This case requires both archived endpoints to match `bare`.
     owner_self: bool,
 }
 
@@ -42,7 +41,9 @@ impl WithFilter {
     ) -> Self {
         let bare = with.to_bare();
         Self {
-            owner_self: archive_kind == MamArchiveKind::Personal && &bare == archive_jid,
+            owner_self: archive_kind == MamArchiveKind::Personal
+                && with.resource().is_none()
+                && &bare == archive_jid,
             bare: bare.to_string(),
             full: with.resource().is_some().then(|| with.to_string()),
         }
@@ -67,7 +68,7 @@ const LIKE_ESCAPE: &str = "\\";
 /// resulting bind. Order matters: the escape character itself must be
 /// doubled first so the subsequent `%`/`_` substitutions don't double-
 /// escape.
-fn escape_like_pattern(value: &str) -> String {
+pub(super) fn escape_like_pattern(value: &str) -> String {
     value
         .replace(LIKE_ESCAPE, "\\\\")
         .replace('%', "\\%")

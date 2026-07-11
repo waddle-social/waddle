@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::muc::RoomClaimFenceContext;
 
@@ -134,6 +135,19 @@ pub trait MamStorage: Send + Sync {
         &self,
         archive_jid: &BareJid,
         message_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError>;
+
+    /// Resolve a sender-owned origin id, falling back to the same sender's
+    /// wire stanza id for legacy XEP-0308 clients that omit `<origin-id/>`.
+    /// Backends must perform this as one bounded lookup rather than paging an
+    /// archive. Personal archives compare the sender by bare account JID;
+    /// room archives compare the exact full occupant JID.
+    async fn get_message_by_sender_and_origin_id(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: MamArchiveKind,
+        sender: &Jid,
+        origin_id: &OriginId,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Get a message by server archive id or stanza id, excluding client origin-id.

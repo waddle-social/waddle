@@ -108,8 +108,8 @@ pub(super) fn jid_matches_with_filter(
 
 /// XEP-0313 §4.3.1 `with` predicate for an archived message.
 ///
-/// In a personal archive, a query for the owner's own bare JID (including
-/// when the supplied JID has a resource) is the self-chat special case:
+/// In a personal archive, a query for the owner's own bare JID is the
+/// self-chat special case:
 /// both endpoints must be bare-equivalent to the archive owner. Room
 /// archives and all other queries keep ordinary sender-or-recipient
 /// semantics.
@@ -121,7 +121,10 @@ pub(super) fn message_matches_with_filter(
     with: &jid::Jid,
 ) -> bool {
     let with_bare = with.to_bare();
-    if archive_kind == MamArchiveKind::Personal && &with_bare == archive_jid {
+    if archive_kind == MamArchiveKind::Personal
+        && with.resource().is_none()
+        && &with_bare == archive_jid
+    {
         return &from.to_bare() == archive_jid && &to.to_bare() == archive_jid;
     }
 

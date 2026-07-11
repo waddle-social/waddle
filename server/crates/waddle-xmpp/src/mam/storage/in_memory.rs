@@ -7,6 +7,7 @@ use jid::BareJid;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::xep::matches_fulltext;
 
@@ -254,6 +255,53 @@ impl MamStorage for InMemoryMamStorage {
                     && message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(message_id)
             })
             .map(|(_, message)| message.clone()))
+    }
+
+    async fn get_message_by_sender_and_origin_id(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: super::MamArchiveKind,
+        sender: &jid::Jid,
+        origin_id: &OriginId,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid = archive_jid.to_string();
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .filter_map(|(stored_archive, message)| {
+                let sender_matches = match archive_kind {
+                    super::MamArchiveKind::Personal => message.from.to_bare() == sender.to_bare(),
+                    super::MamArchiveKind::Room => &message.from == sender,
+                };
+                if stored_archive != &archive_jid || !sender_matches {
+                    return None;
+                }
+                let match_priority = if message
+                    .origin_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate == origin_id)
+                {
+                    0
+                } else if message
+                    .stanza_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.id.as_str() == origin_id.as_str())
+                {
+                    1
+                } else {
+                    return None;
+                };
+                Some((match_priority, message))
+            })
+            .min_by(|(left_priority, left), (right_priority, right)| {
+                left_priority.cmp(right_priority).then_with(|| {
+                    left.timestamp
+                        .cmp(&right.timestamp)
+                        .then_with(|| left.id.cmp(&right.id))
+                })
+            })
+            .map(|(_, message)| message)
+            .cloned())
     }
 
     async fn get_message_by_archive_or_stanza_id(

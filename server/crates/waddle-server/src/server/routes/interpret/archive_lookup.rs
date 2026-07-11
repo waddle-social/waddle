@@ -46,31 +46,13 @@ pub(super) async fn lookup_archived_message(
                 .await
         }
         MessageRef::OriginId { sender, origin_id } => {
-            // No origin-id-only accessor on `MamStorage` today, so we
-            // narrow with the storage-level sender filter when its MAM
-            // semantics match this lookup, then pick the first row whose
-            // `origin_id` *or wire `id` attribute* (`stanza_id` column)
-            // matches the requested value. The fall-through to the wire id
-            // mirrors the legacy `lookup_correction_target_message`
-            // behaviour — many clients (and the CUE e2e scenarios)
-            // omit the explicit `<origin-id/>` payload and rely on
-            // the message's `id` attribute as the correction
-            // target. Sender-bound matching keeps the
-            // OR-collision protection from #229 PR8: only rows sent
-            // by the original author can satisfy the correction.
-            // XEP-0313 §4.3.1 gives `with=archive-owner` special self-chat
-            // semantics in personal archives. Rich-target validation is
-            // instead asking for messages authored by that owner, so using
-            // `with` there would exclude ordinary owner -> peer messages.
-            // The typed sender post-filter below remains authoritative.
-            lookup_origin_id_across_pages(
-                mam_storage.as_ref(),
-                archive,
-                archive_kind,
-                sender,
-                origin_id.as_str(),
-            )
-            .await
+            // Use the backend's bounded sender-owned lookup. It matches the
+            // explicit origin-id first shape and the legacy wire `id`
+            // fallback without applying XEP-0313 `with=owner` self-chat
+            // semantics or scanning sequential MAM pages.
+            mam_storage
+                .get_message_by_sender_and_origin_id(archive, archive_kind, sender, origin_id)
+                .await
         }
     };
     match lookup {
@@ -85,99 +67,6 @@ pub(super) async fn lookup_archived_message(
             None
         }
     }
-}
-
-/// Search every forward RSM page that can contain an origin-id target.
-///
-/// The storage-level `with` filter is only a narrowing optimization: personal
-/// owner-origin lookups must omit it because XEP-0313 gives `with=owner`
-/// self-chat semantics, while ordinary personal and room lookups can still
-/// contain rows authored by the other endpoint. Consequently the typed sender
-/// predicate remains authoritative on every page.
-pub(super) async fn lookup_origin_id_across_pages(
-    mam_storage: &dyn waddle_xmpp::mam::MamStorage,
-    archive: &jid::BareJid,
-    archive_kind: waddle_xmpp::mam::MamArchiveKind,
-    sender: &jid::BareJid,
-    origin_id: &str,
-) -> Result<Option<MamArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
-    const PAGE_SIZE: u32 = 100;
-
-    let with = if archive_kind == waddle_xmpp::mam::MamArchiveKind::Personal && sender == archive {
-        None
-    } else {
-        Some(jid::Jid::from(sender.clone()))
-    };
-    let mut after_id = None;
-    let mut seen_cursors = std::collections::HashSet::new();
-    loop {
-        let query = waddle_xmpp::mam::MamQuery {
-            with: with.clone(),
-            max: Some(PAGE_SIZE),
-            after_id: after_id.clone(),
-            ..Default::default()
-        };
-        let result = mam_storage
-            .query_messages(archive, archive_kind, &query)
-            .await?;
-        if let Some(row) = result.messages.into_iter().find(|row| {
-            row_matches_origin_id(row, sender, origin_id)
-                || row_matches_wire_id(row, sender, origin_id)
-        }) {
-            return Ok(Some(row));
-        }
-        if result.complete {
-            return Ok(None);
-        }
-        let Some(next_cursor) = result.last_id else {
-            warn!(
-                archive = %archive,
-                "LookupArchivedMessage: incomplete MAM page had no forward cursor"
-            );
-            return Ok(None);
-        };
-        if !seen_cursors.insert(next_cursor.clone()) {
-            warn!(
-                archive = %archive,
-                cursor = %next_cursor,
-                "LookupArchivedMessage: MAM cursor did not advance"
-            );
-            return Ok(None);
-        }
-        after_id = Some(next_cursor);
-    }
-}
-
-/// Verify a storage row genuinely matches the typed
-/// [`MessageRef::OriginId`] key — `origin_id` field equality plus
-/// `sender` (`from`) equality via parsed [`jid::BareJid`] comparison.
-/// String equality on `from` would mishandle case-folded localparts
-/// or full-JID-vs-bare-JID strings; the typed compare normalizes both.
-pub(super) fn row_matches_origin_id(
-    row: &MamArchivedMessage,
-    expected_sender: &jid::BareJid,
-    expected_origin_id: &str,
-) -> bool {
-    if row.origin_id.as_ref().map(|o| o.id.as_str()) != Some(expected_origin_id) {
-        return false;
-    }
-    row.from.to_bare() == *expected_sender
-}
-
-/// Fallback match for the legacy XEP-0308 correction-target shape
-/// where the message carries no explicit `<origin-id/>` payload —
-/// matches the row's wire `id` attribute (the `stanza_id` storage
-/// column) to the correction's `replaces_id`. Same sender-bound
-/// scoping as [`row_matches_origin_id`].
-pub(super) fn row_matches_wire_id(
-    row: &MamArchivedMessage,
-    expected_sender: &jid::BareJid,
-    expected_wire_id: &str,
-) -> bool {
-    if row.stanza_id.as_ref().map(|s| s.id.as_str()) != Some(expected_wire_id) {
-        return false;
-    }
-    row.from.to_bare() == *expected_sender
 }
 
 /// Project a storage [`MamArchivedMessage`] row into the protocol-side

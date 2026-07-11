@@ -6,6 +6,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
 use tracing::{debug, instrument};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::mam::storage::query_semantics::{finalize_result, uses_backward_pagination};
 use crate::mam::storage::{MamStorage, MamStorageError};
@@ -13,8 +14,9 @@ use crate::muc::RoomClaimFenceContext;
 
 use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
 use super::query::{
-    ensure_postgres_requested_ids_exist, ensure_sqlite_requested_ids_exist, fetch_postgres_cursor,
-    fetch_sqlite_cursor, push_postgres_mam_filters, push_sqlite_mam_filters, WithFilter,
+    ensure_postgres_requested_ids_exist, ensure_sqlite_requested_ids_exist, escape_like_pattern,
+    fetch_postgres_cursor, fetch_sqlite_cursor, push_postgres_mam_filters, push_sqlite_mam_filters,
+    WithFilter,
 };
 use super::schema::SELECT_COLUMNS;
 use super::{MamDatabaseBackend, SqlxMamStorage};
@@ -321,6 +323,83 @@ impl MamStorage for SqlxMamStorage {
                 .bind(message_id)
                 .fetch_optional(pool)
                 .await?;
+                row.as_ref().map(decode_postgres_message_row).transpose()
+            }
+        }
+    }
+
+    async fn get_message_by_sender_and_origin_id(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: crate::mam::MamArchiveKind,
+        sender: &jid::Jid,
+        origin_id: &OriginId,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid = archive_jid.to_string();
+        let sender_full = sender.to_string();
+        let sender_bare = sender.to_bare().to_string();
+        let sender_resource_prefix = format!("{}/%", escape_like_pattern(&sender_bare));
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+                ));
+                builder
+                    .push_bind(archive_jid.as_str())
+                    .push(" AND (origin_id = ")
+                    .push_bind(origin_id.as_str())
+                    .push(" OR stanza_id = ")
+                    .push_bind(origin_id.as_str())
+                    .push(") AND ");
+                match archive_kind {
+                    crate::mam::MamArchiveKind::Personal => {
+                        builder
+                            .push("(from_jid = ")
+                            .push_bind(sender_bare.as_str())
+                            .push(" OR from_jid LIKE ")
+                            .push_bind(sender_resource_prefix.as_str())
+                            .push(" ESCAPE '\\')");
+                    }
+                    crate::mam::MamArchiveKind::Room => {
+                        builder.push("from_jid = ").push_bind(sender_full.as_str());
+                    }
+                }
+                builder
+                    .push(" ORDER BY CASE WHEN origin_id = ")
+                    .push_bind(origin_id.as_str())
+                    .push(" THEN 0 ELSE 1 END, timestamp ASC, id ASC LIMIT 1");
+                let row = builder.build().fetch_optional(pool).await?;
+                row.as_ref().map(decode_sqlite_message_row).transpose()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+                ));
+                builder
+                    .push_bind(archive_jid.as_str())
+                    .push(" AND (origin_id = ")
+                    .push_bind(origin_id.as_str())
+                    .push(" OR stanza_id = ")
+                    .push_bind(origin_id.as_str())
+                    .push(") AND ");
+                match archive_kind {
+                    crate::mam::MamArchiveKind::Personal => {
+                        builder
+                            .push("(from_jid = ")
+                            .push_bind(sender_bare.as_str())
+                            .push(" OR from_jid LIKE ")
+                            .push_bind(sender_resource_prefix.as_str())
+                            .push(" ESCAPE '\\')");
+                    }
+                    crate::mam::MamArchiveKind::Room => {
+                        builder.push("from_jid = ").push_bind(sender_full.as_str());
+                    }
+                }
+                builder
+                    .push(" ORDER BY CASE WHEN origin_id = ")
+                    .push_bind(origin_id.as_str())
+                    .push(" THEN 0 ELSE 1 END, timestamp ASC, id ASC LIMIT 1");
+                let row = builder.build().fetch_optional(pool).await?;
                 row.as_ref().map(decode_postgres_message_row).transpose()
             }
         }

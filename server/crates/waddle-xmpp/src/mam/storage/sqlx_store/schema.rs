@@ -62,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
     ON mam_messages(room_jid, reply_to_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_mam_room_origin
     ON mam_messages(room_jid, origin_id);
+CREATE INDEX IF NOT EXISTS idx_mam_room_stanza
+    ON mam_messages(room_jid, stanza_id);
 "#;
 
 const SQLITE_MAM_ORIGIN_DEDUP_INDEXES: &str = r#"
@@ -121,6 +123,8 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
     ON mam_messages(room_jid, reply_to_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_mam_room_origin
     ON mam_messages(room_jid, origin_id);
+CREATE INDEX IF NOT EXISTS idx_mam_room_stanza
+    ON mam_messages(room_jid, stanza_id);
 "#;
 
 const POSTGRES_MAM_ORIGIN_DEDUP_INDEXES: &str = r#"

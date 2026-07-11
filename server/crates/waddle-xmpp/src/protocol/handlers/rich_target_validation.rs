@@ -190,7 +190,7 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
         return Some(DetectedRichTarget {
             kind: RichTargetKind::Correction,
             reference: MessageRef::OriginId {
-                sender: author.clone(),
+                sender: jid::Jid::from(author.clone()),
                 origin_id: OriginId::new(correction.replaces_id),
             },
             author,
