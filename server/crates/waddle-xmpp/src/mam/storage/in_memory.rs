@@ -7,12 +7,13 @@ use jid::BareJid;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::xep::matches_fulltext;
 
 use super::origin_dedup::origin_id_dedup_match;
 use super::query_semantics::{
-    archive_order_after, archive_order_before, jid_matches_with_filter, matches_thread_filter,
+    archive_order_after, archive_order_before, matches_thread_filter, message_matches_with_filter,
     missing_requested_id, uses_backward_pagination,
 };
 use super::tombstone::apply_tombstone;
@@ -20,7 +21,7 @@ use super::{MamStorage, MamStorageError};
 
 #[derive(Clone, Default)]
 pub struct InMemoryMamStorage {
-    entries: Arc<RwLock<Vec<(String, ArchivedMessage)>>>,
+    entries: Arc<RwLock<Vec<(BareJid, ArchivedMessage)>>>,
 }
 
 impl InMemoryMamStorage {
@@ -40,11 +41,10 @@ impl MamStorage for InMemoryMamStorage {
         archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         let mut entries = self.entries.write().await;
         if message.origin_id.is_some() {
             if let Some((_, existing)) = entries.iter().find(|(jid, existing)| {
-                jid == &archive_jid_str && origin_id_dedup_match(existing, message)
+                jid == archive_jid && origin_id_dedup_match(existing, message)
             }) {
                 return Ok(existing.id.clone());
             }
@@ -59,20 +59,20 @@ impl MamStorage for InMemoryMamStorage {
         let mut stored = message.clone();
         stored.id = archive_id.clone();
 
-        entries.push((archive_jid_str, stored));
+        entries.push((archive_jid.clone(), stored));
         Ok(archive_id)
     }
 
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: super::MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         let mut messages: Vec<ArchivedMessage> = entries
             .iter()
-            .filter(|(jid, _)| jid == &archive_jid_str)
+            .filter(|(jid, _)| jid == archive_jid)
             .map(|(_, message)| message.clone())
             .collect();
         let filter_before_cursor = match query.filter_before_id.as_deref() {
@@ -126,23 +126,14 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| message.timestamp <= end);
         }
         if let Some(with) = query.with.as_ref() {
-            // XEP-0313 §4.3.1: `with` matches sender or recipient.
-            //  - Bare `with` matches archived JIDs whose **bare form**
-            //    equals `with`, regardless of resource (so the row may
-            //    be `alice@example.com` or `alice@example.com/web`).
-            //  - Full `with` matches only the exact full JID.
-            //
-            // Earlier this was a textual `starts_with` prefix match
-            // which is incorrect: `alice@example.com` would match
-            // `alice@example.com.evil/whatever`, leaking unrelated
-            // archive rows across XMPP domains. Compare via parsed
-            // [`jid::Jid`] values so the matching respects JID
-            // structure, not byte-prefix overlap.
-            let with_resource = with.resource().is_some();
-            let with_bare = with.to_bare();
             messages.retain(|message| {
-                jid_matches_with_filter(&message.from, &with_bare, with_resource, with)
-                    || jid_matches_with_filter(&message.to, &with_bare, with_resource, with)
+                message_matches_with_filter(
+                    archive_jid,
+                    archive_kind,
+                    &message.from,
+                    &message.to,
+                    with,
+                )
             });
         }
         if !query.ids.is_empty() {
@@ -236,12 +227,11 @@ impl MamStorage for InMemoryMamStorage {
         archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == &archive_jid_str
+                jid == archive_jid
                     && (message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(stanza_id)
                         || message.origin_id.as_ref().map(|o| o.id.as_str()) == Some(stanza_id))
             })
@@ -253,15 +243,60 @@ impl MamStorage for InMemoryMamStorage {
         archive_jid: &BareJid,
         message_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == &archive_jid_str
+                jid == archive_jid
                     && message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(message_id)
             })
             .map(|(_, message)| message.clone()))
+    }
+
+    async fn get_message_by_sender_and_origin_id(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: super::MamArchiveKind,
+        sender: &jid::Jid,
+        origin_id: &OriginId,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .filter_map(|(stored_archive, message)| {
+                let sender_matches = match archive_kind {
+                    super::MamArchiveKind::Personal => message.from.to_bare() == sender.to_bare(),
+                    super::MamArchiveKind::Room => &message.from == sender,
+                };
+                if stored_archive != archive_jid || !sender_matches {
+                    return None;
+                }
+                let match_priority = if message
+                    .origin_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate == origin_id)
+                {
+                    0
+                } else if message
+                    .stanza_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.id.as_str() == origin_id.as_str())
+                {
+                    1
+                } else {
+                    return None;
+                };
+                Some((match_priority, message))
+            })
+            .min_by(|(left_priority, left), (right_priority, right)| {
+                left_priority.cmp(right_priority).then_with(|| {
+                    left.timestamp
+                        .cmp(&right.timestamp)
+                        .then_with(|| left.id.cmp(&right.id))
+                })
+            })
+            .map(|(_, message)| message)
+            .cloned())
     }
 
     async fn get_message_by_archive_or_stanza_id(
@@ -269,12 +304,11 @@ impl MamStorage for InMemoryMamStorage {
         archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == &archive_jid_str
+                jid == archive_jid
                     && (message.id == stanza_id
                         || message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(stanza_id))
             })
@@ -282,12 +316,8 @@ impl MamStorage for InMemoryMamStorage {
     }
 
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
-        let room_jid_str = room_jid.to_string();
         let entries = self.entries.read().await;
-        Ok(entries
-            .iter()
-            .filter(|(jid, _)| jid == &room_jid_str)
-            .count() as u32)
+        Ok(entries.iter().filter(|(jid, _)| jid == room_jid).count() as u32)
     }
 
     async fn delete_before(
@@ -295,10 +325,9 @@ impl MamStorage for InMemoryMamStorage {
         room_jid: &BareJid,
         before: DateTime<Utc>,
     ) -> Result<u64, MamStorageError> {
-        let room_jid_str = room_jid.to_string();
         let mut entries = self.entries.write().await;
         let previous_len = entries.len();
-        entries.retain(|(jid, message)| !(jid == &room_jid_str && message.timestamp < before));
+        entries.retain(|(jid, message)| !(jid == room_jid && message.timestamp < before));
         Ok((previous_len - entries.len()) as u64)
     }
 

@@ -16,7 +16,9 @@
 pub mod projection;
 pub mod storage;
 
-pub use storage::{InMemoryMamStorage, MamStorage, MamStorageError, SqlxMamStorage};
+pub use storage::{
+    InMemoryMamStorage, MamArchiveKind, MamStorage, MamStorageError, SqlxMamStorage,
+};
 pub use waddle_xmpp_core::mam::{
     archived_inner_message, build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
     is_mam_query_form_request, parse_mam_query, ArchivedMention, ArchivedMessage,

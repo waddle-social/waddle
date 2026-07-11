@@ -20,7 +20,7 @@
 use chrono::Utc;
 use jid::{BareJid, Jid};
 use minidom::Element;
-use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage};
+use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind, MamQuery, MamStorage};
 use waddle_xmpp::mam::{InMemoryMamStorage, SqlxMamStorage};
 use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{
@@ -98,7 +98,7 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
 
     let query = MamQuery::default();
     let result = storage
-        .query_messages(&room_bare(), &query)
+        .query_messages(&room_bare(), MamArchiveKind::Room, &query)
         .await
         .expect("query archive");
     assert_eq!(result.messages.len(), 1);
@@ -268,7 +268,7 @@ async fn xep_0201_cross_archive_parent_thread_id_round_trips_without_validation(
         .expect("store row");
 
     let result = storage
-        .query_messages(&room_bare(), &MamQuery::default())
+        .query_messages(&room_bare(), MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -339,7 +339,7 @@ async fn xep_0201_inmemory_mam_storage_also_round_trips_parent() {
         .await
         .expect("store in-memory");
     let result = storage
-        .query_messages(&room_bare(), &MamQuery::default())
+        .query_messages(&room_bare(), MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query in-memory");
     assert_eq!(result.messages.len(), 1);
@@ -382,7 +382,7 @@ async fn xep_0201_collapsed_thread_field_round_trips_nested_through_storage() {
         .expect("store row");
 
     let result = storage
-        .query_messages(&room_bare(), &MamQuery::default())
+        .query_messages(&room_bare(), MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -411,7 +411,7 @@ async fn xep_0201_collapsed_thread_field_round_trips_root_only_through_storage()
         .expect("store row");
 
     let result = storage
-        .query_messages(&room_bare(), &MamQuery::default())
+        .query_messages(&room_bare(), MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -458,7 +458,7 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
         .expect("store row");
 
     let result = storage
-        .query_messages(&room_bare(), &MamQuery::default())
+        .query_messages(&room_bare(), MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);

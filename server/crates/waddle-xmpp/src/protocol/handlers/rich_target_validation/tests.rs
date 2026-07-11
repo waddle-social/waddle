@@ -69,7 +69,9 @@ fn archived_message_from(from: &str, body: &str) -> ArchivedMessage {
     }
 }
 
-fn extract_lookup_event(outcome: &HandlerOutcome) -> (&CallbackId, &BareJid, &MessageRef) {
+fn extract_lookup_event(
+    outcome: &HandlerOutcome,
+) -> (&CallbackId, &BareJid, MamArchiveKind, &MessageRef) {
     let events = match outcome {
         HandlerOutcome::AwaitCallback(events) => events,
         other => panic!("expected AwaitCallback, got {other:?}"),
@@ -79,8 +81,9 @@ fn extract_lookup_event(outcome: &HandlerOutcome) -> (&CallbackId, &BareJid, &Me
         OutboundEvent::LookupArchivedMessage {
             id,
             archive,
+            archive_kind,
             reference,
-        } => (id, archive, reference),
+        } => (id, archive, *archive_kind, reference),
         other => panic!("expected LookupArchivedMessage, got {other:?}"),
     }
 }
@@ -117,8 +120,9 @@ fn xep_0308_correction_emits_lookup_with_origin_id() {
     msg.payloads.push(build_replace_element("orig-msg-1"));
 
     let outcome = run(&local, &mut msg);
-    let (_id, archive, reference) = extract_lookup_event(&outcome);
+    let (_id, archive, archive_kind, reference) = extract_lookup_event(&outcome);
     assert_eq!(*archive, bare("alice@example.com"));
+    assert_eq!(archive_kind, MamArchiveKind::Personal);
     match reference {
         MessageRef::OriginId { sender, origin_id } => {
             assert_eq!(*sender, bare("alice@example.com"));
@@ -176,7 +180,7 @@ fn xep_0424_retraction_emits_lookup_with_stanza_id() {
     msg.payloads.push(build_retract_element("stanza-X"));
 
     let outcome = run(&local, &mut msg);
-    let (_id, _archive, reference) = extract_lookup_event(&outcome);
+    let (_id, _archive, _archive_kind, reference) = extract_lookup_event(&outcome);
     match reference {
         MessageRef::StanzaId { stanza_id } => {
             let expected_by: jid::Jid = bare("alice@example.com").into();
@@ -196,7 +200,7 @@ fn xep_0461_reply_emits_lookup_with_stanza_id() {
     ));
 
     let outcome = run(&local, &mut msg);
-    let (_id, _archive, reference) = extract_lookup_event(&outcome);
+    let (_id, _archive, _archive_kind, reference) = extract_lookup_event(&outcome);
     match reference {
         MessageRef::StanzaId { stanza_id } => {
             assert_eq!(stanza_id.as_str(), "stanza-Y");

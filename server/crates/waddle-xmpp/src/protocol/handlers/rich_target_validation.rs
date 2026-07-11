@@ -46,6 +46,7 @@
 use super::errors::{
     bad_request_reply, item_not_found_reply, not_acceptable_reply, send_message_error,
 };
+use crate::mam::MamArchiveKind;
 use crate::protocol::event::{ArchivedMessage, CallbackId, MessageRef, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
@@ -130,6 +131,7 @@ impl MessageHandler for RichTargetValidationHandler {
         HandlerOutcome::AwaitCallback(vec![OutboundEvent::LookupArchivedMessage {
             id: RICH_TARGET_LOOKUP_CALLBACK_SENTINEL,
             archive: detected.author.clone(),
+            archive_kind: MamArchiveKind::Personal,
             reference: detected.reference,
         }])
     }
@@ -188,7 +190,7 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
         return Some(DetectedRichTarget {
             kind: RichTargetKind::Correction,
             reference: MessageRef::OriginId {
-                sender: author.clone(),
+                sender: jid::Jid::from(author.clone()),
                 origin_id: OriginId::new(correction.replaces_id),
             },
             author,

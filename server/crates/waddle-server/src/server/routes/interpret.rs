@@ -498,9 +498,11 @@ async fn interpret_with_depth(
             OutboundEvent::LookupArchivedMessage {
                 id,
                 archive,
+                archive_kind,
                 reference,
             } => {
-                let result = lookup_archived_message(deps, &archive, &reference).await;
+                let result =
+                    lookup_archived_message(deps, &archive, archive_kind, &reference).await;
                 outcome
                     .feedback
                     .push(InboundEvent::ArchivedMessageLoaded { id, result });

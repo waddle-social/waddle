@@ -2483,9 +2483,12 @@ impl MamStorage for LookupOutageMamStorage {
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: waddle_xmpp::mam::MamArchiveKind,
         query: &waddle_xmpp_core::mam::MamQuery,
     ) -> Result<waddle_xmpp_core::mam::MamResult, MamStorageError> {
-        self.inner.query_messages(archive_jid, query).await
+        self.inner
+            .query_messages(archive_jid, archive_kind, query)
+            .await
     }
     async fn get_message(
         &self,
@@ -2518,6 +2521,17 @@ impl MamStorage for LookupOutageMamStorage {
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
         self.inner
             .get_message_by_message_id(archive_jid, message_id)
+            .await
+    }
+    async fn get_message_by_sender_and_origin_id(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: waddle_xmpp::mam::MamArchiveKind,
+        sender: &jid::Jid,
+        origin_id: &waddle_xmpp_core::xep0359::OriginId,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        self.inner
+            .get_message_by_sender_and_origin_id(archive_jid, archive_kind, sender, origin_id)
             .await
     }
     async fn get_message_by_archive_or_stanza_id(

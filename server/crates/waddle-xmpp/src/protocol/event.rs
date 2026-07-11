@@ -18,7 +18,7 @@
 use super::frame::InboundFrame;
 use crate::xep::{CallThreadKind, CallThreadMedia};
 use crate::Stanza;
-use jid::{BareJid, FullJid};
+use jid::{FullJid, Jid};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::message::Message;
 
@@ -51,8 +51,9 @@ pub enum MessageRef {
     },
     /// XEP-0359 origin-id, scoped to the original sender.
     OriginId {
-        /// Bare JID of the original sender.
-        sender: BareJid,
+        /// Original sender identity: bare account JID in personal archives,
+        /// exact full occupant JID in room archives.
+        sender: Jid,
         /// The client-supplied opaque origin-id value (canonical
         /// [`OriginId`] from `waddle-xmpp-core`).
         origin_id: OriginId,

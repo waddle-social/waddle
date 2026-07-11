@@ -163,7 +163,11 @@ async fn archived_dm_call_anchor(
         .deps
         .protocol
         .mam_storage
-        .query_messages(owner, &Default::default())
+        .query_messages(
+            owner,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query DM MAM")
         .messages
@@ -306,7 +310,11 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
         .deps
         .protocol
         .mam_storage
-        .query_messages(&alice, &Default::default())
+        .query_messages(
+            &alice,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query alice MAM before self proceed")
         .messages
@@ -335,7 +343,11 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
         .deps
         .protocol
         .mam_storage
-        .query_messages(&alice, &Default::default())
+        .query_messages(
+            &alice,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query alice MAM after self proceed")
         .messages;
@@ -3918,14 +3930,22 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
         .deps
         .protocol
         .mam_storage
-        .query_messages(&alice_jid.to_bare(), &Default::default())
+        .query_messages(
+            &alice_jid.to_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query sender MAM archive");
     let bob_archive = state
         .deps
         .protocol
         .mam_storage
-        .query_messages(&bob_jid.to_bare(), &Default::default())
+        .query_messages(
+            &bob_jid.to_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query recipient MAM archive");
     let sender_row = alice_archive.messages.last().expect("sender archive row");
@@ -3993,7 +4013,11 @@ async fn muc_private_message_to_own_nick_archives_one_delivered_tuple() {
         .deps
         .protocol
         .mam_storage
-        .query_messages(&alice_jid.to_bare(), &Default::default())
+        .query_messages(
+            &alice_jid.to_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query self-PM archive");
     let self_rows: Vec<_> = archive
