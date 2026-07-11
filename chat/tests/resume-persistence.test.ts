@@ -636,7 +636,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("BrowserXmppClient removes restored SM queue entries when native fallback retry owns resend", () => {
@@ -662,7 +662,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("BrowserXmppClient persists SM state when the native replay queue is empty", () => {

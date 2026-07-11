@@ -1089,7 +1089,7 @@ describe("client send readiness", () => {
     const result = await client.sendDirectMessage("bob@example.com", "hello");
 
     expect(result?.state).toBe("queued");
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toHaveLength(1);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toHaveLength(1);
     await expect(client.sendDmReaction("bob@example.com", "msg-1", ["👍"])).rejects.toThrow(
       "Reconnection timed out",
     );
@@ -1107,7 +1107,7 @@ describe("client send readiness", () => {
     (client as unknown as { connected: boolean }).connected = true;
 
     await expect(client.sendDirectMessage("bob@example.com/mobile", "hello", { id: "dm-send-invalid" })).rejects.toThrow("XMPP send failed: invalid-recipient");
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("DM sends are durable until XEP-0198 ack confirms server handling", async () => {
@@ -1119,12 +1119,12 @@ describe("client send readiness", () => {
     const result = await client.sendDirectMessage("bob@example.com", "hello", { id: "dm-live-1" });
 
     expect(result).toEqual({ id: "dm-live-1", state: "sending" });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id)).toEqual([
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
       "dm-live-1",
     ]);
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
@@ -1266,7 +1266,7 @@ describe("client send readiness", () => {
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 });
 

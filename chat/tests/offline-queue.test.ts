@@ -120,7 +120,7 @@ describe("offline outbound queue replay", () => {
 
     await client.sendDirectMessage("bob@example.com", "first", { id: "dm-1" });
     await client.sendDirectMessage("bob@example.com", "second", { id: "dm-2" });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id)).toEqual([
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
       "dm-1",
       "dm-2",
     ]);
@@ -166,7 +166,7 @@ describe("offline outbound queue replay", () => {
     // Post-fix: persisted queue entries linger until XEP-0198
     // `message:acked` confirms the server received them.
     expect(
-      listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id),
+      listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id),
     ).toEqual(["dm-1", "dm-2"]);
 
     // A second flush in the same session must NOT re-send: both entries
@@ -179,11 +179,11 @@ describe("offline outbound queue replay", () => {
     // persisted queue; dm-2 is still pending.
     xmpp.emit("message:acked", { id: "dm-1" });
     expect(
-      listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id),
+      listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id),
     ).toEqual(["dm-2"]);
 
     xmpp.emit("message:acked", { id: "dm-2" });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("replays queued room messages in order after the room rejoins", async () => {
@@ -251,6 +251,32 @@ describe("offline outbound queue replay", () => {
 });
 
 describe("offline outbound queue hydration", () => {
+  test("ambiguous resource-bearing legacy rows fail closed for every DM scope", () => {
+    localStorage.setItem(
+      "waddle.chat.outbound-queue.alice@example.com",
+      JSON.stringify([
+        {
+          kind: "dm",
+          id: "legacy-unscoped-occupant",
+          createdAt: new Date().toISOString(),
+          peerJid: "room@conference.example/alice",
+          body: "ambiguous",
+        },
+      ]),
+    );
+
+    expect(
+      listQueuedDmMessages("alice@example.com", "room@conference.example", "account"),
+    ).toEqual([]);
+    expect(
+      listQueuedDmMessages(
+        "alice@example.com",
+        "room@conference.example/alice",
+        "muc-occupant",
+      ),
+    ).toEqual([]);
+  });
+
   test("room timelines restore queued messages from localStorage", async () => {
     const roomJid = roomBareJidFor(session(), "c1");
     enqueueQueuedMessage("alice@example.com", {

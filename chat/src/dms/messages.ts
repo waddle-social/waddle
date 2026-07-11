@@ -124,7 +124,11 @@ export function useDirectMessages(
       peerJid,
       () => conversationScope(peerJid) === "muc-occupant",
     );
-    const queued = listQueuedDmMessages(barePeerJid(currentSession.jid), queuePeer);
+    const queued = listQueuedDmMessages(
+      barePeerJid(currentSession.jid),
+      queuePeer,
+      conversationScope(peerJid),
+    );
     for (const message of queued) pendingEchoClientIds.add(message.id);
     return queued.map((message) => queuedDmMessageToTimeline(currentSession, message));
   }
