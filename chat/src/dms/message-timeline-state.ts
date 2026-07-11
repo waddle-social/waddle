@@ -243,13 +243,21 @@ export function buildDmTimelineFromMamResults(params: {
     timeline.push(tm);
   }
   for (const update of correctionUpdates) {
-    const target = findMessageById(timeline, update.targetId);
-    if (!target || !isSameDmCorrectionSender(target, update.correctionFromJid)) continue;
+    const target = findMessageById(
+      timeline,
+      update.targetId,
+      (candidate) => isSameDmCorrectionSender(candidate, update.correctionFromJid),
+    );
+    if (!target || target.isRetracted) continue;
     assignCorrectionFields(target, update.payload);
   }
   for (const update of retractionUpdates) {
-    const target = findMessageById(timeline, update.targetId);
-    if (!target || !isSameDmCorrectionSender(target, update.fromJid)) continue;
+    const target = findMessageById(
+      timeline,
+      update.targetId,
+      (candidate) => isSameDmCorrectionSender(candidate, update.fromJid),
+    );
+    if (!target) continue;
     const index = timeline.indexOf(target);
     if (index === -1) continue;
     const retracted = retractTimelineMessage(target);

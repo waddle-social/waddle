@@ -1,6 +1,6 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { mergeMessageIds } from "@/lib/message-ids";
-import { barePeerJid } from "@/lib/xmpp-client";
+import { hasMessageSenderContinuity } from "@/lib/messaging/sender-scoped-ids";
 
 // #1182: a live stanza with no wire identity (no client id, no XEP-0359
 // stanza-id/origin-id) is keyed on a fabricated UUID (`synthesizedId`).
@@ -31,14 +31,6 @@ const REAL_STAMP_AHEAD_TOLERANCE_MS = 90_000;
  * room-occupant JID (the MAM copy may add a real JID the live copy never
  * saw); DM rows compare the bare sender JID.
  */
-function sameAuthor(a: TimelineMessage, b: TimelineMessage): boolean {
-  if (a.authorOccupantJid || b.authorOccupantJid) {
-    return a.authorOccupantJid === b.authorOccupantJid;
-  }
-  return a.author === b.author
-    && barePeerJid(a.authorJid ?? "") === barePeerJid(b.authorJid ?? "");
-}
-
 /**
  * Asymmetric stamp check: the real side may trail the synthesized
  * receipt by the full window (slow delivery, skew) but only lead it by
@@ -82,7 +74,7 @@ export function findSynthesizedIdMergeTarget(
   return candidates.find((existing) =>
     !existing.synthesizedId !== !incoming.synthesizedId
     && contentKey(existing) === incomingKey
-    && sameAuthor(existing, incoming)
+    && hasMessageSenderContinuity(existing, incoming)
     && (incoming.synthesizedId
       ? stampsReconcilable(incoming, existing)
       : stampsReconcilable(existing, incoming))

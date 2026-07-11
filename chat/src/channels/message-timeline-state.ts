@@ -20,6 +20,7 @@ import { isStaleReactionUpdate } from "@/lib/messaging/reactions";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
+import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -50,8 +51,43 @@ function mergeMissingThreadMetadata(
     next = next === existing ? { ...existing, ...patch } : { ...next, ...patch };
   };
 
-  const ids = mergeMessageIds(next, next.id, [incoming.id, ...(incoming.wireIds ?? [])]);
+  const canonicalRoomMessage = [incoming, existing].find((message) =>
+    !!message.authorOccupantJid
+    && !!message.stanzaId
+    && !!message.stanzaIdBy
+  );
+  const ids = mergeMessageIds(
+    next,
+    canonicalRoomMessage?.stanzaId ?? next.id,
+    [incoming.id, ...(incoming.wireIds ?? [])],
+  );
   if (ids.id !== next.id || !sameStringList(ids.wireIds, next.wireIds)) next = ids;
+
+  if (canonicalRoomMessage) {
+    assign({
+      stanzaId: canonicalRoomMessage.stanzaId,
+      stanzaIdBy: canonicalRoomMessage.stanzaIdBy,
+      ...(canonicalRoomMessage.replyableId
+        ? { replyableId: canonicalRoomMessage.replyableId }
+        : {}),
+      ...(canonicalRoomMessage.reactionTargetId
+        ? { reactionTargetId: canonicalRoomMessage.reactionTargetId }
+        : {}),
+      ...(canonicalRoomMessage.correctionTargetId
+        ? { correctionTargetId: canonicalRoomMessage.correctionTargetId }
+        : {}),
+      ...(canonicalRoomMessage.authorRealJid
+        ? {
+            authorJid: canonicalRoomMessage.authorRealJid,
+            authorRealJid: canonicalRoomMessage.authorRealJid,
+          }
+        : {}),
+      authorOccupantJid: canonicalRoomMessage.authorOccupantJid,
+      ...(canonicalRoomMessage.displayedMarkerRequested
+        ? { displayedMarkerRequested: true }
+        : {}),
+    });
+  }
 
   if (!next.threadId && incoming.threadId) assign({ threadId: incoming.threadId });
   if (!next.parentThreadId && incoming.parentThreadId) assign({ parentThreadId: incoming.parentThreadId });
@@ -325,6 +361,7 @@ export function buildChannelTimelineFromMamResults(params: {
   for (const message of existing) {
     byId.add(message);
   }
+  const identityIndex = new SenderScopedIdIndex(existing);
   const timeline = options.seedExistingOnly ? [] : [...existing];
   // #1182: rows whose primary id had to be fabricated (id-less live
   // stanzas) can only reconcile by content. Each is consumable once so
@@ -335,9 +372,7 @@ export function buildChannelTimelineFromMamResults(params: {
     const tm = mapped.isRetracted
       ? retractTimelineMessage(mapped, mapped.retractionId)
       : mapped;
-    const idMatch = [tm.id, ...(tm.wireIds ?? [])]
-      .map((id) => byId.get(id))
-      .find((message): message is TimelineMessage => !!message);
+    const idMatch = identityIndex.find(tm);
     const synthesizedMatch = idMatch ? undefined : findSynthesizedIdMergeTarget(synthesizedRows, tm);
     if (synthesizedMatch) synthesizedRows.splice(synthesizedRows.indexOf(synthesizedMatch), 1);
     const existingMessage = idMatch ?? synthesizedMatch;
@@ -355,9 +390,11 @@ export function buildChannelTimelineFromMamResults(params: {
         if (index !== -1) timeline[index] = merged;
         byId.add(merged);
       }
+      identityIndex.replace(existingMessage, merged);
       continue;
     }
     byId.add(tm);
+    identityIndex.add(tm);
     timeline.push(tm);
   }
 
@@ -380,8 +417,12 @@ export function buildChannelTimelineFromMamResults(params: {
   }
 
   for (const update of correctionUpdates) {
-    const target = findMessageById(timeline, update.targetId);
-    if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
+    const target = findMessageById(
+      timeline,
+      update.targetId,
+      (candidate) => isSameMucCorrectionSender(candidate, update.correctionSender),
+    );
+    if (!target || target.isRetracted) continue;
     assignCorrectionFields(target, update.payload);
   }
 

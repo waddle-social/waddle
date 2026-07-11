@@ -80,11 +80,13 @@ export function applyCorrection(
   payload: CorrectionPayload,
   policy: CorrectionPolicy,
 ): TimelineMessage[] | null {
-  const index = findMessageIndexById(messages, replacesId);
+  // Scope before resolving aliases. Two occupants may legitimately reuse the
+  // same sender-selected id; their verified sender identity disambiguates the
+  // target, while multiple claims inside one sender scope still fail closed.
+  const index = findMessageIndexById(messages, replacesId, policy.senderMatches);
   if (index < 0) return null;
   const current = messages[index]!;
   if (current.isRetracted) return null;
-  if (!policy.senderMatches(current)) return null;
   const updated: TimelineMessage = { ...current };
   assignCorrectionFields(updated, { ...payload, body: payload.body.trim() });
   const next = messages.slice();

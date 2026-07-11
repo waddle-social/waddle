@@ -2303,7 +2303,7 @@ describe("client keepalive lifecycle", () => {
 
     expect(fetchRoomHistoryByThread).toHaveBeenCalledWith(roomJid, "thread-1", 100, null);
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
-      { kind: "room", key: roomJid, after: "mam-thread-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["room-thread-1"] },
+      { kind: "room", key: roomJid, after: "mam-thread-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["mam-thread-1", "room-thread-1"] },
     ]);
   });
 
@@ -2390,7 +2390,7 @@ describe("client keepalive lifecycle", () => {
 
     expect(fetchRoomHistoryByThread).toHaveBeenCalledWith(roomJid, "thread-1", 100, null);
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
-      { kind: "room", key: roomJid, after: "mam-thread-list-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["room-thread-list-1"] },
+      { kind: "room", key: roomJid, after: "mam-thread-list-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["mam-thread-list-1", "room-thread-list-1"] },
     ]);
   });
 
@@ -2442,7 +2442,7 @@ describe("client keepalive lifecycle", () => {
       body: "newer missed room message",
     }));
     expect(catchup.onSessionStarted()).toEqual([
-      { kind: "room", key: roomJid, after: "mam-room-newer", since: "2024-01-01T00:00:01.000Z", seenIds: ["room-newer"] },
+      { kind: "room", key: roomJid, after: "mam-room-newer", since: "2024-01-01T00:00:01.000Z", seenIds: ["mam-room-newer", "room-newer"] },
     ]);
   });
 
@@ -2539,9 +2539,9 @@ describe("client keepalive lifecycle", () => {
     });
     expect(fetchRoomHistoryPage).toHaveBeenCalledTimes(3);
     expect(roomHandler).toHaveBeenCalledTimes(3);
-    expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "room-newer-2" }));
-    expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "room-newer-1" }));
-    expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "room-same-time-missed" }));
+    expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "mam-room-newer-2" }));
+    expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "mam-room-newer-1" }));
+    expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "mam-room-same-time-missed" }));
   });
 
   test("room stale archive cursor catch-up filters live activity already seen after that cursor", async () => {
@@ -2683,7 +2683,7 @@ describe("client keepalive lifecycle", () => {
 
     await client.queryMamPage("w1", "c1", 100, { type: "latest" });
     expect(catchup.onSessionStarted()).toEqual([
-      { kind: "room", key: roomJid, after: "mam-room-1", since: "2024-01-01T00:00:00.000Z", seenIds: ["room-1"] },
+      { kind: "room", key: roomJid, after: "mam-room-1", since: "2024-01-01T00:00:00.000Z", seenIds: ["mam-room-1", "room-1"] },
     ]);
 
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
@@ -2701,12 +2701,12 @@ describe("client keepalive lifecycle", () => {
     });
     expect(fetchRoomHistoryPage).toHaveBeenCalledTimes(3);
     expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({
-      id: "room-2",
+      id: "mam-room-2",
       body: "first missed room page",
       roomJid,
     }));
     expect(roomHandler).toHaveBeenCalledWith(expect.objectContaining({
-      id: "room-3",
+      id: "mam-room-3",
       body: "second missed room page",
       roomJid,
     }));

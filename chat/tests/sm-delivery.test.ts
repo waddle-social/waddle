@@ -339,8 +339,11 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
       {
         id: "thread-42",
         author: "alice",
+        authorJid: "w1-c1@rooms.example.com/alice",
+        authorOccupantJid: "w1-c1@rooms.example.com/alice",
         body: "topic root",
         createdAt: "2024-01-01T00:00:00Z",
+        createdAtSource: "delay",
         isSelf: true,
       },
       {
@@ -348,8 +351,11 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
         wireIds: ["reply-archive"],
         reactionTargetId: "reply-live",
         author: "bob",
+        authorJid: "w1-c1@rooms.example.com/bob",
+        authorOccupantJid: "w1-c1@rooms.example.com/bob",
         body: "live reply",
         createdAt: "2024-01-01T00:01:00Z",
+        createdAtSource: "delay",
         isSelf: false,
         replyTo: {
           id: "thread-42",
