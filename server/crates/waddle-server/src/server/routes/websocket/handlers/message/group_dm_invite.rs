@@ -249,7 +249,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
     // #1264: record the outstanding invite so a later XEP-0045 §7.8.2
     // `<decline/>` from this invitee verifies against the ledger and
     // routes to this inviter.
-    if let Err(error) = crate::server::routes::websocket::muc_invites::record_invite(
+    match crate::server::routes::websocket::muc_invites::record_invite(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::routes::websocket::muc_invites::OutstandingInvite {
             room: room_jid.clone(),
@@ -259,27 +259,41 @@ pub(super) async fn handle_group_dm_mediated_invite(
     )
     .await
     {
-        warn!(
-            room = %room_jid,
-            invitee = %invitee,
-            error = %error,
-            "Failed to record outstanding group-DM invite; rolling back grant"
-        );
-        rollback_group_dm_invite_grant(
-            state,
-            room_actor,
-            &channel_id,
-            &room_jid,
-            &invitee,
-            &bound_jid.to_bare(),
-        )
-        .await;
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            GroupDmInviteError::InternalServerError,
-            "Internal server error.",
-        )]);
+        Ok(crate::server::routes::websocket::muc_invites::RecordOutcome::New) => {}
+        // #1276 Greptile P1 "Duplicate Invites Redeliver": an identical
+        // unexpired re-invite is a silent success with NO second
+        // delivery. The member tuple was already granted by the first
+        // invite (this call's grant is idempotent), so re-sending would
+        // only flood the invitee or exhaust their offline
+        // pending-delivery quota. Matches the sibling `muc_invite`
+        // mediated-invite flow; no rollback — the desired end state
+        // (member + outstanding invite) already holds.
+        Ok(crate::server::routes::websocket::muc_invites::RecordOutcome::AlreadyOutstanding) => {
+            return Some(vec![]);
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                invitee = %invitee,
+                error = %error,
+                "Failed to record outstanding group-DM invite; rolling back grant"
+            );
+            rollback_group_dm_invite_grant(
+                state,
+                room_actor,
+                &channel_id,
+                &room_jid,
+                &invitee,
+                &bound_jid.to_bare(),
+            )
+            .await;
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                GroupDmInviteError::InternalServerError,
+                "Internal server error.",
+            )]);
+        }
     }
 
     let mut invite = incoming.clone();
