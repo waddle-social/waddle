@@ -60,7 +60,6 @@ export function hasMessageSenderContinuity(
   const incomingAuthorJid = bareJidKey(incoming.authorJid ?? "");
   return !!existingAuthorJid
     && !!incomingAuthorJid
-    && existing.author === incoming.author
     && existingAuthorJid === incomingAuthorJid;
 }
 
@@ -156,7 +155,7 @@ function continuityKey(...parts: readonly string[]): string {
 
 function legacySenderKey(message: TimelineMessage): string | undefined {
   const authorJid = bareJidKey(message.authorJid ?? "");
-  return authorJid ? continuityKey(message.author, authorJid) : undefined;
+  return authorJid || undefined;
 }
 
 class SenderContinuityIndex {

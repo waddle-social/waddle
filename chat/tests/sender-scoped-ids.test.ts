@@ -28,12 +28,14 @@ describe("SenderScopedIdIndex", () => {
   test("normalizes bare sender JIDs identically in the scan and index", () => {
     const existing: TimelineMessage = {
       ...canonicalRoomMessage(0),
+      author: "Alice",
       authorOccupantJid: undefined,
       authorRealJid: undefined,
       authorJid: " Alice@Example.COM/phone ",
     };
     const incoming: TimelineMessage = {
       ...existing,
+      author: "alice",
       authorJid: "alice@example.com/laptop",
     };
 
