@@ -105,11 +105,28 @@ export const XMPP_STREAM_ERROR_CONDITIONS = new Set([
   "unsupported-version",
 ]);
 
+/** RFC 6120 §8.3.3 defined stanza-error conditions, plus the stream-error
+ * conditions so mixed consumers keep matching. Telemetry collapses anything
+ * outside this list to "unknown". */
 export const XMPP_ERROR_CONDITIONS = new Set([
   ...XMPP_STREAM_ERROR_CONDITIONS,
+  "bad-request",
+  "feature-not-implemented",
   "forbidden",
+  "gone",
   "item-not-found",
+  "jid-malformed",
+  "not-acceptable",
+  "not-allowed",
+  "payment-required",
+  "recipient-unavailable",
+  "redirect",
+  "registration-required",
+  "remote-server-not-found",
+  "remote-server-timeout",
   "service-unavailable",
+  "subscription-required",
+  "unexpected-request",
 ]);
 
 export interface XmppErrorEvent {
@@ -120,8 +137,14 @@ export interface XmppErrorEvent {
   detail: string;
   /** Original error object if one was caught. */
   cause?: unknown;
-  /** XMPP stream-error condition when `kind === "stream"`. */
+  /** XMPP stream-error condition when `kind === "stream"`, or the RFC 6120
+   * §8.3 stanza-error condition when a server error stanza was received. */
   condition?: string;
+  /** RFC 6120 §8.3.2 `type` attribute of a received error stanza
+   * ("auth" | "cancel" | "continue" | "modify" | "wait" | "unknown"). */
+  errorType?: string;
+  /** Server-provided `<text/>` of a received error stanza. */
+  errorText?: string;
   /** XEP-0198 stream-management extension detail when a stream error carries one. */
   streamManagementError?: {
     kind: "handled-count-too-high";

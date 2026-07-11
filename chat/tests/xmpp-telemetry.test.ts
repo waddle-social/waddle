@@ -784,6 +784,71 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors[0].options?.type).toBe("xmpp.disconnect");
     expect(stub.errors[0].options?.context?.recoverable).toBe("true");
     expect(stub.errors[0].options?.context?.detail).toBe("room-self-presence-timeout");
+    expect(stub.errors[0].options?.context?.errorSource).toBe("local-timeout");
+  });
+
+  test("stanza error context carries errorType, errorText, and errorSource", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    const internal = client as unknown as {
+      emitError: (event: {
+        kind: "stream" | "auth" | "connect-timeout" | "member-query";
+        recoverable: boolean;
+        detail: string;
+        cause?: unknown;
+        condition?: string;
+        errorType?: string;
+        errorText?: string;
+      }) => void;
+    };
+
+    // Server-returned stanza error with full context.
+    internal.emitError({
+      kind: "member-query",
+      recoverable: true,
+      detail: "affiliation query failed for owner",
+      condition: "item-not-found",
+      errorType: "cancel",
+      errorText: "no such room",
+    });
+
+    // RFC 6120 defined condition outside the old allowlist must survive.
+    internal.emitError({
+      kind: "member-query",
+      recoverable: true,
+      detail: "affiliation query failed for owner",
+      condition: "not-allowed",
+      errorType: "cancel",
+    });
+
+    // No condition: source is unattributed, so errorSource stays unset.
+    internal.emitError({
+      kind: "member-query",
+      recoverable: true,
+      detail: "affiliation query failed for owner",
+    });
+
+    expect(stub.errors).toHaveLength(3);
+
+    const serverErr = stub.errors[0];
+    expect(serverErr.options?.context?.condition).toBe("item-not-found");
+    expect(serverErr.options?.context?.errorType).toBe("cancel");
+    expect(serverErr.options?.context?.errorText).toBe("no such room");
+    expect(serverErr.options?.context?.errorSource).toBe("server");
+    expect(serverErr.options?.context?.detail).toBe("member-query-item-not-found");
+
+    const definedCondition = stub.errors[1];
+    expect(definedCondition.options?.context?.condition).toBe("not-allowed");
+    expect(definedCondition.options?.context?.detail).toBe("member-query-not-allowed");
+
+    const unattributed = stub.errors[2];
+    expect(unattributed.options?.context?.condition).toBeUndefined();
+    expect(unattributed.options?.context?.errorSource).toBeUndefined();
+    expect(unattributed.options?.context?.detail).toBe("member-query-failed");
   });
 
   test("set_on_error bridge preserves stream error conditions for telemetry", () => {

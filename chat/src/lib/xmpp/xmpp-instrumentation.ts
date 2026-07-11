@@ -66,11 +66,15 @@ export function installInstrumentation(client: BrowserXmppClient): void {
     const smCounts = event.kind === "stream"
       ? telemetryStreamManagementCounts(event)
       : undefined;
+    const errorSource = telemetryErrorSource(event.kind, condition);
     const cause = new Error(detail);
     reportError(kind, cause, {
       recoverable: event.recoverable,
       detail,
       ...(condition ? { condition } : {}),
+      ...(event.errorType ? { errorType: event.errorType } : {}),
+      ...(event.errorText ? { errorText: event.errorText } : {}),
+      ...(errorSource ? { errorSource } : {}),
       ...(streamDetail ? { streamDetail } : {}),
       ...(smCounts ?? {}),
     });
@@ -145,6 +149,19 @@ function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, 
     smH: String(event.streamManagementError.h),
     smSendCount: String(event.streamManagementError.sendCount),
   };
+}
+
+/** Attribute the failure: a condition means the server answered with an
+ * error stanza/stream error; `connect-timeout` events are client-side
+ * timers (connect stall, room self-presence wait). Anything else is left
+ * unattributed rather than guessed. */
+function telemetryErrorSource(
+  kind: XmppErrorKind,
+  condition: string | undefined,
+): "server" | "local-timeout" | undefined {
+  if (condition) return "server";
+  if (kind === "connect-timeout") return "local-timeout";
+  return undefined;
 }
 
 function telemetryCondition(kind: XmppErrorKind, condition: string | undefined): string | undefined {

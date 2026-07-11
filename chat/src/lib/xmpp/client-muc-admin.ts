@@ -46,17 +46,37 @@ export class RoomMemberListUnavailableError extends Error {
   }
 }
 
-/** Stanza-error condition from a rejected wasm promise. The bridge
- * rejects with either `{ condition }` or `{ error: { condition } }`;
- * anything else yields `undefined`. */
-function stanzaErrorCondition(error: unknown): string | undefined {
+interface StanzaErrorContext {
+  condition?: string;
+  errorType?: string;
+  errorText?: string;
+}
+
+/** Stanza-error context from a rejected wasm promise. The bridge rejects
+ * with an `Error` carrying `condition` / `errorType` / `text` properties
+ * (or legacy `{ condition }` / `{ error: { condition } }` shapes); anything
+ * else yields an empty context. */
+function stanzaErrorContext(error: unknown): StanzaErrorContext {
+  const source = stanzaErrorSource(error);
+  if (!source) return {};
+  const { condition, errorType, text } = source as {
+    condition?: unknown;
+    errorType?: unknown;
+    text?: unknown;
+  };
+  return {
+    ...(typeof condition === "string" ? { condition } : {}),
+    ...(typeof errorType === "string" ? { errorType } : {}),
+    ...(typeof text === "string" ? { errorText: text } : {}),
+  };
+}
+
+function stanzaErrorSource(error: unknown): object | undefined {
   if (typeof error !== "object" || error === null) return undefined;
-  const direct = (error as { condition?: unknown }).condition;
-  if (typeof direct === "string") return direct;
+  if (typeof (error as { condition?: unknown }).condition === "string") return error;
   const nested = (error as { error?: unknown }).error;
   if (typeof nested !== "object" || nested === null) return undefined;
-  const nestedCondition = (nested as { condition?: unknown }).condition;
-  return typeof nestedCondition === "string" ? nestedCondition : undefined;
+  return typeof (nested as { condition?: unknown }).condition === "string" ? nested : undefined;
 }
 
 /**
@@ -107,7 +127,7 @@ export class MucAdmin {
     if (!listMembers) { this.deps.emitError({ kind: "member-query", recoverable: false, detail: "missing list_room_members" }); throw new Error("missing list_room_members"); }
     const affiliations = ["owner", "admin", "member", "outcast"] as const; const members: MemberSummary[] = []; const failedAffiliations: string[] = [];
     for (const affiliation of affiliations) {
-      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: jidLocalpart(item.jid), avatar_url: null, affiliation, joined_at: "" }); } } catch (error) { failedAffiliations.push(affiliation); const condition = stanzaErrorCondition(error); const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.deps.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
+      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: jidLocalpart(item.jid), avatar_url: null, affiliation, joined_at: "" }); } } catch (error) { failedAffiliations.push(affiliation); const context = stanzaErrorContext(error); const detail = context.condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : context.condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.deps.emitError({ kind: "member-query", recoverable: true, detail, cause: error, ...context }); }
     }
     if (members.length === 0 && failedAffiliations.length > 0) {
       throw new RoomMemberListUnavailableError();
