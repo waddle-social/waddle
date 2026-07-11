@@ -146,6 +146,10 @@ export const XMPP_ERROR_CONDITIONS = new Set([
   "subscription-required",
   "undefined-condition",
   "unexpected-request",
+  // Non-RFC conditions Waddle flows branch on as first-class stanza
+  // conditions (see STANZA_CONDITION_PRECONDITION_NOT_MET in the Rust
+  // client's error.rs — XEP-0223 publish-options rejections).
+  "precondition-not-met",
 ]);
 
 export interface XmppErrorEvent {

@@ -545,7 +545,16 @@ describe("client send readiness", () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     const errors: XmppErrorEvent[] = [];
-    client.onError((event) => errors.push(event));
+    const staleJoinVisibleAtEmit: boolean[] = [];
+    client.onError((event) => {
+      errors.push(event);
+      // A listener that synchronously retries the join must NOT observe
+      // the doomed promise still cached in joinedMucs (the emit is
+      // deferred one microtask so ensureJoined's catch cleans up first).
+      staleJoinVisibleAtEmit.push(
+        (client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid),
+      );
+    });
     let onPresence: ((presence: {
       from?: string;
       presence_type: string;
@@ -581,6 +590,7 @@ describe("client send readiness", () => {
     expect(errors[0].kind).toBe("muc-join");
     expect(errors[0].condition).toBe("registration-required");
     expect(errors[0].errorType).toBe("auth");
+    expect(staleJoinVisibleAtEmit).toEqual([false]);
   });
 
   test("room join ignores unrelated room presence errors while waiting for self-presence", async () => {

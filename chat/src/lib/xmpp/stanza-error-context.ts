@@ -35,8 +35,9 @@ export function stanzaErrorContext(error: unknown): StanzaErrorContext {
     errorType?: unknown;
     text?: unknown;
   };
+  const normalizedCondition = typeof condition === "string" ? condition.trim().toLowerCase() : "";
   return {
-    ...(typeof condition === "string" ? { condition } : {}),
+    ...(normalizedCondition ? { condition: normalizedCondition } : {}),
     ...(isStanzaErrorType(errorType) ? { errorType } : {}),
     ...(typeof text === "string" && text.length > 0
       ? { errorText: text.slice(0, MAX_ERROR_TEXT_LENGTH) }

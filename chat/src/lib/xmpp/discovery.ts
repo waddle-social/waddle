@@ -1,6 +1,7 @@
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import { reportError } from "@/lib/telemetry";
+import { XMPP_ERROR_CONDITIONS } from "./types";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
 import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
@@ -215,9 +216,10 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
     // channels fail to render — keep them structured so consumers can
     // grep / aggregate by `to`.
     console.warn(`[disco] ${kind} timeout`, { to: err.to, node: err.node });
-    reportError("xmpp.stream", err, {
+    const detail = `disco-${kind}-timeout`;
+    reportError("xmpp.stream", new Error(detail), {
       recoverable: true,
-      detail: `disco-${kind}-timeout`,
+      detail,
       errorSource: "local-timeout",
     });
     return;
@@ -230,10 +232,18 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
   // once on a connection flap, and beaconing each would flood Faro with
   // one error per room. Those stay console-only.
   if (!context.condition) return;
-  reportError("xmpp.stream", err, {
+  // Allowlist the condition like `telemetryCondition()` does for
+  // XmppErrorEvents: a non-standard element name must not mint
+  // high-cardinality `disco-*-*` details. The beacon exception is a
+  // fresh Error carrying only the detail — never the raw rejection,
+  // whose message embeds the uncapped server `<text/>`.
+  const condition = XMPP_ERROR_CONDITIONS.has(context.condition) ? context.condition : "unknown";
+  const detail = `disco-${kind}-${condition}`;
+  reportError("xmpp.stream", new Error(detail), {
     recoverable: true,
-    detail: `disco-${kind}-${context.condition}`,
+    detail,
     ...context,
+    condition,
     errorSource: "server",
   });
 }
