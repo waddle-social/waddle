@@ -103,7 +103,14 @@ _Residual (tracked, not #945-gating): survivor-check TOCTOU needs per-call locki
 2. #1160 — required status checks + merge_group + gate container publish on XMPP compliance. HITL (rulesets).
 3. #1163 — alerts-as-code + Alloy pod-log collection. Contact-point routing HITL.
 
-### Lane J — 1:1 chat + MUC conformance (2026-07-10 audit; epic #1269)
+### Lane J — 1:1 chat + MUC conformance (2026-07-10 audit; epic #1269) — ✅ **COMPLETE**
+
+**Lane J COMPLETE (2026-07-11):** all six bundles merged — J1 client chat (PR #1273,
++#1275 server stanza-id strip), J2 server 1:1 routing (PR #1272), J3 MUC invites/
+lifecycle (PR #1276), J4 MUC-MAM/spoofing (PR #1274), J5 MUC delivery/self-ping
+(PR #1277), J6 disco truthfulness (PR #1271). 27 issues closed (#1243–#1268 + #1275);
+epic **#1269** closed. Each merged only after CI green + Qodo + Greptile approval on
+the final SHA with zero unresolved threads.
 
 Second deep audit (6 lanes incl. independent gpt-5.5) of private + group chat vs
 main @ `c35afb9d`; all findings verified in code. #1243–#1268 filed, indexed by
