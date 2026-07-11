@@ -36,13 +36,15 @@ pub(super) enum InboundDisposition {
     Unhandled,
 }
 
-/// Dispatch responses plus the XEP-0198 handled-state decision that produced
-/// them. An empty response set is not enough to infer this: successful message
-/// and presence handlers normally return no response too.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct StanzaDispatchResult {
-    pub(super) responses: Vec<String>,
-    pub(super) disposition: InboundDisposition,
+pub(super) enum StanzaTimeout {
+    /// The retryable IQ error accepts responsibility for the request. Keep the
+    /// response typed until `frame.rs` reaches the existing transport XML
+    /// boundary.
+    HandledIq(xmpp_parsers::minidom::Element),
+    /// Dispatch was cancelled without accepting responsibility or owing a
+    /// protocol response.
+    Unhandled,
 }
 
 /// Maximum wall-clock a single stanza's dispatch may take before the backstop
@@ -126,11 +128,11 @@ impl StanzaBackstop {
     /// for get/set, nothing for everything else. The typed disposition keeps an
     /// empty successful response distinct from a cancelled, unhandled stanza.
     /// Records the timeout metric and a `warn!`, and marks the span errored.
-    fn on_timeout(self) -> StanzaDispatchResult {
+    fn on_timeout(self) -> StanzaTimeout {
         metrics::record_stanza_handler_timeout(self.kind, &self.payload_ns);
         self.span.record("otel.status_code", "ERROR");
         let _enter = self.span.enter();
-        let (responses, disposition) = match &self.iq_reply {
+        match &self.iq_reply {
             Some(reply) => {
                 warn!(
                     stanza_kind = self.kind,
@@ -144,19 +146,14 @@ impl StanzaBackstop {
                     timeout_secs = STANZA_HANDLER_WEDGE_TIMEOUT.as_secs(),
                     "stanza handler exceeded wedge backstop; returning resource-constraint"
                 );
-                (
-                    vec![super::build_iq_error_xml_typed(
-                        &reply.id,
-                        reply.from.as_deref(),
-                        reply.to.as_deref(),
-                        resource_constraint_iq_error(
-                            "The server could not process this request in time; please retry.",
-                        ),
-                    )],
-                    // Producing the required retryable IQ error accepts
-                    // responsibility for the request.
-                    InboundDisposition::Handled,
-                )
+                StanzaTimeout::HandledIq(super::transport_xml::build_iq_error_element_typed(
+                    &reply.id,
+                    reply.from.as_deref(),
+                    reply.to.as_deref(),
+                    resource_constraint_iq_error(
+                        "The server could not process this request in time; please retry.",
+                    ),
+                ))
             }
             None => {
                 warn!(
@@ -167,12 +164,8 @@ impl StanzaBackstop {
                 );
                 // Dispatch was cancelled without a protocol response. XEP-0198
                 // leaves responsibility with the sender.
-                (Vec::new(), InboundDisposition::Unhandled)
+                StanzaTimeout::Unhandled
             }
-        };
-        StanzaDispatchResult {
-            responses,
-            disposition,
         }
     }
 }
@@ -183,17 +176,14 @@ impl StanzaBackstop {
 pub(super) async fn run_with_backstop<F>(
     backstop: StanzaBackstop,
     dispatch: F,
-) -> StanzaDispatchResult
+) -> Result<Vec<String>, StanzaTimeout>
 where
     F: Future<Output = Vec<String>> + Send,
 {
     let span = backstop.span.clone();
     match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {
-        Ok(responses) => StanzaDispatchResult {
-            responses,
-            disposition: InboundDisposition::Handled,
-        },
-        Err(_elapsed) => backstop.on_timeout(),
+        Ok(responses) => Ok(responses),
+        Err(_elapsed) => Err(backstop.on_timeout()),
     }
 }
 

@@ -776,13 +776,15 @@ async fn handle_inbound_text(
 
     // A timed-out message/presence dispatch was cancelled before the server
     // accepted XEP-0198 responsibility. End this transport without moving to
-    // `Closing`: normal cleanup must persist the resumable session with the
-    // pre-hole inbound `h`, prompting the sender to replay the stanza.
+    // `Closing`: resumable sessions persist the pre-hole `h`; non-resumable
+    // sessions leave their unacknowledged suffix to the sender's stream-end
+    // policy. In both cases the server must not falsely acknowledge the hole.
     if conn.sm_inbound_completion.has_unhandled_hole() {
         warn!(
             jid = ?conn.phase.bound_jid(),
             inbound_h = conn.sm_state.get_inbound_count(),
-            "Closing stream after unhandled stanza dispatch timeout; preserving sender responsibility"
+            resumable = conn.sm_state.is_resumable(),
+            "Ending transport after unhandled stanza dispatch timeout; preserving sender responsibility"
         );
         return false;
     }

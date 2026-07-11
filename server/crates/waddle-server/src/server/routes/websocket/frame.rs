@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    frame_backstop::{run_with_backstop, InboundDisposition, StanzaBackstop},
+    frame_backstop::{run_with_backstop, InboundDisposition, StanzaBackstop, StanzaTimeout},
     isr_resume::handle_isr_resume_authenticate,
     parse_errors::{is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
@@ -312,15 +312,21 @@ async fn handle_xmpp_frame_impl(
                     }
                 }
             };
-            let outcome = run_with_backstop(backstop, dispatch).await;
+            let (responses, disposition) = match run_with_backstop(backstop, dispatch).await {
+                Ok(responses) => (responses, InboundDisposition::Handled),
+                Err(StanzaTimeout::HandledIq(reply)) => {
+                    (vec![element_to_xml(reply)], InboundDisposition::Handled)
+                }
+                Err(StanzaTimeout::Unhandled) => (Vec::new(), InboundDisposition::Unhandled),
+            };
             settle_inbound_dispatch(
-                outcome.disposition,
+                disposition,
                 ordered_relay_origin_was_deferred(&ordered_relay_origin),
                 reserved_inbound_for_sm,
                 sm_inbound_completion,
                 sm_state,
             );
-            outcome.responses
+            responses
         }
     }
 }

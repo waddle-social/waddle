@@ -39,6 +39,19 @@ fn presence_stanza() -> Stanza {
     Stanza::Presence(Presence::new(xmpp_parsers::presence::Type::None))
 }
 
+fn responses_and_disposition(
+    result: Result<Vec<String>, StanzaTimeout>,
+) -> (Vec<String>, InboundDisposition) {
+    match result {
+        Ok(responses) => (responses, InboundDisposition::Handled),
+        Err(StanzaTimeout::HandledIq(reply)) => (
+            vec![crate::server::routes::websocket::element_to_xml(reply)],
+            InboundDisposition::Handled,
+        ),
+        Err(StanzaTimeout::Unhandled) => (Vec::new(), InboundDisposition::Unhandled),
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn iq_get_timeout_yields_conformant_resource_constraint() {
     let stanza = iq_get_stanza("disco-1", "alice@example.com/web", "upload.example.com");
@@ -50,20 +63,20 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
         "must not resolve before the wedge budget elapses"
     );
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
-    let outcome = fut.await;
+    let (responses, disposition) = responses_and_disposition(fut.await);
 
     assert_eq!(
-        outcome.responses.len(),
+        responses.len(),
         1,
         "a timed-out IQ get owes exactly one reply"
     );
-    assert_eq!(outcome.disposition, InboundDisposition::Handled);
+    assert_eq!(disposition, InboundDisposition::Handled);
     let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     sm_state.enable("iq-timeout".to_string(), true, Some(300));
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
-        outcome.disposition,
+        disposition,
         false,
         Some(sequence),
         &mut completion,
@@ -74,7 +87,7 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
         1,
         "the retryable IQ error accepts responsibility for the request"
     );
-    let reply = &outcome.responses[0];
+    let reply = &responses[0];
     // minidom serializes attributes with single quotes (house style; see the
     // existing iq.rs assertions).
     assert!(
@@ -111,14 +124,14 @@ async fn message_timeout_yields_no_response() {
 
     let fut = run_with_backstop(backstop, pending::<Vec<String>>());
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
-    let outcome = fut.await;
+    let (responses, disposition) = responses_and_disposition(fut.await);
 
     assert!(
-        outcome.responses.is_empty(),
+        responses.is_empty(),
         "a timed-out message owes no reply: {:?}",
-        outcome.responses
+        responses
     );
-    assert_eq!(outcome.disposition, InboundDisposition::Unhandled);
+    assert_eq!(disposition, InboundDisposition::Unhandled);
 }
 
 #[tokio::test(start_paused = true)]
@@ -128,13 +141,10 @@ async fn presence_timeout_yields_no_response() {
 
     let fut = run_with_backstop(backstop, pending::<Vec<String>>());
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
-    let outcome = fut.await;
+    let (responses, disposition) = responses_and_disposition(fut.await);
 
-    assert!(
-        outcome.responses.is_empty(),
-        "a timed-out presence owes no reply"
-    );
-    assert_eq!(outcome.disposition, InboundDisposition::Unhandled);
+    assert!(responses.is_empty(), "a timed-out presence owes no reply");
+    assert_eq!(disposition, InboundDisposition::Unhandled);
 }
 
 #[tokio::test(start_paused = true)]
@@ -147,14 +157,14 @@ async fn iq_result_timeout_yields_no_response() {
 
     let fut = run_with_backstop(backstop, pending::<Vec<String>>());
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
-    let outcome = fut.await;
+    let (responses, disposition) = responses_and_disposition(fut.await);
 
     assert!(
-        outcome.responses.is_empty(),
+        responses.is_empty(),
         "a timed-out IQ result owes no reply: {:?}",
-        outcome.responses
+        responses
     );
-    assert_eq!(outcome.disposition, InboundDisposition::Unhandled);
+    assert_eq!(disposition, InboundDisposition::Unhandled);
 }
 
 #[tokio::test(start_paused = true)]
@@ -164,14 +174,15 @@ async fn fast_dispatch_passes_through_untouched() {
 
     // A handler that completes immediately must pass its response through
     // unchanged, with no timeout reply.
-    let outcome = run_with_backstop(backstop, async {
+    let result = run_with_backstop(backstop, async {
         vec!["<iq id=\"disco-2\" type=\"result\"/>".to_string()]
     })
     .await;
+    let (responses, disposition) = responses_and_disposition(result);
 
     assert_eq!(
-        outcome.responses,
+        responses,
         vec!["<iq id=\"disco-2\" type=\"result\"/>".to_string()]
     );
-    assert_eq!(outcome.disposition, InboundDisposition::Handled);
+    assert_eq!(disposition, InboundDisposition::Handled);
 }
