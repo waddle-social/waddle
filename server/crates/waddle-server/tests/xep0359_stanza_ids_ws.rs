@@ -48,7 +48,7 @@ fn frame_has_message_body(frame: &str, body: &str) -> bool {
         .is_some()
 }
 
-fn message_ids(frame: &str, body: &str, room: &str) -> (String, Vec<String>, Vec<String>) {
+fn message_ids(frame: &str, body: &str, room: &BareJid) -> (String, Vec<String>, Vec<String>) {
     let root = frame.parse::<Element>().expect("valid XML frame");
     let message = find_message_by_body(&root, body)
         .unwrap_or_else(|| panic!("message with body {body:?} missing from frame: {frame}"));
@@ -60,18 +60,18 @@ fn message_ids(frame: &str, body: &str, room: &str) -> (String, Vec<String>, Vec
         .collect();
     let room_stanza_ids = message
         .children()
-        .filter(|child| child.is("stanza-id", NS_SID) && child.attr("by") == Some(room))
+        .filter(|child| child.is("stanza-id", NS_SID) && child.attr("by") == Some(room.as_str()))
         .filter_map(|child| child.attr("id").map(str::to_owned))
         .collect();
     (envelope_id, origin_ids, room_stanza_ids)
 }
 
-fn groupchat_message(room: &str, id: &str, origin_id: &str, body: &str) -> String {
+fn groupchat_message(room: &BareJid, id: &str, origin_id: &str, body: &str) -> String {
     element_to_xml(
         Element::builder("message", NS_CLIENT)
             .attr(
                 xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
-                room,
+                room.as_str(),
             )
             .attr(
                 xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
@@ -94,12 +94,15 @@ fn groupchat_message(room: &str, id: &str, origin_id: &str, body: &str) -> Strin
     )
 }
 
-async fn join_room_as(client: &mut WsXmppClient, room: &str, nick: &str) {
-    let occupant = format!("{room}/{nick}");
+async fn join_room_as(client: &mut WsXmppClient, room: &BareJid, nick: &str) {
+    let occupant = room
+        .clone()
+        .with_resource_str(nick)
+        .expect("valid occupant resource");
     let presence = Element::builder("presence", NS_CLIENT)
         .attr(
             xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
-            occupant,
+            occupant.as_str(),
         )
         .append(Element::builder("x", NS_MUC).build())
         .build();
@@ -194,7 +197,9 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
     )
     .await
     .expect("connect alice");
-    let room = format!("sid-collision-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let room: BareJid = format!("sid-collision-{}@muc.{DOMAIN}", uuid::Uuid::new_v4())
+        .parse()
+        .expect("valid room JID");
     join_room_as(&mut admin, &room, USERNAME).await;
     join_room_as(&mut alice, &room, ALICE).await;
 

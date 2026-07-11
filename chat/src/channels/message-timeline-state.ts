@@ -20,7 +20,7 @@ import { isStaleReactionUpdate } from "@/lib/messaging/reactions";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
-import { findSenderScopedIdTarget } from "@/lib/messaging/sender-scoped-ids";
+import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -82,6 +82,7 @@ function mergeMissingThreadMetadata(
             authorRealJid: canonicalRoomMessage.authorRealJid,
           }
         : {}),
+      authorOccupantJid: canonicalRoomMessage.authorOccupantJid,
       ...(canonicalRoomMessage.displayedMarkerRequested
         ? { displayedMarkerRequested: true }
         : {}),
@@ -360,7 +361,7 @@ export function buildChannelTimelineFromMamResults(params: {
   for (const message of existing) {
     byId.add(message);
   }
-  const identityRows = [...existing];
+  const identityIndex = new SenderScopedIdIndex(existing);
   const timeline = options.seedExistingOnly ? [] : [...existing];
   // #1182: rows whose primary id had to be fabricated (id-less live
   // stanzas) can only reconcile by content. Each is consumable once so
@@ -371,7 +372,7 @@ export function buildChannelTimelineFromMamResults(params: {
     const tm = mapped.isRetracted
       ? retractTimelineMessage(mapped, mapped.retractionId)
       : mapped;
-    const idMatch = findSenderScopedIdTarget(identityRows, tm);
+    const idMatch = identityIndex.find(tm);
     const synthesizedMatch = idMatch ? undefined : findSynthesizedIdMergeTarget(synthesizedRows, tm);
     if (synthesizedMatch) synthesizedRows.splice(synthesizedRows.indexOf(synthesizedMatch), 1);
     const existingMessage = idMatch ?? synthesizedMatch;
@@ -389,13 +390,11 @@ export function buildChannelTimelineFromMamResults(params: {
         if (index !== -1) timeline[index] = merged;
         byId.add(merged);
       }
-      const identityIndex = identityRows.indexOf(existingMessage);
-      if (identityIndex === -1) identityRows.push(merged);
-      else identityRows[identityIndex] = merged;
+      identityIndex.replace(existingMessage, merged);
       continue;
     }
     byId.add(tm);
-    identityRows.push(tm);
+    identityIndex.add(tm);
     timeline.push(tm);
   }
 

@@ -69,28 +69,58 @@ export function findSenderScopedIdTarget(
   messages: readonly TimelineMessage[],
   incoming: TimelineMessage,
 ): TimelineMessage | undefined {
-  const primaryMatches = messages.filter(
-    (message) =>
-      message.id === incoming.id
-      && !hasConflictingRoomCanonicalIdentity(message, incoming)
-      && hasMessageSenderContinuity(message, incoming),
-  );
-  if (primaryMatches.length === 1) return primaryMatches[0];
-  if (primaryMatches.length > 1) return undefined;
+  return new SenderScopedIdIndex(messages).find(incoming);
+}
 
-  let target: TimelineMessage | undefined;
-  for (const id of [incoming.id, ...(incoming.wireIds ?? [])]) {
-    const matches = messages.filter(
+/** Collision-preserving identity index for repeated MAM reconciliation. */
+export class SenderScopedIdIndex {
+  private readonly byId = new Map<string, Set<TimelineMessage>>();
+
+  constructor(messages: readonly TimelineMessage[] = []) {
+    for (const message of messages) this.add(message);
+  }
+
+  add(message: TimelineMessage): void {
+    for (const id of new Set([message.id, ...(message.wireIds ?? [])])) {
+      const bucket = this.byId.get(id) ?? new Set<TimelineMessage>();
+      bucket.add(message);
+      this.byId.set(id, bucket);
+    }
+  }
+
+  replace(existing: TimelineMessage, replacement: TimelineMessage): void {
+    for (const id of new Set([existing.id, ...(existing.wireIds ?? [])])) {
+      const bucket = this.byId.get(id);
+      bucket?.delete(existing);
+      if (bucket?.size === 0) this.byId.delete(id);
+    }
+    this.add(replacement);
+  }
+
+  private matches(id: string, incoming: TimelineMessage): TimelineMessage[] {
+    return [...(this.byId.get(id) ?? [])].filter(
       (message) =>
-        (message.id === id || message.wireIds?.includes(id))
-        && !hasConflictingRoomCanonicalIdentity(message, incoming)
+        !hasConflictingRoomCanonicalIdentity(message, incoming)
         && hasMessageSenderContinuity(message, incoming),
     );
-    if (matches.length > 1) return undefined;
-    const match = matches[0];
-    if (!match) continue;
-    if (target && target !== match) return undefined;
-    target = match;
   }
-  return target;
+
+  find(incoming: TimelineMessage): TimelineMessage | undefined {
+    const primaryMatches = this.matches(incoming.id, incoming).filter(
+      (message) => message.id === incoming.id,
+    );
+    if (primaryMatches.length === 1) return primaryMatches[0];
+    if (primaryMatches.length > 1) return undefined;
+
+    let target: TimelineMessage | undefined;
+    for (const id of new Set([incoming.id, ...(incoming.wireIds ?? [])])) {
+      const matches = this.matches(id, incoming);
+      if (matches.length > 1) return undefined;
+      const match = matches[0];
+      if (!match) continue;
+      if (target && target !== match) return undefined;
+      target = match;
+    }
+    return target;
+  }
 }

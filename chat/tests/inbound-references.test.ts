@@ -480,7 +480,6 @@ describe("roomMessageFromArchived", () => {
       correctionTargetId: "client-id",
       author: "alice",
       authorJid: "room@conf.example.com/alice",
-      authorOccupantJid: "room@conf.example.com/alice",
       body: "my message",
       createdAt: "2026-05-14T10:36:55Z",
       createdAtSource: "queued" as const,
@@ -505,6 +504,7 @@ describe("roomMessageFromArchived", () => {
         replyableId: "room-stanza-self",
         reactionTargetId: "room-stanza-self",
         correctionTargetId: "origin-id",
+        authorOccupantJid: "room@conf.example.com/alice",
       });
       expect(timeline[0]?.wireIds).toEqual(expect.arrayContaining(["client-id", "origin-id"]));
     }
