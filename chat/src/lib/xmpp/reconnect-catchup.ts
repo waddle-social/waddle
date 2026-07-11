@@ -71,9 +71,28 @@ export class ReconnectCatchup {
     if (!snapshot) return;
     for (const [key, cursor] of snapshot.dmLastSeen) {
       const scope = cursor.scope ?? "account";
-      this.dmLastSeen.set(dmCursorKey(key, scope), { ...cursor, scope });
+      advance(
+        this.dmLastSeen,
+        dmCursorKey(key, scope),
+        cursor.timestamp,
+        cursor.archiveId,
+        cursor.seenIds,
+        cursor.archiveTimestamp,
+        cursor.archiveSeenIds,
+        scope,
+      );
     }
-    for (const [key, cursor] of snapshot.roomLastSeen) this.roomLastSeen.set(key, { ...cursor });
+    for (const [key, cursor] of snapshot.roomLastSeen) {
+      advance(
+        this.roomLastSeen,
+        key,
+        cursor.timestamp,
+        cursor.archiveId,
+        cursor.seenIds,
+        cursor.archiveTimestamp,
+        cursor.archiveSeenIds,
+      );
+    }
     // A hydrated instance is by definition *not* a first-ever login —
     // it represents a prior tab session that left cursors behind. The
     // next `onSessionStarted()` must return those cursors so MAM
@@ -90,15 +109,11 @@ export class ReconnectCatchup {
     this.persistScheduled = true;
     queueMicrotask(() => {
       this.persistScheduled = false;
-      // Read-merge-write so two tabs of the same account don't
-      // clobber each other's cursor advances. Pre-fix each tab held
-      // its own in-memory map and serialized the whole thing on
-      // every write — the last writer won, and the other tab's
-      // progress was silently lost. Now we merge any remote state
-      // that landed since our last write back into our in-memory
-      // maps before persisting, so both tabs converge to the union
-      // (per-key: higher timestamp wins, equal timestamps merge
-      // `seenIds` — exactly the rule `advance()` already uses).
+      // Each tab writes its own persistence shard, so concurrent
+      // localStorage writes cannot replace another tab's cursor set.
+      // Merge every shard before saving this tab's snapshot so live
+      // tabs converge eagerly as well; hydrate applies the same
+      // higher-timestamp/equal-seenIds `advance()` rule on reload.
       const remote = this.persistence.loadCatchup();
       if (remote) this.absorbRemoteSnapshot(remote);
       const snapshot: PersistedReconnectCatchup = {

@@ -149,6 +149,21 @@ describe("MamPager page conversion", () => {
     expect(result.messages.map((message) => message.body)).toEqual(["hello"]);
   });
 
+  test("known MUC authority overrides a stale bare account cursor", async () => {
+    const requestedPeers: string[] = [];
+    const xmpp: MamWasmClient = {
+      fetch_dm_history_page: async (peerJid) => {
+        requestedPeers.push(peerJid);
+        return page([], { complete: true });
+      },
+    };
+    const { pager, catchup } = createPager(xmpp);
+    catchup.recordDmSeen("room@muc.example.com/mobile", "2026-07-01T09:00:00.000Z");
+    await pager.queryPersonalMamPage(MUC_PM_ALICE);
+
+    expect(requestedPeers).toEqual([MUC_PM_ALICE]);
+  });
+
   test("ordinary full-resource DM thread pages retain bare conversation behavior", async () => {
     const requestedPeers: string[] = [];
     const xmpp: MamWasmClient = {

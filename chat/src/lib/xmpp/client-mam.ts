@@ -242,7 +242,7 @@ export class MamPager {
   constructor(private readonly deps: MamPagerDeps) {}
 
   private isMucPmPeer(peerJid: string, scope?: DmConversationScope): boolean {
-    return scope ? scope === "muc-occupant" : this.deps.isMucPmPeer(peerJid);
+    return scope === "muc-occupant" || this.deps.isMucPmPeer(peerJid);
   }
 
   private selfBare(): string {
