@@ -20,6 +20,19 @@ const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_SID: &str = "urn:xmpp:sid:0";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnvelopeId(String);
+
+impl EnvelopeId {
+    fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 fn element_to_xml(element: Element) -> String {
     let mut bytes = Vec::new();
     element.write_to(&mut bytes).expect("serialize XML");
@@ -48,25 +61,33 @@ fn frame_has_message_body(frame: &str, body: &str) -> bool {
         .is_some()
 }
 
-fn message_ids(frame: &str, body: &str, room: &BareJid) -> (String, Vec<String>, Vec<String>) {
+fn message_ids(
+    frame: &str,
+    body: &str,
+    room: &BareJid,
+) -> (EnvelopeId, Vec<OriginId>, Vec<StanzaId>) {
     let root = frame.parse::<Element>().expect("valid XML frame");
     let message = find_message_by_body(&root, body)
         .unwrap_or_else(|| panic!("message with body {body:?} missing from frame: {frame}"));
-    let envelope_id = message.attr("id").expect("message id preserved").to_owned();
+    let envelope_id = EnvelopeId::new(message.attr("id").expect("message id preserved"));
     let origin_ids = message
         .children()
         .filter(|child| child.is("origin-id", NS_SID))
-        .filter_map(|child| child.attr("id").map(str::to_owned))
+        .filter_map(|child| child.attr("id").map(OriginId::new))
         .collect();
     let room_stanza_ids = message
         .children()
         .filter(|child| child.is("stanza-id", NS_SID) && child.attr("by") == Some(room.as_str()))
-        .filter_map(|child| child.attr("id").map(str::to_owned))
+        .filter_map(|child| {
+            child
+                .attr("id")
+                .map(|id| StanzaId::new(id, Jid::from(room.clone())))
+        })
         .collect();
     (envelope_id, origin_ids, room_stanza_ids)
 }
 
-fn groupchat_message(room: &BareJid, id: &str, origin_id: &str, body: &str) -> String {
+fn groupchat_message(room: &BareJid, id: &EnvelopeId, origin_id: &OriginId, body: &str) -> String {
     element_to_xml(
         Element::builder("message", NS_CLIENT)
             .attr(
@@ -79,14 +100,14 @@ fn groupchat_message(room: &BareJid, id: &str, origin_id: &str, body: &str) -> S
             )
             .attr(
                 xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
-                id,
+                id.as_str(),
             )
             .append(Element::builder("body", NS_CLIENT).append(body).build())
             .append(
                 Element::builder("origin-id", NS_SID)
                     .attr(
                         xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
-                        origin_id,
+                        origin_id.as_str(),
                     )
                     .build(),
             )
@@ -203,15 +224,15 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
     join_room_as(&mut admin, &room, USERNAME).await;
     join_room_as(&mut alice, &room, ALICE).await;
 
-    let shared_envelope_id = "reused-client-id";
-    let shared_origin_id = "reused-origin-id";
+    let shared_envelope_id = EnvelopeId::new("reused-client-id");
+    let shared_origin_id = OriginId::new("reused-origin-id");
     let admin_body = "admin collision message";
     let alice_body = "alice collision message";
     admin
         .send(&groupchat_message(
             &room,
-            shared_envelope_id,
-            shared_origin_id,
+            &shared_envelope_id,
+            &shared_origin_id,
             admin_body,
         ))
         .await
@@ -223,8 +244,8 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
     alice
         .send(&groupchat_message(
             &room,
-            shared_envelope_id,
-            shared_origin_id,
+            &shared_envelope_id,
+            &shared_origin_id,
             alice_body,
         ))
         .await
@@ -240,12 +261,12 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
         message_ids(&alice_reflection, alice_body, &room);
     assert_eq!(admin_envelope, shared_envelope_id);
     assert_eq!(alice_envelope, shared_envelope_id);
-    assert_eq!(admin_origins, vec![shared_origin_id]);
-    assert_eq!(alice_origins, vec![shared_origin_id]);
+    assert_eq!(admin_origins, vec![shared_origin_id.clone()]);
+    assert_eq!(alice_origins, vec![shared_origin_id.clone()]);
     assert_eq!(admin_room_ids.len(), 1);
     assert_eq!(alice_room_ids.len(), 1);
-    assert!(!admin_room_ids[0].is_empty());
-    assert!(!alice_room_ids[0].is_empty());
+    assert!(!admin_room_ids[0].id.is_empty());
+    assert!(!alice_room_ids[0].id.is_empty());
     assert_ne!(
         admin_room_ids[0], alice_room_ids[0],
         "the room authority must assign distinct identities despite reused sender aliases"
@@ -289,7 +310,7 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
         message_ids(alice_mam, alice_body, &room);
     assert_eq!(admin_mam_envelope, shared_envelope_id);
     assert_eq!(alice_mam_envelope, shared_envelope_id);
-    assert_eq!(admin_mam_origins, vec![shared_origin_id]);
+    assert_eq!(admin_mam_origins, vec![shared_origin_id.clone()]);
     assert_eq!(alice_mam_origins, vec![shared_origin_id]);
     assert_eq!(admin_mam_room_ids, admin_room_ids);
     assert_eq!(alice_mam_room_ids, alice_room_ids);
