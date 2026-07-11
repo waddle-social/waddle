@@ -2,7 +2,9 @@ import type { TimelineMessage } from "@/lib/chat-ui";
 import { barePeerJid } from "@/lib/xmpp-client";
 
 function normalizedRealJid(message: TimelineMessage): string | undefined {
-  return message.authorRealJid ? barePeerJid(message.authorRealJid) : undefined;
+  return message.authorRealJid
+    ? barePeerJid(message.authorRealJid).trim().toLowerCase()
+    : undefined;
 }
 
 function senderScopeJid(message: TimelineMessage): string | undefined {

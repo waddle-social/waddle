@@ -392,6 +392,36 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     ]);
   });
 
+  test("reconciles the same real JID across wire casing differences", () => {
+    const h = harness();
+    const base = {
+      id: "room-stanza-1",
+      stanzaId: "room-stanza-1",
+      stanzaIdBy: "room@muc.example.com",
+      replyableId: "room-stanza-1",
+      author: "alice",
+      authorOccupantJid: "room@muc.example.com/alice",
+      body: "same message",
+      isSelf: false,
+      createdAtSource: "delay" as const,
+    };
+    h.liveMerge.mergeLiveMessage({
+      ...base,
+      authorJid: "Alice@Example.COM/phone",
+      authorRealJid: "Alice@Example.COM/phone",
+      createdAt: "2026-05-14T10:36:55Z",
+    });
+    h.liveMerge.mergeLiveMessage({
+      ...base,
+      authorJid: "alice@example.com/laptop",
+      authorRealJid: "alice@example.com/laptop",
+      createdAt: "2026-05-14T10:36:56Z",
+    });
+
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.id).toBe("room-stanza-1");
+  });
+
   test("preserves distinct room-stamped messages across nicks for the same bare real JID", () => {
     const h = harness();
     for (const [index, nick] of ["alice-phone", "alice-laptop"].entries()) {
