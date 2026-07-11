@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import type { BrowserXmppClient, MessageSearchResult } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, DmConversationScope, MessageSearchResult } from "@/lib/xmpp-client";
 
 // XEP-0313 archive query with the `query=` parameter for the DM side.
 // Mirrors useChannelMessageSearch, scoped to activePeerJid and using
@@ -14,6 +14,7 @@ type UseDmMessageSearchDeps = {
   actionError: Ref<string>;
   clearActionError: () => void;
   normalizeError: (e: unknown) => string;
+  conversationScope?: (peerJid: string) => DmConversationScope;
 };
 
 export function useDmMessageSearch(deps: UseDmMessageSearchDeps) {
@@ -23,6 +24,7 @@ export function useDmMessageSearch(deps: UseDmMessageSearchDeps) {
     actionError,
     clearActionError,
     normalizeError,
+    conversationScope,
   } = deps;
 
   const searchResults = ref<MessageSearchResult[]>([]);
@@ -44,7 +46,12 @@ export function useDmMessageSearch(deps: UseDmMessageSearchDeps) {
     isSearching.value = true;
     clearActionError();
     try {
-      const results = await client.searchDmMessages(peerJid, trimmed);
+      const results = await client.searchDmMessages(
+        peerJid,
+        trimmed,
+        20,
+        conversationScope?.(peerJid),
+      );
       // Race-id guard: same purpose as the channel side — drop stale
       // results from earlier queries / different peers.
       if (

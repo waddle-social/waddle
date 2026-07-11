@@ -20,6 +20,7 @@ import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid } from "@/lib/xmpp-client";
+import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
 import { mdsChatKey, queueMdsDisplayed, setMdsDisplayed } from "@/lib/last-seen-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
@@ -172,12 +173,17 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     // chat as displayed. Persist the stanza-id under the MDS-scoped
     // last-seen key so existing conversation-scoped readers can pick
     // it up alongside their own divider state. The chat-id is the
-    // bare JID of either the MUC room or the DM peer.
+    // bare JID for DMs/rooms and full occupant JID for MUC PMs.
     client.setMdsDisplayedHandler((entry) => {
-      const chatId = barePeerJid(entry.chatId);
+      // The XEP-0490 item id is already the protocol's typed chat
+      // identity. Do not reclassify it through mutable local discovery:
+      // an event for a not-yet-opened occupant must remain full too.
+      const chatId = resourceOf(entry.chatId)
+        ? fullJidIdentityKey(entry.chatId)
+        : bareJidKey(entry.chatId);
       const displayed = {
         stanzaId: entry.stanzaId,
-        stanzaIdBy: barePeerJid(entry.stanzaIdBy),
+        stanzaIdBy: entry.stanzaIdBy,
       };
       const accepted = isActiveDirectDmSurface()
         ? dmMessaging.applyMdsDisplayed(chatId, displayed)

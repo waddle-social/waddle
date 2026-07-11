@@ -60,13 +60,14 @@ function makeHarness(options: {
   channelInbox?: () => Promise<boolean>;
 } = {}) {
   let lifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
+  let mdsDisplayedHandler: ((entry: { chatId: string; stanzaId: string; stanzaIdBy: string }) => void) | null = null;
   const client = {
     ...handlerStubs(),
     setDirectMessageHandler: () => {},
     setDmChatStateHandler: () => {},
     setDmDisplayedHandler: () => {},
     setDmReactionHandler: () => {},
-    setMdsDisplayedHandler: () => {},
+    setMdsDisplayedHandler: (handler: typeof mdsDisplayedHandler) => { mdsDisplayedHandler = handler; },
     setPresenceUpdateHandler: () => {},
     addPubsubEventHandler: () => {},
     setMemberJidHandler: () => {},
@@ -209,6 +210,12 @@ function makeHarness(options: {
       if (!lifecycleHandler) throw new Error("session lifecycle handler was not registered");
       lifecycleHandler(event);
     },
+    dispatchMdsDisplayed: (entry: { chatId: string; stanzaId: string; stanzaIdBy: string }) => {
+      if (!mdsDisplayedHandler) throw new Error("MDS displayed handler was not registered");
+      mdsDisplayedHandler(entry);
+    },
+    dmApplyMdsDisplayed: deps.dmMessaging.applyMdsDisplayed,
+    roomApplyMdsDisplayed: deps.messaging.applyMdsDisplayed,
     counts: () => ({
       dmInbox: hydrateDmInbox.mock.calls.length,
       channelInbox: hydrateChannelInbox.mock.calls.length,
@@ -222,6 +229,29 @@ function makeHarness(options: {
 }
 
 describe("session bootstrap choreography (#754)", () => {
+  test("cross-resource MDS keeps an unknown second occupant in one room isolated", async () => {
+    const harness = makeHarness();
+    harness.dispatchMdsDisplayed({
+      chatId: "room@conference.example/alice",
+      stanzaId: "sid-alice",
+      stanzaIdBy: "example.com",
+    });
+    harness.dispatchMdsDisplayed({
+      chatId: "room@conference.example/bob",
+      stanzaId: "sid-bob",
+      stanzaIdBy: "example.com",
+    });
+
+    expect(harness.roomApplyMdsDisplayed).toHaveBeenNthCalledWith(1,
+      "room@conference.example/alice",
+      { stanzaId: "sid-alice", stanzaIdBy: "example.com" },
+    );
+    expect(harness.roomApplyMdsDisplayed).toHaveBeenNthCalledWith(2,
+      "room@conference.example/bob",
+      { stanzaId: "sid-bob", stanzaIdBy: "example.com" },
+    );
+    harness.scope.stop();
+  });
   test("a resumed session-ready re-hydrates each surface exactly once (inbox pushes are not SM-replayed)", async () => {
     // XEP-0198 resume replays peer-routed stanzas, but the server
     // fire-and-forgets inbox pushes to live resources only — a detached

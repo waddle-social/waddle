@@ -638,7 +638,11 @@ export function useChannelMessages(
 
   function applyMdsDisplayed(chatId: string, displayed: MdsDisplayedState): boolean {
     const roomJid = currentRoomJid.value;
-    if (!roomJid || barePeerJid(chatId) !== barePeerJid(roomJid)) return false;
+    // XEP-0490 scopes groupchat to the bare room and MUC PMs to a full
+    // occupant JID. Never let an occupant item advance the room timeline.
+    if (!roomJid || chatId.includes("/") || barePeerJid(chatId) !== barePeerJid(roomJid)) {
+      return false;
+    }
     const feedTimeline = messages.value.filter(isFeedVisible);
     const key = mdsChatKey(barePeerJid(roomJid));
     if (!displayedStateCanAdvance(feedTimeline, getMdsDisplayed(key), displayed)) return false;

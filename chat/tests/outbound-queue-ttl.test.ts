@@ -67,7 +67,7 @@ describe("outbound queue TTL", () => {
       peerJid: "bob@example.com",
       body: "still in window",
     });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toHaveLength(1);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toHaveLength(1);
   });
 
   test("entries older than 7 days are pruned on read", () => {
@@ -78,7 +78,7 @@ describe("outbound queue TTL", () => {
       peerJid: "bob@example.com",
       body: "ancient draft",
     });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("pruning rewrites the persisted snapshot (the entry is gone, not just hidden)", () => {
@@ -135,6 +135,6 @@ describe("outbound queue TTL", () => {
       peerJid: "bob@example.com",
       body: "weird stamp",
     });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toHaveLength(1);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toHaveLength(1);
   });
 });

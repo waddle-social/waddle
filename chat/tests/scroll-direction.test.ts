@@ -18,7 +18,7 @@ import {
   setMdsDisplayed,
 } from "../src/lib/last-seen-store";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { LiveRoomMessage } from "../src/lib/xmpp-client";
+import type { LiveDmMessage, LiveRoomMessage } from "../src/lib/xmpp-client";
 
 function createStorageMock() {
   const values = new Map<string, string>();
@@ -367,6 +367,10 @@ describe("scroll direction preference", () => {
     await messaging.loadMessages("w1", "c1", 2);
 
     expect(messaging.firstUnseenId.value).toBe("room-2");
+    expect(messaging.applyMdsDisplayed("w1-c1@rooms.example.com/alice", {
+      stanzaId: "room-stanza-2",
+      stanzaIdBy: "w1-c1@rooms.example.com",
+    })).toBe(false);
   });
 
   test("room initial load re-pins when the virtual timeline ref appears after messages", async () => {
@@ -761,6 +765,214 @@ describe("scroll direction preference", () => {
     await dm.loadMessages("bob@example.com", 2);
 
     expect(dm.firstUnseenId.value).toBe("dm-2");
+  });
+
+  test("MUC-PM paging and live MDS isolate two occupants in the same room", async () => {
+    const alice = "room@conference.example/alice";
+    const bob = "room@conference.example/bob";
+    setMdsDisplayed(mdsChatKey(alice), {
+      stanzaId: "alice-stanza-1",
+      stanzaIdBy: "example.com",
+    });
+    setMdsDisplayed(mdsChatKey(bob), {
+      stanzaId: "bob-stanza-9",
+      stanzaIdBy: "example.com",
+    });
+    const queryPersonalMam = mock(async () => [
+      {
+        id: "alice-1",
+        stanzaId: "alice-stanza-1",
+        stanzaIdBy: "example.com",
+        peerJid: alice,
+        fromJid: alice,
+        nick: "alice",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+        mucPm: true,
+      },
+      {
+        id: "alice-2",
+        stanzaId: "alice-stanza-2",
+        stanzaIdBy: "example.com",
+        peerJid: alice,
+        fromJid: alice,
+        nick: "alice",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+        mucPm: true,
+      },
+    ]);
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref(session()),
+      ref({
+        queryPersonalMam,
+        isMucPmPeer: (peerJid: string) => peerJid.startsWith("room@conference.example/"),
+      } as never) as never,
+      ref(alice),
+      String,
+      actionError,
+      () => { actionError.value = ""; },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+
+    await dm.loadMessages(alice, 2);
+
+    expect(dm.firstUnseenId.value).toBe("alice-2");
+    expect(localStorage.getItem(dmKey(alice))).toBe("alice-2");
+    expect(localStorage.getItem(dmKey(bob))).toBeNull();
+    expect(dm.applyMdsDisplayed(bob, {
+      stanzaId: "bob-stanza-9",
+      stanzaIdBy: "example.com",
+    })).toBe(false);
+    expect(dm.applyMdsDisplayed(alice, {
+      stanzaId: "alice-stanza-2",
+      stanzaIdBy: "example.com",
+    })).toBe(true);
+    expect(dm.firstUnseenId.value).toBeNull();
+  });
+
+  test("MUC-PM paging keeps request-start identity when the client clears during await", async () => {
+    const alice = "room@rooms.custom.example/alice";
+    setMdsDisplayed(mdsChatKey(alice), {
+      stanzaId: "alice-stanza-1",
+      stanzaIdBy: "example.com",
+    });
+    let resolvePage!: (messages: LiveDmMessage[]) => void;
+    const queryPersonalMam = mock(async () => new Promise<LiveDmMessage[]>((resolve) => {
+      resolvePage = resolve;
+    }));
+    const client = {
+      queryPersonalMam,
+      isMucPmPeer: (peerJid: string) => peerJid === alice,
+    } as never;
+    const clientRef = ref(client);
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref(session()),
+      clientRef,
+      ref(alice),
+      String,
+      actionError,
+      () => { actionError.value = ""; },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+
+    const load = dm.loadMessages(alice, 2);
+    await Promise.resolve();
+    clientRef.value = null as never;
+    resolvePage([
+      {
+        id: "alice-1",
+        stanzaId: "alice-stanza-1",
+        stanzaIdBy: "example.com",
+        peerJid: alice,
+        fromJid: alice,
+        nick: "alice",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message",
+        mucPm: true,
+      },
+      {
+        id: "alice-2",
+        stanzaId: "alice-stanza-2",
+        stanzaIdBy: "example.com",
+        peerJid: alice,
+        fromJid: alice,
+        nick: "alice",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message",
+        mucPm: true,
+      },
+    ]);
+    await load;
+
+    expect(dm.firstUnseenId.value).toBe("alice-2");
+    expect(localStorage.getItem(dmKey(alice))).toBe("alice-2");
+  });
+
+  test("typed inbound MDS isolates an unknown occupant before custom-service discovery", async () => {
+    const alice = "room@rooms.custom.example/alice";
+    const bob = "room@rooms.custom.example/bob";
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref(session()),
+      ref({
+        queryPersonalMam: mock(async () => [{
+          id: "bob-1",
+          stanzaId: "shared-stanza-id",
+          stanzaIdBy: "example.com",
+          peerJid: bob,
+          fromJid: bob,
+          nick: "bob",
+          body: "hello",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message" as const,
+          mucPm: true,
+        }]),
+        // Reproduces the pre-discovery window: the custom MUC service is
+        // not known locally yet, but the inbound item ID is already typed.
+        isMucPmPeer: () => false,
+      } as never) as never,
+      ref(bob),
+      String,
+      actionError,
+      () => { actionError.value = ""; },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+    await dm.loadMessages(bob, 1);
+
+    expect(dm.applyMdsDisplayed(alice, {
+      stanzaId: "shared-stanza-id",
+      stanzaIdBy: "example.com",
+    })).toBe(false);
+    expect(dm.applyMdsDisplayed(bob, {
+      stanzaId: "shared-stanza-id",
+      stanzaIdBy: "example.com",
+    })).toBe(true);
+  });
+
+  test("restored occupant scope reconciles the full inbound MDS key before discovery", async () => {
+    const alice = "room@rooms.custom.example/alice";
+    setMdsDisplayed(mdsChatKey(alice), {
+      stanzaId: "alice-restored-sid",
+      stanzaIdBy: "example.com",
+    });
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref(session()),
+      ref({
+        queryPersonalMam: mock(async () => [{
+          id: "alice-restored",
+          stanzaId: "alice-restored-sid",
+          stanzaIdBy: "example.com",
+          peerJid: alice,
+          fromJid: alice,
+          nick: "alice",
+          body: "restored",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message" as const,
+          mucPm: true,
+        }]),
+        isMucPmPeer: () => false,
+      } as never) as never,
+      ref(alice),
+      String,
+      actionError,
+      () => { actionError.value = ""; },
+      ref("muc-occupant"),
+    );
+    dm.timelineEl.value = makeTimelineEl();
+
+    await dm.loadMessages(alice, 1);
+
+    expect(dm.firstUnseenId.value).toBeNull();
+    expect(localStorage.getItem(dmKey(alice))).toBe("alice-restored");
+    expect(localStorage.getItem(dmKey("room@rooms.custom.example"))).toBeNull();
   });
 
   test("DM initial load reconciles queued inactive MDS candidates without moving backward", async () => {

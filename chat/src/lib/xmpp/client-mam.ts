@@ -473,14 +473,19 @@ export class MamPager {
     return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), roomJid: message.roomJid }));
   }
 
-  async queryPersonalMam(peerJid: string, max = 100): Promise<LiveDmMessage[]> {
-    const page = await this.queryPersonalMamPage(peerJid, max, { type: "latest" });
+  async queryPersonalMam(peerJid: string, max = 100, requestedScope?: DmConversationScope): Promise<LiveDmMessage[]> {
+    const page = await this.queryPersonalMamPage(peerJid, max, { type: "latest" }, requestedScope);
     return page.messages;
   }
 
-  async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
+  async queryPersonalMamPage(
+    peerJid: string,
+    max = 100,
+    pageParam: MamPageParam = { type: "latest" },
+    requestedScope?: DmConversationScope,
+  ): Promise<MamHistoryPage<LiveDmMessage>> {
     const xmpp = await this.deps.requireConnectedXmpp();
-    const dmScope = this.deps.catchup.getDmScope(peerJid);
+    const dmScope = requestedScope ?? this.deps.catchup.getDmScope(peerJid);
     const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
     const page = await xmpp.fetch_dm_history_page?.(archivePeerJid, max, pageParam);
     if (!page) return { messages: [], complete: true };
@@ -489,10 +494,16 @@ export class MamPager {
     return result;
   }
 
-  async queryPersonalMamThreadPage(peerJid: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
+  async queryPersonalMamThreadPage(
+    peerJid: string,
+    threadId: string,
+    max = 100,
+    pageParam: MamThreadPageParam = { type: "latest" },
+    requestedScope?: DmConversationScope,
+  ): Promise<MamHistoryPage<LiveDmMessage>> {
     if (!threadId) return { messages: [], complete: true };
     const xmpp = await this.deps.requireConnectedXmpp();
-    const dmScope = this.deps.catchup.getDmScope(peerJid);
+    const dmScope = requestedScope ?? this.deps.catchup.getDmScope(peerJid);
     const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
     const page = await xmpp.fetch_dm_history_by_thread?.(archivePeerJid, threadId, max, pageParam.type === "before" ? pageParam.before : null);
     if (!page) return { messages: [], complete: true };
@@ -546,10 +557,15 @@ export class MamPager {
     }
   }
 
-  async searchDmMessages(peerJid: string, query: string, max = 20): Promise<MessageSearchResult[]> {
+  async searchDmMessages(
+    peerJid: string,
+    query: string,
+    max = 20,
+    requestedScope?: DmConversationScope,
+  ): Promise<MessageSearchResult[]> {
     if (!query.trim()) return [];
     const xmpp = await this.deps.requireConnectedXmpp();
-    const dmScope = this.deps.catchup.getDmScope(peerJid);
+    const dmScope = requestedScope ?? this.deps.catchup.getDmScope(peerJid);
     const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
     const page = await xmpp.search_dm_history?.(archivePeerJid, query, max);
     const selfBare = this.selfBare();

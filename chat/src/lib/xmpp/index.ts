@@ -79,6 +79,7 @@ export {
   sortEventsUpcomingFirst,
 } from "./event-calendar";
 export type { UserPepProfile } from "./pep-types";
+export type { DmConversationScope } from "./reconnect-catchup";
 export type {
   DmChatStateEvent,
   DmConversation,

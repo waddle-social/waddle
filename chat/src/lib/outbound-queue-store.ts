@@ -1,6 +1,8 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/send-types";
 import { reportError } from "@/lib/telemetry";
+import { bareJidKey, fullJidIdentityKey } from "@/lib/xmpp/jid";
+import type { DmConversationScope } from "@/lib/xmpp/reconnect-catchup";
 
 const PREFIX = "waddle.chat.outbound-queue";
 
@@ -238,11 +240,26 @@ export function listQueuedRoomMessages(
 export function listQueuedDmMessages(
   accountKey: string,
   peerJid: string,
+  scope: DmConversationScope,
 ): PersistedQueuedDmMessage[] {
+  const requestedMucPm = scope === "muc-occupant";
+  const requestedKey = dmQueuePeerKey(peerJid, requestedMucPm);
   return readQueue(accountKey).filter(
-    (message): message is PersistedQueuedDmMessage =>
-      message.kind === "dm" && message.peerJid === peerJid,
+    (message): message is PersistedQueuedDmMessage => {
+      if (message.kind !== "dm") return false;
+      const rowMucPm = message.mucPm === true;
+      if (rowMucPm !== requestedMucPm) return false;
+      // Before the scope bit existed, account DMs were already persisted
+      // bare. A resource-bearing row without `mucPm` is therefore ambiguous
+      // legacy data and must fail closed instead of aliasing a room occupant.
+      if (!rowMucPm && message.peerJid.includes("/")) return false;
+      return dmQueuePeerKey(message.peerJid, rowMucPm) === requestedKey;
+    },
   );
+}
+
+function dmQueuePeerKey(peerJid: string, mucPm: boolean): string {
+  return mucPm ? fullJidIdentityKey(peerJid) : bareJidKey(peerJid);
 }
 
 export function enqueueQueuedMessage(
@@ -250,7 +267,12 @@ export function enqueueQueuedMessage(
   message: PersistedQueuedMessage,
 ): void {
   const next = readQueue(accountKey).filter((entry) => entry.id !== message.id);
-  next.push(message);
+  next.push(message.kind === "dm"
+    ? {
+        ...message,
+        peerJid: dmQueuePeerKey(message.peerJid, message.mucPm === true),
+      }
+    : message);
   writeQueue(accountKey, next);
 }
 

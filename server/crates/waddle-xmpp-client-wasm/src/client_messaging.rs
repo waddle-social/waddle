@@ -93,11 +93,11 @@ impl WaddleClient {
     }
 
     /// XEP-0490 §3 publish to `urn:xmpp:mds:displayed:0`. `chat_id` is
-    /// the bare JID of the chat (DM contact or MUC room) which becomes
-    /// the PEP item id; `stanza_id` is the XEP-0359 id of the latest
-    /// displayed message; `stanza_id_by` is the JID that injected
-    /// that stanza-id (the MUC room for group chats, the user's own
-    /// server for 1:1). The publish carries the spec-mandated
+    /// the JID of the chat (bare DM contact, bare MUC room, or full MUC
+    /// occupant for a private message) which becomes the PEP item id;
+    /// `stanza_id` is the XEP-0359 id of the latest
+    /// displayed message; `stanza_id_by` is the resource-less room or
+    /// account-server authority required by XEP-0490. The publish carries the spec-mandated
     /// publish-options as preconditions.
     pub fn publish_mds_displayed(
         &self,
@@ -108,7 +108,7 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let chat_id: BareJid = chat_id
+            let chat_id: Jid = chat_id
                 .parse()
                 .map_err(|err| js_error(format!("invalid MDS chat id: {err}")))?;
             let stanza_id = StanzaId::new(stanza_id)

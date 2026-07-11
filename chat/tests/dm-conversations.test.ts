@@ -342,6 +342,7 @@ describe("useDirectMessageConversations", () => {
       mucPm: true,
     });
     expect(reloaded.activePeerJid.value).toBe("room@muc.example.com/juliet");
+    expect(reloaded.activeConversationScope.value).toBe("muc-occupant");
     delete (globalThis as unknown as { window?: unknown }).window;
   });
 
@@ -363,13 +364,17 @@ describe("useDirectMessageConversations", () => {
         peerUsername: "juliet (room)",
         unreadCount: 0,
       }],
-      activePeerJid: null,
+      activePeerJid: "room@muc.example.com/juliet",
     }));
 
     const { composable } = makeComposable();
     await nextTick();
 
-    expect(composable.conversations.value[0]?.peerJid).toBe("room@muc.example.com/juliet");
+    expect(composable.conversations.value[0]).toMatchObject({
+      peerJid: "room@muc.example.com/juliet",
+      mucPm: true,
+    });
+    expect(composable.activeConversationScope.value).toBe("muc-occupant");
     delete (globalThis as unknown as { window?: unknown }).window;
   });
 

@@ -22,8 +22,9 @@ function makeChannelClient(
 function makeDmClient(
   sendDmDisplayed = mock(async () => undefined),
   publishMdsDisplayed = mock(async () => undefined),
+  isMucPmPeer = (_peerJid: string) => false,
 ): BrowserXmppClient {
-  return { sendDmDisplayed, publishMdsDisplayed } as unknown as BrowserXmppClient;
+  return { sendDmDisplayed, publishMdsDisplayed, isMucPmPeer } as unknown as BrowserXmppClient;
 }
 function channel(features: string[] = [NS_STANZA_ID]): ChannelSummary {
   return {
@@ -320,6 +321,79 @@ describe("useDmReadMarkers", () => {
     expect(publishMdsDisplayed).toHaveBeenCalledWith(
       "bob@example.com",
       "server-stanza-id",
+      "example.com",
+    );
+  });
+
+  test("MUC-PM MDS uses the full occupant while ordinary resources stay bare", () => {
+    const occupantPublish = mock(async () => undefined);
+    const occupant = "room@conference.example/alice";
+    const occupantMarkers = useDmReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(
+        mock(async () => undefined),
+        occupantPublish,
+        (peerJid) => peerJid.startsWith("room@conference.example/"),
+      )),
+      activePeerJid: ref(occupant),
+      messages: ref<TimelineMessage[]>([{
+        id: "pm-1",
+        stanzaId: "pm-sid-1",
+        stanzaIdBy: "example.com",
+        body: "",
+        nick: "alice",
+        timestamp: 0,
+      } as TimelineMessage]),
+    });
+
+    occupantMarkers.markDisplayed("pm-1");
+
+    expect(occupantPublish).toHaveBeenCalledWith(occupant, "pm-sid-1", "example.com");
+
+    const dmPublish = mock(async () => undefined);
+    const dmMarkers = useDmReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(mock(async () => undefined), dmPublish)),
+      activePeerJid: ref("bob@example.com/phone"),
+      messages: ref<TimelineMessage[]>([{
+        id: "dm-resource-1",
+        stanzaId: "dm-sid-1",
+        stanzaIdBy: "example.com",
+        body: "",
+        nick: "bob",
+        timestamp: 0,
+      } as TimelineMessage]),
+    });
+
+    dmMarkers.markDisplayed("dm-resource-1");
+
+    expect(dmPublish).toHaveBeenCalledWith("bob@example.com", "dm-sid-1", "example.com");
+  });
+
+  test("restored MUC-PM scope publishes the full item id before client discovery", () => {
+    const publishMdsDisplayed = mock(async () => undefined);
+    const occupant = "room@rooms.custom.example/alice";
+    const markers = useDmReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(
+        mock(async () => undefined),
+        publishMdsDisplayed,
+        () => false,
+      )),
+      activePeerJid: ref(occupant),
+      conversationScope: () => "muc-occupant",
+      messages: ref<TimelineMessage[]>([{
+        id: "pm-restored",
+        stanzaId: "pm-restored-sid",
+        stanzaIdBy: "example.com",
+        body: "",
+        nick: "alice",
+        timestamp: 0,
+      } as TimelineMessage]),
+    });
+
+    markers.markDisplayed("pm-restored");
+
+    expect(publishMdsDisplayed).toHaveBeenCalledWith(
+      occupant,
+      "pm-restored-sid",
       "example.com",
     );
   });

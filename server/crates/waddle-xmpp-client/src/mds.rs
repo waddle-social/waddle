@@ -6,7 +6,7 @@
 //! `<displayed/>` payload enforces the XEP-0490 shape strictly so the
 //! typed `MdsDisplayed` value flows end-to-end.
 
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use minidom::Element;
 
 use crate::request::StanzaId;
@@ -26,11 +26,11 @@ const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsu
 
 /// Typed representation of one MDS catch-up entry. `chat_id` is the
 /// PEP item id (= JID of the chat). `stanza_id` is the XEP-0359 id of
-/// the displayed message; `stanza_id_by` is the JID that injected the
-/// stanza-id (the room for MUC, the user's server for 1:1).
+/// the displayed message; `stanza_id_by` is the resource-less assigning
+/// entity required by XEP-0490 for room and account-server stanza IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsCatchupEntry {
-    pub chat_id: BareJid,
+    pub chat_id: Jid,
     pub stanza_id: StanzaId,
     pub stanza_id_by: BareJid,
 }
@@ -97,7 +97,7 @@ fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &BareJid) -> Elem
 /// the user's own PEP service per XEP-0163.
 pub fn build_mds_publish_iq(
     iq_id: &str,
-    chat_id: &BareJid,
+    chat_id: &Jid,
     stanza_id: &StanzaId,
     stanza_id_by: &BareJid,
 ) -> Element {
@@ -159,7 +159,7 @@ pub fn build_mds_subscribe_iq(iq_id: &str, subscriber_bare_jid: &str) -> Element
 }
 
 fn parse_displayed_into_entry(item: &Element) -> Option<MdsCatchupEntry> {
-    let chat_id = item.attr("id")?.parse::<BareJid>().ok()?;
+    let chat_id = item.attr("id")?.parse::<Jid>().ok()?;
     let displayed = item.get_child("displayed", NS_MDS)?;
     let (stanza_id, stanza_id_by) = parse_displayed_payload(displayed)?;
     Some(MdsCatchupEntry {
@@ -247,6 +247,10 @@ mod tests {
         String::from(elem)
     }
 
+    fn jid(value: &str) -> Jid {
+        value.parse().expect("test JID parses")
+    }
+
     fn bare_jid(value: &str) -> BareJid {
         value.parse().expect("test bare JID parses")
     }
@@ -326,7 +330,7 @@ mod tests {
     fn publish_iq_carries_spec_publish_options() {
         let iq = build_mds_publish_iq(
             "iq-1",
-            &bare_jid("romeo@montague.lit"),
+            &jid("romeo@montague.lit"),
             &stanza_id("stanza-id-1"),
             &bare_jid("juliet@capulet.lit"),
         );
@@ -393,7 +397,7 @@ mod tests {
         ]);
         let entries = parse_mds_catchup_result(&iq);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].chat_id, bare_jid("romeo@montague.lit"));
+        assert_eq!(entries[0].chat_id, jid("romeo@montague.lit"));
         assert_eq!(entries[0].stanza_id, stanza_id("dm-sid"));
         assert_eq!(entries[0].stanza_id_by, bare_jid("juliet@capulet.lit"));
         assert_eq!(
@@ -402,7 +406,7 @@ mod tests {
         );
         assert_eq!(
             entries[1].stanza_id_by,
-            bare_jid("example@conference.shakespeare.lit")
+            jid("example@conference.shakespeare.lit")
         );
     }
 
@@ -421,6 +425,11 @@ mod tests {
             ),
             item(
                 NS_PUBSUB,
+                "resource-by",
+                displayed_with(vec![stanza_id_element("sid-1", "alice@example.com/phone")]),
+            ),
+            item(
+                NS_PUBSUB,
                 "multiple",
                 displayed_with(vec![
                     stanza_id_element("sid-1", "alice@example.com"),
@@ -435,7 +444,7 @@ mod tests {
         ]);
         let entries = parse_mds_catchup_result(&iq);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].chat_id, bare_jid("valid@example.com"));
+        assert_eq!(entries[0].chat_id, jid("valid@example.com"));
         assert_eq!(entries[0].stanza_id, stanza_id("sid-valid"));
     }
 
@@ -448,7 +457,7 @@ mod tests {
         )]);
         let entries = parse_mds_event(&msg).expect("is MDS event");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].chat_id, bare_jid("romeo@montague.lit"));
+        assert_eq!(entries[0].chat_id, jid("romeo@montague.lit"));
         assert_eq!(entries[0].stanza_id, stanza_id("evt-sid"));
     }
 
