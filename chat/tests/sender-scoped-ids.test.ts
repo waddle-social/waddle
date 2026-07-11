@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import type { TimelineMessage } from "@/lib/chat-ui";
-import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
+import {
+  findSenderScopedIdTarget,
+  SenderScopedIdIndex,
+} from "@/lib/messaging/sender-scoped-ids";
 
 function canonicalRoomMessage(index: number): TimelineMessage {
   const stanzaId = `room-stanza-${index}`;
@@ -22,6 +25,22 @@ function canonicalRoomMessage(index: number): TimelineMessage {
 }
 
 describe("SenderScopedIdIndex", () => {
+  test("normalizes bare sender JIDs identically in the scan and index", () => {
+    const existing: TimelineMessage = {
+      ...canonicalRoomMessage(0),
+      authorOccupantJid: undefined,
+      authorRealJid: undefined,
+      authorJid: " Alice@Example.COM/phone ",
+    };
+    const incoming: TimelineMessage = {
+      ...existing,
+      authorJid: "alice@example.com/laptop",
+    };
+
+    expect(findSenderScopedIdTarget([existing], incoming)).toBe(existing);
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBe(existing);
+  });
+
   test("preserves fail-closed multiplicity for a repeated object reference", () => {
     const message = canonicalRoomMessage(0);
     const index = new SenderScopedIdIndex([message, message]);

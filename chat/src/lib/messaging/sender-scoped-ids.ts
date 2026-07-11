@@ -1,5 +1,5 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
-import { barePeerJid } from "@/lib/xmpp-client";
+import { bareJidKey, barePeerJid } from "@/lib/xmpp-client";
 
 function normalizedRealJid(message: TimelineMessage): string | undefined {
   return message.authorRealJid
@@ -57,7 +57,7 @@ export function hasMessageSenderContinuity(
   }
 
   return existing.author === incoming.author
-    && barePeerJid(existing.authorJid ?? "") === barePeerJid(incoming.authorJid ?? "");
+    && bareJidKey(existing.authorJid ?? "") === bareJidKey(incoming.authorJid ?? "");
 }
 
 /**
@@ -151,7 +151,7 @@ function continuityKey(...parts: readonly string[]): string {
 }
 
 function legacySenderKey(message: TimelineMessage): string {
-  return continuityKey(message.author, barePeerJid(message.authorJid ?? ""));
+  return continuityKey(message.author, bareJidKey(message.authorJid ?? ""));
 }
 
 class SenderContinuityIndex {
