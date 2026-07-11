@@ -463,7 +463,10 @@ export function roomMessageFromArchived(
     ? message.moderation_target_id
     : undefined;
   const activeRetractionTarget = moderationTargetId ?? (!message.moderation_target_id ? message.retracts_id : undefined);
-  const roomPrimaryId = message.id ?? stampedByRoom ?? message.mam_id;
+  // XEP-0359 sender-selected ids are aliases, never room-global identity.
+  // Prefer the room-authored stanza-id; without one, use the archive/live
+  // envelope id and retain client id/origin-id only for sender-scoped merge.
+  const roomPrimaryId = stampedByRoom ?? message.mam_id;
   const roomWireIds = [message.id, message.origin_id, stampedByRoom]
     .filter((value): value is string => !!value && value !== roomPrimaryId);
   // #1182: on the live path `mam_id` is fabricated by the dispatcher
@@ -515,7 +518,7 @@ export function roomMessageFromArchived(
     return {
       // #1267 item 3: only trust a stanza-id whose `by` is the room
       // (XEP-0359 §Security) — never the unverified first-listed one.
-      id: message.id ?? stampedByRoom ?? message.mam_id,
+      id: roomPrimaryId,
       archiveId: message.mam_id,
       roomJid,
       nick: "",

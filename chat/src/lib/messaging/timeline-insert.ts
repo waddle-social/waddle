@@ -122,7 +122,7 @@ export function insertLiveMessage(
     ?? (contentMatchable ? findSynthesizedIdMergeTarget(messages, msg) : undefined);
   if (existing) {
     const merged = messages
-      .map((m) => (m.id === existing.id ? mergedLiveRow(m, msg) : m))
+      .map((m) => (m === existing ? mergedLiveRow(m, msg) : m))
       .sort(compareTimelineMessages);
     consumeReconciledEchoIds(pendingEchoClientIds, existing);
     return { messages: finalize(merged), appended: false };

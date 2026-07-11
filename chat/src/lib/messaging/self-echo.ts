@@ -1,5 +1,9 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
+import {
+  findSenderScopedIdTarget,
+  hasMessageSenderContinuity,
+} from "@/lib/messaging/sender-scoped-ids";
 
 // Self-echo reconciliation for the live merge path, shared verbatim by
 // the channel and DM pipelines (XEP-0359 alias resolution + body-match
@@ -35,16 +39,20 @@ export function findLiveMergeTarget(
   msg: TimelineMessage,
   pendingEchoClientIds: ReadonlySet<string>,
 ): TimelineMessage | undefined {
-  const existingById = [msg.id, ...(msg.wireIds ?? [])]
-    .map((id) => findMessageById(messages, id))
-    .find((message): message is TimelineMessage => !!message);
+  const mucScoped = !!msg.authorOccupantJid || messages.some((message) => !!message.authorOccupantJid);
+  const existingById = mucScoped
+    ? findSenderScopedIdTarget(messages, msg)
+    : [msg.id, ...(msg.wireIds ?? [])]
+      .map((id) => findMessageById(messages, id))
+      .find((message): message is TimelineMessage => !!message);
   const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
   const pendingSelfEcho = bodyFallbackAllowed
     ? messages.find(
       (m) =>
         pendingEchoClientIds.has(m.id)
         && m.isSelf
-        && m.body === msg.body,
+        && m.body === msg.body
+        && (!mucScoped || hasMessageSenderContinuity(m, msg)),
     )
     : undefined;
   const preservedSelfEcho = bodyFallbackAllowed
@@ -53,7 +61,8 @@ export function findLiveMergeTarget(
         m.isSelf
         && m.body === msg.body
         && !!m.deliveryStatus
-        && m.deliveryStatus !== "delivered",
+        && m.deliveryStatus !== "delivered"
+        && (!mucScoped || hasMessageSenderContinuity(m, msg)),
     )
     : undefined;
   return existingById ?? pendingSelfEcho ?? preservedSelfEcho;

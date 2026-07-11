@@ -263,10 +263,13 @@ describe("roomMessageFromArchived", () => {
       existing: [{
         id: "client-1",
         wireIds: ["room-stanza-1"],
+        author: "alice",
+        authorJid: "room@conf.example.com/alice",
+        authorOccupantJid: "room@conf.example.com/alice",
         body: "read https://example.com",
-        nick: "alice",
         isSelf: true,
         createdAt: "2026-06-01T12:00:00.000Z",
+        createdAtSource: "queued",
         linkPreviews: [{ originalUrl: "https://example.com", title: "Example" }],
       }],
     });
@@ -390,10 +393,121 @@ describe("roomMessageFromArchived", () => {
 
     const result = roomMessageFromArchived(archived);
 
+    expect(result?.id).toBe("room-stanza-xyz");
     expect(result?.reactionTargetId).toBe("room-stanza-xyz");
     expect(result?.replyableId).toBe("room-stanza-xyz");
-    expect(result?.wireIds).toContain("room-stanza-xyz");
+    expect(result?.wireIds).toContain("client-origin-id");
     expect(result?.wireIds).not.toContain("foreign-stanza-xyz");
+  });
+
+  test("keeps archived occupants distinct when they reuse a sender-selected id", () => {
+    const decoded = [
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "mam-alice",
+        id: "shared-client-id",
+        stanza_id: "room-stanza-alice",
+        stanza_id_by: "room@conf.example.com",
+        from: "room@conf.example.com/alice",
+        author_real_jid: "alice@example.com/phone",
+        body: "from alice",
+      }),
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "mam-bob",
+        id: "shared-client-id",
+        stanza_id: "room-stanza-bob",
+        stanza_id_by: "room@conf.example.com",
+        from: "room@conf.example.com/bob",
+        author_real_jid: "bob@example.com/laptop",
+        body: "from bob",
+      }),
+    ].filter((message): message is NonNullable<typeof message> => !!message);
+
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: decoded,
+    });
+
+    expect(timeline.map(({ id, body }) => ({ id, body }))).toEqual([
+      { id: "room-stanza-alice", body: "from alice" },
+      { id: "room-stanza-bob", body: "from bob" },
+    ]);
+    expect(timeline.every((message) => message.wireIds?.includes("shared-client-id"))).toBe(true);
+  });
+
+  test("keeps same-occupant archive rows with distinct room stanza ids", () => {
+    const decoded = ["room-stanza-1", "room-stanza-2"].map((stanzaId, index) =>
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: `mam-${index + 1}`,
+        id: "reused-client-id",
+        stanza_id: stanzaId,
+        stanza_id_by: "room@conf.example.com",
+        from: "room@conf.example.com/alice",
+        author_real_jid: "alice@example.com/phone",
+        body: index === 0 ? "first" : "second",
+      })!
+    );
+
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: decoded,
+    });
+
+    expect(timeline.map(({ id, body }) => ({ id, body }))).toEqual([
+      { id: "room-stanza-1", body: "first" },
+      { id: "room-stanza-2", body: "second" },
+    ]);
+  });
+
+  test("MAM reconciliation promotes an optimistic alias to canonical room identity", () => {
+    const archived = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "mam-self",
+      id: "client-id",
+      origin_id: "origin-id",
+      stanza_id: "room-stanza-self",
+      stanza_id_by: "room@conf.example.com",
+      from: "room@conf.example.com/alice",
+      author_real_jid: "alice@example.com/phone",
+      body: "my message",
+    })!;
+    const optimistic = {
+      id: "client-id",
+      correctionTargetId: "client-id",
+      author: "alice",
+      authorJid: "room@conf.example.com/alice",
+      authorOccupantJid: "room@conf.example.com/alice",
+      body: "my message",
+      createdAt: "2026-05-14T10:36:55Z",
+      createdAtSource: "queued" as const,
+      isSelf: true,
+      deliveryStatus: "sending" as const,
+    };
+
+    for (const seedExistingOnly of [false, true]) {
+      const timeline = buildChannelTimelineFromMamResults({
+        session,
+        channelIsForum: false,
+        mamResults: [archived],
+        existing: [optimistic],
+        options: { seedExistingOnly },
+      });
+
+      expect(timeline).toHaveLength(1);
+      expect(timeline[0]).toMatchObject({
+        id: "room-stanza-self",
+        stanzaId: "room-stanza-self",
+        stanzaIdBy: "room@conf.example.com",
+        replyableId: "room-stanza-self",
+        reactionTargetId: "room-stanza-self",
+        correctionTargetId: "origin-id",
+      });
+      expect(timeline[0]?.wireIds).toEqual(expect.arrayContaining(["client-id", "origin-id"]));
+    }
   });
 
   test("leaves room-targeted ids undefined when the room did not assign the stanza-id", () => {
@@ -406,9 +520,10 @@ describe("roomMessageFromArchived", () => {
 
     const result = roomMessageFromArchived(archived);
 
+    expect(result?.id).toBe("mam-1");
     expect(result?.reactionTargetId).toBeUndefined();
     expect(result?.replyableId).toBeUndefined();
-    expect(result?.wireIds).toBeUndefined();
+    expect(result?.wireIds).toEqual(["client-origin-id"]);
   });
 
   test("requires an exact room JID on XEP-0359 stanza-id by", () => {
@@ -424,9 +539,10 @@ describe("roomMessageFromArchived", () => {
 
     const result = roomMessageFromArchived(archived);
 
+    expect(result?.id).toBe("mam-1");
     expect(result?.reactionTargetId).toBeUndefined();
     expect(result?.replyableId).toBeUndefined();
-    expect(result?.wireIds).toBeUndefined();
+    expect(result?.wireIds).toEqual(["client-origin-id"]);
   });
 
   test("maps XEP-0424 tombstones without projecting a new retraction target", () => {
@@ -442,7 +558,8 @@ describe("roomMessageFromArchived", () => {
     const result = roomMessageFromArchived(archived);
 
     expect(result).toMatchObject({
-      id: "original-message-id",
+      id: "mam-1",
+      wireIds: ["original-message-id"],
       body: "",
       isRetracted: true,
       retractionId: "retract-message-id",

@@ -440,12 +440,12 @@ describe("useUnreadOverview", () => {
     expect(overview.error.value).toBeNull();
     expect(overview.groups.value[0]?.channelMessages).toHaveLength(2);
     const reacted = overview.groups.value[0]?.channelMessages.find((message) =>
-      message.id === "channel-1"
+      message.id === "stanza-channel-1"
     );
     expect(reacted?.body).toBe("older reacted target");
     expect(reacted?.reactions).toEqual({ "👍": ["bob"] });
     const retracted = overview.groups.value[0]?.channelMessages.find((message) =>
-      message.id === "channel-2"
+      message.id === "stanza-channel-2"
     );
     expect(retracted?.body).toBe("");
     expect(retracted?.isRetracted).toBe(true);
@@ -504,7 +504,7 @@ describe("useUnreadOverview", () => {
     await flushOverviewRefresh();
 
     expect(overview.groups.value[0]?.channelMessages.map((message) => message.id)).toEqual([
-      "channel-1",
+      "stanza-channel-1",
     ]);
     expect(overview.groups.value[0]?.channelMessages[0]?.reactions).toEqual({ "👍": ["bob"] });
     scope.stop();

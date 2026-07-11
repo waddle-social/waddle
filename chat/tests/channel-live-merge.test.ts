@@ -324,6 +324,287 @@ describe("applyCorrection sender-match gate (XEP-0308)", () => {
 });
 
 describe("mergeLiveMessage self-echo reconciliation", () => {
+  test("preserves two occupants that reuse the same sender-selected id", () => {
+    const h = harness();
+    h.liveMerge.mergeLiveMessage({
+      id: "room-stanza-alice",
+      wireIds: ["shared-client-id"],
+      author: "alice",
+      authorJid: "room@muc.example.com/alice",
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: "alice@example.com/phone",
+      body: "from alice",
+      isSelf: false,
+      createdAt: "2026-05-14T10:36:55.000Z",
+      createdAtSource: "delay",
+    });
+    h.liveMerge.mergeLiveMessage({
+      id: "room-stanza-bob",
+      wireIds: ["shared-client-id"],
+      author: "bob",
+      authorJid: "room@muc.example.com/bob",
+      authorOccupantJid: "room@muc.example.com/bob",
+      authorRealJid: "bob@example.com/laptop",
+      body: "from bob",
+      isSelf: false,
+      createdAt: "2026-05-14T10:36:56.000Z",
+      createdAtSource: "delay",
+    });
+
+    expect(h.messages.value.map(({ id, body }) => ({ id, body }))).toEqual([
+      { id: "room-stanza-alice", body: "from alice" },
+      { id: "room-stanza-bob", body: "from bob" },
+    ]);
+  });
+
+  test("preserves same-occupant messages with distinct room-authored stanza ids", () => {
+    const h = harness();
+    const sender = {
+      wireIds: ["reused-client-id"],
+      stanzaIdBy: "room@muc.example.com",
+      author: "alice",
+      authorJid: "alice@example.com/phone",
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: "alice@example.com/phone",
+      isSelf: false,
+      createdAtSource: "delay" as const,
+    };
+    h.liveMerge.mergeLiveMessage({
+      ...sender,
+      id: "room-stanza-1",
+      stanzaId: "room-stanza-1",
+      replyableId: "room-stanza-1",
+      body: "first",
+      createdAt: "2026-05-14T10:36:55Z",
+    });
+    h.liveMerge.mergeLiveMessage({
+      ...sender,
+      id: "room-stanza-2",
+      stanzaId: "room-stanza-2",
+      replyableId: "room-stanza-2",
+      body: "second",
+      createdAt: "2026-05-14T10:36:56Z",
+    });
+
+    expect(h.messages.value.map(({ id, body }) => ({ id, body }))).toEqual([
+      { id: "room-stanza-1", body: "first" },
+      { id: "room-stanza-2", body: "second" },
+    ]);
+  });
+
+  test("preserves distinct room-stamped messages across nicks for the same bare real JID", () => {
+    const h = harness();
+    for (const [index, nick] of ["alice-phone", "alice-laptop"].entries()) {
+      const stanzaId = `room-stanza-${index + 1}`;
+      h.liveMerge.mergeLiveMessage({
+        id: stanzaId,
+        wireIds: ["reused-client-id"],
+        stanzaId,
+        stanzaIdBy: "room@muc.example.com",
+        replyableId: stanzaId,
+        author: nick,
+        authorJid: `alice@example.com/${nick}`,
+        authorOccupantJid: `room@muc.example.com/${nick}`,
+        authorRealJid: `alice@example.com/${nick}`,
+        body: `message ${index + 1}`,
+        isSelf: false,
+        createdAt: `2026-05-14T10:36:5${index + 5}Z`,
+        createdAtSource: "delay",
+      });
+    }
+
+    expect(h.messages.value.map((message) => message.id)).toEqual([
+      "room-stanza-1",
+      "room-stanza-2",
+    ]);
+  });
+
+  test("preserves distinct room stamps when an anonymous nick is reused after departure", () => {
+    const h = harness();
+    for (const [index, body] of ["departed occupant", "replacement occupant"].entries()) {
+      const stanzaId = `room-stanza-${index + 1}`;
+      h.liveMerge.mergeLiveMessage({
+        id: stanzaId,
+        wireIds: ["reused-client-id"],
+        stanzaId,
+        stanzaIdBy: "room@muc.example.com",
+        replyableId: stanzaId,
+        author: "guest",
+        authorJid: "room@muc.example.com/guest",
+        authorOccupantJid: "room@muc.example.com/guest",
+        body,
+        isSelf: false,
+        createdAt: `2026-05-14T10:36:5${index + 5}Z`,
+        createdAtSource: "delay",
+      });
+    }
+
+    expect(h.messages.value.map((message) => message.body)).toEqual([
+      "departed occupant",
+      "replacement occupant",
+    ]);
+  });
+
+  test("does not merge unstamped simultaneous occupants with the same bare real JID", () => {
+    const h = harness();
+    for (const [index, nick] of ["alice-phone", "alice-laptop"].entries()) {
+      h.liveMerge.mergeLiveMessage({
+        id: `envelope-${index + 1}`,
+        wireIds: ["reused-client-id"],
+        author: nick,
+        authorJid: `alice@example.com/${nick}`,
+        authorOccupantJid: `room@muc.example.com/${nick}`,
+        authorRealJid: `alice@example.com/${nick}`,
+        body: `message ${index + 1}`,
+        isSelf: false,
+        createdAt: `2026-05-14T10:36:5${index + 5}Z`,
+        createdAtSource: "delay",
+      });
+    }
+
+    expect(h.messages.value.map((message) => message.id)).toEqual([
+      "envelope-1",
+      "envelope-2",
+    ]);
+  });
+
+  test("does not trust a reused nick when the known real JID changed", () => {
+    const h = harness();
+    h.liveMerge.mergeLiveMessage({
+      id: "room-stanza-old-alice",
+      wireIds: ["shared-client-id"],
+      author: "alice",
+      authorJid: "old-alice@example.com/phone",
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: "old-alice@example.com/phone",
+      body: "before nick reuse",
+      isSelf: false,
+      createdAt: "2026-05-14T10:36:55.000Z",
+      createdAtSource: "delay",
+    });
+    h.liveMerge.mergeLiveMessage({
+      id: "room-stanza-new-alice",
+      wireIds: ["shared-client-id"],
+      author: "alice",
+      authorJid: "new-alice@example.com/laptop",
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: "new-alice@example.com/laptop",
+      body: "after nick reuse",
+      isSelf: false,
+      createdAt: "2026-05-14T10:36:56.000Z",
+      createdAtSource: "delay",
+    });
+
+    expect(h.messages.value).toHaveLength(2);
+  });
+
+  test("promotes an optimistic sender id to the room-authored stanza id", () => {
+    const h = harness();
+    h.pendingEchoClientIds.add("client-id");
+    h.messages.value = [{
+      id: "client-id",
+      author: "alice",
+      authorJid: "room@muc.example.com/alice",
+      authorOccupantJid: "room@muc.example.com/alice",
+      body: "my message",
+      isSelf: true,
+      deliveryStatus: "sending",
+      createdAt: "2026-05-14T10:36:55.000Z",
+      createdAtSource: "queued",
+    }];
+
+    h.liveMerge.mergeLiveMessage({
+      id: "room-stanza-self",
+      wireIds: ["client-id"],
+      author: "alice",
+      authorJid: "alice@example.com/phone",
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: "alice@example.com/phone",
+      body: "my message",
+      isSelf: true,
+      createdAt: "2026-05-14T10:36:56.000Z",
+      createdAtSource: "delay",
+    });
+
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.id).toBe("room-stanza-self");
+    expect(h.messages.value[0]?.wireIds).toEqual(["client-id"]);
+    expect(h.messages.value[0]?.deliveryStatus).toBe("delivered");
+  });
+
+  test("fails closed when sender-scoped aliases select multiple rows", () => {
+    const h = harness();
+    const sender = {
+      author: "alice",
+      authorJid: "alice@example.com/phone",
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: "alice@example.com/phone",
+      isSelf: false,
+      createdAtSource: "delay" as const,
+    };
+    h.messages.value = [
+      { ...sender, id: "room-stanza-1", wireIds: ["alias-a"], body: "one", createdAt: "2026-05-14T10:36:55Z" },
+      { ...sender, id: "room-stanza-2", wireIds: ["alias-b"], body: "two", createdAt: "2026-05-14T10:36:56Z" },
+    ];
+
+    h.liveMerge.mergeLiveMessage({
+      ...sender,
+      id: "room-stanza-3",
+      wireIds: ["alias-a", "alias-b"],
+      body: "three",
+      createdAt: "2026-05-14T10:36:57Z",
+    });
+
+    expect(h.messages.value.map((message) => message.id)).toEqual([
+      "room-stanza-1",
+      "room-stanza-2",
+      "room-stanza-3",
+    ]);
+  });
+
+  test("keeps correction and retraction targeting canonical ids after alias collision", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "room-stanza-alice",
+        wireIds: ["shared-client-id"],
+        author: "alice",
+        authorJid: "room@muc.example.com/alice",
+        authorOccupantJid: "room@muc.example.com/alice",
+        body: "alice original",
+        isSelf: false,
+        createdAt: "2026-05-14T10:36:55Z",
+        createdAtSource: "delay",
+      },
+      {
+        id: "room-stanza-bob",
+        wireIds: ["shared-client-id"],
+        author: "bob",
+        authorJid: "room@muc.example.com/bob",
+        authorOccupantJid: "room@muc.example.com/bob",
+        body: "bob original",
+        isSelf: false,
+        createdAt: "2026-05-14T10:36:56Z",
+        createdAtSource: "delay",
+      },
+    ];
+
+    h.liveMerge.applyCorrection("shared-client-id", "ambiguous", {
+      authorJid: "room@muc.example.com/alice",
+    });
+    h.liveMerge.applyCorrection("room-stanza-alice", "alice edited", {
+      authorJid: "room@muc.example.com/alice",
+    });
+    h.liveMerge.applyRetraction(makeLive({
+      retractsId: "room-stanza-bob",
+      fromJid: "room@muc.example.com/bob",
+      nick: "bob",
+    }));
+
+    expect(h.messages.value[0]).toMatchObject({ body: "alice edited", isEdited: true });
+    expect(h.messages.value[1]).toMatchObject({ body: "", isRetracted: true });
+  });
+
   test("keeps timeline ordered when an older catch-up message lands after a newer live message", () => {
     const h = harness();
     h.messages.value = [
