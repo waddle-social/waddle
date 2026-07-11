@@ -165,8 +165,8 @@ The original Lane J scope above remains historical completion. A subsequent adve
 audit found residual loss, isolation, concurrency, and conformance defects. Work the
 unblocked frontier; #1287 is natively blocked by #1281.
 
-1. 🚧 **#1280 — XEP-0198 handler-timeout false ack: cancelled message/presence dispatch remains sender-owned, `h` cannot cross the hole, and cleanup detaches without hanging. IN REVIEW (PR #1292).**
-2. #1281 — scope MUC-PM MAM history to the full occupant JID.
+1. ✅ **#1280 — XEP-0198 handler-timeout false ack: cancelled message/presence dispatch remains sender-owned, `h` cannot cross the hole, and cleanup detaches without hanging. DONE (PR #1292, merged).**
+2. 🚧 **#1281 — scope MUC-PM MAM history to the full occupant JID. IN REVIEW (PR #1293).**
 3. #1287 — scope MUC-PM displayed state to the full occupant JID. Blocked by #1281.
 4. #1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs.
 5. #1288 — prevent cross-occupant MUC message-ID collision merges.
