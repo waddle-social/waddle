@@ -147,6 +147,15 @@ pub(crate) fn build_iq_error_xml_typed(
     to: Option<&str>,
     error: xmpp_parsers::stanza_error::StanzaError,
 ) -> String {
+    element_to_xml(build_iq_error_element_typed(id, from, to, error))
+}
+
+pub(crate) fn build_iq_error_element_typed(
+    id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    error: xmpp_parsers::stanza_error::StanzaError,
+) -> xmpp_parsers::minidom::Element {
     let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error");
@@ -157,11 +166,8 @@ pub(crate) fn build_iq_error_xml_typed(
         iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
     }
 
-    let iq = iq
-        .append(xmpp_parsers::minidom::Element::from(error))
-        .build();
-
-    element_to_xml(iq)
+    iq.append(xmpp_parsers::minidom::Element::from(error))
+        .build()
 }
 
 pub(super) fn build_handled_count_too_high_stream_error(

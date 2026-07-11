@@ -62,6 +62,11 @@ pub struct SmInboundCompletionTracker {
     next_reserved: Option<u32>,
     pending: BTreeSet<u32>,
     completed: BTreeSet<u32>,
+    /// First stanza whose dispatch was cancelled before the server accepted
+    /// XEP-0198 responsibility. The connection terminates after creating this
+    /// hole; retaining it here prevents late or later completions from
+    /// advancing `h` across the sender-owned stanza.
+    first_unhandled: Option<u32>,
 }
 
 impl SmInboundCompletionTracker {
@@ -87,6 +92,9 @@ impl SmInboundCompletionTracker {
         self.completed.insert(sequence.0);
         loop {
             let next = sm_state.get_inbound_count().wrapping_add(1);
+            if self.first_unhandled == Some(next) {
+                break;
+            }
             if !self.completed.remove(&next) {
                 break;
             }
@@ -94,14 +102,33 @@ impl SmInboundCompletionTracker {
         }
     }
 
+    pub fn abandon(&mut self, sequence: OrderedRelayInboundSequence) {
+        if !self.pending.remove(&sequence.0) {
+            return;
+        }
+        self.completed.remove(&sequence.0);
+        if self.first_unhandled.is_none() {
+            self.first_unhandled = Some(sequence.0);
+        }
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn has_unhandled_hole(&self) -> bool {
+        self.first_unhandled.is_some()
     }
 
     pub fn reset(&mut self) {
         self.next_reserved = None;
         self.pending.clear();
         self.completed.clear();
+        self.first_unhandled = None;
     }
 }
 
@@ -142,6 +169,41 @@ mod tests {
         assert!(tracker.has_pending());
 
         tracker.reset();
+        assert!(!tracker.has_pending());
+    }
+
+    #[test]
+    fn abandoned_sequence_never_advances_handled_count_or_waits_for_completion() {
+        let mut sm_state = enabled_sm_state();
+        let mut tracker = SmInboundCompletionTracker::default();
+
+        let abandoned = tracker.reserve(&sm_state);
+        tracker.abandon(abandoned);
+
+        assert_eq!(sm_state.get_inbound_count(), 0);
+        assert!(!tracker.has_pending());
+        assert!(tracker.has_unhandled_hole());
+
+        let later = tracker.reserve(&sm_state);
+        tracker.complete(later, &mut sm_state);
+        tracker.complete(abandoned, &mut sm_state);
+
+        assert_eq!(sm_state.get_inbound_count(), 0);
+        assert!(!tracker.has_pending());
+    }
+
+    #[test]
+    fn completion_before_abandoned_sequence_still_advances_to_the_hole() {
+        let mut sm_state = enabled_sm_state();
+        let mut tracker = SmInboundCompletionTracker::default();
+
+        let first = tracker.reserve(&sm_state);
+        let abandoned = tracker.reserve(&sm_state);
+        tracker.abandon(abandoned);
+        tracker.complete(first, &mut sm_state);
+
+        assert_eq!(sm_state.get_inbound_count(), 1);
+        assert!(tracker.has_unhandled_hole());
         assert!(!tracker.has_pending());
     }
 }

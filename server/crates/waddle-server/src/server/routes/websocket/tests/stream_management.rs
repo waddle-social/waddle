@@ -1,6 +1,7 @@
 use super::super::{
     cleanup::{cleanup_connection_shutdown, cleanup_muc_presence_for_jid},
-    frame::handle_xmpp_frame,
+    frame::{handle_xmpp_frame, settle_inbound_dispatch},
+    frame_backstop::InboundDisposition,
     handlers::{self, presence::handle_muc_join},
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
@@ -39,6 +40,108 @@ fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
 }
 
 // ---- XEP-0198 stream management --------------------------------
+
+#[test]
+fn timed_out_inbound_stanza_preserves_sender_responsibility() {
+    let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
+    state.enable("timeout-regression".to_string(), true, Some(300));
+    let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
+    let sequence = completion.reserve(&state);
+
+    settle_inbound_dispatch(
+        InboundDisposition::Unhandled,
+        true,
+        Some(sequence),
+        &mut completion,
+        &mut state,
+    );
+
+    assert_eq!(state.get_inbound_count(), 0);
+    assert!(!completion.has_pending());
+    assert!(completion.has_unhandled_hole());
+
+    // A late ordered-relay completion cannot turn the cancelled dispatch into
+    // an acknowledgement: the sender must retain and replay this stanza.
+    completion.complete(sequence, &mut state);
+    assert_eq!(state.get_inbound_count(), 0);
+}
+
+#[tokio::test]
+async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("timeout-detach".to_string(), true, Some(300));
+
+    let handled = conn.sm_inbound_completion.reserve(&conn.sm_state);
+    settle_inbound_dispatch(
+        InboundDisposition::Handled,
+        false,
+        Some(handled),
+        &mut conn.sm_inbound_completion,
+        &mut conn.sm_state,
+    );
+    let timed_out = conn.sm_inbound_completion.reserve(&conn.sm_state);
+    settle_inbound_dispatch(
+        InboundDisposition::Unhandled,
+        false,
+        Some(timed_out),
+        &mut conn.sm_inbound_completion,
+        &mut conn.sm_state,
+    );
+
+    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert!(conn.sm_inbound_completion.has_unhandled_hole());
+    assert!(
+        !conn.phase.is_closing(),
+        "timeout must use resumable transport termination, not a clean stream close"
+    );
+
+    let outcome = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+    assert_eq!(
+        outcome,
+        super::super::cleanup::ConnectionShutdownOutcome::Detached
+    );
+    let detached = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session("timeout-detach")
+        .await
+        .expect("registry lookup")
+        .expect("resumable snapshot");
+    assert_eq!(detached.inbound_count, 1);
+
+    let mut resumed = WsConnState::new();
+    resumed.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("timeout-detach", 0),
+        "example.com",
+        state.as_ref(),
+        &mut resumed,
+    )
+    .await;
+    let resumed_frame = responses
+        .iter()
+        .map(|xml| Element::from_str(xml).expect("response xml"))
+        .find(|element| element.name() == "resumed")
+        .expect("resume succeeds");
+    assert_eq!(
+        resumed_frame.attr("h"),
+        Some("1"),
+        "the timed-out second stanza must remain outside the server acknowledgement"
+    );
+}
 
 #[tokio::test]
 async fn sm_features_advertise_sm_namespace() {

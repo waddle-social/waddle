@@ -663,6 +663,28 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_server_h_replays_a_timed_out_outbound_stanza() {
+        let mut state = SmState::new();
+        state.start_outbound();
+        state.previd = Some("timed-out-stream".to_string());
+        let timed_out = Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "timed-out-message",
+            )
+            .build();
+        state.record_sent_stanza(&timed_out);
+
+        // The server ended the transport without advancing h, so processing
+        // its last acknowledgement must leave the stanza sender-owned.
+        assert!(state.process_ack(0).is_empty());
+        let resume_state = state.resume_state().expect("resume state");
+        let mut resumed = SmState::from_resume_state(&resume_state);
+
+        assert_eq!(resumed.mark_unhandled_for_replay(), vec![timed_out]);
+    }
+
+    #[test]
     fn resume_state_carries_advertised_max_resume_window() {
         let mut state = SmState::new();
         state.previd = Some("previous-stream".to_string());
