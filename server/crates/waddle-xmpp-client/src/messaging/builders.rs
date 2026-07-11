@@ -18,9 +18,14 @@ pub fn build_chat_state_message(
     thread: Option<&xep_thread::ThreadRef>,
 ) -> ClientResult<Element> {
     let state = validate_chat_state(state)?;
+    let stanza_id = Uuid::new_v4().to_string();
     let mut builder = Element::builder("message", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
         .append(Element::builder(state, NS_CHAT_STATES).build());
     if let Some(thread) = thread {
         builder = builder.append(xep_thread::build_thread_element(thread));

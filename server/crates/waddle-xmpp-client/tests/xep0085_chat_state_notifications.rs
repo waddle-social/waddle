@@ -55,7 +55,7 @@ fn xep0085_client_builds_and_parses_a_chat_state_notification() {
     let parsed = parse_chat_state_payload(&message).expect("chat state parses");
 
     assert_eq!(parsed.state, "composing");
-    assert!(message.attr("id").is_none());
+    assert!(!message.attr("id").expect("delivery id").is_empty());
     assert!(message
         .children()
         .any(|child| child.is("composing", NS_CHAT_STATES)));
