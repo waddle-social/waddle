@@ -1106,6 +1106,44 @@ describe("client send readiness", () => {
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
   });
 
+  test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
+    const sentTargets: string[] = [];
+    const captureTarget = async (target: string) => { sentTargets.push(target); };
+    const xmpp = {
+      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-send"; }),
+      send_chat_state: mock(captureTarget),
+      send_displayed: mock(captureTarget),
+      send_retraction: mock(captureTarget),
+      send_correction: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-correction"; }),
+      send_reaction: mock(captureTarget),
+    };
+    const client = new BrowserXmppClient(session());
+    const occupant = "room@rooms.waddle.example/alice";
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      mucServiceJid: string;
+      connect: ReturnType<typeof mock>;
+    }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { mucServiceJid: string }).mucServiceJid = "rooms.waddle.example";
+    (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => undefined);
+
+    await client.sendDirectMessage(occupant, "hello", { id: "muc-pm-send" });
+    await client.sendDmChatState(occupant, "composing");
+    await client.sendDmDisplayed(occupant, "message-1");
+    await client.sendDmRetraction(occupant, "message-1");
+    await client.sendDmCorrection(occupant, "edited", "message-1");
+    await client.sendDmReaction(occupant, "message-1", ["👍"]);
+
+    expect(sentTargets).toEqual(Array(6).fill(occupant));
+    expect((xmpp.send_chat_message.mock.calls[0]?.[2] as { muc_pm?: boolean }).muc_pm).toBe(true);
+    expect(
+      (client as unknown as { directMessageAddress: (peerJid: string) => string })
+        .directMessageAddress("user@accounts.example/phone"),
+    ).toBe("user@accounts.example");
+  });
+
   test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
     const xmpp = {
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),

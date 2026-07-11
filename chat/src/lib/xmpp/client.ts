@@ -1463,7 +1463,10 @@ export class BrowserXmppClient {
    * bare peer JID. */
   private directMessageAddress(peerJid: string): string {
     const hasResource = peerJid.includes("/");
-    return hasResource && this.isKnownMucRoomBare(barePeerJid(peerJid))
+    return hasResource && (
+      this.isMucServiceOccupant(peerJid)
+      || this.isKnownMucRoomBare(barePeerJid(peerJid))
+    )
       ? peerJid
       : barePeerJid(peerJid);
   }
