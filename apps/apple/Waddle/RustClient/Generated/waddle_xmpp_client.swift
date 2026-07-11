@@ -2376,8 +2376,8 @@ public struct WaddleMdsDisplayedEntry: Equatable, Hashable {
      */
     public var stanzaId: String
     /**
-     * JID that injected the stanza-id (the room for groupchat; the
-     * user's own server for DMs and MUC PMs).
+     * Assigning entity's XEP-0359 `by` JID; preserve exactly for
+     * stanza-id authority matching.
      */
     public var stanzaIdBy: String
 
@@ -2391,8 +2391,8 @@ public struct WaddleMdsDisplayedEntry: Equatable, Hashable {
          * XEP-0359 id of the displayed message.
          */stanzaId: String,
         /**
-         * JID that injected the stanza-id (the room for groupchat; the
-         * user's own server for DMs and MUC PMs).
+         * Assigning entity's XEP-0359 `by` JID; preserve exactly for
+         * stanza-id authority matching.
          */stanzaIdBy: String) {
         self.chatId = chatId
         self.stanzaId = stanzaId

@@ -304,8 +304,8 @@ pub struct MdsDisplayedEntry {
     pub chat_id: Jid,
     /// XEP-0359 id of the displayed message.
     pub stanza_id: StanzaId,
-    /// JID that injected the stanza-id (the room for groupchat; the
-    /// user's own server for DMs and MUC PMs).
+    /// Assigning entity's XEP-0359 `by` JID; preserve exactly for
+    /// stanza-id authority matching.
     pub stanza_id_by: Jid,
 }
 

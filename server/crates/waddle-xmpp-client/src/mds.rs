@@ -26,8 +26,8 @@ const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsu
 
 /// Typed representation of one MDS catch-up entry. `chat_id` is the
 /// PEP item id (= JID of the chat). `stanza_id` is the XEP-0359 id of
-/// the displayed message; `stanza_id_by` is the JID that injected the
-/// stanza-id (the room for groupchat, the user's server for DMs and MUC PMs).
+/// the displayed message; `stanza_id_by` is the assigning entity's JID from
+/// XEP-0359 and must be preserved exactly for authority matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsCatchupEntry {
     pub chat_id: Jid,

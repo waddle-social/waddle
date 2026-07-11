@@ -96,9 +96,9 @@ impl WaddleClient {
     /// the JID of the chat (bare DM contact, bare MUC room, or full MUC
     /// occupant for a private message) which becomes the PEP item id;
     /// `stanza_id` is the XEP-0359 id of the latest
-    /// displayed message; `stanza_id_by` is the JID that injected
-    /// that stanza-id (the room for groupchat, the user's own server
-    /// for DMs and MUC PMs). The publish carries the spec-mandated
+    /// displayed message; `stanza_id_by` is the assigning entity's
+    /// XEP-0359 `by` JID and must be preserved exactly for authority
+    /// matching. The publish carries the spec-mandated
     /// publish-options as preconditions.
     pub fn publish_mds_displayed(
         &self,
