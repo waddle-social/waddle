@@ -1466,6 +1466,7 @@ export class BrowserXmppClient {
     return hasResource && (
       this.isMucServiceOccupant(peerJid)
       || this.isKnownMucRoomBare(barePeerJid(peerJid))
+      || this.catchup.getDmScope(peerJid) === "muc-occupant"
     )
       ? peerJid
       : barePeerJid(peerJid);

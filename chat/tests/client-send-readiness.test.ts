@@ -1122,12 +1122,17 @@ describe("client send readiness", () => {
     (client as unknown as {
       xmpp: typeof xmpp;
       connected: boolean;
-      mucServiceJid: string;
       connect: ReturnType<typeof mock>;
     }).xmpp = xmpp;
     (client as unknown as { connected: boolean }).connected = true;
-    (client as unknown as { mucServiceJid: string }).mucServiceJid = "rooms.waddle.example";
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => undefined);
+    client.catchup.recordDmSeen(
+      occupant,
+      "2026-07-11T17:00:00.000Z",
+      undefined,
+      undefined,
+      "muc-occupant",
+    );
 
     await client.sendDirectMessage(occupant, "hello", { id: "muc-pm-send" });
     await client.sendDmChatState(occupant, "composing");
