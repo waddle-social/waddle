@@ -62,10 +62,12 @@ export function applyRetraction(
   event: RetractionEvent,
   policy: RetractionPolicy,
 ): TimelineMessage[] | null {
-  const index = findMessageIndexById(messages, event.retractsId);
+  // Resolve aliases inside the authorization scope. In direct chats both
+  // participants may reuse the same sender-selected id; sender identity can
+  // disambiguate them, while duplicate claims by one sender still fail closed.
+  const index = findMessageIndexById(messages, event.retractsId, policy.canRetract);
   if (index < 0) return null;
   const target = messages[index]!;
-  if (!policy.canRetract(target)) return null;
   const next = messages.slice();
   next[index] = retractTimelineMessage(target, event.retractionId);
   return next;

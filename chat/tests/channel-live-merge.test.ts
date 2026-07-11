@@ -592,7 +592,7 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     ]);
   });
 
-  test("keeps correction and retraction targeting canonical ids after alias collision", () => {
+  test("sender-scopes a correction alias after a cross-occupant collision", () => {
     const h = harness();
     h.messages.value = [
       {
@@ -619,10 +619,7 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       },
     ];
 
-    h.liveMerge.applyCorrection("shared-client-id", "ambiguous", {
-      authorJid: "room@muc.example.com/alice",
-    });
-    h.liveMerge.applyCorrection("room-stanza-alice", "alice edited", {
+    h.liveMerge.applyCorrection("shared-client-id", "alice edited", {
       authorJid: "room@muc.example.com/alice",
     });
     h.liveMerge.applyRetraction(makeLive({
@@ -633,6 +630,29 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
 
     expect(h.messages.value[0]).toMatchObject({ body: "alice edited", isEdited: true });
     expect(h.messages.value[1]).toMatchObject({ body: "", isRetracted: true });
+  });
+
+  test("fails closed when a correction alias selects multiple rows inside one sender scope", () => {
+    const h = harness();
+    const alice = {
+      wireIds: ["shared-client-id"],
+      author: "alice",
+      authorJid: "room@muc.example.com/alice",
+      authorOccupantJid: "room@muc.example.com/alice",
+      isSelf: false,
+      createdAtSource: "delay" as const,
+    };
+    h.messages.value = [
+      { ...alice, id: "room-stanza-1", body: "first", createdAt: "2026-05-14T10:36:55Z" },
+      { ...alice, id: "room-stanza-2", body: "second", createdAt: "2026-05-14T10:36:56Z" },
+    ];
+
+    h.liveMerge.applyCorrection("shared-client-id", "ambiguous edit", {
+      authorJid: "room@muc.example.com/alice",
+    });
+
+    expect(h.messages.value.map((message) => message.body)).toEqual(["first", "second"]);
+    expect(h.messages.value.every((message) => !message.isEdited)).toBe(true);
   });
 
   test("keeps timeline ordered when an older catch-up message lands after a newer live message", () => {

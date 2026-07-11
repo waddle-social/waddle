@@ -417,8 +417,12 @@ export function buildChannelTimelineFromMamResults(params: {
   }
 
   for (const update of correctionUpdates) {
-    const target = findMessageById(timeline, update.targetId);
-    if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
+    const target = findMessageById(
+      timeline,
+      update.targetId,
+      (candidate) => isSameMucCorrectionSender(candidate, update.correctionSender),
+    );
+    if (!target || target.isRetracted) continue;
     assignCorrectionFields(target, update.payload);
   }
 

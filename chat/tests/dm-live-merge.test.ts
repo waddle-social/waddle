@@ -230,6 +230,38 @@ describe("applyRetraction sender-match gate (XEP-0424)", () => {
     }));
     expect(h.messages.value[0]?.isRetracted).toBeFalsy();
   });
+
+  test("sender-scopes a reused alias before retracting", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "alice-canonical",
+        wireIds: ["shared-id"],
+        body: "alice message",
+        nick: "alice",
+        authorJid: "alice@example.com/phone",
+        timestamp: 0,
+      } as TimelineMessage,
+      {
+        id: "bob-canonical",
+        wireIds: ["shared-id"],
+        body: "bob message",
+        nick: "bob",
+        authorJid: "bob@example.com/laptop",
+        timestamp: 1,
+      } as TimelineMessage,
+    ];
+
+    h.liveMerge.applyRetraction(makeLive({
+      retractsId: "shared-id",
+      retractionId: "bob-retraction",
+      fromJid: "bob@example.com/mobile",
+      nick: "bob",
+    }));
+
+    expect(h.messages.value[0]).toMatchObject({ body: "alice message" });
+    expect(h.messages.value[1]).toMatchObject({ body: "", isRetracted: true });
+  });
 });
 
 describe("applyCorrection sender-match gate (XEP-0308)", () => {
@@ -247,6 +279,56 @@ describe("applyCorrection sender-match gate (XEP-0308)", () => {
     h.liveMerge.applyCorrection("m1", "hijacked!", "mallory@example.com");
     expect(h.messages.value[0]?.body).toBe("from bob");
     expect(h.messages.value[0]?.isEdited).toBeFalsy();
+  });
+
+  test("sender-scopes a reused alias before correcting", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "alice-canonical",
+        wireIds: ["shared-id"],
+        body: "alice message",
+        nick: "alice",
+        authorJid: "alice@example.com/phone",
+        timestamp: 0,
+      } as TimelineMessage,
+      {
+        id: "bob-canonical",
+        wireIds: ["shared-id"],
+        body: "bob message",
+        nick: "bob",
+        authorJid: "bob@example.com/laptop",
+        timestamp: 1,
+      } as TimelineMessage,
+    ];
+
+    h.liveMerge.applyCorrection("shared-id", "bob edited", "bob@example.com/mobile");
+
+    expect(h.messages.value[0]).toMatchObject({ body: "alice message" });
+    expect(h.messages.value[1]).toMatchObject({ body: "bob edited", isEdited: true });
+  });
+
+  test("fails closed when one sender claims a correction or retraction alias twice", () => {
+    const h = harness();
+    const bob = {
+      wireIds: ["shared-id"],
+      nick: "bob",
+      authorJid: "bob@example.com/laptop",
+    };
+    h.messages.value = [
+      { ...bob, id: "bob-1", body: "first", timestamp: 0 } as TimelineMessage,
+      { ...bob, id: "bob-2", body: "second", timestamp: 1 } as TimelineMessage,
+    ];
+
+    h.liveMerge.applyCorrection("shared-id", "ambiguous edit", "bob@example.com/mobile");
+    h.liveMerge.applyRetraction(makeLive({
+      retractsId: "shared-id",
+      fromJid: "bob@example.com/mobile",
+      nick: "bob",
+    }));
+
+    expect(h.messages.value.map((message) => message.body)).toEqual(["first", "second"]);
+    expect(h.messages.value.every((message) => !message.isEdited && !message.isRetracted)).toBe(true);
   });
 });
 
