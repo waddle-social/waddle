@@ -41,6 +41,19 @@ describe("SenderScopedIdIndex", () => {
     expect(new SenderScopedIdIndex([existing]).find(incoming)).toBe(existing);
   });
 
+  test("fails closed when only a display nick identifies the sender", () => {
+    const existing: TimelineMessage = {
+      ...canonicalRoomMessage(0),
+      authorOccupantJid: undefined,
+      authorRealJid: undefined,
+      authorJid: undefined,
+    };
+    const incoming: TimelineMessage = { ...existing };
+
+    expect(findSenderScopedIdTarget([existing], incoming)).toBeUndefined();
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
+  });
+
   test("preserves fail-closed multiplicity for a repeated object reference", () => {
     const message = canonicalRoomMessage(0);
     const index = new SenderScopedIdIndex([message, message]);

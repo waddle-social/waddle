@@ -56,8 +56,12 @@ export function hasMessageSenderContinuity(
       && existingOccupantJid === incomingOccupantJid;
   }
 
-  return existing.author === incoming.author
-    && bareJidKey(existing.authorJid ?? "") === bareJidKey(incoming.authorJid ?? "");
+  const existingAuthorJid = bareJidKey(existing.authorJid ?? "");
+  const incomingAuthorJid = bareJidKey(incoming.authorJid ?? "");
+  return !!existingAuthorJid
+    && !!incomingAuthorJid
+    && existing.author === incoming.author
+    && existingAuthorJid === incomingAuthorJid;
 }
 
 /**
@@ -150,8 +154,9 @@ function continuityKey(...parts: readonly string[]): string {
   return parts.join("\u0000");
 }
 
-function legacySenderKey(message: TimelineMessage): string {
-  return continuityKey(message.author, bareJidKey(message.authorJid ?? ""));
+function legacySenderKey(message: TimelineMessage): string | undefined {
+  const authorJid = bareJidKey(message.authorJid ?? "");
+  return authorJid ? continuityKey(message.author, authorJid) : undefined;
 }
 
 class SenderContinuityIndex {
