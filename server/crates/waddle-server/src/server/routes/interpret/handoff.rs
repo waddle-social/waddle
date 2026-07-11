@@ -116,6 +116,10 @@ impl SmInboundCompletionTracker {
         !self.pending.is_empty()
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
     pub fn has_unhandled_hole(&self) -> bool {
         self.first_unhandled.is_some()
     }

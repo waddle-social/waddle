@@ -75,6 +75,16 @@ const SEND_WINDOW_LOOP_PAUSE_DEADLINE: std::time::Duration = std::time::Duration
 /// that follows the break is what actually preserves the session.
 const SHUTDOWN_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Aggregate grace period for ordered-relay completions that precede a
+/// terminal XEP-0198 handled-count hole. Those tasks have already spent the
+/// later stanza's 15-second wedge budget running, so this window primarily
+/// closes the scheduler/channel race at detach. It is deliberately aggregate:
+/// an unbounded relay backlog or a panicked spawned task must not strand
+/// connection/shutdown cleanup forever.
+const ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(2);
+const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
+
 /// The two channel halves handed over to the `ConnectionRegistry` at
 /// registration time (`register_bound_connection_after_frame`, then
 /// ADR-0017 Phase 3 Slice 6's force-detach receiver take-over). Bundled so
@@ -825,35 +835,55 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
     if !conn.sm_inbound_completion.has_pending() {
         return;
     }
-    if conn.sm_inbound_completion.has_unhandled_hole() {
-        // The stream is already terminal and the sender will replay from the
-        // hole. Consume only completions that are ready now; waiting for an
-        // earlier ordered relay would make disconnect/shutdown cleanup
-        // unbounded. Under-acknowledging that earlier stanza is safe because
-        // XEP-0198 deliberately leaves it in the sender's replay queue.
-        while let Ok(completion) = handoff_rx.try_recv() {
-            conn.sm_inbound_completion
-                .complete(completion.inbound_sequence, &mut conn.sm_state);
-            let replies = serialize_ordered_relay_handoff_replies(completion.replies);
-            batch_write::record_remaining_for_replay(
-                conn,
-                replies.into_iter(),
-                BatchSmPolicy::Record,
-            );
+    if !conn.sm_inbound_completion.has_unhandled_hole() {
+        while conn.sm_inbound_completion.has_pending() {
+            let Some(completion) = handoff_rx.recv().await else {
+                break;
+            };
+            apply_ordered_relay_handoff_completion(conn, completion);
         }
         conn.sm_inbound_completion.reset();
         return;
     }
-    while conn.sm_inbound_completion.has_pending() {
-        let Some(completion) = handoff_rx.recv().await else {
+
+    let deadline = tokio::time::Instant::now() + ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE;
+    let mut drained = 0usize;
+    while conn.sm_inbound_completion.has_pending()
+        && drained < ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS
+    {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Ok(Some(completion)) = tokio::time::timeout(remaining, handoff_rx.recv()).await else {
             break;
         };
-        conn.sm_inbound_completion
-            .complete(completion.inbound_sequence, &mut conn.sm_state);
-        let replies = serialize_ordered_relay_handoff_replies(completion.replies);
-        batch_write::record_remaining_for_replay(conn, replies.into_iter(), BatchSmPolicy::Record);
+        apply_ordered_relay_handoff_completion(conn, completion);
+        drained += 1;
+        // Tokio timeouts cannot preempt a future that continuously consumes a
+        // ready unbounded-channel backlog. Yield so the deadline is observable
+        // even under adversarial queued completion volume.
+        tokio::task::yield_now().await;
+    }
+    if conn.sm_inbound_completion.has_pending() {
+        warn!(
+            pending = conn.sm_inbound_completion.pending_count(),
+            drained,
+            timeout_ms = ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE.as_millis(),
+            "Stopped bounded pre-hole ordered-relay drain; preserving conservative sender replay"
+        );
     }
     conn.sm_inbound_completion.reset();
+}
+
+fn apply_ordered_relay_handoff_completion(
+    conn: &mut WsConnState,
+    completion: crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+) {
+    conn.sm_inbound_completion
+        .complete(completion.inbound_sequence, &mut conn.sm_state);
+    let replies = serialize_ordered_relay_handoff_replies(completion.replies);
+    batch_write::record_remaining_for_replay(conn, replies.into_iter(), BatchSmPolicy::Record);
 }
 
 fn serialize_ordered_relay_handoff_replies(replies: Vec<Stanza>) -> Vec<String> {
@@ -957,14 +987,11 @@ mod tests {
         let mut conn = WsConnState::new();
         conn.sm_state
             .enable("stream-timeout".to_string(), true, Some(300));
-        let _earlier_pending = conn.sm_inbound_completion.reserve(&conn.sm_state);
         let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
         conn.sm_inbound_completion.abandon(abandoned);
 
-        // Keep the sender alive: a naive cleanup that still considers the
-        // terminal hole pending would wait forever for the earlier ordered
-        // relay. Under-acknowledging that earlier stanza is safe; hanging
-        // detach is not.
+        // Keep the sender alive: the abandoned sequence itself must not remain
+        // pending and make cleanup wait for a completion that cannot arrive.
         let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -974,6 +1001,89 @@ mod tests {
         .expect("abandoned sequence must not block cleanup");
 
         assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_waits_for_pre_hole_ordered_relay_completion() {
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("stream-timeout".to_string(), true, Some(300));
+        let earlier = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        conn.sm_inbound_completion.abandon(abandoned);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion = crate::server::routes::interpret::OrderedRelayHandoffCompletion {
+            inbound_sequence: earlier,
+            replies: Vec::new(),
+        };
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tx.send(completion).expect("cleanup receiver remains open");
+        });
+
+        drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
+
+        assert_eq!(
+            conn.sm_state.get_inbound_count(),
+            1,
+            "the contiguous pre-hole stanza must be acknowledged before detach"
+        );
+        assert!(!conn.sm_inbound_completion.has_pending());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_deadline_bounds_missing_pre_hole_completion() {
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("stream-timeout".to_string(), true, Some(300));
+        let _missing = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        conn.sm_inbound_completion.abandon(abandoned);
+
+        // The connection itself still owns a sender in production, so keep
+        // this one alive to prove cleanup cannot rely on channel closure.
+        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut drain = Box::pin(drain_ordered_relay_handoffs_before_cleanup(
+            &mut rx, &mut conn,
+        ));
+        assert!(futures::poll!(drain.as_mut()).is_pending());
+
+        tokio::time::advance(ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE).await;
+        drain.await;
+
+        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert!(!conn.sm_inbound_completion.has_pending());
+    }
+
+    #[tokio::test]
+    async fn cleanup_work_cap_bounds_ready_pre_hole_backlog() {
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("stream-timeout".to_string(), true, Some(300));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        for _ in 0..=ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS {
+            let sequence = conn.sm_inbound_completion.reserve(&conn.sm_state);
+            tx.send(
+                crate::server::routes::interpret::OrderedRelayHandoffCompletion {
+                    inbound_sequence: sequence,
+                    replies: Vec::new(),
+                },
+            )
+            .expect("cleanup receiver remains open");
+        }
+        let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        conn.sm_inbound_completion.abandon(abandoned);
+
+        drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
+
+        assert_eq!(
+            conn.sm_state.get_inbound_count(),
+            ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS as u32,
+            "cleanup must cap ready backlog work before detaching"
+        );
+        assert!(!conn.sm_inbound_completion.has_pending());
     }
 
     #[test]
