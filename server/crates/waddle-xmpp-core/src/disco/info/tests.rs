@@ -171,6 +171,21 @@ fn test_parse_disco_info_response_accepts_distinct_form_types() {
 }
 
 #[test]
+fn test_parse_disco_info_response_ignores_repeated_empty_form_types() {
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(result_form(""))
+        .append(result_form("   "))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(
+        !parsed.ill_formed,
+        "valueless FORM_TYPE fields do not participate in duplicate detection"
+    );
+}
+
+#[test]
 fn test_parse_disco_info_response_retains_within_form_rejection() {
     let duplicate_fields = Element::builder("x", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")

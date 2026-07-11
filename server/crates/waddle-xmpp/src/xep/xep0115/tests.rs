@@ -115,6 +115,14 @@ fn software_info_form_with_empty_value_field() -> Element {
         .build()
 }
 
+fn form_with_empty_form_type() -> Element {
+    Element::builder("x", DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(data_form_field(FORM_TYPE_FIELD, Some("hidden"), &[" "]))
+        .append(data_form_field("software", None, &["Psi"]))
+        .build()
+}
+
 fn software_info_form_with_duplicate_form_type() -> Element {
     Element::builder("x", DATA_FORMS_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
@@ -563,6 +571,18 @@ fn test_compute_caps_hash_ignores_forms_with_duplicate_form_type_fields() {
     let extensions = vec![software_info_form_with_duplicate_form_type()];
 
     let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+    assert_eq!(hash, baseline);
+}
+
+#[test]
+fn test_compute_caps_hash_ignores_form_with_empty_form_type() {
+    let identities = vec![Identity::server(Some("Waddle"))];
+    let features = vec![Feature::disco_info(), Feature::disco_items()];
+    let baseline = compute_caps_hash(&identities, &features);
+
+    let hash =
+        compute_caps_hash_with_extensions(&identities, &features, &[form_with_empty_form_type()]);
+
     assert_eq!(hash, baseline);
 }
 

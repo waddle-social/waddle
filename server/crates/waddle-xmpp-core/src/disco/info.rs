@@ -311,6 +311,7 @@ fn caps_form_type(form: &Element) -> Option<String> {
         .children()
         .find(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
         .map(Element::text)
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Build a disco#info response IQ.
