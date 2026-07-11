@@ -436,7 +436,10 @@ fn parse_caps_data_form(extension: &Element) -> Option<CapsDataForm> {
             }
 
             if field.attr("type") == Some("hidden") {
-                form_type = values.first().cloned();
+                form_type = values
+                    .first()
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned();
             }
             continue;
         }
