@@ -24,6 +24,7 @@ import {
 } from "../src/lib/telemetry";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
+import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -664,15 +665,15 @@ describe("BrowserXmppClient telemetry hooks", () => {
       connected: boolean;
       runReconnectCatchup: (
         xmpp: unknown,
-        entries: Array<{ kind: "dm"; key: string; after?: string }>,
+        entries: ReconnectCatchupEntry[],
       ) => Promise<void>;
     };
     internal.xmpp = xmpp;
     internal.connected = true;
 
     await internal.runReconnectCatchup(xmpp, [
-      { kind: "dm", key: "bob@example.com", after: "mam-1" },
-      { kind: "dm", key: "carol@example.com", after: "mam-1" },
+      { kind: "dm", key: "bob@example.com", scope: "account", after: "mam-1" },
+      { kind: "dm", key: "carol@example.com", scope: "account", after: "mam-1" },
     ]);
 
     expect(events).toHaveLength(1);

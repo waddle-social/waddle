@@ -1127,6 +1127,49 @@ describe("client send readiness", () => {
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
   });
 
+  test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
+    const sentTargets: string[] = [];
+    const captureTarget = async (target: string) => { sentTargets.push(target); };
+    const xmpp = {
+      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-send"; }),
+      send_chat_state: mock(captureTarget),
+      send_displayed: mock(captureTarget),
+      send_retraction: mock(captureTarget),
+      send_correction: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-correction"; }),
+      send_reaction: mock(captureTarget),
+    };
+    const client = new BrowserXmppClient(session());
+    const occupant = "room@rooms.waddle.example/alice";
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      connect: ReturnType<typeof mock>;
+    }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => undefined);
+    client.catchup.recordDmSeen(
+      " Room@Rooms.Waddle.Example/alice ",
+      "2026-07-11T17:00:00.000Z",
+      undefined,
+      undefined,
+      "muc-occupant",
+    );
+
+    await client.sendDirectMessage(occupant, "hello", { id: "muc-pm-send" });
+    await client.sendDmChatState(occupant, "composing");
+    await client.sendDmDisplayed(occupant, "message-1");
+    await client.sendDmRetraction(occupant, "message-1");
+    await client.sendDmCorrection(occupant, "edited", "message-1");
+    await client.sendDmReaction(occupant, "message-1", ["👍"]);
+
+    expect(sentTargets).toEqual(Array(6).fill(occupant));
+    expect((xmpp.send_chat_message.mock.calls[0]?.[2] as { muc_pm?: boolean }).muc_pm).toBe(true);
+    expect(
+      (client as unknown as { directMessageAddress: (peerJid: string) => string })
+        .directMessageAddress("user@accounts.example/phone"),
+    ).toBe("user@accounts.example");
+  });
+
   test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
     const xmpp = {
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
@@ -1351,7 +1394,7 @@ describe("client keepalive lifecycle", () => {
       peerJid: "bob@example.com",
     }));
     expect(catchup.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "mam-newer", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-newer"] },
+      { kind: "dm", scope: "account", key: "bob@example.com", after: "mam-newer", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-newer"] },
     ]);
   });
 
@@ -2017,7 +2060,7 @@ describe("client keepalive lifecycle", () => {
     await client.queryPersonalMamPage("bob@example.com", 100, { type: "latest" });
 
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "mam-loaded-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-loaded-1"] },
+      { kind: "dm", scope: "account", key: "bob@example.com", after: "mam-loaded-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-loaded-1"] },
     ]);
   });
 
@@ -2091,6 +2134,7 @@ describe("client keepalive lifecycle", () => {
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
       {
         kind: "dm",
+        scope: "account",
         key: "bob@example.com",
         after: "mam-retract-video",
         since: retractedAt,

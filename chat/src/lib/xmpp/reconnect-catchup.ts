@@ -1,4 +1,5 @@
 import { compareTimelineTimestamps } from "@/lib/timeline-timestamps";
+import { bareJidKey, fullJidIdentityKey } from "@/lib/xmpp/jid";
 
 import {
   nullResumePersistence,
@@ -30,17 +31,26 @@ import {
  * any messages received while the tab was gone unrecovered until the user
  * manually scrolls back (PR3 in the tab-restore plan).
  */
-type CatchupEntry =
-  | { kind: "dm"; key: string; after?: string; since?: string; seenIds?: string[] }
+export type ReconnectCatchupEntry =
+  | { kind: "dm"; key: string; scope: DmConversationScope; after?: string; since?: string; seenIds?: string[] }
   | { kind: "room"; key: string; after?: string; since?: string; seenIds?: string[] };
 
 type SeenCursor = {
   timestamp: string;
+  scope?: DmConversationScope;
   archiveId?: string;
   archiveTimestamp?: string;
   archiveSeenIds?: string[];
   seenIds?: string[];
 };
+
+export type DmConversationScope = "account" | "muc-occupant";
+
+function dmCursorKey(peerJid: string, scope: DmConversationScope): string {
+  return scope === "muc-occupant"
+    ? fullJidIdentityKey(peerJid)
+    : bareJidKey(peerJid);
+}
 
 export class ReconnectCatchup {
   private readonly dmLastSeen = new Map<string, SeenCursor>();
@@ -59,8 +69,30 @@ export class ReconnectCatchup {
   private hydrate(): void {
     const snapshot = this.persistence.loadCatchup();
     if (!snapshot) return;
-    for (const [key, cursor] of snapshot.dmLastSeen) this.dmLastSeen.set(key, { ...cursor });
-    for (const [key, cursor] of snapshot.roomLastSeen) this.roomLastSeen.set(key, { ...cursor });
+    for (const [key, cursor] of snapshot.dmLastSeen) {
+      const scope = cursor.scope ?? "account";
+      advance(
+        this.dmLastSeen,
+        dmCursorKey(key, scope),
+        cursor.timestamp,
+        cursor.archiveId,
+        cursor.seenIds,
+        cursor.archiveTimestamp,
+        cursor.archiveSeenIds,
+        scope,
+      );
+    }
+    for (const [key, cursor] of snapshot.roomLastSeen) {
+      advance(
+        this.roomLastSeen,
+        key,
+        cursor.timestamp,
+        cursor.archiveId,
+        cursor.seenIds,
+        cursor.archiveTimestamp,
+        cursor.archiveSeenIds,
+      );
+    }
     // A hydrated instance is by definition *not* a first-ever login —
     // it represents a prior tab session that left cursors behind. The
     // next `onSessionStarted()` must return those cursors so MAM
@@ -77,15 +109,11 @@ export class ReconnectCatchup {
     this.persistScheduled = true;
     queueMicrotask(() => {
       this.persistScheduled = false;
-      // Read-merge-write so two tabs of the same account don't
-      // clobber each other's cursor advances. Pre-fix each tab held
-      // its own in-memory map and serialized the whole thing on
-      // every write — the last writer won, and the other tab's
-      // progress was silently lost. Now we merge any remote state
-      // that landed since our last write back into our in-memory
-      // maps before persisting, so both tabs converge to the union
-      // (per-key: higher timestamp wins, equal timestamps merge
-      // `seenIds` — exactly the rule `advance()` already uses).
+      // Each tab writes its own persistence shard, so concurrent
+      // localStorage writes cannot replace another tab's cursor set.
+      // Merge every shard before saving this tab's snapshot so live
+      // tabs converge eagerly as well; hydrate applies the same
+      // higher-timestamp/equal-seenIds `advance()` rule on reload.
       const remote = this.persistence.loadCatchup();
       if (remote) this.absorbRemoteSnapshot(remote);
       const snapshot: PersistedReconnectCatchup = {
@@ -98,7 +126,8 @@ export class ReconnectCatchup {
 
   private absorbRemoteSnapshot(remote: PersistedReconnectCatchup): void {
     for (const [key, cursor] of remote.dmLastSeen) {
-      advance(this.dmLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds);
+      const scope = cursor.scope ?? "account";
+      advance(this.dmLastSeen, dmCursorKey(key, scope), cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds, scope);
     }
     for (const [key, cursor] of remote.roomLastSeen) {
       advance(this.roomLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds);
@@ -110,8 +139,8 @@ export class ReconnectCatchup {
    * advances the cursor — out-of-order or older arrivals are ignored so the
    * next catch-up can't re-pull already-applied messages.
    */
-  recordDmSeen(peerBareJid: string, timestamp: string, archiveId?: string, seenIds?: ReadonlyArray<string>): void {
-    advance(this.dmLastSeen, peerBareJid, timestamp, archiveId, seenIds);
+  recordDmSeen(peerBareJid: string, timestamp: string, archiveId?: string, seenIds?: ReadonlyArray<string>, scope: DmConversationScope = "account"): void {
+    advance(this.dmLastSeen, dmCursorKey(peerBareJid, scope), timestamp, archiveId, seenIds, undefined, undefined, scope);
     this.schedulePersist();
   }
 
@@ -122,7 +151,15 @@ export class ReconnectCatchup {
   }
 
   getDmLastSeen(peerBareJid: string): string | undefined {
-    return this.dmLastSeen.get(peerBareJid)?.timestamp;
+    const occupantCursor = this.dmLastSeen.get(dmCursorKey(peerBareJid, "muc-occupant"));
+    if (occupantCursor?.scope === "muc-occupant") return occupantCursor.timestamp;
+    return this.dmLastSeen.get(dmCursorKey(peerBareJid, "account"))?.timestamp;
+  }
+
+  getDmScope(peerJid: string): DmConversationScope | undefined {
+    const occupantCursor = this.dmLastSeen.get(dmCursorKey(peerJid, "muc-occupant"));
+    if (occupantCursor?.scope === "muc-occupant") return occupantCursor.scope;
+    return this.dmLastSeen.get(dmCursorKey(peerJid, "account"))?.scope;
   }
 
   getRoomLastSeen(roomBareJid: string): string | undefined {
@@ -135,12 +172,12 @@ export class ReconnectCatchup {
    * result is empty (initial login has no missed history); on subsequent
    * calls it contains every tracked DM peer and room.
    */
-  onSessionStarted(): CatchupEntry[] {
+  onSessionStarted(): ReconnectCatchupEntry[] {
     if (!this.sessionStartedOnce) {
       this.sessionStartedOnce = true;
       return [];
     }
-    const entries: CatchupEntry[] = [];
+    const entries: ReconnectCatchupEntry[] = [];
     for (const [key, cursor] of this.dmLastSeen) {
       entries.push(catchupEntry("dm", key, cursor));
     }
@@ -159,25 +196,27 @@ export class ReconnectCatchup {
   }
 }
 
-function catchupEntry(kind: "dm", key: string, cursor: SeenCursor): CatchupEntry;
-function catchupEntry(kind: "room", key: string, cursor: SeenCursor): CatchupEntry;
-function catchupEntry(kind: "dm" | "room", key: string, cursor: SeenCursor): CatchupEntry {
+function catchupEntry(kind: "dm", key: string, cursor: SeenCursor): ReconnectCatchupEntry;
+function catchupEntry(kind: "room", key: string, cursor: SeenCursor): ReconnectCatchupEntry;
+function catchupEntry(kind: "dm" | "room", key: string, cursor: SeenCursor): ReconnectCatchupEntry {
   if (!cursor.archiveId) {
-    return {
-      kind,
-      key,
+    const rest = {
       since: cursor.timestamp,
       ...(cursor.seenIds?.length ? { seenIds: cursor.seenIds } : {}),
     };
+    return kind === "dm"
+      ? { kind, key, scope: cursor.scope ?? "account", ...rest }
+      : { kind, key, ...rest };
   }
   const seenIds = mergeSeenIds(cursor.archiveSeenIds, cursor.seenIds);
-  return {
-    kind,
-    key,
+  const rest = {
     after: cursor.archiveId,
     since: cursor.archiveTimestamp ?? cursor.timestamp,
     ...(seenIds.length ? { seenIds } : {}),
   };
+  return kind === "dm"
+    ? { kind, key, scope: cursor.scope ?? "account", ...rest }
+    : { kind, key, ...rest };
 }
 
 function advance(
@@ -188,6 +227,7 @@ function advance(
   seenIds?: ReadonlyArray<string>,
   archiveTimestamp?: string,
   archiveSeenIds?: ReadonlyArray<string>,
+  scope?: DmConversationScope,
 ): void {
   const normalizedTimestamp = normalizeTimestamp(timestamp);
   const normalizedArchiveTimestamp = archiveTimestamp ? normalizeTimestamp(archiveTimestamp) : undefined;
@@ -205,6 +245,7 @@ function advance(
       : mergeSeenIds(undefined, seenIds);
     map.set(key, {
       timestamp: normalizedTimestamp,
+      ...(scope ? { scope } : current?.scope ? { scope: current.scope } : {}),
       ...(nextArchiveId ? { archiveId: nextArchiveId } : {}),
       ...(nextArchiveTimestamp ? { archiveTimestamp: nextArchiveTimestamp } : {}),
       ...nonEmptyArchiveSeenIds(nextArchiveSeenIds),
@@ -219,6 +260,7 @@ function advance(
       : mergeSeenIds(current.archiveSeenIds, archiveSeenIds);
     map.set(key, {
       ...current,
+      ...(scope ? { scope } : {}),
       ...(archiveId ? { archiveId } : {}),
       ...(archiveId ? { archiveTimestamp: normalizedArchiveTimestamp ?? normalizedTimestamp } : {}),
       ...nonEmptyArchiveSeenIds(nextArchiveSeenIds),

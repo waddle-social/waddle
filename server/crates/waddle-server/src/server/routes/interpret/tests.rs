@@ -335,8 +335,8 @@ async fn xep_0313_archive_direct_persists_to_mam_storage() {
 
     let events = vec![OutboundEvent::ArchiveDirect {
         archive_jid: archive_jid.clone(),
-        from,
-        to,
+        from: from.into(),
+        to: to.into(),
         message: Box::new(msg),
     }];
     let _outcome = interpret(events, &deps).await;
@@ -477,8 +477,8 @@ async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_
     let events = vec![
         OutboundEvent::ArchiveDirect {
             archive_jid: alice.clone(),
-            from: alice.clone(),
-            to: bob.clone(),
+            from: alice.clone().into(),
+            to: bob.clone().into(),
             message: Box::new(msg.clone()),
         },
         OutboundEvent::ProjectInbox {
@@ -562,8 +562,8 @@ async fn origin_id_dedup_rewrites_downstream_archive_refs_to_existing_mam_id() {
     let events = vec![
         OutboundEvent::ArchiveDirect {
             archive_jid: alice.clone(),
-            from: alice.clone(),
-            to: bob.clone(),
+            from: alice.clone().into(),
+            to: bob.clone().into(),
             message: Box::new(retry.clone()),
         },
         OutboundEvent::ProjectInbox {
@@ -651,8 +651,8 @@ async fn origin_id_collision_with_distinct_content_keeps_fresh_archive_refs() {
     let events = vec![
         OutboundEvent::ArchiveDirect {
             archive_jid: alice.clone(),
-            from: alice.clone(),
-            to: bob.clone(),
+            from: alice.clone().into(),
+            to: bob.clone().into(),
             message: Box::new(distinct.clone()),
         },
         OutboundEvent::ProjectInbox {
@@ -698,14 +698,14 @@ async fn xep_0313_archive_direct_writes_one_entry_per_event() {
     let events = vec![
         OutboundEvent::ArchiveDirect {
             archive_jid: alice.clone(),
-            from: alice.clone(),
-            to: bob.clone(),
+            from: alice.clone().into(),
+            to: bob.clone().into(),
             message: Box::new(msg.clone()),
         },
         OutboundEvent::ArchiveDirect {
             archive_jid: bob.clone(),
-            from: alice.clone(),
-            to: bob.clone(),
+            from: alice.clone().into(),
+            to: bob.clone().into(),
             message: Box::new(msg),
         },
     ];
@@ -817,8 +817,8 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "yo");
     let events = vec![OutboundEvent::ArchiveDirect {
         archive_jid: alice.clone(),
-        from: alice,
-        to: bob,
+        from: alice.into(),
+        to: bob.into(),
         message: Box::new(msg),
     }];
     let outcome = interpret(events, &deps).await;

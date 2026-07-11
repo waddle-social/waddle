@@ -48,6 +48,18 @@ export function bareJidKey(jid: string): string {
   return barePeerJid(jid).trim().toLowerCase();
 }
 
+/**
+ * Conversation identity for direct-message coordination. The caller supplies
+ * session-authoritative MUC service context; syntax alone cannot distinguish
+ * an occupant from an ordinary account resource.
+ */
+export function dmConversationIdentityKey(
+  jid: string,
+  isMucPmPeer: (peerJid: string) => boolean,
+): string {
+  return isMucPmPeer(jid) ? fullJidIdentityKey(jid) : bareJidKey(jid);
+}
+
 export function parseManagedRoomBareJid(
   roomJid: string,
 ): { channelId: string } | null {

@@ -67,7 +67,7 @@ type CatchupOutcome = "completed" | "aborted" | "failed";
  * fallback signal to run that reload after the failed attempt
  * (serialized, so the two fetches can no longer race).
  */
-export type CatchupConversationFailure = { kind: "dm" | "room"; key: string };
+export type CatchupConversationFailure = { kind: "dm" | "room"; key: string; dmScope?: "account" | "muc-occupant" };
 
 export type CatchupHookInfo = {
   conversations: number;

@@ -30,7 +30,7 @@ import {
   isInCallReactionForActiveCall,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
-import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, roomBareJidFor } from "./jid";
+import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, resourceOf, roomBareJidFor } from "./jid";
 import { TypedEventBus } from "./client-events";
 import type {
   CatchupConversationFailure,
@@ -100,7 +100,7 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { createGroupDm, type CreateGroupDmResult } from "./group-dm";
-import { ReconnectCatchup } from "./reconnect-catchup";
+import { ReconnectCatchup, type ReconnectCatchupEntry } from "./reconnect-catchup";
 import {
   parseRegisterDeviceResult,
   parseRegisterPushDeviceRejection,
@@ -422,6 +422,7 @@ export class BrowserXmppClient {
   // Cleared on disconnect so a genuine fresh cycle rejoins.
   private readonly autoJoinAttemptedRoomKeys = new Set<string>();
   private uploadServiceJid: string | null = null;
+  private mucServiceJid = "";
   private discoveredRoomJids = new Map<string, string>();
   private readonly reconnect: ReconnectScheduler;
   private readonly resume: ResumeStateStore;
@@ -511,6 +512,7 @@ export class BrowserXmppClient {
 
   constructor(session: WaddleSession, persistence?: ResumePersistence) {
     this.session = session;
+    this.mucServiceJid = `muc.${jidDomain(session.jid)}`;
     // Per-account so a logout/login on the same browser doesn't mix
     // cursors. `session.jid` is the bare JID — already unique per
     // identity — and matches the `accountKey` used by the outbound
@@ -557,6 +559,7 @@ export class BrowserXmppClient {
       // same occupant classification as the live path, so a MUC PM never
       // re-files under the room bare JID after a reconnect.
       classifyMucPm: (message) => this.mucPmOccupant(message),
+      isMucPmPeer: (peerJid) => this.isMucServiceOccupant(peerJid),
     });
     this.mucAdmin = new MucAdmin({
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
@@ -1476,7 +1479,11 @@ export class BrowserXmppClient {
    * bare peer JID. */
   private directMessageAddress(peerJid: string): string {
     const hasResource = peerJid.includes("/");
-    return hasResource && this.isKnownMucRoomBare(barePeerJid(peerJid))
+    return hasResource && (
+      this.isMucServiceOccupant(peerJid)
+      || this.isKnownMucRoomBare(barePeerJid(peerJid))
+      || this.catchup.getDmScope(peerJid) === "muc-occupant"
+    )
       ? peerJid
       : barePeerJid(peerJid);
   }
@@ -2189,6 +2196,7 @@ export class BrowserXmppClient {
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
     const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
     this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
     const autoJoinRoomJids = topology.rooms
       .filter((room) => room.autojoin !== false && !!room.jid)
@@ -2292,6 +2300,9 @@ export class BrowserXmppClient {
           type: "fresh",
           catchup: {
             dmJids: catchupEntries.filter((e) => e.kind === "dm").map((e) => e.key),
+            ...(catchupEntries.some((e) => e.kind === "dm" && e.scope === "muc-occupant")
+              ? { dmOccupantJids: catchupEntries.filter((e) => e.kind === "dm" && e.scope === "muc-occupant").map((e) => e.key) }
+              : {}),
             roomJids: catchupEntries.filter((e) => e.kind === "room").map((e) => e.key),
           },
         }
@@ -2662,7 +2673,13 @@ export class BrowserXmppClient {
       // XEP-0359: the DM authorities mirror the decode path
       // (`assignedStanzaIdBy`): account bare + server domain. Seen-ids
       // and row wireIds must never diverge (see dmStanzaIdAuthorities).
-      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message, [selfBare, jidDomain(selfBare)]));
+      this.catchup.recordDmSeen(
+        converted.peerJid,
+        converted.createdAt,
+        undefined,
+        rawMessageSeenIds(message, [selfBare, jidDomain(selfBare)]),
+        converted.mucPm ? "muc-occupant" : "account",
+      );
       this.events.emit("directMessage", converted);
     }
   }
@@ -2725,6 +2742,11 @@ export class BrowserXmppClient {
     return false;
   }
 
+  private isMucServiceOccupant(peerJid: string): boolean {
+    return Boolean(resourceOf(peerJid))
+      && jidDomain(peerJid).toLowerCase() === this.mucServiceJid.trim().toLowerCase();
+  }
+
   /**
    * XEP-0045 §7.5 (#1256): detect a MUC private message — a non-groupchat
    * message whose conversation counterpart is `room@service/nick` for a
@@ -2753,14 +2775,14 @@ export class BrowserXmppClient {
     return this.isKnownMucRoomBare(barePeerJid(bareJid));
   }
 
-  /** Public: whether `peerJid` is a MUC occupant JID (`room@service/nick`)
-   * of a known room — i.e. a MUC-PM conversation identity. */
+  /** Public: whether `peerJid` is a full occupant JID on the session's
+   * authoritative MUC service (fallback or service discovery result). */
   isMucPmPeer(peerJid: string): boolean {
-    return peerJid.includes("/") && this.isKnownMucRoomBare(barePeerJid(peerJid));
+    return this.isMucServiceOccupant(peerJid);
   }
   private runReconnectCatchup(
     xmpp: XmppClientInstance,
-    entries: Array<{ kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] }>,
+    entries: ReadonlyArray<ReconnectCatchupEntry>,
     lifecycle: SessionLifecycleEvent["type"],
   ) {
     return this.mam.runReconnectCatchup(xmpp, entries, lifecycle);

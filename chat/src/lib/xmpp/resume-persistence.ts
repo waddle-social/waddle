@@ -38,6 +38,7 @@ const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
 
 type PersistedSeenCursor = {
   timestamp: string;
+  scope?: "account" | "muc-occupant";
   archiveId?: string;
   archiveTimestamp?: string;
   archiveSeenIds?: string[];
@@ -132,19 +133,22 @@ export const nullResumePersistence: ResumePersistence = {
 
 export function createLocalStorageResumePersistence(accountKey: string, ownerId?: string): ResumePersistence {
   const owner = ownerId ? explicitResumeOwner(ownerId) : resumeOwner();
-  const catchupKey = `${CATCHUP_PREFIX}.${accountKey}`;
+  // Length-prefix the account segment so prefix enumeration cannot make
+  // `alice@example.com` consume `alice@example.com.evil` shards.
+  const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey.length}:${accountKey}`;
+  const catchupKey = `${catchupKeyPrefix}.${owner.ownerId}`;
   const smKey = `${SM_PREFIX}.${accountKey}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
 
   return {
     loadCatchup() {
-      return readJson<PersistedReconnectCatchup>(catchupKey, isPersistedReconnectCatchup, "catchup");
+      return readCatchupShards(catchupKeyPrefix);
     },
     saveCatchup(snapshot) {
       writeJson(catchupKey, snapshot, "catchup");
     },
     clearCatchup() {
-      removeKey(catchupKey, "catchup");
+      removeKeysWithPrefix(`${catchupKeyPrefix}.`, "catchup");
     },
     loadSm() {
       const envelope = readJson<PersistedSmEnvelope>(smKey, isPersistedSmEnvelope, "sm");
@@ -404,6 +408,40 @@ function readJson<T>(key: string, validate: (value: unknown) => value is T, kind
   }
 }
 
+function storageKeysWithPrefix(prefix: string): string[] {
+  const s = storage();
+  if (!s) return [];
+  const keys: string[] = [];
+  try {
+    for (let index = 0; index < s.length; index += 1) {
+      const key = s.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+  } catch (err) {
+    reportError("storage.read", err, {
+      recoverable: true,
+      detail: "resume-persistence shard enumeration failed (catchup)",
+      storage_area: "catchup",
+    });
+  }
+  return keys;
+}
+
+function readCatchupShards(prefix: string): PersistedReconnectCatchup | null {
+  const snapshots = storageKeysWithPrefix(`${prefix}.`)
+    .map((key) => readJson<PersistedReconnectCatchup>(key, isPersistedReconnectCatchup, "catchup"))
+    .filter((snapshot): snapshot is PersistedReconnectCatchup => !!snapshot);
+  if (snapshots.length === 0) return null;
+  return {
+    dmLastSeen: snapshots.flatMap((snapshot) => snapshot.dmLastSeen),
+    roomLastSeen: snapshots.flatMap((snapshot) => snapshot.roomLastSeen),
+  };
+}
+
+function removeKeysWithPrefix(prefix: string, kind: string): void {
+  for (const key of storageKeysWithPrefix(prefix)) removeKey(key, kind);
+}
+
 function writeJson(key: string, value: unknown, kind: string): void {
   const s = storage();
   if (!s) return;
@@ -438,6 +476,7 @@ function isPersistedSeenCursor(value: unknown): value is PersistedSeenCursor {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.timestamp !== "string") return false;
+  if (candidate.scope !== undefined && candidate.scope !== "account" && candidate.scope !== "muc-occupant") return false;
   if (candidate.archiveId !== undefined && typeof candidate.archiveId !== "string") return false;
   if (candidate.archiveTimestamp !== undefined && typeof candidate.archiveTimestamp !== "string") return false;
   if (candidate.archiveSeenIds !== undefined) {

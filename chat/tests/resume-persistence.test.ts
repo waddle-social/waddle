@@ -120,6 +120,10 @@ async function flushMicrotasks() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function catchupShardKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.resume-cursors.${accountKey.length}:${accountKey}.${ownerId}`;
+}
+
 describe("ReconnectCatchup persistence — hydrate from snapshot on construct", () => {
   test("hydrates DM + room cursors from the persistence snapshot", () => {
     const persistence = inMemoryPersistence();
@@ -138,6 +142,26 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     expect(c.getRoomLastSeen("general@muc.example.com")).toBe("2026-05-20T11:00:00.000Z");
   });
 
+  test("canonicalized hydrate collisions merge cursor progress instead of using persistence order", () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveCatchup({
+      dmLastSeen: [
+        ["BOB@EXAMPLE.COM/desktop", { timestamp: "2026-05-20T12:00:00.000Z", archiveId: "new" }],
+        ["bob@example.com/mobile", { timestamp: "2026-05-20T10:00:00.000Z", archiveId: "old" }],
+      ],
+      roomLastSeen: [],
+    });
+
+    const catchup = new ReconnectCatchup(persistence);
+    expect(catchup.onSessionStarted()).toEqual([{
+      kind: "dm",
+      key: "bob@example.com",
+      scope: "account",
+      after: "new",
+      since: "2026-05-20T12:00:00.000Z",
+    }]);
+  });
+
   test("hydrated instance returns cursors on the *first* onSessionStarted (PR3 whole point)", () => {
     // A hydrated `ReconnectCatchup` represents a prior tab session
     // that left cursors behind in localStorage. The next page load
@@ -147,14 +171,14 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     // dead weight (writes on every advance, never consumed).
     const persistence = inMemoryPersistence();
     persistence.saveCatchup({
-      dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z", archiveId: "dm-arch-1" }]],
+      dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z", scope: "account", archiveId: "dm-arch-1" }]],
       roomLastSeen: [],
     });
 
     const c = new ReconnectCatchup(persistence);
     const entries = c.onSessionStarted();
     expect(entries).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-1", since: "2026-05-20T10:00:00.000Z" },
+      { kind: "dm", key: "bob@example.com", scope: "account", after: "dm-arch-1", since: "2026-05-20T10:00:00.000Z" },
     ]);
   });
 
@@ -187,10 +211,34 @@ describe("ReconnectCatchup persistence — writes back on advance", () => {
       "bob@example.com",
       {
         timestamp: "2026-05-20T10:00:00.000Z",
+        scope: "account",
         archiveId: "dm-arch-1",
         archiveTimestamp: "2026-05-20T10:00:00.000Z",
       },
     ]);
+  });
+
+  test("persists and hydrates custom MUC occupant scope", async () => {
+    const persistence = inMemoryPersistence();
+    const writer = new ReconnectCatchup(persistence);
+    writer.recordDmSeen(
+      "room@rooms.waddle.example/alice",
+      "2026-05-20T10:00:00Z",
+      "pm-arch-1",
+      [],
+      "muc-occupant",
+    );
+    await flushMicrotasks();
+
+    const reader = new ReconnectCatchup(persistence);
+
+    expect(reader.onSessionStarted()).toEqual([{
+      kind: "dm",
+      key: "room@rooms.waddle.example/alice",
+      scope: "muc-occupant",
+      after: "pm-arch-1",
+      since: "2026-05-20T10:00:00.000Z",
+    }]);
   });
 
   test("bursts coalesce into a single write per microtask", async () => {
@@ -769,35 +817,59 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   });
 
   test("loadCatchup returns null for malformed JSON", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
-    window.localStorage.setItem("waddle.chat.resume-cursors.alice@example.com", "{not valid json");
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    window.localStorage.setItem(catchupShardKey("alice@example.com", "tab-a"), "{not valid json");
     expect(persistence.loadCatchup()).toBeNull();
   });
 
   test("loadCatchup rejects payloads with the wrong shape", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     window.localStorage.setItem(
-      "waddle.chat.resume-cursors.alice@example.com",
+      catchupShardKey("alice@example.com", "tab-a"),
       JSON.stringify({ dmLastSeen: "not-an-array", roomLastSeen: [] }),
     );
     expect(persistence.loadCatchup()).toBeNull();
   });
 
-  test("two tabs converge: read-merge-write avoids cursor clobber", async () => {
+  test("two tab shards preserve concurrent cursor writes", async () => {
     // Simulate two `ReconnectCatchup` instances sharing the same
     // localStorage (two tabs of the same account). Each advances
     // its own conversation; after both persist, BOTH conversations
     // are present in storage — the pre-fix behavior would have
     // overwritten one with the other.
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
-    const tabA = new ReconnectCatchup(persistence);
-    const tabB = new ReconnectCatchup(persistence);
-    tabA.recordDmSeen("bob@example.com", "2026-05-20T10:00:00Z", "dm-arch-A");
+    const persistenceA = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    const persistenceB = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    const tabA = new ReconnectCatchup(persistenceA);
+    const tabB = new ReconnectCatchup(persistenceB);
+    tabA.recordDmSeen("room@rooms.waddle.example/alice", "2026-05-20T10:00:00Z", "dm-arch-A", [], "muc-occupant");
     tabB.recordRoomSeen("general@muc.example.com", "2026-05-20T11:00:00Z", "room-arch-B");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const final = persistence.loadCatchup();
+    const final = persistenceA.loadCatchup();
     expect(final).not.toBeNull();
-    expect(final!.dmLastSeen.map((e) => e[0])).toContain("bob@example.com");
+    expect(final!.dmLastSeen).toContainEqual([
+      "room@rooms.waddle.example/alice",
+      expect.objectContaining({ scope: "muc-occupant" }),
+    ]);
     expect(final!.roomLastSeen.map((e) => e[0])).toContain("general@muc.example.com");
+    expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-a"))).not.toBeNull();
+    expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-b"))).not.toBeNull();
+  });
+
+  test("account shard prefixes cannot read or clear a longer JID", () => {
+    const alice = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    const evil = createLocalStorageResumePersistence("alice@example.com.evil", "tab-b");
+    alice.saveCatchup({
+      dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z" }]],
+      roomLastSeen: [],
+    });
+    evil.saveCatchup({
+      dmLastSeen: [["mallory@example.com.evil", { timestamp: "2026-05-20T11:00:00.000Z" }]],
+      roomLastSeen: [],
+    });
+
+    expect(alice.loadCatchup()?.dmLastSeen.map(([key]) => key)).toEqual(["bob@example.com"]);
+    alice.clearCatchup();
+    expect(alice.loadCatchup()).toBeNull();
+    expect(evil.loadCatchup()?.dmLastSeen.map(([key]) => key)).toEqual(["mallory@example.com.evil"]);
   });
 });

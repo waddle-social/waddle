@@ -62,8 +62,8 @@ impl MessageHandler for ArchiveProbe {
         let archive_jid = from_bare.clone();
         HandlerOutcome::Continue(vec![OutboundEvent::ArchiveDirect {
             archive_jid,
-            from: from_bare,
-            to: to_bare,
+            from: from_bare.into(),
+            to: to_bare.into(),
             message: Box::new(message.clone()),
         }])
     }

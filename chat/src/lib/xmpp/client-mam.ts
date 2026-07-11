@@ -12,10 +12,10 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import { buildDmCallOutcomeAnchor, type DmCallOutcomeAnchor } from "@/lib/calls/dm-call-anchor";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
-import { barePeerJid, jidDomain } from "./jid";
+import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain, resourceOf } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { classifyMamError, isMamCursorNotFound } from "./mam";
-import type { ReconnectCatchup } from "./reconnect-catchup";
+import type { DmConversationScope, ReconnectCatchup, ReconnectCatchupEntry } from "./reconnect-catchup";
 import type {
   LiveDmMessage,
   LiveRoomMessage,
@@ -44,8 +44,6 @@ export type DmCallActivityHydrationOptions = { since?: string; pageSize?: number
 
 type CatchupRunStats = { pages: number; messages: number };
 type CatchupOutcome = "completed" | "aborted" | "failed";
-
-type ReconnectCatchupEntry = { kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] };
 
 /**
  * #1267 item 4: typed marker for catch-up page-budget exhaustion. Unlike
@@ -236,10 +234,16 @@ type MamPagerDeps = {
    * the live path. Optional so bare unit-test pagers keep working.
    */
   classifyMucPm?: (message: WasmMessage) => { occupantJid: string; nick: string } | undefined;
+  /** Session-authoritative occupant scope derived from the configured MUC service. */
+  isMucPmPeer: (peerJid: string) => boolean;
 };
 
 export class MamPager {
   constructor(private readonly deps: MamPagerDeps) {}
+
+  private isMucPmPeer(peerJid: string, scope?: DmConversationScope): boolean {
+    return scope === "muc-occupant" || this.deps.isMucPmPeer(peerJid);
+  }
 
   private selfBare(): string {
     return barePeerJid(this.deps.sessionJid());
@@ -266,18 +270,28 @@ export class MamPager {
 
   private dmPageToMessages(
     page: WasmMamPage,
-    options: { applyCallEvents?: boolean } = {},
+    options: { applyCallEvents?: boolean; peerJid?: string; dmScope?: DmConversationScope } = {},
   ): MamHistoryPage<LiveDmMessage> {
     const selfBare = this.selfBare();
-    const outcomeAnchors = options.applyCallEvents === false
+    const outcomeAnchors = options.applyCallEvents === false || this.isMucPmPeer(options.peerJid ?? "", options.dmScope)
       ? []
-      : this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
-    const messages = page.messages
+      : this.applyDmCallEventsFromMamPage(page, selfBare, {
+          publishOutcome: false,
+          ...(options.peerJid ? { peerJid: options.peerJid } : {}),
+          ...(options.dmScope ? { dmScope: options.dmScope } : {}),
+        });
+    const requestedPeerJid = options.peerJid;
+    const rawMessages = requestedPeerJid
+      ? page.messages.filter((message) => this.rawDmMessageMatchesPeer(message, requestedPeerJid, options.dmScope))
+      : page.messages;
+    const messages = rawMessages
       .map((message) => {
         const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
-        return converted ? this.applyMucPmClassification(message, converted) : null;
+        return converted ? this.applyMucPmClassification(message, converted, options.peerJid, options.dmScope) : null;
       })
-      .filter((message): message is LiveDmMessage => !!message);
+      .filter((message): message is LiveDmMessage =>
+        !!message && (!options.peerJid || this.dmMessageMatchesPeer(message, options.peerJid, options.dmScope))
+      );
     const outcomeMessages = outcomeAnchors.map((outcome) =>
       this.dmCallOutcomeAnchorToLiveMessage(outcome),
     );
@@ -312,11 +326,25 @@ export class MamPager {
   private applyDmCallEventsFromMamPage(
     page: WasmMamPage | null | undefined,
     selfBare = this.selfBare(),
-    options: { since?: string; seenIds?: ReadonlyArray<string>; publishOutcome?: boolean } = {},
+    options: { since?: string; seenIds?: ReadonlyArray<string>; publishOutcome?: boolean; peerJid?: string; dmScope?: DmConversationScope } = {},
   ): ArchivedDmCallOutcome[] {
+    // DM call state is bare-peer scoped. Until it is occupant scoped end to
+    // end, replaying MUC-PM call events would alias every nick in the room.
+    if (this.isMucPmPeer(options.peerJid ?? "", options.dmScope)) return [];
     const outcomeAnchors: ArchivedDmCallOutcome[] = [];
     for (const message of page?.messages ?? []) {
       if (!message.call_event) continue;
+      const rawCounterpart = this.rawDmCounterpart(message);
+      // The account archive tuple is authoritative before service discovery:
+      // ordinary server DM rows use a bare remote endpoint; a full remote
+      // endpoint is a MUC-PM occupant. Global hydration has no requested peer
+      // or persisted scope, so fail closed on every resource-qualified row.
+      if (!options.peerJid && !options.dmScope && resourceOf(rawCounterpart)) continue;
+      // Global personal-history hydration has no requested peer context. The
+      // raw remote endpoint still identifies MUC-PM rows, which DM call state
+      // cannot safely represent until it is keyed by full occupant JID.
+      if (this.isMucPmPeer(rawCounterpart)) continue;
+      if (options.peerJid && !this.rawDmMessageMatchesPeer(message, options.peerJid, options.dmScope)) continue;
       if (shouldSkipRawCatchupMessage(message, this.dmStanzaIdAuthorities(), options.since, options.seenIds)) continue;
       const outcomeAnchor = applyDmCallEvent({
         event: message.call_event,
@@ -332,8 +360,18 @@ export class MamPager {
   }
 
   /** Apply the #1256 occupant re-keying to a converted DM message. */
-  private applyMucPmClassification(raw: WasmMessage, converted: LiveDmMessage): LiveDmMessage {
-    const occupant = this.deps.classifyMucPm?.(raw);
+  private applyMucPmClassification(
+    raw: WasmMessage,
+    converted: LiveDmMessage,
+    requestedPeerJid?: string,
+    dmScope?: DmConversationScope,
+  ): LiveDmMessage {
+    const requestedOccupant = requestedPeerJid
+      && this.isMucPmPeer(requestedPeerJid, dmScope)
+      && fullJidIdentityKey(this.rawDmCounterpart(raw)) === fullJidIdentityKey(requestedPeerJid)
+      ? { occupantJid: requestedPeerJid, nick: resourceOf(requestedPeerJid) }
+      : undefined;
+    const occupant = requestedOccupant ?? this.deps.classifyMucPm?.(raw);
     if (!occupant) return converted;
     const isSelf = barePeerJid(raw.from ?? "") === this.selfBare();
     return {
@@ -344,6 +382,41 @@ export class MamPager {
     };
   }
 
+  private dmMessageMatchesPeer(message: LiveDmMessage, peerJid: string, dmScope?: DmConversationScope): boolean {
+    // #1281: a MUC-PM conversation is the full occupant JID. Bare matching
+    // would alias every nick in the room; conversely, ordinary DMs retain
+    // their established bare-JID conversation identity.
+    if (this.isMucPmPeer(peerJid, dmScope)) {
+      return message.mucPm === true
+        && fullJidIdentityKey(message.peerJid) === fullJidIdentityKey(peerJid);
+    }
+    return message.mucPm !== true && bareJidKey(message.peerJid) === bareJidKey(peerJid);
+  }
+
+  private rawDmMessageMatchesPeer(message: WasmMessage, peerJid: string, dmScope?: DmConversationScope): boolean {
+    if (this.isMucPmPeer(peerJid, dmScope)) {
+      return fullJidIdentityKey(this.rawDmCounterpart(message)) === fullJidIdentityKey(peerJid);
+    }
+    const occupant = this.deps.classifyMucPm?.(message);
+    if (occupant) return false;
+    const rawPeer = this.rawDmCounterpart(message);
+    // The persisted scope describes the requested conversation, not the raw
+    // archive endpoint. Keep authoritative endpoint classification independent
+    // so a legacy bare-room cursor cannot admit full occupant rows merely
+    // because its old cursor defaulted to account scope.
+    if (this.isMucPmPeer(rawPeer) && bareJidKey(rawPeer) === bareJidKey(peerJid)) return false;
+    return bareJidKey(rawPeer) === bareJidKey(peerJid);
+  }
+
+  private rawDmCounterpart(message: WasmMessage): string {
+    const from = message.from ?? "";
+    return bareJidKey(from) === bareJidKey(this.selfBare()) ? (message.to ?? "") : from;
+  }
+
+  private dmArchivePeerJid(peerJid: string, dmScope?: DmConversationScope): string {
+    return this.isMucPmPeer(peerJid, dmScope) ? peerJid : barePeerJid(peerJid);
+  }
+
   private recordRoomWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
     for (const message of messages) {
       this.deps.catchup.recordRoomSeen(message.roomJid, message.createdAt, message.archiveId, messageSeenIds(message));
@@ -352,7 +425,7 @@ export class MamPager {
 
   private recordDmWatermarks(messages: ReadonlyArray<LiveDmMessage>) {
     for (const message of messages) {
-      this.deps.catchup.recordDmSeen(message.peerJid, message.createdAt, message.archiveId, messageSeenIds(message));
+      this.deps.catchup.recordDmSeen(message.peerJid, message.createdAt, message.archiveId, messageSeenIds(message), message.mucPm ? "muc-occupant" : "account");
     }
   }
 
@@ -407,9 +480,11 @@ export class MamPager {
 
   async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
     const xmpp = await this.deps.requireConnectedXmpp();
-    const page = await xmpp.fetch_dm_history_page?.(barePeerJid(peerJid), max, pageParam);
+    const dmScope = this.deps.catchup.getDmScope(peerJid);
+    const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
+    const page = await xmpp.fetch_dm_history_page?.(archivePeerJid, max, pageParam);
     if (!page) return { messages: [], complete: true };
-    const result = this.dmPageToMessages(page);
+    const result = this.dmPageToMessages(page, { peerJid: archivePeerJid, dmScope });
     this.recordDmWatermarks(result.messages);
     return result;
   }
@@ -417,9 +492,11 @@ export class MamPager {
   async queryPersonalMamThreadPage(peerJid: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
     if (!threadId) return { messages: [], complete: true };
     const xmpp = await this.deps.requireConnectedXmpp();
-    const page = await xmpp.fetch_dm_history_by_thread?.(barePeerJid(peerJid), threadId, max, pageParam.type === "before" ? pageParam.before : null);
+    const dmScope = this.deps.catchup.getDmScope(peerJid);
+    const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
+    const page = await xmpp.fetch_dm_history_by_thread?.(archivePeerJid, threadId, max, pageParam.type === "before" ? pageParam.before : null);
     if (!page) return { messages: [], complete: true };
-    const result = this.dmPageToMessages(page, { applyCallEvents: false });
+    const result = this.dmPageToMessages(page, { applyCallEvents: false, peerJid: archivePeerJid, dmScope });
     this.recordDmWatermarks(result.messages);
     return result;
   }
@@ -430,6 +507,10 @@ export class MamPager {
   ): Promise<void> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (!xmpp.fetch_dm_history_page) return;
+    if (
+      this.deps.isMucPmPeer(peerJid)
+      || this.deps.catchup.getDmScope(peerJid) === "muc-occupant"
+    ) return;
     const peer = barePeerJid(peerJid);
     if (!peer) return;
     const sessionJid = this.deps.sessionJid();
@@ -468,14 +549,22 @@ export class MamPager {
   async searchDmMessages(peerJid: string, query: string, max = 20): Promise<MessageSearchResult[]> {
     if (!query.trim()) return [];
     const xmpp = await this.deps.requireConnectedXmpp();
-    const page = await xmpp.search_dm_history?.(barePeerJid(peerJid), query, max);
+    const dmScope = this.deps.catchup.getDmScope(peerJid);
+    const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
+    const page = await xmpp.search_dm_history?.(archivePeerJid, query, max);
     const selfBare = this.selfBare();
     const parsed = page?.messages
-      .map((archived) => ({
-        archived,
-        message: dmMessageFromArchived(archived, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() }),
-      }))
-      .filter((entry): entry is { archived: WasmArchivedMessage; message: LiveDmMessage } => !!entry.message) ?? [];
+      .filter((archived) => this.rawDmMessageMatchesPeer(archived, archivePeerJid, dmScope))
+      .map((archived) => {
+        const decoded = dmMessageFromArchived(archived, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
+        return {
+          archived,
+          message: decoded ? this.applyMucPmClassification(archived, decoded, archivePeerJid, dmScope) : null,
+        };
+      })
+      .filter((entry): entry is { archived: WasmArchivedMessage; message: LiveDmMessage } =>
+        !!entry.message && this.dmMessageMatchesPeer(entry.message, archivePeerJid, dmScope)
+      ) ?? [];
     return parsed.filter(({ message }) => !!message.body).map(({ archived, message }) => ({ id: message.id, ...(archived.mam_id ? { archiveId: archived.mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
   }
 
@@ -541,7 +630,11 @@ export class MamPager {
             // telemetry-hook failure — this handler is the reload
             // fallback, so surface a failure on the typed error channel.
             try {
-              this.deps.events.emit("catchupFailure", { kind: entry.kind, key: entry.key });
+              this.deps.events.emit("catchupFailure", {
+                kind: entry.kind,
+                key: entry.key,
+                ...(entry.kind === "dm" && entry.scope === "muc-occupant" ? { dmScope: entry.scope } : {}),
+              });
             } catch (handlerError) {
               this.deps.emitError({
                 kind: "history",
@@ -567,11 +660,12 @@ export class MamPager {
 
   private async runDmReconnectCatchup(
     xmpp: MamWasmClient,
-    entry: { key: string; after?: string; since?: string; seenIds?: string[] },
+    entry: Extract<ReconnectCatchupEntry, { kind: "dm" }>,
     sessionJid: string,
     stats: CatchupRunStats,
   ) {
     if (!xmpp.fetch_dm_history_page) return;
+    const archivePeerJid = this.dmArchivePeerJid(entry.key, entry.scope);
     if (entry.after) {
       let after: string | undefined = entry.after;
       const seenAfter = new Set<string>();
@@ -584,11 +678,11 @@ export class MamPager {
         }
         let page: WasmMamPage | null | undefined;
         try {
-          page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after });
+          page = await xmpp.fetch_dm_history_page(archivePeerJid, 100, { type: "after", after });
         } catch (error) {
           if (isMamCursorNotFound(classifyMamError(error))) {
             const since = entry.since ?? this.deps.catchup.getDmLastSeen(entry.key);
-            if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
+            if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats, entry.scope);
             return;
           }
           throw error;
@@ -596,7 +690,7 @@ export class MamPager {
         pageCount += 1;
         if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
         if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
-        const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds, { stats });
+        const nextAfter = this.applyDmCatchupPage(page, entry.key, undefined, entry.seenIds, { stats, dmScope: entry.scope });
         if (isMamPageComplete(page)) return;
         if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
@@ -605,7 +699,7 @@ export class MamPager {
     }
     const since = entry.since ?? this.deps.catchup.getDmLastSeen(entry.key);
     if (!since) return;
-    await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
+    await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats, entry.scope);
   }
 
   private async runRoomReconnectCatchup(
@@ -658,7 +752,9 @@ export class MamPager {
     sessionJid: string,
     seenIds?: ReadonlyArray<string>,
     stats?: CatchupRunStats,
+    dmScope?: DmConversationScope,
   ) {
+    const archivePeerJid = this.dmArchivePeerJid(peerJid, dmScope);
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
     const pages: WasmMamPage[] = [];
@@ -670,14 +766,14 @@ export class MamPager {
     const applyCollected = () => {
       const selfBare = this.selfBare();
       for (const page of [...pages].reverse()) {
-        this.applyDmCatchupPage(page, since, seenIds, { applyCallEvents: false, stats });
+        this.applyDmCatchupPage(page, peerJid, since, seenIds, { applyCallEvents: false, stats, dmScope });
       }
       for (const page of [...pages].reverse()) {
-        this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
+        this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds, peerJid, dmScope });
       }
     };
     while (true) {
-      const page = await xmpp.fetch_dm_history_page?.(peerJid, 100, pageParam);
+      const page = await xmpp.fetch_dm_history_page?.(archivePeerJid, 100, pageParam);
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
@@ -733,25 +829,39 @@ export class MamPager {
 
   private applyDmCatchupPage(
     page: WasmMamPage | null | undefined,
+    peerJid: string,
     since?: string,
     seenIds?: ReadonlyArray<string>,
-    options: { applyCallEvents?: boolean; stats?: CatchupRunStats } = {},
+    options: { applyCallEvents?: boolean; stats?: CatchupRunStats; dmScope?: DmConversationScope } = {},
   ): string | undefined {
+    // Keep the server page boundary even when every decoded row is rejected.
+    // RSM cursors describe the raw result set; deriving this from accepted
+    // rows would strand paging on an all-sibling legacy/foreign page.
     let lastArchiveId = pageLastArchiveId(page);
     const selfBare = this.selfBare();
     if (options.stats) options.stats.pages += 1;
-    if (options.applyCallEvents !== false) {
-      this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
-    }
-    for (const message of page?.messages ?? []) {
+    const acceptedRaw = (page?.messages ?? []).filter((message) =>
+      this.rawDmMessageMatchesPeer(message, peerJid, options.dmScope)
+    );
+    const accepted = acceptedRaw.flatMap((message) => {
       const decoded = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
-      if (!decoded) continue;
-      const converted = this.applyMucPmClassification(message, decoded);
+      if (!decoded) return [];
+      const converted = this.applyMucPmClassification(message, decoded, peerJid, options.dmScope);
+      return this.dmMessageMatchesPeer(converted, peerJid, options.dmScope) ? [{ converted }] : [];
+    });
+    if (options.applyCallEvents !== false) {
+      this.applyDmCallEventsFromMamPage(
+        page ? { ...page, messages: acceptedRaw } : page,
+        selfBare,
+        { since, seenIds, peerJid, dmScope: options.dmScope },
+      );
+    }
+    for (const { converted } of accepted) {
       if (shouldSkipCatchupMessage(converted, since, seenIds)) continue;
-      this.deps.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
+      this.deps.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted), converted.mucPm ? "muc-occupant" : "account");
       this.deps.events.emit("directMessage", converted);
       if (options.stats) options.stats.messages += 1;
-      lastArchiveId = converted.archiveId ?? lastArchiveId;
+      lastArchiveId ??= converted.archiveId;
     }
     return lastArchiveId;
   }

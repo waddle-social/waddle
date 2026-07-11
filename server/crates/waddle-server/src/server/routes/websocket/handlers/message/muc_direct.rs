@@ -151,8 +151,10 @@ async fn handle_muc_private_message(
     // archived (body-less chat-state PMs get none — an id with no MAM
     // row behind it is a lie), and interpreting the archive first lets
     // an origin-id dedupe's ArchiveIdRewrite land on the wire copy, so
-    // live/MAM id parity holds under retries. Both user archives key
-    // the conversation by the room bare JID.
+    // live/MAM id parity holds under retries. Archive ownership remains
+    // the user's bare JID. The peer endpoint retains the full occupant JID
+    // required for exact `with=room/nick` matching, while the owner endpoint
+    // preserves the stanza the user actually sent or received (§7.5).
     let should_archive = !incoming.bodies.is_empty();
     let mut events: Vec<waddle_xmpp::protocol::OutboundEvent> = Vec::new();
     if should_archive {
@@ -175,12 +177,14 @@ async fn handle_muc_private_message(
         };
         waddle_xmpp_core::xep0359::add_stanza_id(&mut sent_form, &sender_sid);
 
+        let occupant_from = jid::Jid::from(from_room_jid.clone());
+        let occupant_to = jid::Jid::from(target_occupant_jid.clone());
         let mut recipient_archive = relayed.clone();
         recipient_archive.to = Some(jid::Jid::from(recipient_bare.clone()));
         events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
             archive_jid: recipient_bare.clone(),
-            from: room_jid.clone(),
-            to: recipient_bare.clone(),
+            from: occupant_from.clone(),
+            to: jid::Jid::from(recipient_bare.clone()),
             message: Box::new(recipient_archive),
         });
         // A self-PM (own nick) would otherwise archive twice into the
@@ -188,8 +192,8 @@ async fn handle_muc_private_message(
         if recipient_bare != sender_bare {
             events.push(waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
                 archive_jid: sender_bare.clone(),
-                from: sender_bare.clone(),
-                to: room_jid.clone(),
+                from: jid::Jid::from(sender_bare.clone()),
+                to: occupant_to,
                 message: Box::new(sent_form.clone()),
             });
         }

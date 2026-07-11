@@ -14,6 +14,7 @@
 import { describe, expect, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 
 type StreamErrorPayload = { detail?: string | null; condition?: string | null };
@@ -38,7 +39,7 @@ type PrivateState = {
   loadModule: () => Promise<unknown>;
   runSessionReady: (xmpp: unknown, lifecycle: { type: "fresh" | "resumed" }) => Promise<void>;
   runReconnectCatchup: (...args: unknown[]) => Promise<void>;
-  catchup: { onSessionStarted: () => Array<{ kind: "dm" | "room"; key: string }> };
+  catchup: { onSessionStarted: () => ReconnectCatchupEntry[] };
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -159,7 +160,7 @@ describe("connect budget measures to session-ready, not catch-up completion (C1)
     state.connectTimeoutMs = 20;
     // Catch-up (behind the resume barrier) outlives the connect budget.
     state.runReconnectCatchup = () => sleep(60);
-    state.catchup.onSessionStarted = () => [{ kind: "dm", key: "bob@example.com" }];
+    state.catchup.onSessionStarted = () => [{ kind: "dm", key: "bob@example.com", scope: "account" }];
     let stalledHandleDisconnects = 0;
     const handle = { disconnect: async () => { stalledHandleDisconnects += 1; } };
     state.doConnect = async () => {

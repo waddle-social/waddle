@@ -7,8 +7,8 @@ const DM_CALL_STATE_MAX_KEYS: usize = 4096;
 pub(super) async fn archive_direct(
     deps: &Deps<'_>,
     archive_jid: BareJid,
-    from: BareJid,
-    to: BareJid,
+    from: jid::Jid,
+    to: jid::Jid,
     message: Box<Message>,
 ) -> Option<ArchiveIdRewrite> {
     let mut message = *message;
@@ -21,9 +21,27 @@ pub(super) async fn archive_direct(
         );
         return None;
     };
-    if let Some(active) =
-        prepare_dm_call_thread_archive_message(deps, &archive_jid, &from, &to, &message)
-    {
+    let canonical_from_bare = from.to_bare();
+    let canonical_to_bare = to.to_bare();
+    // The archive-fidelity endpoint tuple is the MAM storage shape. Existing
+    // DM-adjacent projections (call threads, activity, previews) intentionally
+    // keep their archive-owner/peer bare tuple. The typed tuple identifies the
+    // archive pass; the serialized stanza may already carry a room-authored
+    // occupant `from`, which must not turn a sender-owned MUC-PM row into a
+    // synthetic recipient/self projection.
+    let sender_archive = canonical_from_bare == archive_jid;
+    let (projection_from, projection_to) = if sender_archive {
+        (archive_jid.clone(), canonical_to_bare)
+    } else {
+        (canonical_from_bare, archive_jid.clone())
+    };
+    if let Some(active) = prepare_dm_call_thread_archive_message(
+        deps,
+        &archive_jid,
+        &projection_from,
+        &projection_to,
+        &message,
+    ) {
         add_dm_call_thread_archive_payloads(&mut message, &active);
     }
     // Per XEP-0313 §5.1.3, the eligibility check is
@@ -34,8 +52,8 @@ pub(super) async fn archive_direct(
     // it for replay.
     let archived = build_direct_archived_message(
         &jid::Jid::from(archive_jid.clone()),
-        jid::Jid::from(from.clone()),
-        jid::Jid::from(to.clone()),
+        from.clone(),
+        to.clone(),
         &message,
     );
     let requested_archive_id = archived.id.clone();
@@ -54,9 +72,12 @@ pub(super) async fn archive_direct(
             // `(sender, peer)` activity, gated by `archive_jid ==
             // from`: persisting the message into the recipient's
             // archive does NOT indicate the recipient is active.
-            if archive_jid == from {
+            if archive_jid == projection_from {
                 super::notification_activity_ingest::record_outbound_message_activity(
-                    deps, &from, &to, &message,
+                    deps,
+                    &projection_from,
+                    &projection_to,
+                    &message,
                 )
                 .await;
             }
@@ -65,9 +86,23 @@ pub(super) async fn archive_direct(
                 requested_archive_id,
                 archive_id.clone(),
             );
-            maybe_project_dm_call_thread(deps, &archive_jid, &from, &to, &archive_id, &message)
-                .await;
-            update_direct_link_preview_refs(deps, &archive_jid, &from, &archive_id, &message).await;
+            maybe_project_dm_call_thread(
+                deps,
+                &archive_jid,
+                &projection_from,
+                &projection_to,
+                &archive_id,
+                &message,
+            )
+            .await;
+            update_direct_link_preview_refs(
+                deps,
+                &archive_jid,
+                &projection_from,
+                &archive_id,
+                &message,
+            )
+            .await;
             apply_direct_retraction_tombstone(deps, &archive_jid, &message).await;
             rewrite
         }
