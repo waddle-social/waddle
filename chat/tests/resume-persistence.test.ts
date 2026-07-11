@@ -120,6 +120,10 @@ async function flushMicrotasks() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function catchupShardKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.resume-cursors.${accountKey.length}:${accountKey}.${ownerId}`;
+}
+
 describe("ReconnectCatchup persistence — hydrate from snapshot on construct", () => {
   test("hydrates DM + room cursors from the persistence snapshot", () => {
     const persistence = inMemoryPersistence();
@@ -814,14 +818,14 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
   test("loadCatchup returns null for malformed JSON", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
-    window.localStorage.setItem("waddle.chat.resume-cursors.alice@example.com.tab-a", "{not valid json");
+    window.localStorage.setItem(catchupShardKey("alice@example.com", "tab-a"), "{not valid json");
     expect(persistence.loadCatchup()).toBeNull();
   });
 
   test("loadCatchup rejects payloads with the wrong shape", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     window.localStorage.setItem(
-      "waddle.chat.resume-cursors.alice@example.com.tab-a",
+      catchupShardKey("alice@example.com", "tab-a"),
       JSON.stringify({ dmLastSeen: "not-an-array", roomLastSeen: [] }),
     );
     expect(persistence.loadCatchup()).toBeNull();
@@ -847,7 +851,25 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       expect.objectContaining({ scope: "muc-occupant" }),
     ]);
     expect(final!.roomLastSeen.map((e) => e[0])).toContain("general@muc.example.com");
-    expect(window.localStorage.getItem("waddle.chat.resume-cursors.alice@example.com.tab-a")).not.toBeNull();
-    expect(window.localStorage.getItem("waddle.chat.resume-cursors.alice@example.com.tab-b")).not.toBeNull();
+    expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-a"))).not.toBeNull();
+    expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-b"))).not.toBeNull();
+  });
+
+  test("account shard prefixes cannot read or clear a longer JID", () => {
+    const alice = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    const evil = createLocalStorageResumePersistence("alice@example.com.evil", "tab-b");
+    alice.saveCatchup({
+      dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z" }]],
+      roomLastSeen: [],
+    });
+    evil.saveCatchup({
+      dmLastSeen: [["mallory@example.com.evil", { timestamp: "2026-05-20T11:00:00.000Z" }]],
+      roomLastSeen: [],
+    });
+
+    expect(alice.loadCatchup()?.dmLastSeen.map(([key]) => key)).toEqual(["bob@example.com"]);
+    alice.clearCatchup();
+    expect(alice.loadCatchup()).toBeNull();
+    expect(evil.loadCatchup()?.dmLastSeen.map(([key]) => key)).toEqual(["mallory@example.com.evil"]);
   });
 });

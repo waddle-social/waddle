@@ -133,7 +133,9 @@ export const nullResumePersistence: ResumePersistence = {
 
 export function createLocalStorageResumePersistence(accountKey: string, ownerId?: string): ResumePersistence {
   const owner = ownerId ? explicitResumeOwner(ownerId) : resumeOwner();
-  const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey}`;
+  // Length-prefix the account segment so prefix enumeration cannot make
+  // `alice@example.com` consume `alice@example.com.evil` shards.
+  const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey.length}:${accountKey}`;
   const catchupKey = `${catchupKeyPrefix}.${owner.ownerId}`;
   const smKey = `${SM_PREFIX}.${accountKey}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
