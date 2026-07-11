@@ -2483,9 +2483,12 @@ impl MamStorage for LookupOutageMamStorage {
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: waddle_xmpp::mam::MamArchiveKind,
         query: &waddle_xmpp_core::mam::MamQuery,
     ) -> Result<waddle_xmpp_core::mam::MamResult, MamStorageError> {
-        self.inner.query_messages(archive_jid, query).await
+        self.inner
+            .query_messages(archive_jid, archive_kind, query)
+            .await
     }
     async fn get_message(
         &self,

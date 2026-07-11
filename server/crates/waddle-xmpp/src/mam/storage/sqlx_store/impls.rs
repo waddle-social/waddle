@@ -47,10 +47,13 @@ impl MamStorage for SqlxMamStorage {
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: crate::mam::MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
         let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
-        // XEP-0313 §4.3.1 `with` filter: a bare `with` matches the
+        // XEP-0313 §4.3.1 `with` filter: an owner-equivalent `with`
+        // requires both endpoints to match the owner's bare JID. Otherwise,
+        // a bare `with` matches the
         // bare form of the archived sender/recipient (so the row's
         // resource can be anything, or absent); a full `with` matches
         // only the exact full JID. The strings are stable for sqlx's
@@ -61,7 +64,10 @@ impl MamStorage for SqlxMamStorage {
         // `alice@example.com` would match `alice@example.com.evil/...`
         // because the prefix overlaps. The corrected shape is exact
         // equality plus a `LIKE 'bare/%'` for the resource form.
-        let with_filter = query.with.as_ref().map(WithFilter::from_with);
+        let with_filter = query
+            .with
+            .as_ref()
+            .map(|with| WithFilter::new(archive_jid, archive_kind, with));
         let archive_jid_str = archive_jid.to_string();
 
         match &self.backend {

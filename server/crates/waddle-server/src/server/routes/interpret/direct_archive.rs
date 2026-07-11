@@ -561,20 +561,16 @@ pub(super) async fn resolve_direct_correction_target_message_id(
     replaces_id: &str,
 ) -> Option<String> {
     let mam_storage = deps.mam_storage?;
-    let query = waddle_xmpp::mam::MamQuery {
-        with: Some(jid::Jid::from(sender.clone())),
-        ..Default::default()
-    };
-    let result = mam_storage.query_messages(archive_jid, &query).await.ok()?;
-    result.messages.into_iter().find_map(|row| {
-        if super::archive_lookup::row_matches_origin_id(&row, sender, replaces_id)
-            || super::archive_lookup::row_matches_wire_id(&row, sender, replaces_id)
-        {
-            row.stanza_id.map(|stanza_id| stanza_id.id)
-        } else {
-            None
-        }
-    })
+    super::archive_lookup::lookup_origin_id_across_pages(
+        mam_storage.as_ref(),
+        archive_jid,
+        waddle_xmpp::mam::MamArchiveKind::Personal,
+        sender,
+        replaces_id,
+    )
+    .await
+    .ok()?
+    .and_then(|row| row.stanza_id.map(|stanza_id| stanza_id.id))
 }
 
 async fn apply_direct_retraction_tombstone(

@@ -293,7 +293,11 @@ async fn xep_0461_collapsed_reply_field_round_trips_bare_to_jid_through_storage(
         .expect("store row");
 
     let result = storage
-        .query_messages(&storage_archive_bare(), &MamQuery::default())
+        .query_messages(
+            &storage_archive_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Room,
+            &MamQuery::default(),
+        )
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -327,7 +331,11 @@ async fn xep_0461_collapsed_reply_field_round_trips_full_to_jid_through_storage(
         .expect("store row");
 
     let result = storage
-        .query_messages(&storage_archive_bare(), &MamQuery::default())
+        .query_messages(
+            &storage_archive_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Room,
+            &MamQuery::default(),
+        )
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -362,7 +370,11 @@ async fn xep_0461_collapsed_reply_field_round_trips_no_to_jid_through_storage() 
         .expect("store row");
 
     let result = storage
-        .query_messages(&storage_archive_bare(), &MamQuery::default())
+        .query_messages(
+            &storage_archive_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Room,
+            &MamQuery::default(),
+        )
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -403,7 +415,11 @@ async fn xep_0461_decode_rejects_orphan_reply_to_jid_row() {
         .expect("raw insert");
 
     let result = storage
-        .query_messages(&storage_archive_bare(), &MamQuery::default())
+        .query_messages(
+            &storage_archive_bare(),
+            waddle_xmpp::mam::MamArchiveKind::Room,
+            &MamQuery::default(),
+        )
         .await;
     match result {
         Err(MamStorageError::Serialization(message)) => {

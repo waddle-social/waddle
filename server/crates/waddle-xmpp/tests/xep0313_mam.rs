@@ -1,4 +1,6 @@
 use waddle_xmpp::disco::info::{muc_room_features, server_features, Feature};
+use waddle_xmpp::mam::{InMemoryMamStorage, MamArchiveKind, MamStorage};
+use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery};
 
 #[test]
 fn server_root_disco_does_not_advertise_a_domain_archive() {
@@ -14,6 +16,193 @@ fn muc_room_disco_advertises_mam_extended_for_supported_id_filters() {
 
     assert!(features.contains(&Feature::mam()));
     assert!(features.contains(&Feature::mam_extended()));
+}
+
+/// XEP-0313 §4.3.1: querying a personal archive with `with` equal to
+/// the archive owner (bare or full) is a self-chat query. Both archived
+/// endpoints must match the owner's bare JID; ordinary contacts and
+/// unrelated rows must not leak into the result set or its RSM count.
+#[tokio::test]
+async fn owner_with_filters_self_chat_before_rsm_pagination() {
+    let storage = InMemoryMamStorage::new();
+    let archive: BareJid = "juliet@example.com".parse().unwrap();
+
+    for (id, from, to) in [
+        (
+            "self-one",
+            "juliet@example.com/balcony",
+            "juliet@example.com/chamber",
+        ),
+        (
+            "ordinary-contact",
+            "romeo@example.com/phone",
+            "juliet@example.com/chamber",
+        ),
+        (
+            "self-two",
+            "juliet@example.com/tablet",
+            "juliet@example.com",
+        ),
+        (
+            "unrelated",
+            "mercutio@example.com/phone",
+            "benvolio@example.com/tablet",
+        ),
+    ] {
+        storage
+            .store_message(
+                &archive,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    ..ArchivedMessage::for_test(from.parse().unwrap(), to.parse().unwrap())
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let first = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some("juliet@example.com/query-device".parse().unwrap()),
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.messages[0].id, "self-one");
+    assert_eq!(first.count, Some(2));
+    assert!(!first.complete);
+
+    let second = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some("juliet@example.com/query-device".parse().unwrap()),
+                after_id: first.last_id,
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.messages[0].id, "self-two");
+    assert_eq!(second.count, Some(2));
+    assert!(second.complete);
+
+    let empty = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some("juliet@example.com/query-device".parse().unwrap()),
+                after_id: second.last_id,
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(empty.messages.is_empty());
+    assert_eq!(empty.count, Some(2));
+    assert!(empty.complete);
+}
+
+/// XEP-0313 §4.3.1 ordinary `with` semantics still apply to room
+/// archives. A full occupant JID is an exact publisher filter; it is
+/// not the personal-archive owner-self special case merely because its
+/// bare form equals the archive JID.
+#[tokio::test]
+async fn room_archive_full_occupant_with_is_exact_before_rsm_pagination() {
+    let storage = InMemoryMamStorage::new();
+    let room: BareJid = "room@example.com".parse().unwrap();
+    let room_jid: Jid = "room@example.com".parse().unwrap();
+    let alice: Jid = "room@example.com/alice".parse().unwrap();
+    let base = chrono::DateTime::parse_from_rfc3339("2026-07-02T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    for (id, seconds, from) in [
+        ("alice-one", 0, alice.clone()),
+        ("bob-one", 1, "room@example.com/bob".parse().unwrap()),
+        ("alice-two", 2, alice.clone()),
+    ] {
+        storage
+            .store_message(
+                &room,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    timestamp: base + chrono::Duration::seconds(seconds),
+                    ..ArchivedMessage::for_test(from, room_jid.clone())
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let first = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(alice.clone()),
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.messages[0].id, "alice-one");
+    assert_eq!(first.count, Some(2));
+    assert!(!first.complete);
+
+    let second = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(alice),
+                after_id: first.last_id,
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.messages[0].id, "alice-two");
+    assert_eq!(second.count, Some(2));
+    assert!(second.complete);
+
+    let bare_room = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(room_jid),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(bare_room.messages.len(), 3);
+
+    let empty = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some("room@example.com/charlie".parse().unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(empty.messages.is_empty());
+    assert_eq!(empty.count, Some(0));
 }
 
 // ── §Security "Sender Impersonation" + "MUC message spoofing" +

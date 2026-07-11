@@ -12,7 +12,7 @@ use crate::xep::matches_fulltext;
 
 use super::origin_dedup::origin_id_dedup_match;
 use super::query_semantics::{
-    archive_order_after, archive_order_before, jid_matches_with_filter, matches_thread_filter,
+    archive_order_after, archive_order_before, matches_thread_filter, message_matches_with_filter,
     missing_requested_id, uses_backward_pagination,
 };
 use super::tombstone::apply_tombstone;
@@ -66,6 +66,7 @@ impl MamStorage for InMemoryMamStorage {
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: super::MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
         let archive_jid_str = archive_jid.to_string();
@@ -126,23 +127,14 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| message.timestamp <= end);
         }
         if let Some(with) = query.with.as_ref() {
-            // XEP-0313 §4.3.1: `with` matches sender or recipient.
-            //  - Bare `with` matches archived JIDs whose **bare form**
-            //    equals `with`, regardless of resource (so the row may
-            //    be `alice@example.com` or `alice@example.com/web`).
-            //  - Full `with` matches only the exact full JID.
-            //
-            // Earlier this was a textual `starts_with` prefix match
-            // which is incorrect: `alice@example.com` would match
-            // `alice@example.com.evil/whatever`, leaking unrelated
-            // archive rows across XMPP domains. Compare via parsed
-            // [`jid::Jid`] values so the matching respects JID
-            // structure, not byte-prefix overlap.
-            let with_resource = with.resource().is_some();
-            let with_bare = with.to_bare();
             messages.retain(|message| {
-                jid_matches_with_filter(&message.from, &with_bare, with_resource, with)
-                    || jid_matches_with_filter(&message.to, &with_bare, with_resource, with)
+                message_matches_with_filter(
+                    archive_jid,
+                    archive_kind,
+                    &message.from,
+                    &message.to,
+                    with,
+                )
             });
         }
         if !query.ids.is_empty() {

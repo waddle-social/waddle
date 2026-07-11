@@ -140,9 +140,15 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
     ) -> Result<ext_host::MamQueryResponse, ext_host::HostToolError> {
         let invocation = self.invocation_for_context(context).await?;
         let requester = invocation.actor_jid.to_bare();
-        let (archive, with) = match query.target {
-            ext_host::MamTarget::Room(jid) => (jid, query.sender),
-            ext_host::MamTarget::Conversation(peer) => (requester, Some(peer)),
+        let (archive, archive_kind, with) = match query.target {
+            ext_host::MamTarget::Room(jid) => {
+                (jid, waddle_xmpp::mam::MamArchiveKind::Room, query.sender)
+            }
+            ext_host::MamTarget::Conversation(peer) => (
+                requester,
+                waddle_xmpp::mam::MamArchiveKind::Personal,
+                Some(peer),
+            ),
         };
         self.authorize_archive(&invocation, &archive)
             .await
@@ -170,7 +176,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .deps
             .protocol
             .mam_storage
-            .query_messages(&archive, &xmpp_query)
+            .query_messages(&archive, archive_kind, &xmpp_query)
             .await
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))

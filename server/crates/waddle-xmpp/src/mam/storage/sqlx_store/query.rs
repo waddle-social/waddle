@@ -7,6 +7,7 @@ use sqlx::{Postgres, QueryBuilder, Sqlite};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery};
 
 use crate::mam::storage::MamStorageError;
+use crate::mam::MamArchiveKind;
 
 use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
 use super::schema::SELECT_COLUMNS;
@@ -14,10 +15,9 @@ use crate::mam::storage::query_semantics::missing_requested_id_in_set;
 
 /// Pre-computed bind values for the SQL `with` filter.
 ///
-/// XEP-0313 §4.3.1 distinguishes bare and full `with` semantics:
-/// bare matches the archived JID's bare form (resource may be any /
-/// absent); full matches only exact equality. Pre-computing both
-/// values keeps the bind site lifetime stable for sqlx and makes the
+/// XEP-0313 §4.3.1 distinguishes the owner self-chat case from ordinary
+/// bare and full `with` semantics. Pre-computing the classification and
+/// bind values keeps their lifetimes stable for sqlx and makes the
 /// matching shape readable at the SQL emit site.
 pub(super) struct WithFilter {
     /// The bare form of the query `with`. Used for both equality
@@ -28,12 +28,22 @@ pub(super) struct WithFilter {
     /// in that case the SQL emits an exact-equality match against the
     /// full form. `None` when the query `with` is bare.
     full: Option<String>,
+    /// Whether this is a personal archive whose `with`, ignoring any
+    /// resource, is the archive owner. This case requires both archived
+    /// endpoints to match `bare`.
+    owner_self: bool,
 }
 
 impl WithFilter {
-    pub(super) fn from_with(with: &jid::Jid) -> Self {
+    pub(super) fn new(
+        archive_jid: &BareJid,
+        archive_kind: MamArchiveKind,
+        with: &jid::Jid,
+    ) -> Self {
+        let bare = with.to_bare();
         Self {
-            bare: with.to_bare().to_string(),
+            owner_self: archive_kind == MamArchiveKind::Personal && &bare == archive_jid,
+            bare: bare.to_string(),
             full: with.resource().is_some().then(|| with.to_string()),
         }
     }
@@ -67,14 +77,30 @@ fn escape_like_pattern(value: &str) -> String {
 macro_rules! push_common_mam_filters {
     ($builder:expr, $query:expr, $with_filter:expr) => {{
         if let Some(with) = $with_filter {
-            // Bare `with`: archived JID may be bare (`= bare`) or full
+            // Owner `with`: both archived endpoints must be bare-equivalent
+            // to the owner, even when the supplied `with` is full.
+            //
+            // Ordinary bare `with`: archived JID may be bare (`= bare`) or full
             // with any resource (`LIKE 'bare/%'`). The resource prefix
             // MUST include the `/` separator so domain prefix
             // collisions (`example.com` vs `example.com.evil`) cannot
             // match.
             //
-            // Full `with`: archived JID must equal exactly.
-            if let Some(full) = with.full.as_deref() {
+            // Ordinary full `with`: archived JID must equal exactly.
+            if with.owner_self {
+                let bare = with.bare.as_str();
+                let resource_prefix = with.bare_resource_prefix();
+                $builder
+                    .push(" AND ((from_jid = ")
+                    .push_bind(bare)
+                    .push(" OR from_jid LIKE ")
+                    .push_bind(resource_prefix.clone())
+                    .push(" ESCAPE '\\') AND (to_jid = ")
+                    .push_bind(bare)
+                    .push(" OR to_jid LIKE ")
+                    .push_bind(resource_prefix)
+                    .push(" ESCAPE '\\'))");
+            } else if let Some(full) = with.full.as_deref() {
                 $builder
                     .push(" AND (from_jid = ")
                     .push_bind(full)

@@ -7,6 +7,17 @@ use crate::muc::RoomClaimFenceContext;
 
 use super::MamStorageError;
 
+/// The XEP-0313 archive context that defines query semantics.
+///
+/// A bare JID alone cannot distinguish a personal archive from a room
+/// archive. Callers must supply the protocol context explicitly so the
+/// owner-self `with` rule is never inferred from domain naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MamArchiveKind {
+    Personal,
+    Room,
+}
+
 /// Trait for MAM message storage backends.
 ///
 /// Per XEP-0313 §4.1, archive addressing is normatively a **bare JID**
@@ -76,10 +87,15 @@ pub trait MamStorage: Send + Sync {
     /// - For MUC archives: the room bare JID
     /// - For personal archives: the user's bare JID
     ///
+    /// `archive_kind` is mandatory because XEP-0313 §4.3.1 gives
+    /// owner-equivalent `with` queries special semantics only for personal
+    /// archives. The JID itself is not sufficient to infer that context.
+    ///
     /// Supports filtering by time range, sender, and RSM pagination.
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError>;
 

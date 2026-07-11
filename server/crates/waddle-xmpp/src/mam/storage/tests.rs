@@ -152,7 +152,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     assert_eq!(next_generation_id, "archive-next-generation");
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .unwrap();
     let ids: Vec<&str> = result
@@ -287,7 +287,7 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
     );
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .unwrap();
     assert_eq!(
@@ -493,6 +493,7 @@ async fn test_query_with_pagination() {
     let page_one = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 ..Default::default()
@@ -506,6 +507,7 @@ async fn test_query_with_pagination() {
     let page_two = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 after_id: page_one.last_id.clone(),
                 ..Default::default()
@@ -592,6 +594,7 @@ async fn assert_full_occupant_with_excludes_siblings_before_pagination(storage: 
     let first = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 with: Some(alice_occupant.clone()),
                 max: Some(2),
@@ -607,6 +610,7 @@ async fn assert_full_occupant_with_excludes_siblings_before_pagination(storage: 
     let second = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 with: Some(alice_occupant),
                 after_id: first.last_id.clone(),
@@ -619,6 +623,270 @@ async fn assert_full_occupant_with_excludes_siblings_before_pagination(storage: 
     assert_eq!(bodies(&second), vec!["alice later"]);
     assert_eq!(second.count, Some(3));
     assert!(second.complete);
+}
+
+#[tokio::test]
+async fn sqlite_owner_with_returns_only_self_chat_rows() {
+    let storage = create_test_storage().await;
+    assert_owner_with_returns_only_self_chat_rows(&storage).await;
+}
+
+#[tokio::test]
+async fn inmemory_owner_with_returns_only_self_chat_rows() {
+    let storage = InMemoryMamStorage::new();
+    assert_owner_with_returns_only_self_chat_rows(&storage).await;
+}
+
+async fn assert_owner_with_returns_only_self_chat_rows(storage: &dyn MamStorage) {
+    let archive = bare("juliet@example.com");
+    let owner = jid("juliet@example.com");
+    let base = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+
+    for (id, seconds, from, to) in [
+        (
+            "self-chat-one",
+            0,
+            jid("juliet@example.com/balcony"),
+            jid("juliet@example.com/chamber"),
+        ),
+        (
+            "ordinary-outgoing",
+            1,
+            jid("juliet@example.com/phone"),
+            jid("romeo@example.com/mobile"),
+        ),
+        (
+            "ordinary-incoming",
+            2,
+            jid("romeo@example.com/desktop"),
+            jid("juliet@example.com/tablet"),
+        ),
+        ("self-chat-two", 3, jid("juliet@example.com/balcony"), owner),
+        (
+            "unrelated",
+            4,
+            jid("mercutio@example.com/phone"),
+            jid("benvolio@example.com/tablet"),
+        ),
+    ] {
+        storage
+            .store_message(
+                &archive,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    timestamp: base + ChronoDuration::seconds(seconds),
+                    body: Some(id.to_string()),
+                    ..ArchivedMessage::for_test(from, to)
+                },
+            )
+            .await
+            .expect("store archive fixture");
+    }
+
+    let bare_owner = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some(jid("juliet@example.com")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query self-chat archive");
+
+    let ids = bare_owner
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["self-chat-one", "self-chat-two"]);
+    assert_eq!(bare_owner.count, Some(2));
+
+    let first_page = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some(jid("juliet@example.com/query-device")),
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query first self-chat page with full owner JID");
+    assert_eq!(first_page.messages[0].id, "self-chat-one");
+    assert_eq!(first_page.count, Some(2));
+    assert!(!first_page.complete);
+
+    let second_page = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some(jid("juliet@example.com/query-device")),
+                after_id: first_page.last_id,
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query second self-chat page with full owner JID");
+    assert_eq!(second_page.messages[0].id, "self-chat-two");
+    assert_eq!(second_page.count, Some(2));
+    assert!(second_page.complete);
+
+    let ordinary_bare = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some(jid("romeo@example.com")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query ordinary contact by bare JID");
+    let ordinary_ids = ordinary_bare
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ordinary_ids, vec!["ordinary-outgoing", "ordinary-incoming"]);
+    assert_eq!(ordinary_bare.count, Some(2));
+
+    let ordinary_full = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some(jid("romeo@example.com/desktop")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query ordinary contact by full JID");
+    assert_eq!(ordinary_full.messages[0].id, "ordinary-incoming");
+    assert_eq!(ordinary_full.messages.len(), 1);
+    assert_eq!(ordinary_full.count, Some(1));
+
+    let empty = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Personal,
+            &MamQuery {
+                with: Some(jid("tybalt@example.com")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query contact absent from archive");
+    assert!(empty.messages.is_empty());
+    assert_eq!(empty.count, Some(0));
+    assert!(empty.complete);
+}
+
+#[tokio::test]
+async fn sqlite_room_archive_full_occupant_with_is_exact() {
+    let storage = create_test_storage().await;
+    assert_room_archive_full_occupant_with_is_exact(&storage).await;
+}
+
+#[tokio::test]
+async fn inmemory_room_archive_full_occupant_with_is_exact() {
+    let storage = InMemoryMamStorage::new();
+    assert_room_archive_full_occupant_with_is_exact(&storage).await;
+}
+
+async fn assert_room_archive_full_occupant_with_is_exact(storage: &dyn MamStorage) {
+    let room = bare("room@example.com");
+    let room_jid = jid("room@example.com");
+    let alice = jid("room@example.com/alice");
+    let bob = jid("room@example.com/bob");
+    let base = DateTime::parse_from_rfc3339("2026-07-02T12:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+
+    for (id, seconds, from) in [
+        ("alice-one", 0, alice.clone()),
+        ("bob-one", 1, bob),
+        ("alice-two", 2, alice.clone()),
+    ] {
+        storage
+            .store_message(
+                &room,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    timestamp: base + ChronoDuration::seconds(seconds),
+                    ..ArchivedMessage::for_test(from, room_jid.clone())
+                },
+            )
+            .await
+            .expect("store room archive fixture");
+    }
+
+    let first = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(alice.clone()),
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query first Alice page");
+    assert_eq!(first.messages[0].id, "alice-one");
+    assert_eq!(first.count, Some(2));
+    assert!(!first.complete);
+
+    let second = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(alice),
+                after_id: first.last_id,
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query second Alice page");
+    assert_eq!(second.messages[0].id, "alice-two");
+    assert_eq!(second.count, Some(2));
+    assert!(second.complete);
+
+    let bare_room = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(room_jid),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query room by bare JID");
+    assert_eq!(bare_room.messages.len(), 3);
+    assert_eq!(bare_room.count, Some(3));
+
+    let empty = storage
+        .query_messages(
+            &room,
+            MamArchiveKind::Room,
+            &MamQuery {
+                with: Some(jid("room@example.com/charlie")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query absent occupant");
+    assert!(empty.messages.is_empty());
+    assert_eq!(empty.count, Some(0));
 }
 
 #[tokio::test]
@@ -641,6 +909,7 @@ async fn assert_rsm_after_uses_archive_order_not_lexical_id_order(storage: &dyn 
     let page_one = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 ..Default::default()
@@ -654,6 +923,7 @@ async fn assert_rsm_after_uses_archive_order_not_lexical_id_order(storage: &dyn 
     let page_two = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 after_id: page_one.last_id.clone(),
@@ -668,6 +938,7 @@ async fn assert_rsm_after_uses_archive_order_not_lexical_id_order(storage: &dyn 
     let page_three = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 after_id: page_two.last_id.clone(),
@@ -700,6 +971,7 @@ async fn assert_rsm_before_uses_archive_order_not_lexical_id_order(storage: &dyn
     let page = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 before_id: Some("x-fifth".to_string()),
@@ -748,6 +1020,7 @@ async fn assert_rsm_cursors_page_same_timestamp_by_archive_id(storage: &dyn MamS
     let after = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 after_id: Some("id-b".to_string()),
@@ -765,6 +1038,7 @@ async fn assert_rsm_cursors_page_same_timestamp_by_archive_id(storage: &dyn MamS
     let before = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 before_id: Some("id-d".to_string()),
@@ -800,6 +1074,7 @@ async fn assert_extended_before_id_filters_without_flipping_order(storage: &dyn 
     let result = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 filter_before_id: Some("x-fifth".to_string()),
                 ..Default::default()
@@ -834,6 +1109,7 @@ async fn assert_extended_ids_query_returns_specific_messages(storage: &dyn MamSt
     let result = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 ids: vec!["x-fifth".to_string(), "a-second".to_string()],
                 ..Default::default()
@@ -910,6 +1186,7 @@ async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
     let error = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 after_id: Some("missing-id".to_string()),
                 ..Default::default()
@@ -923,6 +1200,7 @@ async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
     let error = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 before_id: Some("missing-before-id".to_string()),
                 ..Default::default()
@@ -936,6 +1214,7 @@ async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
     let error = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 filter_before_id: Some("missing-filter-before-id".to_string()),
                 ..Default::default()
@@ -949,6 +1228,7 @@ async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
     let error = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 filter_after_id: Some("missing-filter-after-id".to_string()),
                 ..Default::default()
@@ -962,6 +1242,7 @@ async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
     let error = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 ids: vec!["known-id".to_string(), "missing-query-id".to_string()],
                 ..Default::default()
@@ -993,6 +1274,7 @@ async fn assert_rsm_cursor_outside_query_filters_still_pages(storage: &dyn MamSt
     let result = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 start: Some(base + ChronoDuration::seconds(3)),
                 after_id: Some("a-second".to_string()),
@@ -1025,6 +1307,7 @@ async fn assert_rsm_max_zero_returns_count_only(storage: &dyn MamStorage) {
     let result = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(0),
                 ..Default::default()
@@ -1060,6 +1343,7 @@ async fn assert_rsm_empty_edge_pages_omit_first_and_last(storage: &dyn MamStorag
     let after_last = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 after_id: Some("x-fifth".to_string()),
@@ -1077,6 +1361,7 @@ async fn assert_rsm_empty_edge_pages_omit_first_and_last(storage: &dyn MamStorag
     let before_first = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
                 before_id: Some("z-first".to_string()),
@@ -1144,6 +1429,7 @@ async fn test_thread_query_filters_before_pagination_and_count() {
     let result = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 thread_id: waddle_xmpp_core::mam::ThreadId::new("a-thread-root"),
                 max: Some(2),
@@ -1191,6 +1477,7 @@ async fn test_fulltext_query_filters_before_pagination_and_count() {
     let result = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 fulltext: waddle_xmpp_core::mam::RichText::new("release notes"),
                 max: Some(1),
@@ -1230,7 +1517,7 @@ async fn test_sqlite_file_backing_persists() {
 
     let reopened = SqlxMamStorage::open(&database_url).await.expect("reopen");
     let result = reopened
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -1276,7 +1563,7 @@ async fn reaction_round_trips_through_in_memory_storage() {
     storage.store_message(&archive, &msg).await.expect("store");
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
 
@@ -1336,7 +1623,7 @@ async fn reaction_round_trips_through_persistent_sqlite() {
 
     let reopened = SqlxMamStorage::open(&database_url).await.expect("reopen");
     let result = reopened
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
 
@@ -1470,7 +1757,7 @@ async fn reaction_lands_after_legacy_body_not_null_schema_migrated() {
 
     // 4. Confirm the row is there with the reaction payload intact.
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -1529,6 +1816,7 @@ async fn test_empty_before_returns_last_page() {
     let last_page = storage
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 max: Some(3),
                 before_id: Some(String::new()),
@@ -1729,7 +2017,7 @@ async fn xep_0313_sqlx_archive_returns_messages_in_chronological_order() {
     storage.store_message(&archive, &earlier).await.unwrap();
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .unwrap();
 
@@ -1771,7 +2059,7 @@ async fn xep_0313_in_memory_archive_returns_messages_in_chronological_order() {
     storage.store_message(&archive, &earlier).await.unwrap();
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .unwrap();
 
@@ -1816,7 +2104,7 @@ async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps
     storage.store_message(&archive, &first).await.unwrap();
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .unwrap();
     let ids: Vec<&str> = result.messages.iter().map(|m| m.id.as_str()).collect();
@@ -1885,6 +2173,7 @@ async fn in_memory_query_filters_by_stanza_id() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("uuid-A"), filter_id("uuid-C")],
                 ..Default::default()
@@ -1913,6 +2202,7 @@ async fn in_memory_query_stanza_id_no_match_returns_empty() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("uuid-missing")],
                 ..Default::default()
@@ -1959,6 +2249,7 @@ async fn sqlx_query_filters_by_stanza_id() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("uuid-B"), filter_id("uuid-C")],
                 ..Default::default()
