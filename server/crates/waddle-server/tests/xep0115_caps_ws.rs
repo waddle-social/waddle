@@ -23,9 +23,11 @@
 
 use waddle_ws_test_support as ws_common;
 
+use jid::FullJid;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use ws_common::{extract_attr_after, TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const ADMIN: &str = "admin";
@@ -33,6 +35,12 @@ static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
+
+fn element_to_xml(element: Element) -> String {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize element");
+    String::from_utf8(bytes).expect("serializer emits utf-8")
+}
 
 async fn admin_client(server: &TestServer, resource: &str) -> WsXmppClient {
     let password = server.fixed_account_password().to_string();
@@ -135,7 +143,6 @@ fn caps_verification_string_with_forms(
 ) -> String {
     use waddle_xmpp::disco::info::{Feature, Identity};
     use waddle_xmpp::xep::xep0115::compute_caps_hash_with_extensions;
-    use xmpp_parsers::minidom::Element;
 
     let identities = vec![Identity::new("client", "pc", Some(identity_name))];
     let features: Vec<Feature> = features
@@ -144,34 +151,94 @@ fn caps_verification_string_with_forms(
         .collect();
     let extensions = forms
         .iter()
-        .map(|(form_type, software)| {
-            Element::builder("x", "jabber:x:data")
-                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-                .append(
-                    Element::builder("field", "jabber:x:data")
-                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
-                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
-                        .append(
-                            Element::builder("value", "jabber:x:data")
-                                .append(*form_type)
-                                .build(),
-                        )
-                        .build(),
-                )
-                .append(
-                    Element::builder("field", "jabber:x:data")
-                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
-                        .append(
-                            Element::builder("value", "jabber:x:data")
-                                .append(*software)
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build()
-        })
+        .map(|(form_type, software)| caps_data_form(form_type, software))
         .collect::<Vec<_>>();
     compute_caps_hash_with_extensions(&identities, &features, &extensions)
+}
+
+fn caps_data_form(form_type: &str, software: &str) -> Element {
+    Element::builder("x", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append(form_type)
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append(software)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn caps_presence_xml(node: &str, ver: &str) -> String {
+    use waddle_xmpp::xep::xep0115::Caps;
+
+    element_to_xml(
+        Element::builder("presence", "jabber:client")
+            .append(Caps::new(node, ver).build_element())
+            .build(),
+    )
+}
+
+fn caps_disco_result_xml(
+    iq_id: &str,
+    from: &FullJid,
+    node: &str,
+    ver: &str,
+    identity_name: &str,
+    features: &[&str],
+    forms: &[(&str, &str)],
+) -> String {
+    use waddle_xmpp::xep::xep0115::Caps;
+
+    let caps = Caps::new(node, ver);
+    let mut query = Element::builder("query", NS_DISCO_INFO)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            caps.node_ver(),
+        )
+        .append(
+            Element::builder("identity", NS_DISCO_INFO)
+                .attr(minidom::rxml::xml_ncname!("category").to_owned(), "client")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "pc")
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), identity_name)
+                .build(),
+        );
+    for feature in features {
+        query = query.append(
+            Element::builder("feature", NS_DISCO_INFO)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), *feature)
+                .build(),
+        );
+    }
+    for (form_type, software) in forms {
+        query = query.append(caps_data_form(form_type, software));
+    }
+
+    element_to_xml(
+        Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                from.to_string(),
+            )
+            .append(query.build())
+            .build(),
+    )
 }
 
 /// Send a ping IQ and wait for its result. Used as a deterministic
@@ -1061,7 +1128,12 @@ async fn caps_duplicate_form_types_across_forms_are_ill_formed_and_not_cached() 
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start();
     let mut admin = admin_client(&server, "caps-duplicate-forms-1").await;
-    let admin_full_jid = admin.full_jid.clone().expect("full jid");
+    let admin_full_jid: FullJid = admin
+        .full_jid
+        .as_deref()
+        .expect("full jid")
+        .parse()
+        .expect("typed full jid");
 
     let node = "https://example.test/caps#duplicate-forms";
     let identity_name = "Duplicate Form Client";
@@ -1071,9 +1143,7 @@ async fn caps_duplicate_form_types_across_forms_are_ill_formed_and_not_cached() 
     let ver = caps_verification_string_with_forms(identity_name, &features, &forms);
 
     admin
-        .send(&format!(
-            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
-        ))
+        .send(&caps_presence_xml(node, &ver))
         .await
         .expect("send caps presence");
     let disco_query = admin
@@ -1085,18 +1155,15 @@ async fn caps_duplicate_form_types_across_forms_are_ill_formed_and_not_cached() 
         .await
         .expect("server queries admin");
     let iq_id = extract_iq_id(&disco_query);
-    let forms_xml: String = forms
-        .iter()
-        .map(|(form_type, software)| {
-            format!(
-                r#"<x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE" type="hidden"><value>{form_type}</value></field><field var="software"><value>{software}</value></field></x>"#
-            )
-        })
-        .collect();
-
     admin
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{admin_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="{identity_name}"/><feature var="urn:xmpp:ping"/>{forms_xml}</query></iq>"#
+        .send(&caps_disco_result_xml(
+            &iq_id,
+            &admin_full_jid,
+            node,
+            &ver,
+            identity_name,
+            &features,
+            &forms,
         ))
         .await
         .expect("send duplicate-form response");
@@ -1104,9 +1171,7 @@ async fn caps_duplicate_form_types_across_forms_are_ill_formed_and_not_cached() 
 
     let mut admin2 = admin_client(&server, "caps-duplicate-forms-2").await;
     admin2
-        .send(&format!(
-            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
-        ))
+        .send(&caps_presence_xml(node, &ver))
         .await
         .expect("admin2 sends caps");
     let _re_query = admin2
@@ -1276,9 +1341,7 @@ fn roster_get_iq_xml(id: &str) -> String {
         .attr(attr("id"), id)
         .append(minidom::Element::builder("query", "jabber:iq:roster").build())
         .build();
-    let mut bytes = Vec::new();
-    element.write_to(&mut bytes).expect("serialize element");
-    String::from_utf8(bytes).expect("serializer emits utf-8")
+    element_to_xml(element)
 }
 
 /// XEP-0115 §1: caps describe the *generating entity*. Presence relayed to a
