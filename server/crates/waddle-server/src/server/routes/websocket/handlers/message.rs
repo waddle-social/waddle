@@ -17,11 +17,13 @@ mod dm_pin;
 mod group_dm_invite;
 mod link_preview_stamp;
 mod muc_direct;
+mod muc_invite;
 
 use dm_pin::{handle_dm_pin_message, handle_dm_pin_retraction_cascade};
 use group_dm_invite::handle_group_dm_mediated_invite;
 use link_preview_stamp::consume_link_preview_request;
 use muc_direct::handle_muc_direct_message;
+use muc_invite::handle_muc_mediated_invite;
 
 /// Thin transport adapter that drives the sans-I/O dispatcher
 /// (#229 PR16 + PR18). Every `<message/>` stanza arriving on the
@@ -83,6 +85,13 @@ pub async fn handle_message(
 
     if let Some(frames) =
         handle_group_dm_mediated_invite(&incoming, state, &bound_jid, authenticated_session).await
+    {
+        return frames;
+    }
+    // XEP-0045 §7.8 (#1248): mediated invitations for every non-group-DM
+    // room — previously these fell through and were silently dropped.
+    if let Some(frames) =
+        handle_muc_mediated_invite(&incoming, state, &bound_jid, authenticated_session).await
     {
         return frames;
     }

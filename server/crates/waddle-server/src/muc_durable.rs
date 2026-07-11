@@ -427,6 +427,32 @@ impl MucDurableStore for PostgresMucRoomStore {
         })
     }
 
+    /// XEP-0045 §10.9 (#1261): a destroyed room must not resurrect from
+    /// durable storage. Epoch-fenced like every other write — a node
+    /// that lost the claim mid-destroy must not wipe the new owner's
+    /// rows.
+    fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+        Box::pin(async move {
+            let epoch = self.epoch_for(room_jid)?;
+            let mut tx = self.db.begin().await.map_err(db_err)?;
+            self.assert_fenced(&mut tx, room_jid, epoch).await?;
+            tx.execute(
+                "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+            tx.execute(
+                "DELETE FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+            tx.commit().await.map_err(db_err)?;
+            Ok(())
+        })
+    }
+
     fn record_claim_epoch(&self, room_jid: &BareJid, epoch: ClaimEpoch) {
         self.claim_epochs.insert(room_jid.clone(), epoch);
     }

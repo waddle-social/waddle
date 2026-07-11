@@ -35,6 +35,144 @@ fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
     Some(request)
 }
 
+/// XEP-0045 §10.9 (#1261): "The room ... destroys the room, even if it
+/// was defined as persistent." Delete every waddle-side durable row the
+/// join path would otherwise rematerialize the destroyed room from,
+/// ordered so that a mid-sequence failure is always FAIL-CLOSED —
+/// every prefix of the sequence only ever narrows someone's access,
+/// never widens it — and every step is an idempotent delete, so a
+/// failed destroy leaves the room live and a retry re-runs the
+/// sequence safely:
+///
+/// 1. the outstanding mediated-invite ledger (#1264) — an
+///    undeclinable invite is the mildest possible consequence;
+/// 2. for group DMs, each member's permission tuple (fail-hard — a
+///    surviving tuple is durable authorization for a dead room) and
+///    XEP-0402 bookmark (best-effort — a stale bookmark is cosmetic);
+/// 3. group-DM per-member archive-visibility boundaries — deleted
+///    only AFTER the member tuples: an absent boundary row means
+///    full-history visibility, so dropping it while a member tuple
+///    still authorizes MAM reads would silently WIDEN that member's
+///    history access on an aborted destroy;
+/// 4. the managed-channel catalog row (`channels`) LAST — it is the
+///    resurrection vector `handle_muc_join` rebuilds managed rooms
+///    from, so it only falls once everything else committed.
+///
+/// Runs BEFORE occupants are notified and before the actor is torn
+/// down: a destroy that cannot durably destroy fails as a whole (the
+/// caller returns `internal-server-error` and the room stays live)
+/// instead of acknowledging a destruction that will resurrect.
+async fn wipe_destroyed_room_durable_state(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room: &waddle_xmpp::muc::MucRoom,
+) -> Result<(), ()> {
+    let db_actor = state.deps.app_state.db_pool.global_actor().clone();
+    if let Err(error) = crate::server::routes::websocket::muc_invites::delete_room_invites(
+        db_actor.clone(),
+        room_jid,
+    )
+    .await
+    {
+        warn!(
+            room = %room_jid,
+            error = %error,
+            "Failed to delete outstanding invites for destroyed room"
+        );
+        return Err(());
+    }
+    if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+        let channel = match crate::server::xmpp_state::get_xmpp_channel(
+            db_actor.clone(),
+            &channel_id,
+        )
+        .await
+        {
+            Ok(channel) => channel,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    channel = %channel_id,
+                    error = %error,
+                    "Failed to look up channel row while destroying room"
+                );
+                return Err(());
+            }
+        };
+        if channel.is_some_and(|channel| {
+            channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+        }) {
+            // Group-DM membership is durably authorized via permission
+            // tuples and surfaced via XEP-0402 bookmarks; both must go
+            // with the room or the members stay durably entitled to a
+            // room that no longer exists.
+            for entry in room.get_all_affiliations() {
+                if entry.affiliation < waddle_xmpp::Affiliation::Member {
+                    continue;
+                }
+                if let Err(error) = crate::admin::channels::remove_group_dm_member_tuple(
+                    &state.deps.app_state,
+                    &channel_id,
+                    &entry.jid,
+                )
+                .await
+                {
+                    warn!(
+                        room = %room_jid,
+                        member = %entry.jid,
+                        error = %error,
+                        "Failed to revoke group-DM member tuple for destroyed room"
+                    );
+                    return Err(());
+                }
+                if crate::admin::channels::retract_group_dm_bookmark(
+                    &state.deps.app_state,
+                    &entry.jid,
+                    room_jid,
+                )
+                .await
+                .is_err()
+                {
+                    warn!(
+                        room = %room_jid,
+                        member = %entry.jid,
+                        "Failed to retract group-DM bookmark for destroyed room"
+                    );
+                }
+            }
+        }
+        // Boundaries fall only after the member tuples above: an
+        // absent boundary means full-history visibility, so this
+        // delete is only safe once no tuple authorizes MAM reads.
+        if let Err(error) = db_actor
+            .ask(crate::db::actor::DbExecute {
+                sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
+                params: vec![room_jid.to_string().into()],
+            })
+            .await
+        {
+            warn!(
+                room = %room_jid,
+                error = %error,
+                "Failed to delete archive boundaries for destroyed room"
+            );
+            return Err(());
+        }
+        if let Err(error) =
+            crate::server::xmpp_channels::delete_xmpp_channel(db_actor.clone(), &channel_id).await
+        {
+            warn!(
+                room = %room_jid,
+                channel = %channel_id,
+                error = %error,
+                "Failed to delete channel catalog row for destroyed room"
+            );
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn handle_muc_owner_and_moderation_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -126,71 +264,160 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // alongside the IQ result so it lands on the same socket;
             // others are routed via the connection registry.
             let destroy_request = parse_destroy_request(iq).unwrap_or_default();
-            let mut frames = Vec::new();
-            if let Some(room_actor) = get_room_actor(state, &room_jid).await {
-                if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
-                    for occupant in snapshot.room.occupants.values() {
-                        let is_self_occupant = occupant.real_jid == *sender_jid;
-                        // XEP-0421: the destroy notification is the
-                        // occupant's final unavailable presence from
-                        // the room and MUST carry their occupant-id
-                        // (#1268).
-                        let occupant_bare = occupant.real_jid.to_bare();
-                        let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                            bare_jid: &occupant_bare,
-                            real_jid: Some(&occupant.real_jid),
-                            secret: &state.deps.occupant_id_secret,
-                        };
-                        let presence = build_destroy_notification(
-                            &room_jid,
-                            &occupant.nick,
-                            &occupant.real_jid,
-                            &destroy_request,
-                            is_self_occupant,
-                            &identity,
-                        );
-                        if is_self_occupant {
-                            frames.push(stanza_to_xml(&Stanza::Presence(presence)));
-                        } else {
-                            let _ = state
-                                .deps
-                                .protocol
-                                .connection_registry
-                                .try_send_to(&occupant.real_jid, Stanza::Presence(presence));
-                        }
-                        // XEP-0045 §10.9 destroy ends every occupant's
-                        // session in the room — their LiveKit
-                        // participant must end with it. Without this
-                        // the SFU keeps the room populated until its
-                        // own timeout even though the XMPP room is
-                        // gone. Idempotent for non-call participants.
-                        super::super::super::muc_call_sfu::unregister_participant_from_room(
-                            state,
-                            &room_jid,
-                            &occupant.real_jid,
-                        );
-                    }
+            let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                )];
+            };
+            let Ok(snapshot) = room_actor.ask(GetSnapshot).await else {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            };
+            // Single atomic commit point (#1261, #1276 Greptile P1s).
+            // `destroy_room_actor` (the registry `DestroyRoom` handler)
+            // removes the in-memory entry AND wipes the clustering durable
+            // state (config/subject/affiliations incl. bans — the
+            // security-sensitive resurrection vector) under one claim
+            // fence: on a durable-delete failure it restores the entry and
+            // reports `DurableWipeFailed`, so the room ends up either fully
+            // destroyed or fully intact. There is no separate pre-wipe to
+            // roll back, so no fail-open window can leave a live room
+            // stripped of its bans/affiliations. Only the irreversible
+            // app-level rows (catalog row, group-DM tuples/bookmarks,
+            // archive boundaries, invite ledger) are wiped afterwards,
+            // strictly AFTER this commit.
+            match super::super::super::destroy_room_actor(state, &room_jid).await {
+                Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed) => {}
+                // The clustering durable wipe failed and the registry
+                // atomically restored the room — nothing was torn down, so
+                // answer retryable, never a false success.
+                Ok(
+                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
+                ) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+                // A concurrent destroy already removed the room between the
+                // `get_room_actor` lookup above and here — genuinely gone.
+                Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested item not found."),
+                    )];
+                }
+                // A transport-level ask failure: the atomic handler either
+                // fully applied or not at all, so there is no split state.
+                // Answer retryable, never `item-not-found` (#1276 P1-B).
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = %error,
+                        "Destroy ask failed; returning a retryable error"
+                    );
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
                 }
             }
-
-            if destroy_room_actor(state, &room_jid).await {
-                debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-                let room_jid_string = room_jid.to_string();
-                frames.push(build_iq_result_xml(
-                    id,
-                    Some(room_jid_string.as_str()),
-                    response_to,
-                    None,
-                ));
-                return frames;
+            // COMMITTED: the registry entry and the clustering ban/
+            // affiliation state are both gone, so the room can never
+            // resurrect with its old grants. Tear down the irreversible
+            // app-level rows (#1261) post-commit: the managed-channel
+            // catalog row, group-DM member tuples/bookmarks, archive
+            // boundaries, and the outstanding mediated-invite ledger.
+            // These are idempotent deletes; a post-commit failure leaves
+            // only benign app-level orphans (re-run by a retried destroy
+            // or a sweeper), never a live room — so it is logged, not
+            // surfaced as an error that would falsely claim the destroy
+            // did not happen.
+            if wipe_destroyed_room_durable_state(state, &room_jid, &snapshot.room)
+                .await
+                .is_err()
+            {
+                warn!(
+                    room = %room_jid,
+                    "Destroy committed but the app-level durable wipe (catalog row / \
+                     group-DM tuples / boundaries / invite ledger) did not fully \
+                     stick; leftover rows are idempotently re-cleanable and cannot \
+                     resurrect the room's ban/affiliation state"
+                );
             }
+            debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
 
-            return vec![build_iq_error_xml_typed(
+            let mut frames = Vec::new();
+            for occupant in snapshot.room.occupants.values() {
+                // XEP-0045 §10.9 (#1261): the service sends one
+                // unavailable presence with `<destroy/>` to EACH
+                // occupant session — every device sharing this
+                // nick, not just the roster's single `real_jid`.
+                // Sibling sessions that were skipped kept a live
+                // room locally after the destroy.
+                for session_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+                    let is_self_session = session_jid == *sender_jid;
+                    // XEP-0421: the destroy notification is the
+                    // occupant's final unavailable presence from
+                    // the room and MUST carry their occupant-id
+                    // (#1268).
+                    let occupant_bare = session_jid.to_bare();
+                    let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                        bare_jid: &occupant_bare,
+                        real_jid: Some(&session_jid),
+                        secret: &state.deps.occupant_id_secret,
+                    };
+                    let presence = build_destroy_notification(
+                        &room_jid,
+                        &occupant.nick,
+                        &session_jid,
+                        &destroy_request,
+                        is_self_session,
+                        &identity,
+                    );
+                    if is_self_session {
+                        frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+                    } else {
+                        let _ = state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .try_send_to(&session_jid, Stanza::Presence(presence));
+                    }
+                    // XEP-0045 §10.9 destroy ends every occupant's
+                    // session in the room — their LiveKit
+                    // participant must end with it. Without this
+                    // the SFU keeps the room populated until its
+                    // own timeout even though the XMPP room is
+                    // gone. Idempotent for non-call participants.
+                    super::super::super::muc_call_sfu::unregister_participant_from_room(
+                        state,
+                        &room_jid,
+                        &session_jid,
+                    );
+                }
+            }
+            let room_jid_string = room_jid.to_string();
+            frames.push(build_iq_result_xml(
                 id,
-                response_from,
+                Some(room_jid_string.as_str()),
                 response_to,
-                item_not_found_iq_error("Requested item not found."),
-            )];
+                None,
+            ));
+            return frames;
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {

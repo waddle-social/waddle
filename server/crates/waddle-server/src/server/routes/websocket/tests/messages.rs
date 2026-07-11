@@ -4129,6 +4129,19 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
     .await;
     while alice_rx.try_recv().is_ok() {}
 
+    // #1264: a decline only forwards when the outstanding-invite ledger
+    // says alice actually invited hecate to this room.
+    crate::server::routes::websocket::muc_invites::record_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: decliner_jid.to_bare(),
+            inviter: alice_jid.to_bare(),
+        },
+    )
+    .await
+    .expect("seed outstanding invite");
+
     let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
         .append(
             Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
@@ -4161,7 +4174,11 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
     let mediated = Element::from_str(&xml).expect("mediated decline XML");
     assert_eq!(mediated.name(), "message");
     assert_eq!(mediated.attr("from"), Some(room_jid.to_string().as_str()));
-    assert_eq!(mediated.attr("to"), Some(alice_jid.to_string().as_str()));
+    assert_eq!(
+        mediated.attr("to"),
+        Some(alice_jid.to_bare().to_string().as_str()),
+        "the decline is addressed to the ledger-recorded inviter"
+    );
     let decline = mediated
         .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
         .and_then(|x| x.get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER))
@@ -4177,75 +4194,26 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
         decline.attr("to").is_none(),
         "mediated decline rewrites to='…' into from='decliner': {xml}"
     );
+
+    // The ledger row is consumed: a second decline is refused.
+    let leftover = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &decliner_jid.to_bare(),
+    )
+    .await
+    .expect("ledger lookup");
+    assert!(leftover.is_empty(), "delivered decline consumes the invite");
 }
 
+/// #1264: the ledger-recorded inviter is authoritative for decline
+/// routing — a client-supplied `to` naming someone else must not make
+/// the room deliver a decline to that third party.
 #[tokio::test]
-async fn muc_mediated_decline_to_full_jid_is_forwarded_to_that_inviter_resource() {
+async fn muc_mediated_decline_routes_to_ledger_inviter_not_client_supplied_target() {
     let state = create_test_websocket_state().await;
     let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "decline-full-room@muc.example.com"
-        .parse()
-        .expect("room jid");
-    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
-        .parse()
-        .expect("alice jid");
-    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
-
-    let (alice_tx, mut alice_rx) = mpsc::channel(8);
-    register_test_connection(state.as_ref(), &alice_jid, alice_tx).await;
-
-    handle_muc_join(
-        state.as_ref(),
-        "example.com",
-        &room_jid,
-        &alice_jid,
-        "alice",
-        None,
-        &Some(alice_session),
-    )
-    .await;
-    while alice_rx.try_recv().is_ok() {}
-
-    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
-        .append(
-            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
-                .attr(
-                    minidom::rxml::xml_ncname!("to").to_owned(),
-                    alice_jid.to_string(),
-                )
-                .build(),
-        )
-        .build();
-    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some(xmpp_parsers::message::Id("decline-full-1".to_string()));
-    message.type_ = XmppMessageType::Normal;
-    message.payloads.push(decline_payload);
-
-    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
-    assert!(
-        responses.is_empty(),
-        "mediated decline routes asynchronously"
-    );
-
-    let outbound = alice_rx
-        .try_recv()
-        .expect("full-JID inviter resource receives mediated decline");
-    let xml = stanza_to_xml(&outbound.stanza);
-    let mediated = Element::from_str(&xml).expect("mediated decline XML");
-    assert_eq!(mediated.attr("from"), Some(room_jid.to_string().as_str()));
-    assert_eq!(mediated.attr("to"), Some(alice_jid.to_string().as_str()));
-    let decline = mediated
-        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
-        .and_then(|x| x.get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER))
-        .expect("decline payload");
-    assert_eq!(decline.attr("from"), Some("hecate@example.com"));
-}
-
-#[tokio::test]
-async fn muc_mediated_decline_to_non_occupant_is_silent_success() {
-    let state = create_test_websocket_state().await;
-    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
-    let room_jid: BareJid = "decline-spoof-room@muc.example.com"
         .parse()
         .expect("room jid");
     let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
@@ -4271,6 +4239,18 @@ async fn muc_mediated_decline_to_non_occupant_is_silent_success() {
     .await;
     while alice_rx.try_recv().is_ok() {}
 
+    crate::server::routes::websocket::muc_invites::record_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: decliner_jid.to_bare(),
+            inviter: alice_jid.to_bare(),
+        },
+    )
+    .await
+    .expect("seed outstanding invite");
+
+    // The decliner tries to aim the decline at mallory.
     let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
         .append(
             Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
@@ -4281,24 +4261,163 @@ async fn muc_mediated_decline_to_non_occupant_is_silent_success() {
                 .build(),
         )
         .build();
-    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
-    message.id = Some(xmpp_parsers::message::Id("decline-spoof-1".to_string()));
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-full-1".to_string()));
     message.type_ = XmppMessageType::Normal;
     message.payloads.push(decline_payload);
 
     let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
     assert!(
         responses.is_empty(),
-        "well-formed decline to unresolved target must not reveal occupancy: {responses:?}"
+        "mediated decline routes asynchronously"
     );
+
     assert!(
         mallory_rx.try_recv().is_err(),
-        "decline must not be mediated to non-occupants"
+        "the decline must not reach the client-supplied third party"
+    );
+    let outbound = alice_rx
+        .try_recv()
+        .expect("the actual inviter receives the mediated decline");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let mediated = Element::from_str(&xml).expect("mediated decline XML");
+    assert_eq!(mediated.attr("from"), Some(room_jid.to_string().as_str()));
+    assert_eq!(
+        mediated.attr("to"),
+        Some(alice_jid.to_bare().to_string().as_str())
+    );
+    let decline = mediated
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .and_then(|x| x.get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER))
+        .expect("decline payload");
+    assert_eq!(decline.attr("from"), Some("hecate@example.com"));
+}
+
+/// #1264: without an outstanding invitation the decline is refused —
+/// previously anyone could fabricate a "declined your invitation"
+/// message toward any occupant.
+#[tokio::test]
+async fn muc_mediated_decline_without_outstanding_invite_is_refused() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "decline-spoof-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    let (alice_tx, mut alice_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &alice_jid, alice_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+    while alice_rx.try_recv().is_ok() {}
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    alice_jid.to_bare().to_string(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
+    message.id = Some(xmpp_parsers::message::Id("decline-spoof-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert_eq!(
+        responses.len(),
+        1,
+        "fabricated decline must be refused: {responses:?}"
+    );
+    assert!(
+        responses[0].contains("forbidden"),
+        "fabricated decline must be <forbidden/>: {responses:?}"
     );
     assert!(
         alice_rx.try_recv().is_err(),
-        "unresolved decline must not be broadcast to current occupants"
+        "a fabricated decline must never reach the named occupant"
     );
+}
+
+/// #1264: a legitimate decline to an OFFLINE inviter is queued in the
+/// pending-delivery store instead of silently dropped.
+#[tokio::test]
+async fn muc_mediated_decline_to_offline_inviter_is_queued_durably() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "decline-offline-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let inviter: BareJid = "alice@example.com".parse().expect("inviter jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    crate::server::routes::websocket::muc_invites::record_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: decliner_jid.to_bare(),
+            inviter: inviter.clone(),
+        },
+    )
+    .await
+    .expect("seed outstanding invite");
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    inviter.to_string(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-offline-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert!(
+        responses.is_empty(),
+        "queued decline is a silent success for the decliner: {responses:?}"
+    );
+
+    let pending = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&inviter)
+        .await
+        .expect("pending list");
+    assert_eq!(
+        pending.len(),
+        1,
+        "offline inviter must get a durable pending-delivery row"
+    );
+
+    let leftover = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &decliner_jid.to_bare(),
+    )
+    .await
+    .expect("ledger lookup");
+    assert!(leftover.is_empty(), "queued decline consumes the invite");
 }
 
 #[tokio::test]
@@ -5235,4 +5354,482 @@ fn xep_0201_thread_reattach_ignores_unrelated_namespaced_thread_payload() {
         Some("conversation-thread"),
         "RFC 6121 thread must survive serialization despite unrelated <thread> in another ns; rendered: {rendered}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// XEP-0045 §7.8 mediated invitations for regular (non-group-DM) rooms
+// (#1248): previously these stanzas were silently dropped.
+// ---------------------------------------------------------------------------
+
+fn mediated_invite_message(
+    room_jid: &BareJid,
+    invitee: &BareJid,
+    id: &str,
+    reason: Option<&str>,
+) -> xmpp_parsers::message::Message {
+    let mut invite = Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER).attr(
+        minidom::rxml::xml_ncname!("to").to_owned(),
+        invitee.to_string(),
+    );
+    if let Some(reason) = reason {
+        invite = invite.append(
+            Element::builder("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(reason)
+                .build(),
+        );
+    }
+    let x = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(invite.build())
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(x);
+    message
+}
+
+/// §7.8.2: the room adds `from` (the inviter) to the `<invite/>` and
+/// relays it to the invitee from the room's own bare JID; the
+/// outstanding-invite ledger records the relay (#1264).
+#[tokio::test]
+async fn xep0045_mediated_invite_relayed_from_room_to_invitee() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "invite-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let invitee: BareJid = "hecate@example.com".parse().expect("invitee jid");
+    let invitee_jid: FullJid = "hecate@example.com/broom"
+        .parse()
+        .expect("invitee full jid");
+    register_test_native_user(state.as_ref(), "hecate", "cauldron-pass").await;
+
+    let (hecate_tx, mut hecate_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &invitee_jid, hecate_tx).await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+
+    let message = mediated_invite_message(&room_jid, &invitee, "invite-1", Some("dark rites"));
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(
+        responses.is_empty(),
+        "mediated invite relays asynchronously: {responses:?}"
+    );
+
+    let outbound = hecate_rx
+        .try_recv()
+        .expect("invitee receives the mediated invitation");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let mediated = Element::from_str(&xml).expect("mediated invite XML");
+    assert_eq!(mediated.name(), "message");
+    assert_eq!(
+        mediated.attr("from"),
+        Some(room_jid.to_string().as_str()),
+        "§7.8.2: the invitation comes from the room itself"
+    );
+    assert_eq!(mediated.attr("to"), Some(invitee.to_string().as_str()));
+    let invite = mediated
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .and_then(|x| x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER))
+        .expect("invite payload");
+    assert_eq!(
+        invite.attr("from"),
+        Some(alice_jid.to_bare().to_string().as_str()),
+        "§7.8.2: the room MUST stamp the inviter into invite@from"
+    );
+    assert_eq!(
+        invite
+            .get_child("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .map(|reason| reason.text()),
+        Some("dark rites".to_string())
+    );
+
+    let ledger = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &invitee,
+    )
+    .await
+    .expect("ledger lookup");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "relayed invite recorded in the ledger exactly once"
+    );
+    assert_eq!(ledger[0].inviter, alice_jid.to_bare());
+}
+
+/// §7.8: mediated invitations are an occupant action — a non-occupant
+/// sender is refused.
+#[tokio::test]
+async fn xep0045_mediated_invite_from_non_occupant_rejected() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "invite-outsider@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let outsider_session = create_test_session(state.as_ref(), "mallory").await;
+    let outsider: FullJid = "mallory@example.com/web".parse().expect("outsider jid");
+    register_test_native_user(state.as_ref(), "hecate", "cauldron-pass").await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session),
+    )
+    .await;
+
+    let invitee: BareJid = "hecate@example.com".parse().expect("invitee jid");
+    let message = mediated_invite_message(&room_jid, &invitee, "invite-2", None);
+    let responses =
+        handle_message_for_test(state.as_ref(), &outsider, Some(&outsider_session), message).await;
+    assert_eq!(responses.len(), 1, "non-occupant invite: {responses:?}");
+    assert!(
+        responses[0].contains("not-acceptable"),
+        "non-occupant invite must be refused: {responses:?}"
+    );
+}
+
+/// §7.8.2: "If the inviter supplies a non-existent JID, the room
+/// SHOULD return an <item-not-found/> error to the inviter."
+#[tokio::test]
+async fn xep0045_mediated_invite_nonexistent_invitee_item_not_found() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "invite-ghost@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+
+    let ghost: BareJid = "ghost@example.com".parse().expect("ghost jid");
+    let message = mediated_invite_message(&room_jid, &ghost, "invite-3", None);
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert_eq!(responses.len(), 1, "ghost invite: {responses:?}");
+    assert!(
+        responses[0].contains("item-not-found"),
+        "nonexistent invitee must be <item-not-found/>: {responses:?}"
+    );
+}
+
+/// §7.8.2 note: members-only rooms restrict invitations to admins;
+/// a plain member gets <forbidden/>, while an admin/owner invite
+/// auto-adds the invitee to the member list.
+#[tokio::test]
+async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "invite-members-only@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let invitee: BareJid = "hecate@example.com".parse().expect("invitee jid");
+    register_test_native_user(state.as_ref(), "hecate", "cauldron-pass").await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice_jid.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: bob_jid.to_bare(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("grant member");
+    let mut config = room_actor
+        .ask(waddle_xmpp::muc::room_actor::GetConfig)
+        .await
+        .expect("config");
+    config.members_only = true;
+    room_actor
+        .ask(waddle_xmpp::muc::room_actor::UpdateConfig { config })
+        .await
+        .expect("members-only config");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session.clone()),
+    )
+    .await;
+
+    // A plain member's invite is forbidden.
+    let member_invite = mediated_invite_message(&room_jid, &invitee, "invite-4a", None);
+    let responses =
+        handle_message_for_test(state.as_ref(), &bob_jid, Some(&bob_session), member_invite).await;
+    assert_eq!(responses.len(), 1, "member invite: {responses:?}");
+    assert!(
+        responses[0].contains("forbidden"),
+        "member invite in a members-only room must be <forbidden/>: {responses:?}"
+    );
+
+    // The owner's invite succeeds and auto-adds the invitee.
+    let owner_invite = mediated_invite_message(&room_jid, &invitee, "invite-4b", None);
+    let responses = handle_message_for_test(
+        state.as_ref(),
+        &alice_jid,
+        Some(&alice_session),
+        owner_invite,
+    )
+    .await;
+    assert!(
+        responses.is_empty(),
+        "owner invite relays asynchronously: {responses:?}"
+    );
+    let snapshot = room_actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .await
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.room.get_affiliation(&invitee),
+        Affiliation::Member,
+        "§7.8.2: members-only invite must add the invitee to the member list"
+    );
+}
+
+/// #1248: an OFFLINE invitee gets a durable pending-delivery row
+/// instead of a silent drop.
+#[tokio::test]
+async fn xep0045_mediated_invite_offline_invitee_queued_durably() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "invite-offline@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let invitee: BareJid = "hecate@example.com".parse().expect("invitee jid");
+    register_test_native_user(state.as_ref(), "hecate", "cauldron-pass").await;
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+
+    let message = mediated_invite_message(&room_jid, &invitee, "invite-5", None);
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(
+        responses.is_empty(),
+        "offline invite queues durably: {responses:?}"
+    );
+
+    let pending = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&invitee)
+        .await
+        .expect("pending list");
+    assert_eq!(
+        pending.len(),
+        1,
+        "offline invitee must get a durable pending-delivery row"
+    );
+
+    // Anti-spam dedup (#1264 hardening): re-sending the identical
+    // invite while one is outstanding is a silent success and MUST NOT
+    // insert another pending-delivery row — repeated invites cannot
+    // exhaust the invitee's offline quota.
+    let repeat = mediated_invite_message(&room_jid, &invitee, "invite-5b", None);
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), repeat).await;
+    assert!(responses.is_empty(), "duplicate invite: {responses:?}");
+    let pending = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&invitee)
+        .await
+        .expect("pending list after duplicate");
+    assert_eq!(
+        pending.len(),
+        1,
+        "a duplicate invite must not add a second pending-delivery row"
+    );
+}
+
+/// #1264: with invitations from SEVERAL inviters outstanding, the
+/// decline's `to` selects which one is declined — and only that
+/// inviter's row is consumed.
+#[tokio::test]
+async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "decline-multi-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice");
+    let bob: BareJid = "bob@example.com".parse().expect("bob");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+    let alice_full: FullJid = "alice@example.com/web".parse().expect("alice full");
+
+    let (alice_tx, mut alice_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &alice_full, alice_tx).await;
+
+    for inviter in [&alice, &bob] {
+        crate::server::routes::websocket::muc_invites::record_invite(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+                room: room_jid.clone(),
+                invitee: decliner_jid.to_bare(),
+                inviter: inviter.clone(),
+            },
+        )
+        .await
+        .expect("seed invite");
+    }
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    alice.to_string(),
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-multi-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert!(responses.is_empty(), "decline routes: {responses:?}");
+
+    let outbound = alice_rx.try_recv().expect("alice receives her decline");
+    let xml = stanza_to_xml(&outbound.stanza);
+    assert!(xml.contains("decline"), "decline payload delivered: {xml}");
+
+    let remaining = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &decliner_jid.to_bare(),
+    )
+    .await
+    .expect("ledger lookup");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the declined inviter's row is consumed"
+    );
+    assert_eq!(remaining[0].inviter, bob, "bob's invitation stays live");
+}
+
+/// #1264: with several invitations outstanding, a decline that names
+/// none of the inviters is ambiguous — <bad-request/>, nothing
+/// forwarded, nothing consumed.
+#[tokio::test]
+async fn muc_mediated_decline_ambiguous_target_is_bad_request() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "decline-ambiguous-room@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
+
+    for inviter in ["alice@example.com", "bob@example.com"] {
+        crate::server::routes::websocket::muc_invites::record_invite(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+                room: room_jid.clone(),
+                invitee: decliner_jid.to_bare(),
+                inviter: inviter.parse().expect("inviter"),
+            },
+        )
+        .await
+        .expect("seed invite");
+    }
+
+    let decline_payload = Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(
+            Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    "mallory@example.com",
+                )
+                .build(),
+        )
+        .build();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("decline-ambiguous-1".to_string()));
+    message.type_ = XmppMessageType::Normal;
+    message.payloads.push(decline_payload);
+    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    assert_eq!(responses.len(), 1, "ambiguous decline: {responses:?}");
+    assert!(
+        responses[0].contains("bad-request"),
+        "ambiguous decline must be <bad-request/>: {responses:?}"
+    );
+
+    let remaining = crate::server::routes::websocket::muc_invites::list_invites(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &room_jid,
+        &decliner_jid.to_bare(),
+    )
+    .await
+    .expect("ledger lookup");
+    assert_eq!(remaining.len(), 2, "nothing consumed on ambiguity");
 }

@@ -36,9 +36,10 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, GetOrCreateRoom, GetRoom,
-    IsMucJid, ListRooms, ReapSealedRoom, RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor,
-    RoomRegistryError, WireClusteringClaims,
+    CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
+    DestroyRoomReason, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, ReapSealedRoom,
+    RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
+    WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -314,10 +315,18 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        /// Destroy a room, returning whether it existed.
-        destroy_room(room_jid: BareJid) -> bool,
+        /// Destroy a room, returning the typed outcome. The handler
+        /// removes the registry entry and wipes the room's clustering
+        /// durable rows (config/subject/affiliations incl. bans) under
+        /// one claim fence, restoring the entry and reporting
+        /// [`DestroyRoomOutcome::DurableWipeFailed`] if the durable delete
+        /// fails — the destroy is therefore all-or-nothing (#1261, #1276).
+        destroy_room(room_jid: BareJid) -> DestroyRoomOutcome,
         "destroy_room",
-        DestroyRoom { room_jid }
+        DestroyRoom {
+            room_jid,
+            reason: DestroyRoomReason::Destroy
+        }
     );
 
     registry_method!(

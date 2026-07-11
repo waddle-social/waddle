@@ -1299,13 +1299,32 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     let mut destroyed_rooms: std::collections::BTreeSet<BareJid> =
         std::collections::BTreeSet::new();
     for room_jid in &destroy_targets {
-        if let Err(error) = state
+        // `NotRegistered` is fine (dormant room, no live actor);
+        // `DurableWipeFailed` means the registry kept the room because
+        // its fenced clustering wipe failed — the cascade must fail
+        // and roll back, not record the room as destroyed (#1261).
+        let failure = match state
             .room_registry
             .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {
                 room_jid: room_jid.clone(),
+                reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::Destroy,
             })
             .await
         {
+            Ok(
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
+                | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+            ) => None,
+            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+                Some(format!(
+                    "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
+                ))
+            }
+            Err(error) => Some(format!(
+                "cascade destroy failed for room {room_jid}: {error}"
+            )),
+        };
+        if let Some(message) = failure {
             let failed_restores =
                 restore_space_node_items(state, &node_name, &retracted_items, &destroyed_rooms)
                     .await;
@@ -1318,13 +1337,11 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             )
             .await;
             tracing::warn!(
-                error = %error,
                 room = %room_jid,
-                "cascade destroy: room registry ask failed",
+                message = %message,
+                "cascade destroy: room registry destroy did not complete",
             );
-            return Err(internal_err(format!(
-                "cascade destroy failed for room {room_jid}: {error}"
-            )));
+            return Err(internal_err(message));
         }
         destroyed_rooms.insert(room_jid.clone());
     }

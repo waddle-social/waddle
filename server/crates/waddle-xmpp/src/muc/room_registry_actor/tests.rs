@@ -160,13 +160,14 @@ async fn test_destroy_room() {
         .await
         .expect("create");
 
-    let removed: bool = registry
+    let removed: DestroyRoomOutcome = registry
         .ask(DestroyRoom {
             room_jid: jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await
         .expect("destroy");
-    assert!(removed);
+    assert_eq!(removed, DestroyRoomOutcome::Destroyed);
 
     let exists: bool = registry
         .ask(RoomExists { room_jid: jid })
@@ -383,11 +384,14 @@ async fn test_destroy_non_existent_room_returns_false() {
     let registry = spawn_registry().await;
     let jid = test_room_jid("ghost");
 
-    let removed: bool = registry
-        .ask(DestroyRoom { room_jid: jid })
+    let removed: DestroyRoomOutcome = registry
+        .ask(DestroyRoom {
+            room_jid: jid,
+            reason: DestroyRoomReason::Destroy,
+        })
         .await
         .expect("destroy");
-    assert!(!removed);
+    assert_eq!(removed, DestroyRoomOutcome::NotRegistered);
 }
 
 #[tokio::test]
@@ -477,10 +481,11 @@ async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
     let destroyed = registry
         .ask(DestroyRoom {
             room_jid: room_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await
         .expect("destroy poisoned room");
-    assert!(destroyed);
+    assert_eq!(destroyed, DestroyRoomOutcome::Destroyed);
 
     let recreated: ActorRef<RoomActor> = registry
         .ask(GetOrCreateRoom {
@@ -889,6 +894,7 @@ mod ownership_claims_tests {
         registry
             .ask(DestroyRoom {
                 room_jid: jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await
             .expect("destroy");
@@ -901,6 +907,155 @@ mod ownership_claims_tests {
                 .is_none(),
             "DestroyRoom must release the Postgres claim (element 7's \
              'graceful release')"
+        );
+    }
+
+    /// XEP-0045 §10.9 (#1261): an explicit `DestroyRoom` must wipe the
+    /// room's durable rows (config/subject/affiliations incl. bans) so
+    /// the destroyed room cannot resurrect from storage on the next
+    /// join — "the room ... destroys the room, even if it was defined
+    /// as persistent".
+    #[tokio::test]
+    async fn destroy_room_deletes_durable_room_state() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy");
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room");
+
+        registry
+            .ask(DestroyRoom {
+                room_jid: jid.clone(),
+                reason: DestroyRoomReason::Destroy,
+            })
+            .await
+            .expect("destroy");
+
+        assert_eq!(
+            *durable_store.deleted_rooms.lock().expect("lock"),
+            vec![jid.to_string()],
+            "DestroyRoom must delete the durable room state exactly once"
+        );
+    }
+
+    /// A destroy whose durable delete fails must FAIL (returning
+    /// `false` and keeping the room registered) — acknowledging it
+    /// would leave rows behind that resurrect the "destroyed" room on
+    /// the next join.
+    #[tokio::test]
+    async fn destroy_room_fails_and_keeps_room_when_durable_delete_fails() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            fail_deletes: true,
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy-fails");
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room");
+
+        let destroyed = registry
+            .ask(DestroyRoom {
+                room_jid: jid.clone(),
+                reason: DestroyRoomReason::Destroy,
+            })
+            .await
+            .expect("destroy ask");
+        assert_eq!(
+            destroyed,
+            DestroyRoomOutcome::DurableWipeFailed,
+            "a destroy whose durable delete failed must not be acknowledged"
+        );
+        let still_there = registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("get room");
+        assert!(
+            still_there.is_some(),
+            "the room stays registered so the destroy can be retried"
+        );
+    }
+
+    /// The deposed-node eviction path (fenced fan-out check observed a
+    /// steal) evicts the LOCAL actor only — the room lives on under
+    /// its new owner, so `DestroyRoomReason::LocalEviction` MUST NOT
+    /// wipe the durable rows. Without the split, a same-node re-claim
+    /// racing the queued eviction could pass the write fence and wipe
+    /// a legitimately re-claimed room's config/subject/ban list.
+    #[tokio::test]
+    async fn local_eviction_does_not_delete_durable_room_state() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("deposed-evict");
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room");
+
+        registry
+            .ask(DestroyRoom {
+                room_jid: jid.clone(),
+                reason: DestroyRoomReason::LocalEviction,
+            })
+            .await
+            .expect("evict");
+
+        assert!(
+            durable_store.deleted_rooms.lock().expect("lock").is_empty(),
+            "a local eviction must never delete the room's durable state"
         );
     }
 
@@ -1168,6 +1323,8 @@ mod ownership_claims_tests {
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         demote_notifications: Mutex<Vec<(String, String)>>,
+        deleted_rooms: Mutex<Vec<String>>,
+        fail_deletes: bool,
     }
 
     impl MucDurableStore for RecordingDurableStore {
@@ -1202,6 +1359,19 @@ mod ownership_claims_tests {
             _room_jid: &'a BareJid,
             _entry: &'a AffiliationEntry,
         ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+            if self.fail_deletes {
+                return Box::pin(async {
+                    Err(crate::XmppError::internal("delete refused by test store"))
+                });
+            }
+            self.deleted_rooms
+                .lock()
+                .expect("lock")
+                .push(room_jid.to_string());
             Box::pin(async { Ok(()) })
         }
 
@@ -1305,6 +1475,8 @@ mod ownership_claims_tests {
                 )],
             }),
             demote_notifications: Mutex::new(Vec::new()),
+            deleted_rooms: Mutex::new(Vec::new()),
+            fail_deletes: false,
         });
         registry
             .ask(WireClusteringClaims {

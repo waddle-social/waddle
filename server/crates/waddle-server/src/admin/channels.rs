@@ -31,7 +31,7 @@ use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
-    CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, ListRooms,
+    CreateRoom, DestroyRoom, DestroyRoomReason, GetOrCreateRoom, GetRoom, ListRooms,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
@@ -1875,6 +1875,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
             .room_registry
             .ask(DestroyRoom {
                 room_jid: channel_jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await;
         return Err(error);
@@ -1902,6 +1903,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                     .room_registry
                     .ask(DestroyRoom {
                         room_jid: channel_jid.clone(),
+                        reason: DestroyRoomReason::Destroy,
                     })
                     .await;
                 return Err(error);
@@ -1946,6 +1948,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                             .room_registry
                             .ask(DestroyRoom {
                                 room_jid: channel_jid.clone(),
+                                reason: DestroyRoomReason::Destroy,
                             })
                             .await;
                     }
@@ -2017,6 +2020,7 @@ async fn run_group_dm_create(
             .room_registry
             .ask(DestroyRoom {
                 room_jid: room_jid.clone(),
+                reason: DestroyRoomReason::Destroy,
             })
             .await;
         return Err(error);
@@ -2766,6 +2770,7 @@ async fn rollback_group_dm_create(
         .room_registry
         .ask(DestroyRoom {
             room_jid: room_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
         .await;
 }
@@ -2916,6 +2921,18 @@ pub(crate) async fn rollback_group_dm_member_tuple(
     member_jid: &BareJid,
 ) {
     let _ = delete_group_dm_member_tuple(state, group_dm_id, member_jid).await;
+}
+
+/// Fallible group-DM member-tuple removal for callers that must
+/// propagate the failure — the XEP-0045 §10.9 destroy wipe (#1261)
+/// refuses to acknowledge a destruction whose durable authorization
+/// survived.
+pub(crate) async fn remove_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
+    delete_group_dm_member_tuple(state, group_dm_id, member_jid).await
 }
 
 pub(crate) async fn validate_group_dm_invitee(
@@ -3353,39 +3370,55 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         }
     }
 
-    match state
+    // `NotRegistered` is fine (a dormant channel has no live actor);
+    // `DurableWipeFailed` means the registry deliberately kept the room
+    // because its fenced clustering wipe failed — the deletion must
+    // fail and roll back rather than record a destruction that will
+    // resurrect (#1261).
+    let destroy_result = state
         .room_registry
         .ask(DestroyRoom {
             room_jid: args.channel_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
         })
-        .await
-    {
-        Ok(_removed) => {}
-        Err(error) => {
-            restore_removed_channel_bookmarks(
-                state,
-                &removed_bookmarks,
-                &item_id,
-                channel_id.as_deref(),
-            )
-            .await;
-            if let (Some(channel_id), Some(snapshot)) =
-                (channel_id.as_deref(), catalog_snapshot.as_ref())
-            {
-                restore_channel_catalog_snapshot(state, channel_id, snapshot.as_ref()).await;
-            }
-            if let Some(link) = link.as_ref() {
-                if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
-                    tracing::warn!(
-                        error = %rollback_error,
-                        channel = %args.channel_jid,
-                        space = %link.space_jid,
-                        "channels:delete rollback failed to restore channel-space link",
-                    );
-                }
-            }
-            return Err(send_err("room_registry ask DestroyRoom")(error));
+        .await;
+    let failure = match destroy_result {
+        Ok(
+            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
+            | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+        ) => None,
+        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+            Some(internal_err(format!(
+                "room destroy refused for {}: durable room-state wipe failed",
+                args.channel_jid
+            )))
         }
+        Err(error) => Some(send_err("room_registry ask DestroyRoom")(error)),
+    };
+    if let Some(error) = failure {
+        restore_removed_channel_bookmarks(
+            state,
+            &removed_bookmarks,
+            &item_id,
+            channel_id.as_deref(),
+        )
+        .await;
+        if let (Some(channel_id), Some(snapshot)) =
+            (channel_id.as_deref(), catalog_snapshot.as_ref())
+        {
+            restore_channel_catalog_snapshot(state, channel_id, snapshot.as_ref()).await;
+        }
+        if let Some(link) = link.as_ref() {
+            if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
+                tracing::warn!(
+                    error = %rollback_error,
+                    channel = %args.channel_jid,
+                    space = %link.space_jid,
+                    "channels:delete rollback failed to restore channel-space link",
+                );
+            }
+        }
+        return Err(error);
     }
     Ok(())
 }

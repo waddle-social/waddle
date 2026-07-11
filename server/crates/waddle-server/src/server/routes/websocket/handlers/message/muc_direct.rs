@@ -333,6 +333,25 @@ async fn deliver_pm_to_session(
     .await
 }
 
+/// XEP-0045 §7.8.2 mediated decline, hardened per #1264:
+///
+/// - the decline is only forwarded when the outstanding-invite ledger
+///   holds a row for `(room, decliner)` — without that check any
+///   authenticated user could make the room deliver a "declined your
+///   invitation" message to an arbitrary user;
+/// - with several inviters outstanding, the decline's `to` attribute
+///   selects WHICH invitation is declined, but the recipient is always
+///   a ledger-recorded inviter — never an arbitrary client-supplied
+///   target;
+/// - the row is claimed atomically BEFORE delivery (concurrent
+///   declines from two devices forward exactly one) and re-recorded if
+///   neither a live socket nor the durable queue accepted the decline;
+/// - delivery is durable: an offline inviter gets a pending-delivery
+///   row instead of a silent drop.
+///
+/// The room actor is deliberately not consulted: the ledger outlives
+/// room-actor dormancy eviction, so a legitimate decline still reaches
+/// the inviter after the room actor was evicted.
 async fn handle_muc_mediated_decline(
     incoming: &Message,
     state: &WebSocketState,
@@ -345,29 +364,125 @@ async fn handle_muc_mediated_decline(
     if room_jid.domain().as_str() != state.deps.service_domains.muc {
         return None;
     }
-    let Some(room_actor) = state
-        .deps
-        .protocol
-        .room_registry
-        .ask(GetRoom {
-            room_jid: room_jid.clone(),
-        })
-        .await
-        .ok()
-        .flatten()
-    else {
+    let inbound_decline = mediated_decline(incoming)?;
+
+    let decliner = bound_jid.to_bare();
+    let db_actor = state.deps.app_state.db_pool.global_actor().clone();
+    let outstanding = match crate::server::routes::websocket::muc_invites::list_invites(
+        db_actor.clone(),
+        &room_jid,
+        &decliner,
+    )
+    .await
+    {
+        Ok(outstanding) => outstanding,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                decliner = %decliner,
+                error = %error,
+                "Failed to look up outstanding invites for mediated decline"
+            );
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                ErrorType::Wait,
+                DefinedCondition::InternalServerError,
+                "Internal server error.",
+            )]);
+        }
+    };
+    if outstanding.is_empty() {
+        // #1264: no outstanding invitation — refuse instead of
+        // relaying a fabricated decline.
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ErrorType::Cancel,
-            DefinedCondition::ItemNotFound,
-            "Requested room not found.",
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "You have no outstanding invitation to this room.",
         )]);
+    }
+    // Select which invitation this decline answers. The client's `to`
+    // must name one of the recorded inviters; with exactly one
+    // outstanding invitation a missing/mismatched `to` is forgiven
+    // (there is nothing to disambiguate).
+    let declined_to = inbound_decline
+        .attr("to")
+        .and_then(|to| to.parse::<jid::Jid>().ok())
+        .map(|jid| jid.to_bare());
+    let invite = match declined_to
+        .as_ref()
+        .and_then(|to| outstanding.iter().find(|invite| invite.inviter == *to))
+    {
+        Some(invite) => invite.clone(),
+        None if outstanding.len() == 1 => outstanding[0].clone(),
+        None => {
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                ErrorType::Modify,
+                DefinedCondition::BadRequest,
+                "Several invitations are outstanding; the decline must name its inviter.",
+            )]);
+        }
     };
-    let Ok(snapshot) = room_actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+
+    // Claim the row atomically FIRST: of N concurrent declines for the
+    // same invitation, exactly one wins the delete and forwards.
+    match crate::server::routes::websocket::muc_invites::claim_invite(db_actor.clone(), &invite)
         .await
-    else {
+    {
+        Ok(true) => {}
+        // Another session already declined this invitation — silent
+        // success, no duplicate decline for the inviter.
+        Ok(false) => return Some(Vec::new()),
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                decliner = %decliner,
+                error = %error,
+                "Failed to claim outstanding invite for mediated decline"
+            );
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                ErrorType::Wait,
+                DefinedCondition::InternalServerError,
+                "Internal server error.",
+            )]);
+        }
+    }
+
+    let x = build_mediated_decline_payload(bound_jid, inbound_decline);
+    let mut mediated = Message::new(Some(jid::Jid::from(invite.inviter.clone())));
+    mediated.id = incoming.id.clone();
+    mediated.from = Some(jid::Jid::from(room_jid.clone()));
+    mediated.type_ = MessageType::Normal;
+    mediated.payloads.push(x);
+    if let Err(error) =
+        super::muc_invite::deliver_muc_user_message(state, &invite.inviter, mediated).await
+    {
+        // Neither a live socket nor the durable queue took the decline
+        // — put the claimed row back so the decliner can retry, and
+        // say so instead of losing the decline silently.
+        tracing::warn!(
+            room = %room_jid,
+            decliner = %decliner,
+            inviter = %invite.inviter,
+            error = %error,
+            "Mediated decline could not be delivered or queued; restoring ledger row"
+        );
+        if let Err(error) =
+            crate::server::routes::websocket::muc_invites::record_invite(db_actor, &invite).await
+        {
+            tracing::warn!(
+                room = %room_jid,
+                decliner = %decliner,
+                error = %error,
+                "Failed to restore claimed invite after undeliverable decline"
+            );
+        }
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
@@ -375,68 +490,9 @@ async fn handle_muc_mediated_decline(
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
-    };
-    let inbound_decline = mediated_decline(incoming)?;
-    let Some(to_attr) = inbound_decline.attr("to") else {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            "Mediated decline missing target.",
-        )]);
-    };
-    let Ok(to) = to_attr.parse::<jid::Jid>() else {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            "Mediated decline target is not a valid JID.",
-        )]);
-    };
-    let recipients = decline_recipients(&room_jid, &snapshot.room, &to);
-
-    let x = build_mediated_decline_payload(bound_jid, inbound_decline);
-    for recipient in recipients {
-        let mut mediated = Message::new(Some(jid::Jid::from(recipient.clone())));
-        mediated.id = incoming.id.clone();
-        mediated.from = Some(jid::Jid::from(room_jid.clone()));
-        mediated.type_ = MessageType::Normal;
-        mediated.payloads.push(x.clone());
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&recipient, Stanza::Message(mediated));
     }
 
     Some(Vec::new())
-}
-
-fn decline_recipients(
-    room_jid: &jid::BareJid,
-    room: &waddle_xmpp::muc::MucRoom,
-    jid: &jid::Jid,
-) -> Vec<jid::FullJid> {
-    if let Ok(full) = jid.clone().try_into_full() {
-        if full.to_bare() == *room_jid {
-            return room.get_occupant_sessions(full.resource().as_ref());
-        }
-        if room.find_nick_by_real_jid(&full).is_some() {
-            return vec![full];
-        }
-        return Vec::new();
-    }
-    let bare = jid.to_bare();
-    if bare == *room_jid {
-        return Vec::new();
-    }
-    room.occupants
-        .values()
-        .filter(|occupant| occupant.real_jid.to_bare() == bare)
-        .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
-        .collect()
 }
 
 fn mediated_decline(message: &Message) -> Option<&minidom::Element> {

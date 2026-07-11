@@ -67,7 +67,7 @@ fn can_change_affiliation(
     }
 }
 
-async fn persist_managed_channel_affiliation(
+pub(in crate::server::routes::websocket::handlers) async fn persist_managed_channel_affiliation(
     state: &WebSocketState,
     channel_id: &str,
     jid: &BareJid,
@@ -285,7 +285,7 @@ pub(super) async fn handle_muc_admin_iq(
         ))];
     }
     let room_jid = query.room_jid.clone();
-    let items = query.items;
+    let items = query.items.clone();
     if has_mixed_admin_set_semantics(&items) {
         return vec![build_iq_error_xml_typed(
             iq.id(),
@@ -515,10 +515,13 @@ pub(super) async fn handle_muc_admin_iq(
                 &actor_previous_affiliations,
             )
             .await;
-            return vec![build_iq_error_xml_typed(
+            // XEP-0045 §9.2: the denial returns <not-allowed/> "along
+            // with the offending item(s)".
+            return vec![build_iq_error_xml_with_payload(
                 iq.id(),
                 response_from,
                 response_to,
+                waddle_xmpp::muc::admin::build_admin_items_query(&query.items),
                 not_allowed_iq_error("Admins cannot change an owner's affiliation."),
             )];
         }
@@ -534,10 +537,13 @@ pub(super) async fn handle_muc_admin_iq(
                 &actor_previous_affiliations,
             )
             .await;
-            return vec![build_iq_error_xml_typed(
+            // XEP-0045 §8.4/§9.7: the denial returns <not-allowed/>
+            // "along with the offending item(s)".
+            return vec![build_iq_error_xml_with_payload(
                 iq.id(),
                 response_from,
                 response_to,
+                waddle_xmpp::muc::admin::build_admin_items_query(&query.items),
                 not_allowed_iq_error("Admins and moderators cannot change an owner or admin role."),
             )];
         }

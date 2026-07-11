@@ -5,9 +5,7 @@ use waddle_xmpp::{
     muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
-    pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
     protocol::handlers::errors::message_error_reply,
-    Stanza,
 };
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -29,7 +27,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return None;
     }
 
-    let (invitee, inbound_invite) = mediated_invitee(incoming)?;
+    let (invitee, inbound_invite) = super::muc_invite::mediated_invitee(incoming)?;
     let channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid)?;
     let channel = crate::server::xmpp_state::get_xmpp_channel(
         state.deps.app_state.db_pool.global_actor().clone(),
@@ -231,13 +229,71 @@ pub(super) async fn handle_group_dm_mediated_invite(
     .await
     .is_err()
     {
-        rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee).await;
+        rollback_group_dm_invite_grant(
+            state,
+            room_actor,
+            &channel_id,
+            &room_jid,
+            &invitee,
+            &bound_jid.to_bare(),
+        )
+        .await;
         return Some(vec![error_reply(
             incoming,
             bound_jid,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
+    }
+
+    // #1264: record the outstanding invite so a later XEP-0045 §7.8.2
+    // `<decline/>` from this invitee verifies against the ledger and
+    // routes to this inviter.
+    match crate::server::routes::websocket::muc_invites::record_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: invitee.clone(),
+            inviter: bound_jid.to_bare(),
+        },
+    )
+    .await
+    {
+        Ok(crate::server::routes::websocket::muc_invites::RecordOutcome::New) => {}
+        // #1276 Greptile P1 "Duplicate Invites Redeliver": an identical
+        // unexpired re-invite is a silent success with NO second
+        // delivery. The member tuple was already granted by the first
+        // invite (this call's grant is idempotent), so re-sending would
+        // only flood the invitee or exhaust their offline
+        // pending-delivery quota. Matches the sibling `muc_invite`
+        // mediated-invite flow; no rollback — the desired end state
+        // (member + outstanding invite) already holds.
+        Ok(crate::server::routes::websocket::muc_invites::RecordOutcome::AlreadyOutstanding) => {
+            return Some(vec![]);
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                invitee = %invitee,
+                error = %error,
+                "Failed to record outstanding group-DM invite; rolling back grant"
+            );
+            rollback_group_dm_invite_grant(
+                state,
+                room_actor,
+                &channel_id,
+                &room_jid,
+                &invitee,
+                &bound_jid.to_bare(),
+            )
+            .await;
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                GroupDmInviteError::InternalServerError,
+                "Internal server error.",
+            )]);
+        }
     }
 
     let mut invite = incoming.clone();
@@ -249,75 +305,42 @@ pub(super) async fn handle_group_dm_mediated_invite(
         &inbound_invite,
         access,
     )];
-    let resources =
-        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &invitee)
-            .await;
-    if resources.is_empty() {
-        if let Err(error) = queue_offline_group_dm_invite(state, &invitee, &invite).await {
-            warn!(
-                invitee = %invitee,
-                error = %error,
-                "Failed to queue offline group-DM invite; rolling back member grant"
-            );
-            rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee)
-                .await;
-            let error_kind = match error {
-                OfflineGroupDmInviteError::QuotaExceeded => GroupDmInviteError::ServiceUnavailable,
-                OfflineGroupDmInviteError::Storage(_) => GroupDmInviteError::InternalServerError,
-            };
-            return Some(vec![error_reply(
-                incoming,
-                bound_jid,
-                error_kind,
-                "Internal server error.",
-            )]);
-        }
-    } else {
-        for resource in resources {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(&resource, Stanza::Message(invite.clone()))
-                .await;
-        }
+    // Shared delivery path (#1248/#1264): sends to every connected
+    // resource and falls back to the durable pending-delivery queue
+    // when the invitee is offline OR every listed session refused the
+    // write — a stale resource list must not lose the invitation.
+    if let Err(error) = super::muc_invite::deliver_muc_user_message(state, &invitee, invite).await {
+        warn!(
+            invitee = %invitee,
+            error = %error,
+            "Group-DM invite could not be delivered or queued; rolling back member grant"
+        );
+        let error_kind = match error {
+            super::muc_invite::MucUserDeliveryError::QuotaExceeded => {
+                GroupDmInviteError::ServiceUnavailable
+            }
+            super::muc_invite::MucUserDeliveryError::Storage(_) => {
+                GroupDmInviteError::InternalServerError
+            }
+        };
+        rollback_group_dm_invite_grant(
+            state,
+            room_actor,
+            &channel_id,
+            &room_jid,
+            &invitee,
+            &bound_jid.to_bare(),
+        )
+        .await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            error_kind,
+            "Internal server error.",
+        )]);
     }
 
     Some(vec![])
-}
-
-#[derive(Debug, thiserror::Error)]
-enum OfflineGroupDmInviteError {
-    #[error("pending_delivery quota exceeded")]
-    QuotaExceeded,
-    #[error("{0}")]
-    Storage(String),
-}
-
-async fn queue_offline_group_dm_invite(
-    state: &WebSocketState,
-    invitee: &jid::BareJid,
-    invite: &xmpp_parsers::message::Message,
-) -> Result<(), OfflineGroupDmInviteError> {
-    let row = PendingRow {
-        id: PendingRowId::fresh(),
-        recipient: invitee.clone(),
-        original_receipt_at: chrono::Utc::now(),
-        payload: PendingPayload::Transient(Box::new(invite.clone())),
-        flushed_in_session: None,
-        outbound_sequence: None,
-    };
-    match state
-        .deps
-        .protocol
-        .pending_delivery_storage
-        .insert(row)
-        .await
-    {
-        Ok(InsertOutcome::Inserted) => Ok(()),
-        Ok(InsertOutcome::QuotaExceeded) => Err(OfflineGroupDmInviteError::QuotaExceeded),
-        Err(error) => Err(OfflineGroupDmInviteError::Storage(error.to_string())),
-    }
 }
 
 /// Undo a partially granted group-DM invite.
@@ -337,6 +360,7 @@ async fn rollback_group_dm_invite_grant(
     channel_id: &str,
     room_jid: &jid::BareJid,
     invitee: &jid::BareJid,
+    inviter: &jid::BareJid,
 ) {
     crate::admin::channels::rollback_group_dm_member_tuple(
         &state.deps.app_state,
@@ -345,6 +369,19 @@ async fn rollback_group_dm_invite_grant(
     )
     .await;
     let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
+    // #1264: a rolled-back invite is not declinable — drop exactly the
+    // ledger row this flow recorded (harmless no-op on paths that
+    // failed before recording it); another inviter's outstanding
+    // invitation is left alone.
+    let _ = crate::server::routes::websocket::muc_invites::claim_invite(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::routes::websocket::muc_invites::OutstandingInvite {
+            room: room_jid.clone(),
+            invitee: invitee.clone(),
+            inviter: inviter.clone(),
+        },
+    )
+    .await;
     let _ =
         crate::admin::channels::retract_group_dm_bookmark(&state.deps.app_state, invitee, room_jid)
             .await;
@@ -453,8 +490,16 @@ mod tests {
             "precondition: the granted invitee hydrates into the mirror"
         );
 
-        rollback_group_dm_invite_grant(&state, room_actor.clone(), channel_id, &room_jid, &invitee)
-            .await;
+        let inviter: jid::BareJid = "inviter@example.com".parse().expect("inviter jid");
+        rollback_group_dm_invite_grant(
+            &state,
+            room_actor.clone(),
+            channel_id,
+            &room_jid,
+            &invitee,
+            &inviter,
+        )
+        .await;
 
         assert!(
             !durable_recipients(&room_actor).await.contains(&invitee),
@@ -508,18 +553,6 @@ async fn delete_group_dm_archive_boundary(
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-fn mediated_invitee(
-    message: &xmpp_parsers::message::Message,
-) -> Option<(jid::BareJid, minidom::Element)> {
-    let x = message
-        .payloads
-        .iter()
-        .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
-    let invite = x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)?;
-    let to = invite.attr("to")?.parse::<jid::BareJid>().ok()?;
-    Some((to, invite.clone()))
 }
 
 fn build_server_mediated_invite_payload(

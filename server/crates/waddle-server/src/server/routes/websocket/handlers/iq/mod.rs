@@ -96,6 +96,10 @@ pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
 mod mentions_permissions;
 mod muc_admin;
+// XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
+// `handlers::message::muc_invite` persists the granted membership with
+// the exact same tuple write the admin affiliation path uses.
+pub(in crate::server::routes::websocket::handlers) use muc_admin::persist_managed_channel_affiliation;
 mod muc_occupant_disco;
 mod muc_owner_config;
 mod muc_owner_moderation;
@@ -198,11 +202,11 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 
 // `build_iq_error_xml_typed` is re-exported via `pub(super) use` so
 // submodules wildcard-importing this module's namespace see it.
-pub(super) use super::super::build_iq_error_xml_typed;
+pub(super) use super::super::{build_iq_error_xml_typed, build_iq_error_xml_with_payload};
 
 use super::super::{
-    build_iq_result_xml, destroy_room_actor, element_to_xml, get_room_actor, iq_to_xml,
-    is_muc_room_jid, stanza_to_xml, WebSocketState,
+    build_iq_result_xml, element_to_xml, get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml,
+    WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, resolve_muc_room_archive_access,

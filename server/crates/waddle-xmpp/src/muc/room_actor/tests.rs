@@ -4226,6 +4226,226 @@ async fn sealed_room_reports_dormant_so_the_sweep_converges() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// XEP-0045 §8.2/§8.4/§9.7 role-change target protections (#1262).
+//
+// The target-protection matrix binds EVERY actor, the room owner
+// included: §8.4 "a service MUST NOT allow the voice privileges of an
+// admin or owner to be removed by anyone"; §9.7 moderator status
+// "cannot be revoked from a room owner or room admin"; §8.2 "a user
+// cannot be kicked by a moderator with a lower affiliation".
+// ---------------------------------------------------------------------------
+
+async fn join_with(actor: &ActorRef<RoomActor>, user: &str, affiliation: Affiliation, role: Role) {
+    actor
+        .ask(Join {
+            nick: user.to_string(),
+            real_jid: test_full_jid(user),
+            role,
+            affiliation,
+        })
+        .await
+        .expect("join");
+}
+
+fn role_item(nick: &str, role: Role) -> AdminItem {
+    AdminItem {
+        jid: None,
+        nick: Some(nick.to_string()),
+        affiliation: None,
+        role: Some(role),
+        reason: None,
+    }
+}
+
+async fn role_of(actor: &ActorRef<RoomActor>, nick: &str) -> Role {
+    actor
+        .ask(GetOccupantByNick {
+            nick: nick.to_string(),
+        })
+        .await
+        .expect("occupant ask")
+        .expect("occupant exists")
+        .role
+}
+
+/// §8.4: even the room owner must not remove an admin's voice
+/// (role → visitor is a spec-impossible state for an admin).
+#[tokio::test]
+async fn xep0045_owner_cannot_revoke_voice_from_admin() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "admin", Affiliation::Admin, Role::Moderator).await;
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![role_item("admin", Role::Visitor)],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
+    ));
+    assert_eq!(role_of(&actor, "admin").await, Role::Moderator);
+}
+
+/// §8.4: an owner's voice is equally protected against another owner.
+#[tokio::test]
+async fn xep0045_owner_cannot_revoke_voice_from_owner() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "cohost", Affiliation::Owner, Role::Moderator).await;
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![role_item("cohost", Role::Visitor)],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
+    ));
+    assert_eq!(role_of(&actor, "cohost").await, Role::Moderator);
+}
+
+/// §9.7: even the room owner must not revoke moderator status from an
+/// admin (role → participant).
+#[tokio::test]
+async fn xep0045_owner_cannot_revoke_moderator_from_admin() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "admin", Affiliation::Admin, Role::Moderator).await;
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![role_item("admin", Role::Participant)],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
+    ));
+    assert_eq!(role_of(&actor, "admin").await, Role::Moderator);
+}
+
+/// §8.2 only bars kicks by actors with a LOWER affiliation: the owner
+/// may still kick an admin out of the room (ejection is not a voice or
+/// moderator-status revocation).
+#[tokio::test]
+async fn xep0045_owner_can_kick_admin() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "admin", Affiliation::Admin, Role::Moderator).await;
+
+    let applied = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![role_item("admin", Role::None)],
+        })
+        .await
+        .expect("owner kick of an admin is allowed");
+
+    assert!(
+        applied
+            .removed_by_moderation
+            .contains(&test_full_jid("admin")),
+        "kicked admin session must be marked removed-by-moderation"
+    );
+    let occupant = actor
+        .ask(GetOccupantByNick {
+            nick: "admin".to_string(),
+        })
+        .await
+        .expect("occupant ask");
+    assert!(occupant.is_none(), "kicked admin must leave the room");
+}
+
+/// §8.2: an admin (higher target affiliation) must not kick an owner.
+#[tokio::test]
+async fn xep0045_admin_cannot_kick_owner() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "owner", Affiliation::Owner, Role::Moderator).await;
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("admin"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![role_item("owner", Role::None)],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
+    ));
+    assert_eq!(role_of(&actor, "owner").await, Role::Moderator);
+}
+
+/// §8.4: a member-affiliated moderator must not revoke voice from a
+/// target whose affiliation is at or above their own level.
+#[tokio::test]
+async fn xep0045_member_moderator_cannot_revoke_voice_from_equal_affiliation() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "target", Affiliation::Member, Role::Participant).await;
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("mod"),
+            sender_affiliation: Affiliation::Member,
+            sender_role: Role::Moderator,
+            items: vec![role_item("target", Role::Visitor)],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
+    ));
+    assert_eq!(role_of(&actor, "target").await, Role::Participant);
+}
+
+/// Sanity: the owner may still revoke voice from a plain member —
+/// target protection only shields admins/owners (and same-or-higher
+/// affiliations from plain moderators).
+#[tokio::test]
+async fn xep0045_owner_can_revoke_voice_from_member() {
+    let actor = spawn_room_actor().await;
+    join_with(&actor, "member", Affiliation::Member, Role::Participant).await;
+
+    actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![role_item("member", Role::Visitor)],
+        })
+        .await
+        .expect("owner devoices a plain member");
+
+    assert_eq!(role_of(&actor, "member").await, Role::Visitor);
+}
+
 /// #1265 item 1 / XEP-0045 §7.2.8: a banned user joining a
 /// members-only room is refused as `Banned` (→ <forbidden/>), never as
 /// `MembersOnly` (→ <registration-required/>, which would invite the
