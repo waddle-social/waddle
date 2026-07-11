@@ -1127,7 +1127,7 @@ describe("client send readiness", () => {
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => undefined);
     client.catchup.recordDmSeen(
-      occupant,
+      " Room@Rooms.Waddle.Example/alice ",
       "2026-07-11T17:00:00.000Z",
       undefined,
       undefined,

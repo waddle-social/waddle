@@ -50,6 +50,28 @@ describe("ReconnectCatchup", () => {
     expect(c.getDmLastSeen("bob@example.com")).toBe("2024-01-02T00:00:00.000Z");
   });
 
+  test("MUC occupant scope uses a canonical full-JID key", () => {
+    const c = new ReconnectCatchup();
+    c.recordDmSeen(
+      " Room@Rooms.Example/Alice ",
+      "2024-01-02T00:00:00Z",
+      "mam-occupant-1",
+      [],
+      "muc-occupant",
+    );
+
+    expect(c.getDmScope("room@rooms.example/Alice")).toBe("muc-occupant");
+    expect(c.getDmLastSeen("ROOM@ROOMS.EXAMPLE/Alice")).toBe("2024-01-02T00:00:00.000Z");
+    expect(c.onSessionStarted()).toEqual([]);
+    expect(c.onSessionStarted()).toEqual([{
+      kind: "dm",
+      key: "room@rooms.example/Alice",
+      scope: "muc-occupant",
+      after: "mam-occupant-1",
+      since: "2024-01-02T00:00:00.000Z",
+    }]);
+  });
+
   test("subsequent onSessionStarted falls back to timestamp when no archive id is known", () => {
     const c = new ReconnectCatchup();
     c.recordDmSeen("bob@example.com", "2024-01-01T00:00:00Z");

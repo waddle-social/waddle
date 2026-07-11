@@ -1,4 +1,5 @@
 import { compareTimelineTimestamps } from "@/lib/timeline-timestamps";
+import { bareJidKey, fullJidIdentityKey } from "@/lib/xmpp/jid";
 
 import {
   nullResumePersistence,
@@ -45,6 +46,12 @@ type SeenCursor = {
 
 export type DmConversationScope = "account" | "muc-occupant";
 
+function dmCursorKey(peerJid: string, scope: DmConversationScope): string {
+  return scope === "muc-occupant"
+    ? fullJidIdentityKey(peerJid)
+    : bareJidKey(peerJid);
+}
+
 export class ReconnectCatchup {
   private readonly dmLastSeen = new Map<string, SeenCursor>();
   private readonly roomLastSeen = new Map<string, SeenCursor>();
@@ -62,7 +69,10 @@ export class ReconnectCatchup {
   private hydrate(): void {
     const snapshot = this.persistence.loadCatchup();
     if (!snapshot) return;
-    for (const [key, cursor] of snapshot.dmLastSeen) this.dmLastSeen.set(key, { ...cursor });
+    for (const [key, cursor] of snapshot.dmLastSeen) {
+      const scope = cursor.scope ?? "account";
+      this.dmLastSeen.set(dmCursorKey(key, scope), { ...cursor, scope });
+    }
     for (const [key, cursor] of snapshot.roomLastSeen) this.roomLastSeen.set(key, { ...cursor });
     // A hydrated instance is by definition *not* a first-ever login —
     // it represents a prior tab session that left cursors behind. The
@@ -101,7 +111,8 @@ export class ReconnectCatchup {
 
   private absorbRemoteSnapshot(remote: PersistedReconnectCatchup): void {
     for (const [key, cursor] of remote.dmLastSeen) {
-      advance(this.dmLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds, cursor.scope);
+      const scope = cursor.scope ?? "account";
+      advance(this.dmLastSeen, dmCursorKey(key, scope), cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds, scope);
     }
     for (const [key, cursor] of remote.roomLastSeen) {
       advance(this.roomLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds);
@@ -114,7 +125,7 @@ export class ReconnectCatchup {
    * next catch-up can't re-pull already-applied messages.
    */
   recordDmSeen(peerBareJid: string, timestamp: string, archiveId?: string, seenIds?: ReadonlyArray<string>, scope: DmConversationScope = "account"): void {
-    advance(this.dmLastSeen, peerBareJid, timestamp, archiveId, seenIds, undefined, undefined, scope);
+    advance(this.dmLastSeen, dmCursorKey(peerBareJid, scope), timestamp, archiveId, seenIds, undefined, undefined, scope);
     this.schedulePersist();
   }
 
@@ -125,11 +136,15 @@ export class ReconnectCatchup {
   }
 
   getDmLastSeen(peerBareJid: string): string | undefined {
-    return this.dmLastSeen.get(peerBareJid)?.timestamp;
+    const occupantCursor = this.dmLastSeen.get(dmCursorKey(peerBareJid, "muc-occupant"));
+    if (occupantCursor?.scope === "muc-occupant") return occupantCursor.timestamp;
+    return this.dmLastSeen.get(dmCursorKey(peerBareJid, "account"))?.timestamp;
   }
 
   getDmScope(peerJid: string): DmConversationScope | undefined {
-    return this.dmLastSeen.get(peerJid)?.scope;
+    const occupantCursor = this.dmLastSeen.get(dmCursorKey(peerJid, "muc-occupant"));
+    if (occupantCursor?.scope === "muc-occupant") return occupantCursor.scope;
+    return this.dmLastSeen.get(dmCursorKey(peerJid, "account"))?.scope;
   }
 
   getRoomLastSeen(roomBareJid: string): string | undefined {
