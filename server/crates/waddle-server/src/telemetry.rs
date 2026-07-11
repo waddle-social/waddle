@@ -32,13 +32,35 @@ fn build_resource() -> Resource {
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "waddle-server".to_string());
     let service_version = std::env::var("OTEL_SERVICE_VERSION")
         .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+    let service_instance_id = resolve_service_instance_id(
+        std::env::var("OTEL_SERVICE_INSTANCE_ID").ok(),
+        std::env::var("HOSTNAME").ok(),
+    );
 
     Resource::builder()
         .with_attributes([
             KeyValue::new("service.name", service_name),
             KeyValue::new("service.version", service_version),
+            KeyValue::new("service.instance.id", service_instance_id),
         ])
         .build()
+}
+
+/// Resolve the `service.instance.id` resource attribute.
+///
+/// With multiple replicas, OTLP-pushed metrics that share an identical
+/// resource collapse into one clobbered series downstream, so every
+/// process needs a distinct, stable-for-its-lifetime identity.
+/// Precedence: explicit `OTEL_SERVICE_INSTANCE_ID` override, then
+/// `HOSTNAME` (the kubelet sets it to the pod name in every pod), then
+/// a pid-suffixed fallback for local runs. Blank values are skipped.
+fn resolve_service_instance_id(explicit: Option<String>, hostname: Option<String>) -> String {
+    [explicit, hostname]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("waddle-server-{}", std::process::id()))
 }
 
 fn default_filter() -> EnvFilter {
@@ -122,6 +144,8 @@ fn build_log_filter() -> EnvFilter {
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint (default: http://localhost:4317)
 /// - `OTEL_SERVICE_NAME`: Service name (default: waddle-server)
 /// - `OTEL_SERVICE_VERSION`: Service version (default: crate version)
+/// - `OTEL_SERVICE_INSTANCE_ID`: Per-replica instance id (default: `HOSTNAME`,
+///   i.e. the pod name in Kubernetes, then a pid-suffixed fallback)
 /// - `RUST_LOG`: Log filter (default: info)
 ///
 /// # Example
@@ -301,10 +325,53 @@ pub fn shutdown() {
 }
 #[cfg(test)]
 mod tests {
+    use opentelemetry::Key;
+
     #[test]
     fn test_build_resource() {
         // Test that resource building doesn't panic
         let _resource = super::build_resource();
+    }
+
+    #[test]
+    fn build_resource_includes_nonempty_service_instance_id() {
+        let resource = super::build_resource();
+        let value = resource
+            .get(&Key::from_static_str("service.instance.id"))
+            .expect("resource must carry service.instance.id");
+        assert!(
+            !value.as_str().trim().is_empty(),
+            "service.instance.id must be non-empty"
+        );
+    }
+
+    #[test]
+    fn instance_id_prefers_explicit_override() {
+        let id = super::resolve_service_instance_id(
+            Some("explicit-id".to_string()),
+            Some("pod-name".to_string()),
+        );
+        assert_eq!(id, "explicit-id");
+    }
+
+    #[test]
+    fn instance_id_falls_back_to_hostname() {
+        let id =
+            super::resolve_service_instance_id(None, Some("waddle-server-abc-xyz".to_string()));
+        assert_eq!(id, "waddle-server-abc-xyz");
+    }
+
+    #[test]
+    fn instance_id_skips_blank_values() {
+        let id =
+            super::resolve_service_instance_id(Some("   ".to_string()), Some("\t".to_string()));
+        assert_eq!(id, format!("waddle-server-{}", std::process::id()));
+    }
+
+    #[test]
+    fn instance_id_trims_surrounding_whitespace() {
+        let id = super::resolve_service_instance_id(None, Some(" pod-1 \n".to_string()));
+        assert_eq!(id, "pod-1");
     }
 
     #[test]
