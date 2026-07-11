@@ -919,6 +919,16 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(timeoutErr).toBeDefined();
     expect(timeoutErr?.options?.context?.errorSource).toBe("local-timeout");
     expect(timeoutErr?.options?.context?.condition).toBeUndefined();
+
+    // Condition-less rejections (e.g. "client is disconnected" during a
+    // connection flap) must stay console-only — one beacon per in-flight
+    // room IQ would flood Faro.
+    stub.errors.length = 0;
+    await discoverChannels(
+      { send_raw_iq: async () => { throw "client is disconnected"; } },
+      "alice@example.com",
+    ).catch(() => undefined);
+    expect(stub.errors).toHaveLength(0);
   });
 
   test("set_on_error bridge preserves stream error conditions for telemetry", () => {

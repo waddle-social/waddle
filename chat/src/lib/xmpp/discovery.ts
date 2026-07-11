@@ -224,11 +224,17 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
   }
   console.error(`[disco] ${kind} FAILED`, { to, node, err });
   const context = stanzaErrorContext(err);
+  // Beacon only attributable failures (server stanza error or the timeout
+  // branch above). Condition-less rejections — chiefly "client is
+  // disconnected" — reject every in-flight disco IQ of a topology load at
+  // once on a connection flap, and beaconing each would flood Faro with
+  // one error per room. Those stay console-only.
+  if (!context.condition) return;
   reportError("xmpp.stream", err, {
     recoverable: true,
-    detail: context.condition ? `disco-${kind}-${context.condition}` : `disco-${kind}-failed`,
+    detail: `disco-${kind}-${context.condition}`,
     ...context,
-    ...(context.condition ? { errorSource: "server" } : {}),
+    errorSource: "server",
   });
 }
 

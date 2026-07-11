@@ -708,6 +708,11 @@ export class BrowserXmppClient {
     if (!waiter) return false;
     if (errorNick !== waiter.requestedNick) return false;
 
+    waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
+    this.revokeMucReadiness(room, { keepPendingJoin: true });
+    // Emit after the waiter is rejected and readiness revoked so an error
+    // listener that synchronously retries the join observes consistent
+    // state instead of the doomed waiter.
     this.emitError({
       kind: "muc-join",
       recoverable: true,
@@ -718,8 +723,6 @@ export class BrowserXmppClient {
         text: presence.error_text,
       }),
     });
-    waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
-    this.revokeMucReadiness(room, { keepPendingJoin: true });
     return true;
   }
 
