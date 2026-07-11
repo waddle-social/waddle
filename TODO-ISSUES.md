@@ -105,12 +105,13 @@ _Residual (tracked, not #945-gating): survivor-check TOCTOU needs per-call locki
 
 ### Lane J — 1:1 chat + MUC conformance (2026-07-10 audit; epic #1269) — ✅ **COMPLETE**
 
-**Lane J COMPLETE (2026-07-11):** all six bundles merged — J1 client chat (PR #1273,
-+#1275 server stanza-id strip), J2 server 1:1 routing (PR #1272), J3 MUC invites/
+**Lane J COMPLETE (2026-07-11):** all six original bundles merged — J1 client chat
+(PR #1273, #1275 server stanza-id strip), J2 server 1:1 routing (PR #1272), J3 MUC invites/
 lifecycle (PR #1276), J4 MUC-MAM/spoofing (PR #1274), J5 MUC delivery/self-ping
 (PR #1277), J6 disco truthfulness (PR #1271). 27 issues closed (#1243–#1268 + #1275);
-epic **#1269** closed. Each merged only after CI green + Qodo + Greptile approval on
-the final SHA with zero unresolved threads.
+epic **#1269** closed. Each implementation bundle merged after CI green, a successful
+final-SHA Greptile check, the Qodo report's actionable findings were addressed, and
+zero unresolved review threads remained. Post-completion residuals are tracked below.
 
 Second deep audit (6 lanes incl. independent gpt-5.5) of private + group chat vs
 main @ `c35afb9d`; all findings verified in code. #1243–#1268 filed, indexed by
@@ -134,7 +135,7 @@ in parallel; within a bundle, top-to-bottom.
 
 **J3 — MUC invites / lifecycle `[bundle]`**
 1. ✅ #1248 — **High**: mediated invitations (§7.8) unimplemented for non-group-DM rooms → "invite" silently no-ops. Relates #945. DONE (PR #1276)
-2. ✅ #1252 — **High**: nick change silently dropped after tearing down MUJI + SFU (no 303/210 anywhere). DONE (PR #1276)
+2. ✅ #1252 — **High**: nick-change attempts no longer tear down MUJI/SFU state; Waddle's identity-locked nickname policy rejects them conformantly with `not-acceptable` rather than emitting a 303 rename. DONE (PR #1276)
 3. ✅ #1261 — destroy doesn't wipe durable state (resurrection) + misses sibling same-nick sessions. DONE (PR #1276)
 4. ✅ #1264 — mediated decline spoofable (no invite ledger) + dropped for offline/remote inviter. DONE (PR #1276)
 5. ✅ #1262 — owner bypasses §8.4/§9.7 role-change target protections. DONE (PR #1276)
@@ -157,6 +158,29 @@ in parallel; within a bundle, top-to-bottom.
 3. ✅ #1265 — XEP-0045 MUC minor conformance cluster (16 items, incl. `muc#stable_id` advertise, history-knob, member-list access). Relates Lane D #1170 (extended-MAM), #1258. DONE (PR #1271; items 3 → #232 and 5 deferred with justification in the PR)
 
 _Cross-refs (already-lane'd, referenced not re-filed): #1173/#1171/#1170 (Lane D), #1118 (Lane E), #984 (Lane G), #466 (Tier 0 close — residual → #1267)._
+
+### Lane J follow-up — adversarial residual audit (2026-07-11; epic #1279) — 🚧 **IN PROGRESS**
+
+The original Lane J scope above remains historical completion. A subsequent adversarial
+audit found residual loss, isolation, concurrency, and conformance defects. Work the
+unblocked frontier; #1287 is natively blocked by #1281.
+
+1. 🚧 **#1280 — XEP-0198 handler-timeout false ack: cancelled message/presence dispatch remains sender-owned, `h` cannot cross the hole, and cleanup detaches without hanging. IN REVIEW (PR #1292).**
+2. #1281 — scope MUC-PM MAM history to the full occupant JID.
+3. #1287 — scope MUC-PM displayed state to the full occupant JID. Blocked by #1281.
+4. #1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs.
+5. #1288 — prevent cross-occupant MUC message-ID collision merges.
+6. #1289 — make mediated-invite grants and rollback atomic.
+7. #1283 — seal room destruction and purge the destroyed MAM epoch.
+8. #1290 — implement XEP-0313 `with=self` intersection semantics.
+9. #1286 — advertise XEP-0085 chat-state support in entity capabilities.
+10. #1291 — reject duplicate `FORM_TYPE` values across capability forms.
+11. #1284 — reconcile `RoomActor` claims left by dead nodes.
+12. #1285 — send MUC status 332 on non-resumable service shutdown.
+
+_Shared completion work: #1136 proves the handler-timeout metric end to end; its completion
+unblocks #1163's timeout alert. #1174 removes the post-#1247 dead XEP-0184 surface and
+stale receipt comments._
 
 ## Tier 3 — Performance / scale prep (parallel with Tier 2 tail)
 

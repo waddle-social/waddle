@@ -12,8 +12,9 @@
 //! On elapse the response is **conformant** (RFC 6120 §8.2.3 / §8.3): a timed-out
 //! IQ `get`/`set` still owes exactly one reply, so we synthesize
 //! `<iq type='error'><resource-constraint/></iq>` with error type `wait` (a
-//! temporary, retryable condition). Message/Presence owe no reply, so they are
-//! dropped (logged + metered) on elapse.
+//! temporary, retryable condition). Message/Presence owe no reply; when stream
+//! management is active they remain explicitly unhandled and the transport is
+//! ended for replay/resumption instead of falsely advancing XEP-0198 `h`.
 //!
 //! Observability (all OTEL-native via the existing providers): a per-dispatch
 //! `info_span!` (→ OTEL span), a `warn!` with stable fields (→ OTLP log), and
@@ -27,6 +28,24 @@ use waddle_xmpp::metrics;
 use waddle_xmpp::Stanza;
 
 use super::handlers::iq::errors::resource_constraint_iq_error;
+
+/// Whether dispatch accepted XEP-0198 responsibility for the inbound stanza.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InboundDisposition {
+    Handled,
+    Unhandled,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum StanzaTimeout {
+    /// The retryable IQ error accepts responsibility for the request. Keep the
+    /// response typed until `frame.rs` reaches the existing transport XML
+    /// boundary.
+    HandledIq(xmpp_parsers::minidom::Element),
+    /// Dispatch was cancelled without accepting responsibility or owing a
+    /// protocol response.
+    Unhandled,
+}
 
 /// Maximum wall-clock a single stanza's dispatch may take before the backstop
 /// fires. This is a coarse *wedge* backstop, not a latency SLO: it sits above
@@ -106,9 +125,10 @@ impl StanzaBackstop {
 
     /// Build the conformant response set for a dispatch that exceeded
     /// [`STANZA_HANDLER_WEDGE_TIMEOUT`]: a `resource-constraint`/`wait` IQ error
-    /// for get/set, nothing for everything else. Records the timeout metric and
-    /// a `warn!`, and marks the span errored.
-    fn on_timeout(self) -> Vec<String> {
+    /// for get/set, nothing for everything else. The typed disposition keeps an
+    /// empty successful response distinct from a cancelled, unhandled stanza.
+    /// Records the timeout metric and a `warn!`, and marks the span errored.
+    fn on_timeout(self) -> StanzaTimeout {
         metrics::record_stanza_handler_timeout(self.kind, &self.payload_ns);
         self.span.record("otel.status_code", "ERROR");
         let _enter = self.span.enter();
@@ -126,23 +146,25 @@ impl StanzaBackstop {
                     timeout_secs = STANZA_HANDLER_WEDGE_TIMEOUT.as_secs(),
                     "stanza handler exceeded wedge backstop; returning resource-constraint"
                 );
-                vec![super::build_iq_error_xml_typed(
+                StanzaTimeout::HandledIq(super::transport_xml::build_iq_error_element_typed(
                     &reply.id,
                     reply.from.as_deref(),
                     reply.to.as_deref(),
                     resource_constraint_iq_error(
                         "The server could not process this request in time; please retry.",
                     ),
-                )]
+                ))
             }
             None => {
                 warn!(
                     stanza_kind = self.kind,
                     payload_ns = %self.payload_ns,
                     timeout_secs = STANZA_HANDLER_WEDGE_TIMEOUT.as_secs(),
-                    "stanza handler exceeded wedge backstop; dropping (no reply owed)"
+                    "stanza handler exceeded wedge backstop; leaving stanza unhandled (no reply owed)"
                 );
-                Vec::new()
+                // Dispatch was cancelled without a protocol response. XEP-0198
+                // leaves responsibility with the sender.
+                StanzaTimeout::Unhandled
             }
         }
     }
@@ -151,14 +173,17 @@ impl StanzaBackstop {
 /// Drive a stanza's dispatch under the wedge backstop: run `dispatch` within the
 /// backstop span and the [`STANZA_HANDLER_WEDGE_TIMEOUT`]; on elapse, return the
 /// conformant timeout response instead of letting the connection hang.
-pub(super) async fn run_with_backstop<F>(backstop: StanzaBackstop, dispatch: F) -> Vec<String>
+pub(super) async fn run_with_backstop<F>(
+    backstop: StanzaBackstop,
+    dispatch: F,
+) -> Result<Vec<String>, StanzaTimeout>
 where
     F: Future<Output = Vec<String>> + Send,
 {
     let span = backstop.span.clone();
     match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {
-        Ok(responses) => responses,
-        Err(_elapsed) => backstop.on_timeout(),
+        Ok(responses) => Ok(responses),
+        Err(_elapsed) => Err(backstop.on_timeout()),
     }
 }
 
