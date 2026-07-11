@@ -304,9 +304,8 @@ pub struct MdsDisplayedEntry {
     pub chat_id: Jid,
     /// XEP-0359 id of the displayed message.
     pub stanza_id: StanzaId,
-    /// Assigning entity's XEP-0359 `by` JID; preserve exactly for
-    /// stanza-id authority matching.
-    pub stanza_id_by: Jid,
+    /// Resource-less assigning entity from the XEP-0359 `by` attribute.
+    pub stanza_id_by: BareJid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

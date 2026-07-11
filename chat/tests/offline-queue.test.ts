@@ -321,4 +321,40 @@ describe("offline outbound queue hydration", () => {
       deliveryStatus: "queued",
     });
   });
+
+  test("MUC-PM timelines restore only the full occupant's queued messages", async () => {
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "queued-muc-pm-alice",
+      createdAt: new Date().toISOString(),
+      peerJid: "room@conference.example/alice",
+      body: "private hello",
+    });
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "queued-muc-pm-bob",
+      createdAt: new Date().toISOString(),
+      peerJid: "room@conference.example/bob",
+      body: "other occupant",
+    });
+
+    const actionError = ref("");
+    const messaging = useDirectMessages(
+      ref(session()),
+      ref(null),
+      ref("room@conference.example/alice"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+      ref("muc-occupant"),
+    );
+
+    await messaging.loadMessages("room@conference.example/alice");
+
+    expect(messaging.messages.value.map((message) => message.id)).toEqual([
+      "queued-muc-pm-alice",
+    ]);
+  });
 });

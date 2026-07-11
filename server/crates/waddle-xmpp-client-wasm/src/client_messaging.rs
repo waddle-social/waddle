@@ -96,9 +96,8 @@ impl WaddleClient {
     /// the JID of the chat (bare DM contact, bare MUC room, or full MUC
     /// occupant for a private message) which becomes the PEP item id;
     /// `stanza_id` is the XEP-0359 id of the latest
-    /// displayed message; `stanza_id_by` is the assigning entity's
-    /// XEP-0359 `by` JID and must be preserved exactly for authority
-    /// matching. The publish carries the spec-mandated
+    /// displayed message; `stanza_id_by` is the resource-less room or
+    /// account-server authority required by XEP-0490. The publish carries the spec-mandated
     /// publish-options as preconditions.
     pub fn publish_mds_displayed(
         &self,
@@ -114,7 +113,7 @@ impl WaddleClient {
                 .map_err(|err| js_error(format!("invalid MDS chat id: {err}")))?;
             let stanza_id = StanzaId::new(stanza_id)
                 .map_err(|err| js_error(format!("invalid MDS stanza id: {err}")))?;
-            let stanza_id_by: Jid = stanza_id_by
+            let stanza_id_by: BareJid = stanza_id_by
                 .parse()
                 .map_err(|err| js_error(format!("invalid MDS stanza-id by JID: {err}")))?;
             let iq = build_mds_publish_iq(&iq_id, &chat_id, &stanza_id, &stanza_id_by);

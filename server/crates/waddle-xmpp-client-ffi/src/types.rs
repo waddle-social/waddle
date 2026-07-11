@@ -66,8 +66,8 @@ pub struct WaddleMdsDisplayedEntry {
     pub chat_id: String,
     /// XEP-0359 id of the displayed message.
     pub stanza_id: String,
-    /// Assigning entity's XEP-0359 `by` JID; preserve exactly for
-    /// stanza-id authority matching.
+    /// Resource-less room or account-server authority from the XEP-0359 `by`
+    /// attribute, as required by XEP-0490.
     pub stanza_id_by: String,
 }
 

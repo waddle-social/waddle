@@ -120,7 +120,11 @@ export function useDirectMessages(
   function queuedMessagesForPeer(peerJid: string): TimelineMessage[] {
     const currentSession = session.value;
     if (!currentSession) return [];
-    const queued = listQueuedDmMessages(barePeerJid(currentSession.jid), barePeerJid(peerJid));
+    const queuePeer = dmConversationIdentityKey(
+      peerJid,
+      () => conversationScope(peerJid) === "muc-occupant",
+    );
+    const queued = listQueuedDmMessages(barePeerJid(currentSession.jid), queuePeer);
     for (const message of queued) pendingEchoClientIds.add(message.id);
     return queued.map((message) => queuedDmMessageToTimeline(currentSession, message));
   }

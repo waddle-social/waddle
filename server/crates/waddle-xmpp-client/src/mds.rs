@@ -26,13 +26,13 @@ const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsu
 
 /// Typed representation of one MDS catch-up entry. `chat_id` is the
 /// PEP item id (= JID of the chat). `stanza_id` is the XEP-0359 id of
-/// the displayed message; `stanza_id_by` is the assigning entity's JID from
-/// XEP-0359 and must be preserved exactly for authority matching.
+/// the displayed message; `stanza_id_by` is the resource-less assigning
+/// entity required by XEP-0490 for room and account-server stanza IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsCatchupEntry {
     pub chat_id: Jid,
     pub stanza_id: StanzaId,
-    pub stanza_id_by: Jid,
+    pub stanza_id_by: BareJid,
 }
 
 fn build_publish_options_form() -> Element {
@@ -75,7 +75,7 @@ fn field(var: &str, value: &str) -> Element {
         .build()
 }
 
-fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &Jid) -> Element {
+fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &BareJid) -> Element {
     Element::builder("displayed", NS_MDS)
         .append(
             Element::builder("stanza-id", NS_STANZA_ID)
@@ -99,7 +99,7 @@ pub fn build_mds_publish_iq(
     iq_id: &str,
     chat_id: &Jid,
     stanza_id: &StanzaId,
-    stanza_id_by: &Jid,
+    stanza_id_by: &BareJid,
 ) -> Element {
     let item = Element::builder("item", NS_PUBSUB)
         .attr(
@@ -208,7 +208,7 @@ pub fn parse_mds_event(message: &Element) -> Option<Vec<MdsCatchupEntry>> {
     Some(entries)
 }
 
-fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, Jid)> {
+fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, BareJid)> {
     if !displayed.is("displayed", NS_MDS) {
         return None;
     }
@@ -220,7 +220,7 @@ fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, Jid)> {
         return None;
     }
     let stanza_id = StanzaId::new(stanza_id_elem.attr("id")?).ok()?;
-    let stanza_id_by = stanza_id_elem.attr("by")?.parse::<Jid>().ok()?;
+    let stanza_id_by = stanza_id_elem.attr("by")?.parse::<BareJid>().ok()?;
     Some((stanza_id, stanza_id_by))
 }
 
@@ -251,12 +251,16 @@ mod tests {
         value.parse().expect("test JID parses")
     }
 
+    fn bare_jid(value: &str) -> BareJid {
+        value.parse().expect("test bare JID parses")
+    }
+
     fn stanza_id(value: &str) -> StanzaId {
         StanzaId::new(value).expect("test stanza id is non-empty")
     }
 
     fn displayed_payload(id: &str, by: &str) -> Element {
-        build_displayed_payload(&stanza_id(id), &jid(by))
+        build_displayed_payload(&stanza_id(id), &bare_jid(by))
     }
 
     fn stanza_id_element(id: &str, by: &str) -> Element {
@@ -328,7 +332,7 @@ mod tests {
             "iq-1",
             &jid("romeo@montague.lit"),
             &stanza_id("stanza-id-1"),
-            &jid("juliet@capulet.lit"),
+            &bare_jid("juliet@capulet.lit"),
         );
         let xml = xml_of(&iq);
         // `minidom` serialises namespace attributes with single
@@ -395,10 +399,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].chat_id, jid("romeo@montague.lit"));
         assert_eq!(entries[0].stanza_id, stanza_id("dm-sid"));
-        assert_eq!(entries[0].stanza_id_by, jid("juliet@capulet.lit"));
+        assert_eq!(entries[0].stanza_id_by, bare_jid("juliet@capulet.lit"));
         assert_eq!(
             entries[1].chat_id,
-            jid("example@conference.shakespeare.lit")
+            bare_jid("example@conference.shakespeare.lit")
         );
         assert_eq!(
             entries[1].stanza_id_by,
@@ -418,6 +422,11 @@ mod tests {
                 NS_PUBSUB,
                 "invalid-by",
                 displayed_with(vec![stanza_id_element("sid-1", "not a jid")]),
+            ),
+            item(
+                NS_PUBSUB,
+                "resource-by",
+                displayed_with(vec![stanza_id_element("sid-1", "alice@example.com/phone")]),
             ),
             item(
                 NS_PUBSUB,
