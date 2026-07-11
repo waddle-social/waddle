@@ -91,7 +91,7 @@ describe("offline outbound queue replay", () => {
       kind: "dm",
       id: "dm-preview-replay",
       createdAt: new Date().toISOString(),
-      peerJid: "bob@example.com",
+      peerJid: " Bob@Example.COM/desktop ",
       body: "read https://example.com/article",
     });
 
@@ -296,7 +296,7 @@ describe("offline outbound queue hydration", () => {
       // See `room timelines restore queued messages from localStorage` —
       // the queue store now prunes entries older than 7 days.
       createdAt: new Date().toISOString(),
-      peerJid: "bob@example.com",
+      peerJid: " Bob@Example.COM/desktop ",
       body: "hello from storage",
     });
 
@@ -327,7 +327,8 @@ describe("offline outbound queue hydration", () => {
       kind: "dm",
       id: "queued-muc-pm-alice",
       createdAt: new Date().toISOString(),
-      peerJid: "room@conference.example/alice",
+      peerJid: " Room@Conference.Example/alice ",
+      mucPm: true,
       body: "private hello",
     });
     enqueueQueuedMessage("alice@example.com", {
@@ -335,6 +336,7 @@ describe("offline outbound queue hydration", () => {
       id: "queued-muc-pm-bob",
       createdAt: new Date().toISOString(),
       peerJid: "room@conference.example/bob",
+      mucPm: true,
       body: "other occupant",
     });
 

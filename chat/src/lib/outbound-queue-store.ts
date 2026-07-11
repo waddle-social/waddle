@@ -1,6 +1,7 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/send-types";
 import { reportError } from "@/lib/telemetry";
+import { bareJidKey, fullJidIdentityKey } from "@/lib/xmpp/jid";
 
 const PREFIX = "waddle.chat.outbound-queue";
 
@@ -241,8 +242,14 @@ export function listQueuedDmMessages(
 ): PersistedQueuedDmMessage[] {
   return readQueue(accountKey).filter(
     (message): message is PersistedQueuedDmMessage =>
-      message.kind === "dm" && message.peerJid === peerJid,
+      message.kind === "dm"
+      && dmQueuePeerKey(message.peerJid, message.mucPm === true)
+        === dmQueuePeerKey(peerJid, message.mucPm === true),
   );
+}
+
+function dmQueuePeerKey(peerJid: string, mucPm: boolean): string {
+  return mucPm ? fullJidIdentityKey(peerJid) : bareJidKey(peerJid);
 }
 
 export function enqueueQueuedMessage(
@@ -250,7 +257,12 @@ export function enqueueQueuedMessage(
   message: PersistedQueuedMessage,
 ): void {
   const next = readQueue(accountKey).filter((entry) => entry.id !== message.id);
-  next.push(message);
+  next.push(message.kind === "dm"
+    ? {
+        ...message,
+        peerJid: dmQueuePeerKey(message.peerJid, message.mucPm === true),
+      }
+    : message);
   writeQueue(accountKey, next);
 }
 
