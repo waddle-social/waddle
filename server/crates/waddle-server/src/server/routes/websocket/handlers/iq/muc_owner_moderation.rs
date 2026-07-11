@@ -309,6 +309,24 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 .await
                 .is_err()
             {
+                // Compensate for the already-committed preparatory
+                // clustering wipe (#1276 Greptile P1): re-persist the
+                // live actor's config/subject/affiliations so the
+                // still-live room stays restorable across restart or
+                // reclaim. Best-effort — a double failure is logged
+                // loudly and the destroy still errors as retryable.
+                if let Err(error) = room_actor
+                    .ask(waddle_xmpp::muc::room_actor::RepersistDurableState)
+                    .await
+                {
+                    warn!(
+                        room = %room_jid,
+                        error = %error,
+                        "Failed to re-persist durable room state after an aborted \
+                         destroy; the room is live but not restart-restorable until \
+                         its next durable mutation or a destroy retry"
+                    );
+                }
                 return vec![build_iq_error_xml_typed(
                     id,
                     response_from,
@@ -328,8 +346,25 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // after a successful prepare, nothing can leave a live
             // room with half-removed durable state.
             match super::super::super::destroy_room_actor_prepared(state, &room_jid).await {
-                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed => {}
-                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered => {
+                // P1-B: a transport-level ask failure is NOT
+                // `NotRegistered` — the room may still be live and the
+                // waddle-side rows are already gone. Answer with a
+                // retryable wait-class error, never `item-not-found`.
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = %error,
+                        "Prepared destroy ask failed; returning retryable error"
+                    );
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+                Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed) => {}
+                Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered) => {
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,
@@ -340,7 +375,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 // Unreachable for a prepared destroy (no durable
                 // delete runs), kept for the enum's totality: surface
                 // a retryable error, never a success (#1261).
-                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed => {
+                Ok(
+                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
+                ) => {
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,

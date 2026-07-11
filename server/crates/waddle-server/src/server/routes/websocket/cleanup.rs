@@ -1303,20 +1303,21 @@ pub(crate) async fn prepare_destroy_wipe(state: &WebSocketState, room_jid: &Bare
 /// Destroy a room whose durable rows were already wiped by a
 /// successful [`prepare_destroy_wipe`] — the registry performs no
 /// durable delete, so `DurableWipeFailed` cannot occur (#1276).
+///
+/// A transport-level ask failure (registry mailbox unavailable,
+/// timeout) is surfaced as `Err`, NOT coerced to `NotRegistered`: the
+/// room may well still be registered, and the caller must answer with
+/// a retryable wait-class error rather than `item-not-found`.
 pub(crate) async fn destroy_room_actor_prepared(
     state: &WebSocketState,
     room_jid: &BareJid,
-) -> waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome {
-    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+) -> Result<
+    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome,
+    waddle_xmpp::muc::room_registry_actor::RoomRegistryError,
+> {
+    RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .destroy_room_prepared(room_jid.clone())
         .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            warn!(room = %room_jid, error = %error, "Failed to destroy prepared room actor");
-            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1556,6 +1557,40 @@ mod eviction_tests {
         assert_eq!(
             count_after, 1,
             "room must remain registered while at least one occupant is present"
+        );
+    }
+
+    /// #1276 Greptile P1 ("Ask Failure Misclassified"): a prepared destroy
+    /// reaches `destroy_room_actor_prepared` only AFTER the durable wipe
+    /// phases have already deleted the waddle-side rows. A transport-level
+    /// registry ask failure (mailbox gone / timeout) therefore must NOT be
+    /// coerced to `Ok(NotRegistered)` — that would answer the owner
+    /// `item-not-found` and stop, while the room may still be live with its
+    /// rows already gone. It must surface as `Err` so the caller returns a
+    /// retryable wait-class error instead.
+    #[tokio::test]
+    async fn prepared_destroy_transport_failure_is_err_not_not_registered() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("dead-registry-destroy");
+
+        // Hard-kill the registry so the prepared-destroy ask fails at the
+        // transport level rather than returning a genuine reply.
+        state.deps.protocol.room_registry.kill();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.deps.protocol.room_registry.is_alive() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "registry actor did not die in time"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        let outcome = destroy_room_actor_prepared(&state, &room_jid).await;
+        assert!(
+            outcome.is_err(),
+            "a transport-level registry ask failure must surface as Err (→ retryable \
+             internal-server-error), never be coerced to Ok(NotRegistered) → \
+             item-not-found (#1276 P1-B); got {outcome:?}"
         );
     }
 }
