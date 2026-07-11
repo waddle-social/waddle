@@ -55,7 +55,24 @@ fn xep0085_client_builds_and_parses_a_chat_state_notification() {
     let parsed = parse_chat_state_payload(&message).expect("chat state parses");
 
     assert_eq!(parsed.state, "composing");
+    assert!(message.attr("id").is_none());
     assert!(message
         .children()
         .any(|child| child.is("composing", NS_CHAT_STATES)));
+    assert_eq!(message.children().count(), 1, "§5.6 permits no extra child");
+}
+
+#[test]
+fn xep0085_thread_is_the_only_optional_standalone_child() {
+    let thread = waddle_xmpp_client::xep::thread::ThreadRef {
+        id: "thread-1".to_owned(),
+        parent: None,
+    };
+    let message =
+        build_chat_state_message("room@muc.example", "composing", "groupchat", Some(&thread))
+            .expect("threaded chat state builds");
+
+    assert_eq!(message.children().count(), 2);
+    assert!(message.get_child("composing", NS_CHAT_STATES).is_some());
+    assert!(message.get_child("thread", NS_CLIENT).is_some());
 }

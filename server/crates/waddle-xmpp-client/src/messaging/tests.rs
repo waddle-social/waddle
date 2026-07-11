@@ -2088,8 +2088,10 @@ fn build_chat_state_message_validates_state() {
         .expect("valid chat state");
     assert_eq!(stanza.attr("to"), Some("alice@example.com"));
     assert_eq!(stanza.attr("type"), Some("chat"));
-    assert_origin_id_matches_message_id(&stanza);
+    assert!(stanza.attr("id").is_none());
+    assert!(stanza.get_child("origin-id", NS_ORIGIN_ID).is_none());
     assert!(stanza.get_child("composing", NS_CHAT_STATES).is_some());
+    assert_eq!(stanza.children().count(), 1);
     assert!(build_chat_state_message("alice@example.com", "typing", "chat", None).is_err());
 }
 
