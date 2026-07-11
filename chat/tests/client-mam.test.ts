@@ -204,7 +204,7 @@ describe("MamPager reconnect catch-up cursor handling", () => {
     const delivered: LiveDmMessage[] = [];
     events.on("directMessage", (message) => delivered.push(message));
 
-    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, after: "a0" }]);
+    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, scope: "account", after: "a0" }]);
 
     expect(cursors).toEqual(["a0", "a1"]);
     expect(delivered.map((message) => message.body)).toEqual(["one", "two"]);
@@ -218,7 +218,7 @@ describe("MamPager reconnect catch-up cursor handling", () => {
     };
     const { pager, errors } = createPager(xmpp);
 
-    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, after: "a0" }]);
+    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, scope: "account", after: "a0" }]);
 
     expect(errors).toHaveLength(1);
     expect(errors[0].kind).toBe("history");
@@ -247,7 +247,7 @@ describe("MamPager reconnect catch-up cursor handling", () => {
     events.on("directMessage", (message) => delivered.push(message));
 
     await pager.runReconnectCatchup(xmpp, [
-      { kind: "dm", key: PEER, after: "gone", since: "2024-01-01T00:00:01Z" },
+      { kind: "dm", key: PEER, scope: "account", after: "gone", since: "2024-01-01T00:00:01Z" },
     ]);
 
     expect(afterAttempts).toBe(1);
@@ -271,7 +271,7 @@ describe("MamPager reconnect catch-up cursor handling", () => {
     const catchupInfos: Array<{ outcome: string }> = [];
     events.on("catchup", (info) => catchupInfos.push({ outcome: info.outcome }));
 
-    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, after: "a0" }]);
+    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, scope: "account", after: "a0" }]);
 
     expect(delivered).toEqual([]);
     expect(catchupInfos).toEqual([{ outcome: "aborted" }]);
@@ -302,7 +302,7 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
     const search = await pager.searchDmMessages(CUSTOM_MUC_PM_ALICE, "matching");
     await pager.runReconnectCatchup(
       xmpp,
-      [{ kind: "dm", key: CUSTOM_MUC_PM_ALICE, after: "before-gap" }],
+      [{ kind: "dm", key: CUSTOM_MUC_PM_ALICE, scope: "muc-occupant", after: "before-gap" }],
       "fresh",
     );
 
@@ -493,7 +493,7 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
 
     await pager.runReconnectCatchup(
       xmpp,
-      [{ kind: "dm", key: MUC_PM_ALICE, after: "before-gap" }],
+      [{ kind: "dm", key: MUC_PM_ALICE, scope: "muc-occupant", after: "before-gap" }],
       "fresh",
     );
 
@@ -518,7 +518,7 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
 
     await pager.runReconnectCatchup(
       xmpp,
-      [{ kind: "dm", key: "room@muc.example.com", after: "legacy-boundary" }],
+      [{ kind: "dm", key: "room@muc.example.com", scope: "account", after: "legacy-boundary" }],
       "fresh",
     );
 
@@ -779,7 +779,7 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
 
     await pager.runReconnectCatchup(
       xmpp,
-      [{ kind: "dm", key: MUC_PM_ALICE, after: "before-gap" }],
+      [{ kind: "dm", key: MUC_PM_ALICE, scope: "muc-occupant", after: "before-gap" }],
       "fresh",
     );
 
@@ -834,7 +834,7 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
 
     await pager.runReconnectCatchup(
       xmpp,
-      [{ kind: "dm", key: MUC_PM_ALICE, since }],
+      [{ kind: "dm", key: MUC_PM_ALICE, scope: "muc-occupant", since }],
       "fresh",
     );
 
@@ -863,7 +863,7 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
 
     await pager.runReconnectCatchup(
       xmpp,
-      [{ kind: "dm", key: "room@muc.example.com/juliet", since: "2026-07-01T09:00:00.000Z" }],
+      [{ kind: "dm", key: "room@muc.example.com/juliet", scope: "muc-occupant", since: "2026-07-01T09:00:00.000Z" }],
       "fresh",
     );
 

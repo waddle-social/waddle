@@ -400,7 +400,11 @@ export class MamPager {
     const occupant = this.deps.classifyMucPm?.(message);
     if (occupant) return false;
     const rawPeer = this.rawDmCounterpart(message);
-    if (this.isMucPmPeer(rawPeer, dmScope) && bareJidKey(rawPeer) === bareJidKey(peerJid)) return false;
+    // The persisted scope describes the requested conversation, not the raw
+    // archive endpoint. Keep authoritative endpoint classification independent
+    // so a legacy bare-room cursor cannot admit full occupant rows merely
+    // because its old cursor defaulted to account scope.
+    if (this.isMucPmPeer(rawPeer) && bareJidKey(rawPeer) === bareJidKey(peerJid)) return false;
     return bareJidKey(rawPeer) === bareJidKey(peerJid);
   }
 
