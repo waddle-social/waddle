@@ -75,7 +75,19 @@ export type XmppErrorKind =
   | "auth"
   | "connect-timeout"
   | "history"
-  | "member-query";
+  | "member-query"
+  | "muc-join";
+
+/** RFC 6120 §8.3.2 `type` attribute values of an `<error/>` element, plus
+ * "unknown" for an unrecognised wire value (mirrors the wasm bridge's
+ * `StanzaErrorType::as_str`). */
+export type XmppStanzaErrorType =
+  | "auth"
+  | "cancel"
+  | "continue"
+  | "modify"
+  | "wait"
+  | "unknown";
 
 export const XMPP_STREAM_ERROR_CONDITIONS = new Set([
   "bad-format",
@@ -105,11 +117,39 @@ export const XMPP_STREAM_ERROR_CONDITIONS = new Set([
   "unsupported-version",
 ]);
 
+/** The complete RFC 6120 §8.3.3 defined stanza-error condition list
+ * (self-contained — the overlap with the stream set is deliberate so this
+ * list survives stream-set edits), plus the stream-error conditions so
+ * mixed consumers keep matching. Telemetry collapses anything outside this
+ * list to "unknown". */
 export const XMPP_ERROR_CONDITIONS = new Set([
   ...XMPP_STREAM_ERROR_CONDITIONS,
+  "bad-request",
+  "conflict",
+  "feature-not-implemented",
   "forbidden",
+  "gone",
+  "internal-server-error",
   "item-not-found",
+  "jid-malformed",
+  "not-acceptable",
+  "not-allowed",
+  "not-authorized",
+  "policy-violation",
+  "recipient-unavailable",
+  "redirect",
+  "registration-required",
+  "remote-server-not-found",
+  "remote-server-timeout",
+  "resource-constraint",
   "service-unavailable",
+  "subscription-required",
+  "undefined-condition",
+  "unexpected-request",
+  // Non-RFC conditions Waddle flows branch on as first-class stanza
+  // conditions (see STANZA_CONDITION_PRECONDITION_NOT_MET in the Rust
+  // client's error.rs — XEP-0223 publish-options rejections).
+  "precondition-not-met",
 ]);
 
 export interface XmppErrorEvent {
@@ -120,8 +160,13 @@ export interface XmppErrorEvent {
   detail: string;
   /** Original error object if one was caught. */
   cause?: unknown;
-  /** XMPP stream-error condition when `kind === "stream"`. */
+  /** XMPP stream-error condition when `kind === "stream"`, or the RFC 6120
+   * §8.3 stanza-error condition when a server error stanza was received. */
   condition?: string;
+  /** RFC 6120 §8.3.2 `type` attribute of a received error stanza. */
+  errorType?: XmppStanzaErrorType;
+  /** Server-provided `<text/>` of a received error stanza. */
+  errorText?: string;
   /** XEP-0198 stream-management extension detail when a stream error carries one. */
   streamManagementError?: {
     kind: "handled-count-too-high";

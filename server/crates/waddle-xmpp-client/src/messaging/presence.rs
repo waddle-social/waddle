@@ -112,6 +112,12 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         .and_then(|idle| idle.attr("since"))
         .and_then(|since| since.parse::<DateTime<Utc>>().ok());
 
+    // RFC 6120 §8.3: an error presence (rejected MUC join, bounced
+    // directed presence) carries an `<error/>` child. Parse it once here
+    // so consumers get a typed StanzaError instead of re-walking the XML.
+    let error =
+        (presence_type.as_deref() == Some("error")).then(|| crate::error::parse_stanza_error(el));
+
     InboundPresence {
         from,
         to,
@@ -128,6 +134,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         hand_raised,
         muted,
         idle_since,
+        error,
     }
 }
 
@@ -193,6 +200,46 @@ pub fn build_presence_stanza(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_presence_extracts_stanza_error_from_error_presence() {
+        use crate::error::StanzaErrorType;
+        const NS_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+        let el = Element::builder("presence", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "room@muc.example.com/nick",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+            .append(
+                Element::builder("error", "jabber:client")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "auth")
+                    .append(Element::builder("registration-required", NS_STANZAS).build())
+                    .append(
+                        Element::builder("text", NS_STANZAS)
+                            .append("Members only")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let presence = parse_presence(&el);
+        let error = presence.error.expect("error presence carries StanzaError");
+        assert_eq!(error.condition, "registration-required");
+        assert_eq!(error.error_type, StanzaErrorType::Auth);
+        assert_eq!(error.text.as_deref(), Some("Members only"));
+    }
+
+    #[test]
+    fn parse_presence_leaves_error_empty_for_non_error_presence() {
+        let el = Element::builder("presence", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "room@muc.example.com/nick",
+            )
+            .build();
+        assert_eq!(parse_presence(&el).error, None);
+    }
 
     #[test]
     fn builds_presence_with_show_status_and_caps() {

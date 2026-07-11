@@ -739,6 +739,12 @@ pub struct InboundPresence {
     /// wire boundary (typed-payloads rule); re-serialized to an xs:dateTime only
     /// at the JS boundary so the chat side can render the idle age.
     pub idle_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// RFC 6120 §8.3 stanza error parsed from an error presence
+    /// (`type="error"`), e.g. a rejected XEP-0045 room join. `None` for
+    /// non-error presences. Parsed once at the wire boundary
+    /// (typed-payloads rule) so consumers never re-parse the `<error/>`
+    /// child.
+    pub error: Option<crate::error::StanzaError>,
 }
 
 /// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC

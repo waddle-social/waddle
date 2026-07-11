@@ -272,6 +272,15 @@ export interface WasmPresence {
    * carries none. The chat side renders the idle age on an away presence.
    */
   idle_since?: string;
+  /**
+   * RFC 6120 §8.3 defined condition of an error presence (e.g. a rejected
+   * XEP-0045 room join). Absent for non-error presences.
+   */
+  error_condition?: string;
+  /** RFC 6120 §8.3.2 `type` attribute of the `<error/>` element. */
+  error_type?: string;
+  /** Server-provided `<text/>` of the error, absent when none. */
+  error_text?: string;
 }
 
 /**

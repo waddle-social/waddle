@@ -135,6 +135,22 @@ pub enum StanzaErrorType {
     Unknown,
 }
 
+impl StanzaErrorType {
+    /// The RFC 6120 §8.3.2 wire value, the inverse of the parse in
+    /// [`parse_stanza_error`]. Kept on the type so boundary adapters
+    /// (wasm rejections, telemetry) can't drift from the parser.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Cancel => "cancel",
+            Self::Continue => "continue",
+            Self::Modify => "modify",
+            Self::Wait => "wait",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Parse a stanza-level error from an IQ element returned with `type="error"`.
 ///
 /// Looks for a child `<error/>` element, extracts `type`, the RFC 6120 condition
@@ -247,6 +263,15 @@ mod tests {
         let err = parse_stanza_error(&iq);
         assert_eq!(err.error_type, StanzaErrorType::Unknown);
         assert_eq!(err.condition, "service-unavailable");
+    }
+
+    #[test]
+    fn error_type_as_str_round_trips_through_the_parser() {
+        for wire in ["auth", "cancel", "continue", "modify", "wait"] {
+            let iq = make_iq_error(wire, "forbidden", None);
+            assert_eq!(parse_stanza_error(&iq).error_type.as_str(), wire);
+        }
+        assert_eq!(StanzaErrorType::Unknown.as_str(), "unknown");
     }
 
     #[test]

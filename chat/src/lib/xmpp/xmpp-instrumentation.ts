@@ -33,6 +33,7 @@ const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
   "connect-timeout": "xmpp.disconnect",
   "history": "xmpp.stream",
   "member-query": "xmpp.stream",
+  "muc-join": "xmpp.stream",
 };
 export function installInstrumentation(client: BrowserXmppClient): void {
   client.onMessageAcked((id, meta) => {
@@ -66,11 +67,15 @@ export function installInstrumentation(client: BrowserXmppClient): void {
     const smCounts = event.kind === "stream"
       ? telemetryStreamManagementCounts(event)
       : undefined;
+    const errorSource = telemetryErrorSource(event.kind, condition);
     const cause = new Error(detail);
     reportError(kind, cause, {
       recoverable: event.recoverable,
       detail,
       ...(condition ? { condition } : {}),
+      ...(event.errorType ? { errorType: event.errorType } : {}),
+      ...(event.errorText ? { errorText: event.errorText } : {}),
+      ...(errorSource ? { errorSource } : {}),
       ...(streamDetail ? { streamDetail } : {}),
       ...(smCounts ?? {}),
     });
@@ -96,6 +101,8 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
     case "member-query":
       if (event.detail === "missing list_room_members") return "missing-list-room-members";
       return condition ? `member-query-${condition}` : "member-query-failed";
+    case "muc-join":
+      return condition ? `room-join-${condition}` : "room-join-rejected";
     case "stream":
       if (
         condition === "undefined-condition" &&
@@ -145,6 +152,19 @@ function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, 
     smH: String(event.streamManagementError.h),
     smSendCount: String(event.streamManagementError.sendCount),
   };
+}
+
+/** Attribute the failure: a condition means the server answered with an
+ * error stanza/stream error; `connect-timeout` events are client-side
+ * timers (connect stall, room self-presence wait). Anything else is left
+ * unattributed rather than guessed. */
+function telemetryErrorSource(
+  kind: XmppErrorKind,
+  condition: string | undefined,
+): "server" | "local-timeout" | undefined {
+  if (condition) return "server";
+  if (kind === "connect-timeout") return "local-timeout";
+  return undefined;
 }
 
 function telemetryCondition(kind: XmppErrorKind, condition: string | undefined): string | undefined {
