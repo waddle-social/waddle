@@ -84,21 +84,9 @@ pub(crate) fn stanza_error_rejection_fields(
     Some(StanzaErrorRejectionFields {
         message: err.to_string(),
         condition: stanza_err.condition.clone(),
-        error_type: stanza_error_type_label(stanza_err.error_type),
+        error_type: stanza_err.error_type.as_str(),
         text: stanza_err.text.clone(),
     })
-}
-
-fn stanza_error_type_label(error_type: waddle_xmpp_client::StanzaErrorType) -> &'static str {
-    use waddle_xmpp_client::StanzaErrorType;
-    match error_type {
-        StanzaErrorType::Auth => "auth",
-        StanzaErrorType::Cancel => "cancel",
-        StanzaErrorType::Continue => "continue",
-        StanzaErrorType::Modify => "modify",
-        StanzaErrorType::Wait => "wait",
-        StanzaErrorType::Unknown => "unknown",
-    }
 }
 
 /// Reject an IQ promise. Stanza errors become a real JS `Error` (so

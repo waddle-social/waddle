@@ -475,6 +475,17 @@ pub struct WaddlePresence {
     /// contact's `<idle/>`, or `None` when the presence carries none. The chat
     /// side turns it into the rendered idle age on an away presence.
     pub idle_since: Option<String>,
+    /// RFC 6120 §8.3 defined condition of an error presence (e.g. a
+    /// rejected XEP-0045 room join), omitted for non-error presences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_condition: Option<String>,
+    /// RFC 6120 §8.3.2 `type` attribute of the `<error/>` element
+    /// ("auth" | "cancel" | "continue" | "modify" | "wait" | "unknown").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    /// Server-provided `<text/>` of the error, omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_text: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

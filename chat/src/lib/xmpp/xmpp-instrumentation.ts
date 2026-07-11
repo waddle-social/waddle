@@ -33,6 +33,7 @@ const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
   "connect-timeout": "xmpp.disconnect",
   "history": "xmpp.stream",
   "member-query": "xmpp.stream",
+  "muc-join": "xmpp.stream",
 };
 export function installInstrumentation(client: BrowserXmppClient): void {
   client.onMessageAcked((id, meta) => {
@@ -100,6 +101,8 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
     case "member-query":
       if (event.detail === "missing list_room_members") return "missing-list-room-members";
       return condition ? `member-query-${condition}` : "member-query-failed";
+    case "muc-join":
+      return condition ? `room-join-${condition}` : "room-join-rejected";
     case "stream":
       if (
         condition === "undefined-condition" &&

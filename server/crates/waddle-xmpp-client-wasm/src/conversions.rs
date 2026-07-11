@@ -782,6 +782,12 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         muted: presence.muted,
         // Typed instant → xs:dateTime only at this JS boundary (typed-payloads).
         idle_since: presence.idle_since.map(|since| since.to_rfc3339()),
+        error_condition: presence.error.as_ref().map(|err| err.condition.clone()),
+        error_type: presence
+            .error
+            .as_ref()
+            .map(|err| err.error_type.as_str().to_string()),
+        error_text: presence.error.and_then(|err| err.text),
     }
 }
 
@@ -1064,6 +1070,7 @@ mod inbound_to_js_tests {
             hand_raised: false,
             muted: false,
             idle_since: None,
+            error: None,
         };
         let js = presence_to_js(presence);
         assert_eq!(js.muc_status_codes, vec![100, 110, 210]);

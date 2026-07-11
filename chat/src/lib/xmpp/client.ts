@@ -1,4 +1,5 @@
 import { withSpan } from "@/lib/telemetry";
+import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
 import type { BroadcastShow } from "@/presence/effective-show";
@@ -707,6 +708,16 @@ export class BrowserXmppClient {
     if (!waiter) return false;
     if (errorNick !== waiter.requestedNick) return false;
 
+    this.emitError({
+      kind: "muc-join",
+      recoverable: true,
+      detail: `room join rejected — ${room}`,
+      ...stanzaErrorContext({
+        condition: presence.error_condition,
+        errorType: presence.error_type,
+        text: presence.error_text,
+      }),
+    });
     waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
     this.revokeMucReadiness(room, { keepPendingJoin: true });
     return true;

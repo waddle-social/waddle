@@ -1,8 +1,10 @@
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
+import { reportError } from "@/lib/telemetry";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
 import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
+import { stanzaErrorContext } from "./stanza-error-context";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_MUC = "http://jabber.org/protocol/muc";
@@ -213,9 +215,21 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
     // channels fail to render — keep them structured so consumers can
     // grep / aggregate by `to`.
     console.warn(`[disco] ${kind} timeout`, { to: err.to, node: err.node });
+    reportError("xmpp.stream", err, {
+      recoverable: true,
+      detail: `disco-${kind}-timeout`,
+      errorSource: "local-timeout",
+    });
     return;
   }
   console.error(`[disco] ${kind} FAILED`, { to, node, err });
+  const context = stanzaErrorContext(err);
+  reportError("xmpp.stream", err, {
+    recoverable: true,
+    detail: context.condition ? `disco-${kind}-${context.condition}` : `disco-${kind}-failed`,
+    ...context,
+    ...(context.condition ? { errorSource: "server" } : {}),
+  });
 }
 
 async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Promise<DiscoInfoData | null> {

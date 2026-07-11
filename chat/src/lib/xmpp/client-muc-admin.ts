@@ -7,6 +7,7 @@
  */
 import type { MemberSummary } from "../chat-types";
 import { jidLocalpart } from "./jid";
+import { stanzaErrorContext } from "./stanza-error-context";
 import type { ListRoomMembersOptions, XmppErrorEvent } from "./types";
 import type {
   WasmAdminChannelRef,
@@ -46,38 +47,6 @@ export class RoomMemberListUnavailableError extends Error {
   }
 }
 
-interface StanzaErrorContext {
-  condition?: string;
-  errorType?: string;
-  errorText?: string;
-}
-
-/** Stanza-error context from a rejected wasm promise. The bridge rejects
- * with an `Error` carrying `condition` / `errorType` / `text` properties
- * (or legacy `{ condition }` / `{ error: { condition } }` shapes); anything
- * else yields an empty context. */
-function stanzaErrorContext(error: unknown): StanzaErrorContext {
-  const source = stanzaErrorSource(error);
-  if (!source) return {};
-  const { condition, errorType, text } = source as {
-    condition?: unknown;
-    errorType?: unknown;
-    text?: unknown;
-  };
-  return {
-    ...(typeof condition === "string" ? { condition } : {}),
-    ...(typeof errorType === "string" ? { errorType } : {}),
-    ...(typeof text === "string" ? { errorText: text } : {}),
-  };
-}
-
-function stanzaErrorSource(error: unknown): object | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  if (typeof (error as { condition?: unknown }).condition === "string") return error;
-  const nested = (error as { error?: unknown }).error;
-  if (typeof nested !== "object" || nested === null) return undefined;
-  return typeof (nested as { condition?: unknown }).condition === "string" ? nested : undefined;
-}
 
 /**
  * Structural subset of the WASM client the MUC admin module drives.

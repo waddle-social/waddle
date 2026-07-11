@@ -22,6 +22,7 @@ import {
   reportSessionLifecycle,
   reportStatusChange,
 } from "../src/lib/telemetry";
+import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -849,6 +850,75 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(unattributed.options?.context?.condition).toBeUndefined();
     expect(unattributed.options?.context?.errorSource).toBeUndefined();
     expect(unattributed.options?.context?.detail).toBe("member-query-failed");
+  });
+
+  test("rejected MUC join presence reports the stanza error condition", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    const internal = client as unknown as {
+      emitError: (event: {
+        kind: "muc-join";
+        recoverable: boolean;
+        detail: string;
+        condition?: string;
+        errorType?: string;
+      }) => void;
+    };
+
+    internal.emitError({
+      kind: "muc-join",
+      recoverable: true,
+      detail: "room join rejected — room@muc.example.com",
+      condition: "registration-required",
+      errorType: "auth",
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    const joinErr = stub.errors[0];
+    expect(joinErr.options?.type).toBe("xmpp.stream");
+    expect(joinErr.options?.context?.detail).toBe("room-join-registration-required");
+    expect(joinErr.options?.context?.condition).toBe("registration-required");
+    expect(joinErr.options?.context?.errorType).toBe("auth");
+    expect(joinErr.options?.context?.errorSource).toBe("server");
+  });
+
+  test("disco failures report to Faro with condition or local-timeout attribution", async () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    // Server-returned stanza error: the wasm bridge rejects send_raw_iq
+    // with a structured Error carrying the condition.
+    const stanzaRejection = Object.assign(
+      new Error("server returned a stanza error: cancel: service-unavailable"),
+      { condition: "service-unavailable", errorType: "cancel" },
+    );
+    await discoverChannels(
+      { send_raw_iq: async () => { throw stanzaRejection; } },
+      "alice@example.com",
+    ).catch(() => undefined);
+    const serverErr = stub.errors.find(
+      (entry) => entry.options?.context?.detail === "disco-items-service-unavailable",
+    );
+    expect(serverErr).toBeDefined();
+    expect(serverErr?.options?.context?.condition).toBe("service-unavailable");
+    expect(serverErr?.options?.context?.errorSource).toBe("server");
+
+    // Local timeout: DiscoTimeoutError is attributed to the client timer.
+    stub.errors.length = 0;
+    await discoverChannels(
+      { send_raw_iq: async () => { throw new DiscoTimeoutError("muc.example.com", undefined, 30); } },
+      "alice@example.com",
+    ).catch(() => undefined);
+    const timeoutErr = stub.errors.find(
+      (entry) => entry.options?.context?.detail === "disco-items-timeout",
+    );
+    expect(timeoutErr).toBeDefined();
+    expect(timeoutErr?.options?.context?.errorSource).toBe("local-timeout");
+    expect(timeoutErr?.options?.context?.condition).toBeUndefined();
   });
 
   test("set_on_error bridge preserves stream error conditions for telemetry", () => {

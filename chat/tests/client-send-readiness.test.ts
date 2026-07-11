@@ -9,6 +9,7 @@ import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } fr
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -543,9 +544,13 @@ describe("client send readiness", () => {
   test("room join rejects on XEP-0045 MUC error presence instead of timing out", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
+    const errors: XmppErrorEvent[] = [];
+    client.onError((event) => errors.push(event));
     let onPresence: ((presence: {
       from?: string;
       presence_type: string;
+      error_condition?: string;
+      error_type?: string;
     }) => void) | null = null;
     const xmpp = {
       join_room: mock(async () => undefined),
@@ -564,12 +569,18 @@ describe("client send readiness", () => {
     onPresence?.({
       from: `${roomJid}/alice`,
       presence_type: "error",
+      error_condition: "registration-required",
+      error_type: "auth",
     });
 
     await expect(joined).rejects.toThrow("Channel presence was rejected");
     expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
     expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
     expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].kind).toBe("muc-join");
+    expect(errors[0].condition).toBe("registration-required");
+    expect(errors[0].errorType).toBe("auth");
   });
 
   test("room join ignores unrelated room presence errors while waiting for self-presence", async () => {
