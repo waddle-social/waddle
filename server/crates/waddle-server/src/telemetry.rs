@@ -35,6 +35,8 @@ fn build_resource() -> Resource {
     let service_instance_id = resolve_service_instance_id(
         std::env::var("OTEL_SERVICE_INSTANCE_ID").ok(),
         std::env::var("HOSTNAME").ok(),
+        std::process::id(),
+        uuid::Uuid::new_v4().simple().to_string().as_str(),
     );
 
     Resource::builder()
@@ -52,15 +54,31 @@ fn build_resource() -> Resource {
 /// resource collapse into one clobbered series downstream, so every
 /// process needs a distinct, stable-for-its-lifetime identity.
 /// Precedence: explicit `OTEL_SERVICE_INSTANCE_ID` override, then
-/// `HOSTNAME` (the kubelet sets it to the pod name in every pod), then
-/// a pid-suffixed fallback for local runs. Blank values are skipped.
-fn resolve_service_instance_id(explicit: Option<String>, hostname: Option<String>) -> String {
-    [explicit, hostname]
-        .into_iter()
-        .flatten()
+/// `HOSTNAME` (the kubelet sets it to the pod name in every pod)
+/// suffixed with the pid so several processes sharing a hostname —
+/// bare metal, docker-compose — stay distinguishable, then a
+/// pid+entropy fallback: pids alone repeat across PID namespaces, so
+/// hostname-less containers need the per-process entropy to avoid
+/// colliding. Blank values are skipped.
+fn resolve_service_instance_id(
+    explicit: Option<String>,
+    hostname: Option<String>,
+    pid: u32,
+    fallback_entropy: &str,
+) -> String {
+    if let Some(id) = nonblank(explicit) {
+        return id;
+    }
+    if let Some(host) = nonblank(hostname) {
+        return format!("{host}-{pid}");
+    }
+    format!("waddle-server-{pid}-{fallback_entropy}")
+}
+
+fn nonblank(value: Option<String>) -> Option<String> {
+    value
         .map(|value| value.trim().to_string())
-        .find(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("waddle-server-{}", std::process::id()))
+        .filter(|value| !value.is_empty())
 }
 
 fn default_filter() -> EnvFilter {
@@ -144,8 +162,9 @@ fn build_log_filter() -> EnvFilter {
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint (default: http://localhost:4317)
 /// - `OTEL_SERVICE_NAME`: Service name (default: waddle-server)
 /// - `OTEL_SERVICE_VERSION`: Service version (default: crate version)
-/// - `OTEL_SERVICE_INSTANCE_ID`: Per-replica instance id (default: `HOSTNAME`,
-///   i.e. the pod name in Kubernetes, then a pid-suffixed fallback)
+/// - `OTEL_SERVICE_INSTANCE_ID`: Per-replica instance id (default:
+///   `<HOSTNAME>-<pid>` — the pod name in Kubernetes — then a
+///   pid+entropy fallback when no hostname is available)
 /// - `RUST_LOG`: Log filter (default: info)
 ///
 /// # Example
@@ -350,28 +369,43 @@ mod tests {
         let id = super::resolve_service_instance_id(
             Some("explicit-id".to_string()),
             Some("pod-name".to_string()),
+            7,
+            "entropy",
         );
         assert_eq!(id, "explicit-id");
     }
 
     #[test]
-    fn instance_id_falls_back_to_hostname() {
-        let id =
-            super::resolve_service_instance_id(None, Some("waddle-server-abc-xyz".to_string()));
-        assert_eq!(id, "waddle-server-abc-xyz");
+    fn instance_id_uses_hostname_with_pid_suffix() {
+        // The pid suffix keeps several processes sharing a hostname
+        // (bare metal, docker-compose) from publishing one identity.
+        let id = super::resolve_service_instance_id(
+            None,
+            Some("waddle-server-abc-xyz".to_string()),
+            7,
+            "entropy",
+        );
+        assert_eq!(id, "waddle-server-abc-xyz-7");
     }
 
     #[test]
-    fn instance_id_skips_blank_values() {
-        let id =
-            super::resolve_service_instance_id(Some("   ".to_string()), Some("\t".to_string()));
-        assert_eq!(id, format!("waddle-server-{}", std::process::id()));
+    fn instance_id_falls_back_to_pid_and_entropy() {
+        // Pids repeat across PID namespaces, so the hostname-less
+        // fallback must carry per-process entropy.
+        let id = super::resolve_service_instance_id(
+            Some("   ".to_string()),
+            Some("\t".to_string()),
+            7,
+            "0a1b2c3d",
+        );
+        assert_eq!(id, "waddle-server-7-0a1b2c3d");
     }
 
     #[test]
     fn instance_id_trims_surrounding_whitespace() {
-        let id = super::resolve_service_instance_id(None, Some(" pod-1 \n".to_string()));
-        assert_eq!(id, "pod-1");
+        let id =
+            super::resolve_service_instance_id(None, Some(" pod-1 \n".to_string()), 7, "entropy");
+        assert_eq!(id, "pod-1-7");
     }
 
     #[test]
