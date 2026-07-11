@@ -248,9 +248,8 @@ export class WaddleClient {
      * the JID of the chat (bare DM contact, bare MUC room, or full MUC
      * occupant for a private message) which becomes the PEP item id;
      * `stanza_id` is the XEP-0359 id of the latest
-     * displayed message; `stanza_id_by` is the assigning entity's
-     * XEP-0359 `by` JID and must be preserved exactly for authority
-     * matching. The publish carries the spec-mandated
+     * displayed message; `stanza_id_by` is the resource-less room or
+     * account-server authority required by XEP-0490. The publish carries the spec-mandated
      * publish-options as preconditions.
      */
     publish_mds_displayed(chat_id: string, stanza_id: string, stanza_id_by: string): Promise<any>;
