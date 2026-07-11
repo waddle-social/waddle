@@ -147,14 +147,14 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     // dead weight (writes on every advance, never consumed).
     const persistence = inMemoryPersistence();
     persistence.saveCatchup({
-      dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z", archiveId: "dm-arch-1" }]],
+      dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z", scope: "account", archiveId: "dm-arch-1" }]],
       roomLastSeen: [],
     });
 
     const c = new ReconnectCatchup(persistence);
     const entries = c.onSessionStarted();
     expect(entries).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-1", since: "2026-05-20T10:00:00.000Z" },
+      { kind: "dm", key: "bob@example.com", scope: "account", after: "dm-arch-1", since: "2026-05-20T10:00:00.000Z" },
     ]);
   });
 
@@ -187,10 +187,34 @@ describe("ReconnectCatchup persistence — writes back on advance", () => {
       "bob@example.com",
       {
         timestamp: "2026-05-20T10:00:00.000Z",
+        scope: "account",
         archiveId: "dm-arch-1",
         archiveTimestamp: "2026-05-20T10:00:00.000Z",
       },
     ]);
+  });
+
+  test("persists and hydrates custom MUC occupant scope", async () => {
+    const persistence = inMemoryPersistence();
+    const writer = new ReconnectCatchup(persistence);
+    writer.recordDmSeen(
+      "room@rooms.waddle.example/alice",
+      "2026-05-20T10:00:00Z",
+      "pm-arch-1",
+      [],
+      "muc-occupant",
+    );
+    await flushMicrotasks();
+
+    const reader = new ReconnectCatchup(persistence);
+
+    expect(reader.onSessionStarted()).toEqual([{
+      kind: "dm",
+      key: "room@rooms.waddle.example/alice",
+      scope: "muc-occupant",
+      after: "pm-arch-1",
+      since: "2026-05-20T10:00:00.000Z",
+    }]);
   });
 
   test("bursts coalesce into a single write per microtask", async () => {
@@ -792,12 +816,15 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const tabA = new ReconnectCatchup(persistence);
     const tabB = new ReconnectCatchup(persistence);
-    tabA.recordDmSeen("bob@example.com", "2026-05-20T10:00:00Z", "dm-arch-A");
+    tabA.recordDmSeen("room@rooms.waddle.example/alice", "2026-05-20T10:00:00Z", "dm-arch-A", [], "muc-occupant");
     tabB.recordRoomSeen("general@muc.example.com", "2026-05-20T11:00:00Z", "room-arch-B");
     await new Promise((resolve) => setTimeout(resolve, 0));
     const final = persistence.loadCatchup();
     expect(final).not.toBeNull();
-    expect(final!.dmLastSeen.map((e) => e[0])).toContain("bob@example.com");
+    expect(final!.dmLastSeen).toContainEqual([
+      "room@rooms.waddle.example/alice",
+      expect.objectContaining({ scope: "muc-occupant" }),
+    ]);
     expect(final!.roomLastSeen.map((e) => e[0])).toContain("general@muc.example.com");
   });
 });

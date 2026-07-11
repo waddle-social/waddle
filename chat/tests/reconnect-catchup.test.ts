@@ -29,6 +29,7 @@ describe("ReconnectCatchup", () => {
     expect(entries).toHaveLength(2);
     expect(entries).toContainEqual({
       kind: "dm",
+      scope: "account",
       key: "bob@example.com",
       after: "dm-arch-1",
       since: "2024-01-01T00:00:00.000Z",
@@ -56,7 +57,7 @@ describe("ReconnectCatchup", () => {
     c.onSessionStarted();
 
     expect(c.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", since: "2024-01-01T00:00:00.000Z" },
+      { kind: "dm", scope: "account", key: "bob@example.com", since: "2024-01-01T00:00:00.000Z" },
     ]);
   });
 
@@ -70,6 +71,7 @@ describe("ReconnectCatchup", () => {
     expect(c.onSessionStarted()).toEqual([
       {
         kind: "dm",
+        scope: "account",
         key: "bob@example.com",
         since: "2024-01-01T00:00:00.000Z",
         seenIds: ["dm-1", "dm-2"],
@@ -87,6 +89,7 @@ describe("ReconnectCatchup", () => {
     expect(c.onSessionStarted()).toEqual([
       {
         kind: "dm",
+        scope: "account",
         key: "bob@example.com",
         since: "2024-01-01T00:00:00.000Z",
         seenIds: ["dm-1", "dm-2"],
@@ -102,7 +105,7 @@ describe("ReconnectCatchup", () => {
     c.onSessionStarted();
 
     expect(c.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-2", since: "2024-01-02T00:00:00.000Z" },
+      { kind: "dm", scope: "account", key: "bob@example.com", after: "dm-arch-2", since: "2024-01-02T00:00:00.000Z" },
     ]);
   });
 
@@ -114,7 +117,7 @@ describe("ReconnectCatchup", () => {
     c.onSessionStarted();
 
     expect(c.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-2", since: "2024-01-02T00:00:00.000Z" },
+      { kind: "dm", scope: "account", key: "bob@example.com", after: "dm-arch-2", since: "2024-01-02T00:00:00.000Z" },
     ]);
   });
 
@@ -129,6 +132,7 @@ describe("ReconnectCatchup", () => {
     expect(c.onSessionStarted()).toEqual([
       {
         kind: "dm",
+        scope: "account",
         key: "bob@example.com",
         after: "dm-arch-2",
         since: "2024-01-02T00:00:00.000Z",
@@ -147,6 +151,7 @@ describe("ReconnectCatchup", () => {
     expect(c.onSessionStarted()).toEqual([
       {
         kind: "dm",
+        scope: "account",
         key: "bob@example.com",
         after: "dm-arch-2",
         since: "2024-01-02T00:00:00.000Z",

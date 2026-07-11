@@ -157,8 +157,8 @@ describe("DM call activity hydration", () => {
       messages: [
         {
           mam_id: "mam-proceed",
-          from: "alice@example.com/web",
-          to: "bob@example.com/phone",
+          from: "alice@example.com",
+          to: "bob@example.com",
           timestamp: timestamp(-60_000),
           call_event: {
             kind: "proceed",
@@ -176,8 +176,8 @@ describe("DM call activity hydration", () => {
       messages: [
         {
           mam_id: "mam-propose",
-          from: "bob@example.com/phone",
-          to: "alice@example.com/web",
+          from: "bob@example.com",
+          to: "alice@example.com",
           timestamp: timestamp(-300_000),
           call_event: {
             kind: "propose",
@@ -224,8 +224,8 @@ describe("DM call activity hydration", () => {
       messages: [
         {
           mam_id: "mam-finish",
-          from: "bob@example.com/phone",
-          to: "alice@example.com/web",
+          from: "bob@example.com",
+          to: "alice@example.com",
           timestamp: finishedAt,
           call_event: {
             kind: "finish",
@@ -242,8 +242,8 @@ describe("DM call activity hydration", () => {
       messages: [
         {
           mam_id: "mam-accepted",
-          from: "bob@example.com/phone",
-          to: "alice@example.com/web",
+          from: "bob@example.com",
+          to: "alice@example.com",
           timestamp: acceptedAt,
           call_event: {
             kind: "session-accept",
@@ -296,8 +296,8 @@ describe("DM call activity hydration", () => {
     const page = {
       messages: [{
         mam_id: "mam-propose",
-        from: "bob@example.com/phone",
-        to: "alice@example.com/web",
+        from: "bob@example.com",
+        to: "alice@example.com",
         timestamp,
         call_event: {
           kind: "propose",
@@ -343,8 +343,8 @@ describe("DM call activity hydration", () => {
     const page = {
       messages: [{
         mam_id: "mam-propose",
-        from: "bob@example.com/phone",
-        to: "alice@example.com/web",
+        from: "bob@example.com",
+        to: "alice@example.com",
         timestamp: new Date(now - 60_000).toISOString(),
         call_event: {
           kind: "propose",

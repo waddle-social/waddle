@@ -8,7 +8,7 @@ import type {
   LiveDmMessage,
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
-import { bareJidKey, barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { barePeerJid, dmConversationIdentityKey, jidLocalpart } from "@/lib/xmpp-client";
 import type { CatchupConversationFailure } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
@@ -299,7 +299,10 @@ export function useDirectMessages(
     if (event.type !== "fresh") return;
     const peerJid = activePeerJid.value;
     if (!peerJid) return;
-    if (event.catchup.dmJids.some((jid) => bareJidKey(jid) === bareJidKey(peerJid))) return;
+    const scopedOccupants = new Set(event.catchup.dmOccupantJids ?? []);
+    const isMucPmPeer = (jid: string) => scopedOccupants.has(jid) || (xmppClient.value?.isMucPmPeer?.(jid) ?? false);
+    const peerKey = dmConversationIdentityKey(peerJid, isMucPmPeer);
+    if (event.catchup.dmJids.some((jid) => dmConversationIdentityKey(jid, isMucPmPeer) === peerKey)) return;
     refetchTimelineToCloseGap();
   }
 
@@ -309,7 +312,13 @@ export function useDirectMessages(
   function onCatchupFailed(failure: CatchupConversationFailure) {
     if (failure.kind !== "dm") return;
     const peerJid = activePeerJid.value;
-    if (!peerJid || bareJidKey(peerJid) !== bareJidKey(failure.key)) return;
+    const isMucPmPeer = (jid: string) =>
+      (failure.dmScope === "muc-occupant" && jid === failure.key)
+      || (xmppClient.value?.isMucPmPeer?.(jid) ?? false);
+    if (
+      !peerJid
+      || dmConversationIdentityKey(peerJid, isMucPmPeer) !== dmConversationIdentityKey(failure.key, isMucPmPeer)
+    ) return;
     refetchTimelineToCloseGap();
   }
 

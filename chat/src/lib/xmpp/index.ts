@@ -28,6 +28,7 @@ export type {
 export {
   bareJidKey,
   barePeerJid,
+  dmConversationIdentityKey,
   jidDomain,
   jidDomainOrEmpty,
   jidLocalpart,

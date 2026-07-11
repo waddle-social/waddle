@@ -72,8 +72,8 @@ impl MessageHandler for ArchiveHandler {
                 let from = from_bare.clone().unwrap_or_else(|| local_bare.clone());
                 events.push(OutboundEvent::ArchiveDirect {
                     archive_jid: from.clone(),
-                    from,
-                    to,
+                    from: jid::Jid::from(from),
+                    to: jid::Jid::from(to),
                     message: Box::new(message.clone()),
                 });
             }
@@ -96,8 +96,8 @@ impl MessageHandler for ArchiveHandler {
                     let to = to_bare.unwrap_or_else(|| local_bare.clone());
                     events.push(OutboundEvent::ArchiveDirect {
                         archive_jid: to.clone(),
-                        from,
-                        to,
+                        from: jid::Jid::from(from),
+                        to: jid::Jid::from(to),
                         message: Box::new(message.clone()),
                     });
                 }
@@ -229,7 +229,7 @@ mod tests {
         ArchiveHandler.handle(msg, &ctx)
     }
 
-    fn extract_archive_events(outcome: &HandlerOutcome) -> Vec<(BareJid, BareJid)> {
+    fn extract_archive_events(outcome: &HandlerOutcome) -> Vec<(jid::Jid, jid::Jid)> {
         match outcome {
             HandlerOutcome::Continue(events) => events
                 .iter()
@@ -268,8 +268,8 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let archives = extract_archive_events(&outcome);
         assert_eq!(archives.len(), 1);
-        assert_eq!(archives[0].0, bare("alice@example.com"));
-        assert_eq!(archives[0].1, bare("bob@example.com"));
+        assert_eq!(archives[0].0, jid::Jid::from(bare("alice@example.com")));
+        assert_eq!(archives[0].1, jid::Jid::from(bare("bob@example.com")));
     }
 
     #[test]
@@ -279,8 +279,8 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let archives = extract_archive_events(&outcome);
         assert_eq!(archives.len(), 1);
-        assert_eq!(archives[0].0, bare("alice@example.com"));
-        assert_eq!(archives[0].1, bare("bob@example.com"));
+        assert_eq!(archives[0].0, jid::Jid::from(bare("alice@example.com")));
+        assert_eq!(archives[0].1, jid::Jid::from(bare("bob@example.com")));
     }
 
     #[test]

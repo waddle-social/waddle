@@ -1330,7 +1330,7 @@ describe("client keepalive lifecycle", () => {
       peerJid: "bob@example.com",
     }));
     expect(catchup.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "mam-newer", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-newer"] },
+      { kind: "dm", scope: "account", key: "bob@example.com", after: "mam-newer", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-newer"] },
     ]);
   });
 
@@ -1996,7 +1996,7 @@ describe("client keepalive lifecycle", () => {
     await client.queryPersonalMamPage("bob@example.com", 100, { type: "latest" });
 
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "mam-loaded-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-loaded-1"] },
+      { kind: "dm", scope: "account", key: "bob@example.com", after: "mam-loaded-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-loaded-1"] },
     ]);
   });
 
@@ -2070,6 +2070,7 @@ describe("client keepalive lifecycle", () => {
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
       {
         kind: "dm",
+        scope: "account",
         key: "bob@example.com",
         after: "mam-retract-video",
         since: retractedAt,

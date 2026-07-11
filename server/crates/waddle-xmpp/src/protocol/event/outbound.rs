@@ -134,11 +134,13 @@ pub enum OutboundEvent {
     /// emits this field as the local user's bare JID, so the interpreter
     /// is dumb glue that does not need to reason about sender/recipient
     /// pass semantics. `from` and `to` carry the canonical message tuple
-    /// for telemetry and remain on the typed `message` payload.
+    /// for telemetry and MAM `with` matching. A MUC-PM peer remains a full
+    /// occupant JID while the user's side remains its account JID; ordinary
+    /// direct-message producers keep supplying bare JIDs for both sides.
     ArchiveDirect {
         archive_jid: BareJid,
-        from: BareJid,
-        to: BareJid,
+        from: jid::Jid,
+        to: jid::Jid,
         message: Box<Message>,
     },
     /// Project a message into the local user's inbox (Waddle conversation

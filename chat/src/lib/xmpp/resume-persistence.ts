@@ -38,6 +38,7 @@ const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
 
 type PersistedSeenCursor = {
   timestamp: string;
+  scope?: "account" | "muc-occupant";
   archiveId?: string;
   archiveTimestamp?: string;
   archiveSeenIds?: string[];
@@ -438,6 +439,7 @@ function isPersistedSeenCursor(value: unknown): value is PersistedSeenCursor {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.timestamp !== "string") return false;
+  if (candidate.scope !== undefined && candidate.scope !== "account" && candidate.scope !== "muc-occupant") return false;
   if (candidate.archiveId !== undefined && typeof candidate.archiveId !== "string") return false;
   if (candidate.archiveTimestamp !== undefined && typeof candidate.archiveTimestamp !== "string") return false;
   if (candidate.archiveSeenIds !== undefined) {

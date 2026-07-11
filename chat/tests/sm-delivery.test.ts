@@ -40,12 +40,15 @@ function makeRoomClient(queryMamResults: LiveRoomMessage[] = []) {
   return ref({ ...handlerStubs(), queryMam } as never) as never;
 }
 
-function makeDmMessaging(xmppClient: ReturnType<typeof makeDmClient>) {
+function makeDmMessaging(
+  xmppClient: ReturnType<typeof makeDmClient>,
+  activePeerJid = "bob@example.com",
+) {
   const actionError = ref("");
   const dm = useDirectMessages(
     ref(session()),
     xmppClient,
-    ref("bob@example.com"),
+    ref(activePeerJid),
     String,
     actionError,
     () => {
@@ -55,9 +58,12 @@ function makeDmMessaging(xmppClient: ReturnType<typeof makeDmClient>) {
   return { dm, actionError };
 }
 
-function makeDmClient(queryPersonalMamResults: LiveDmMessage[] = []) {
+function makeDmClient(
+  queryPersonalMamResults: LiveDmMessage[] = [],
+  isMucPmPeer = (peerJid: string) => peerJid.includes("@muc.example.com/"),
+) {
   const queryPersonalMam = mock(async () => queryPersonalMamResults);
-  return ref({ queryPersonalMam } as never) as never;
+  return ref({ queryPersonalMam, isMucPmPeer } as never) as never;
 }
 
 describe("XEP-0198 delivery status (group chat)", () => {
@@ -610,6 +616,84 @@ describe("XEP-0198 delivery status (DM)", () => {
     };
     expect(clientAny.value.queryPersonalMam).not.toHaveBeenCalled();
     expect(dm.messages.value).toEqual(existing);
+  });
+
+  test("fresh MUC-PM session reloads when catch-up covers only a sibling occupant", async () => {
+    const client = makeDmClient();
+    const { dm } = makeDmMessaging(client, "room@muc.example.com/bob");
+    dm.messages.value = [{
+      id: "pm-old",
+      author: "bob",
+      body: "earlier",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+    }];
+
+    dm.onSessionLifecycle({
+      type: "fresh",
+      catchup: { dmJids: ["room@muc.example.com/alice"], roomJids: [] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const clientAny = client as unknown as {
+      value: { queryPersonalMam: ReturnType<typeof mock> };
+    };
+    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith(
+      "room@muc.example.com/bob",
+      100,
+    );
+  });
+
+  test("fresh custom-service MUC-PM session reloads when catch-up covers only a sibling occupant", async () => {
+    // Cold reload: topology discovery has not yet updated the client's MUC
+    // service, so persisted cursor scope is the authoritative signal.
+    const client = makeDmClient([], () => false);
+    const { dm } = makeDmMessaging(client, "room@rooms.waddle.example/bob");
+    dm.messages.value = [{
+      id: "pm-old",
+      author: "bob",
+      body: "earlier",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+    }];
+
+    dm.onSessionLifecycle({
+      type: "fresh",
+      catchup: {
+        dmJids: ["room@rooms.waddle.example/alice"],
+        dmOccupantJids: ["room@rooms.waddle.example/alice"],
+        roomJids: [],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const clientAny = client as unknown as {
+      value: { queryPersonalMam: ReturnType<typeof mock> };
+    };
+    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith(
+      "room@rooms.waddle.example/bob",
+      100,
+    );
+  });
+
+  test("MUC-PM catch-up failure reloads only the same occupant", async () => {
+    const client = makeDmClient();
+    const { dm } = makeDmMessaging(client, "room@muc.example.com/bob");
+    dm.messages.value = [{
+      id: "pm-old",
+      author: "bob",
+      body: "earlier",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+    }];
+
+    dm.onCatchupFailed({ kind: "dm", key: "room@muc.example.com/alice" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const clientAny = client as unknown as {
+      value: { queryPersonalMam: ReturnType<typeof mock> };
+    };
+    expect(clientAny.value.queryPersonalMam).not.toHaveBeenCalled();
   });
 
   test("catch-up failure for the active DM peer falls back to the wholesale reload", async () => {

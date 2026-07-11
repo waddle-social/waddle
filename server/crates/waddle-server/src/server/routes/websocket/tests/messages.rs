@@ -21,6 +21,88 @@ fn dm_call_message(from: &str, to: &str, payload: Element) -> xmpp_parsers::mess
     message
 }
 
+#[tokio::test]
+async fn muc_pm_sender_archive_uses_typed_tuple_for_ancillary_projections() {
+    use crate::notification_activity::NotificationActivityReader;
+
+    let state = create_test_websocket_state().await;
+    let sender: BareJid = "alice@example.com".parse().expect("sender bare jid");
+    let room: BareJid = "room@muc.example.com".parse().expect("room bare jid");
+    let target: jid::FullJid = "room@muc.example.com/bob"
+        .parse()
+        .expect("target occupant jid");
+    let sid = xmpp_parsers::jingle::SessionId("muc-pm-call-projection".to_owned());
+    let propose = waddle_xmpp::xep::xep0353::build_propose(
+        sid.clone(),
+        waddle_xmpp::xep::xep0353::CallOffer::audio_video(),
+    );
+    // The archived row's typed tuple identifies the sender-owned pass. Its
+    // serialized stanza may already carry the room-authored occupant `from`.
+    let message = dm_call_message(
+        "room@muc.example.com/alice",
+        "room@muc.example.com/bob",
+        propose,
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            archive_jid: sender.clone(),
+            from: jid::Jid::from(sender.clone()),
+            to: jid::Jid::from(target),
+            message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let expected_key = crate::server::routes::websocket::DmCallThreadKey::new(
+        sender.clone(),
+        room.clone(),
+        sid.clone(),
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .pending_dm_call_offers
+            .contains_key(&expected_key),
+        "sender-side MUC-PM call projection must remain sender -> room bare"
+    );
+    let wrong_self_key =
+        crate::server::routes::websocket::DmCallThreadKey::new(sender.clone(), sender.clone(), sid);
+    assert!(
+        !state
+            .deps
+            .protocol
+            .pending_dm_call_offers
+            .contains_key(&wrong_self_key),
+        "occupant wire `from` must not misclassify the sender archive as recipient-owned"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .notification_activity
+            .read_activity(&sender, &room)
+            .await
+            .expect("read sender-room activity")
+            .is_some(),
+        "outbound activity must remain keyed by sender and room"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .notification_activity
+            .read_activity(&sender, &sender)
+            .await
+            .expect("read wrong self activity")
+            .is_none(),
+        "sender-side MUC-PM must not create self-conversation activity"
+    );
+}
+
 async fn drive_dm_message(
     state: &WebSocketState,
     full_jid: FullJid,
@@ -147,14 +229,14 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
         vec![
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
                 archive_jid: bob.clone(),
-                from: bob.clone(),
-                to: alice.clone(),
+                from: bob.clone().into(),
+                to: alice.clone().into(),
                 message: Box::new(accepted_proceed.clone()),
             },
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
                 archive_jid: alice.clone(),
-                from: bob.clone(),
-                to: alice.clone(),
+                from: bob.clone().into(),
+                to: alice.clone().into(),
                 message: Box::new(accepted_proceed),
             },
         ],
@@ -238,8 +320,8 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     let _ = crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
             archive_jid: alice.clone(),
-            from: alice.clone(),
-            to: bob.clone(),
+            from: alice.clone().into(),
+            to: bob.clone().into(),
             message: Box::new(dm_call_message(
                 "alice@example.com/web",
                 "bob@example.com/phone",
@@ -297,14 +379,14 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
         vec![
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
                 archive_jid: bob.clone(),
-                from: bob.clone(),
-                to: alice.clone(),
+                from: bob.clone().into(),
+                to: alice.clone().into(),
                 message: Box::new(replayed_proceed.clone()),
             },
             waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
                 archive_jid: alice.clone(),
-                from: bob.clone(),
-                to: alice.clone(),
+                from: bob.clone().into(),
+                to: alice.clone().into(),
                 message: Box::new(replayed_proceed),
             },
         ],
@@ -2823,8 +2905,8 @@ async fn notification_candidate_recovery_preserves_sender_resource_from_archived
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
             archive_jid: recipient.clone(),
-            from: sender_bare.clone(),
-            to: recipient.clone(),
+            from: sender_bare.clone().into(),
+            to: recipient.clone().into(),
             message: Box::new(message),
         }],
         &deps,
@@ -3831,6 +3913,97 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
             "caller-supplied stanza-ids must not survive: {xml}"
         );
     }
+
+    let alice_archive = state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&alice_jid.to_bare(), &Default::default())
+        .await
+        .expect("query sender MAM archive");
+    let bob_archive = state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&bob_jid.to_bare(), &Default::default())
+        .await
+        .expect("query recipient MAM archive");
+    let sender_row = alice_archive.messages.last().expect("sender archive row");
+    assert_eq!(
+        sender_row.from.to_string(),
+        alice_jid.to_bare().to_string(),
+        "sender archive must preserve the sender account endpoint"
+    );
+    assert_eq!(
+        sender_row.to.to_string(),
+        format!("{room_jid}/bob"),
+        "sender archive must retain the recipient occupant peer"
+    );
+    let recipient_row = bob_archive.messages.last().expect("recipient archive row");
+    assert_eq!(
+        recipient_row.from.to_string(),
+        format!("{room_jid}/alice"),
+        "recipient archive must retain the sender occupant peer"
+    );
+    assert_eq!(
+        recipient_row.to.to_string(),
+        bob_jid.to_bare().to_string(),
+        "recipient archive must preserve the delivered account endpoint"
+    );
+}
+
+#[tokio::test]
+async fn muc_private_message_to_own_nick_archives_one_delivered_tuple() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "pm-self-room@muc.example.com".parse().expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+        room_jid
+            .clone()
+            .with_resource_str("alice")
+            .expect("self occupant jid"),
+    )));
+    message.type_ = XmppMessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id("muc-pm-self-1".to_string()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "private note to self".to_string(),
+    );
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(responses.is_empty(), "self-PM routes asynchronously");
+
+    let archive = state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&alice_jid.to_bare(), &Default::default())
+        .await
+        .expect("query self-PM archive");
+    let self_rows: Vec<_> = archive
+        .messages
+        .iter()
+        .filter(|row| row.body.as_deref() == Some("private note to self"))
+        .collect();
+    assert_eq!(self_rows.len(), 1, "self-PM must archive exactly once");
+    assert_eq!(self_rows[0].from.to_string(), format!("{room_jid}/alice"));
+    assert_eq!(self_rows[0].to.to_string(), alice_jid.to_bare().to_string());
 }
 
 #[tokio::test]

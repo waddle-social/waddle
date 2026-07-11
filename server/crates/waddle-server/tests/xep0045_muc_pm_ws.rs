@@ -15,8 +15,8 @@
 //!    (`<sent/>`) to the sender's other carbon-enabled resource.
 //! 3. XEP-0198: a PM to a detached-but-resumable occupant session is
 //!    queued and replayed on resume, not lost.
-//! 4. XEP-0313: the PM lands in both users' archives, keyed by the
-//!    room bare JID.
+//! 4. XEP-0313: the PM lands in both users' archives with the peer's full
+//!    occupant endpoint, so `with=room/nick` excludes sibling PM threads.
 //! 5. `muc#roomconfig_allowpm` is honored (`none` → `<forbidden/>`).
 //! 6. A PM to an unknown nick still bounces `<item-not-found/>`.
 
@@ -37,6 +37,8 @@ const NS_XDATA: &str = "jabber:x:data";
 const NS_OCCUPANT_ID: &str = "urn:xmpp:occupant-id:0";
 const NS_SID: &str = "urn:xmpp:sid:0";
 const NS_CARBONS: &str = "urn:xmpp:carbons:2";
+const NS_MAM: &str = "urn:xmpp:mam:2";
+const NS_RSM: &str = "http://jabber.org/protocol/rsm";
 const NS_XMPP_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 const MUC_ROOMCONFIG_FORM: &str = "http://jabber.org/protocol/muc#roomconfig";
 
@@ -161,6 +163,56 @@ fn data_form_field(var: &str, field_type: Option<&str>, value: &str) -> Element 
                 .build(),
         )
         .build()
+}
+
+fn mam_with_query_xml(
+    archive_jid: &str,
+    query_id: &str,
+    with: &str,
+    max: u32,
+    after: Option<&str>,
+) -> String {
+    let form = Element::builder("x", NS_XDATA)
+        .attr(attr_name("type").to_owned(), "submit")
+        .append(data_form_field("FORM_TYPE", Some("hidden"), NS_MAM))
+        .append(data_form_field("with", Some("jid-single"), with))
+        .build();
+    let mut rsm = Element::builder("set", NS_RSM).append(
+        Element::builder("max", NS_RSM)
+            .append(max.to_string())
+            .build(),
+    );
+    if let Some(after) = after {
+        rsm = rsm.append(
+            Element::builder("after", NS_RSM)
+                .append(after.to_owned())
+                .build(),
+        );
+    }
+    element_to_xml(
+        Element::builder("iq", NS_CLIENT)
+            .attr(attr_name("type").to_owned(), "set")
+            .attr(attr_name("id").to_owned(), query_id.to_owned())
+            .attr(attr_name("to").to_owned(), archive_jid.to_owned())
+            .append(
+                Element::builder("query", NS_MAM)
+                    .attr(attr_name("queryid").to_owned(), query_id.to_owned())
+                    .append(form)
+                    .append(rsm.build())
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+fn mam_page_last(frames: &[String]) -> String {
+    frames
+        .iter()
+        .find_map(|frame| {
+            let element = frame.parse::<Element>().ok()?;
+            find_descendant(&element, "last", NS_RSM).map(|last| last.text())
+        })
+        .expect("MAM page has an RSM <last> cursor")
 }
 
 /// Submit a §10.2 owner-config form setting `muc#roomconfig_allowpm`.
@@ -372,8 +424,8 @@ async fn muc_pm_to_detached_resumable_occupant_replays_on_resume() {
     }
 }
 
-/// XEP-0313 (#1257): the PM is archived in BOTH users' archives, keyed
-/// by the room bare JID.
+/// XEP-0313 (#1257/#1281): the PM is owned by BOTH users' bare archives;
+/// each row retains the peer's full room occupant JID.
 #[tokio::test]
 async fn muc_pm_archived_in_both_user_archives() {
     let _guard = TEST_SERIAL.lock().await;
@@ -425,6 +477,137 @@ async fn muc_pm_archived_in_both_user_archives() {
 
     let _ = admin.close().await;
     let _ = alice.close().await;
+}
+
+/// #1281: a full-occupant MAM `with` filter is applied before RSM paging.
+/// Interleaved PMs to another nick must neither leak into the page nor consume
+/// its limit/cursor.
+#[tokio::test]
+async fn muc_pm_mam_with_full_occupant_excludes_siblings_across_pages() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_pass = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(ALICE, &alice_pass), ("bob", &bob_pass)]);
+    let admin_pass = server.fixed_account_password().to_string();
+
+    let mut admin = connect(&server, ADMIN, &admin_pass, "pm-scope-admin").await;
+    let mut alice = connect(&server, ALICE, &alice_pass, "pm-scope-alice").await;
+    let mut bob = connect(&server, "bob", &bob_pass, "pm-scope-bob").await;
+    let room = format!("pm-scope-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room, ADMIN).await;
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, "bob").await;
+
+    let alice_first = format!("alice-first-{}", uuid::Uuid::new_v4());
+    let bob_middle = format!("bob-middle-{}", uuid::Uuid::new_v4());
+    let alice_second = format!("alice-second-{}", uuid::Uuid::new_v4());
+    for (target, body) in [
+        (ALICE, alice_first.as_str()),
+        ("bob", bob_middle.as_str()),
+        (ALICE, alice_second.as_str()),
+    ] {
+        admin
+            .send(&pm_xml(&room, target, body, body))
+            .await
+            .expect("send interleaved PM");
+        let recipient = if target == ALICE {
+            &mut alice
+        } else {
+            &mut bob
+        };
+        recipient
+            .recv_matching(|frame| frame.contains(body))
+            .await
+            .expect("recipient receives interleaved PM");
+    }
+
+    let admin_archive = format!("{ADMIN}@{DOMAIN}");
+    let alice_occupant = format!("{room}/{ALICE}");
+    admin
+        .send(&mam_with_query_xml(
+            &admin_archive,
+            "pm-scope-page-1",
+            &alice_occupant,
+            1,
+            None,
+        ))
+        .await
+        .expect("send first scoped MAM query");
+    let first = admin
+        .recv_until(|frame| frame.contains("<fin") && frame.contains("pm-scope-page-1"))
+        .await
+        .expect("first scoped MAM page completes");
+    assert!(first.iter().any(|frame| frame.contains(&alice_first)));
+    assert!(!first.iter().any(|frame| frame.contains(&bob_middle)));
+    assert!(!first.iter().any(|frame| frame.contains(&alice_second)));
+    let cursor = mam_page_last(&first);
+
+    admin
+        .send(&mam_with_query_xml(
+            &admin_archive,
+            "pm-scope-page-2",
+            &alice_occupant,
+            1,
+            Some(&cursor),
+        ))
+        .await
+        .expect("send second scoped MAM query");
+    let second = admin
+        .recv_until(|frame| frame.contains("<fin") && frame.contains("pm-scope-page-2"))
+        .await
+        .expect("second scoped MAM page completes");
+    assert!(second.iter().any(|frame| frame.contains(&alice_second)));
+    assert!(!second.iter().any(|frame| frame.contains(&bob_middle)));
+
+    let _ = admin.close().await;
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
+/// #1281: a PM to one's own nick is archived once under the personal archive,
+/// with the full self occupant JID remaining queryable as the MAM peer.
+#[tokio::test]
+async fn muc_self_pm_is_single_and_queryable_by_full_occupant() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "pm-self-admin").await;
+    let room = format!("pm-self-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room, ADMIN).await;
+
+    let body = format!("self-pm-{}", uuid::Uuid::new_v4());
+    admin
+        .send(&pm_xml(&room, ADMIN, "pm-self-1", &body))
+        .await
+        .expect("send self-PM");
+    admin
+        .recv_matching(|frame| frame.contains(&body))
+        .await
+        .expect("self-PM is delivered");
+
+    let archive = format!("{ADMIN}@{DOMAIN}");
+    let occupant = format!("{room}/{ADMIN}");
+    admin
+        .send(&mam_with_query_xml(
+            &archive,
+            "pm-self-query",
+            &occupant,
+            10,
+            None,
+        ))
+        .await
+        .expect("query self-PM");
+    let frames = admin
+        .recv_until(|frame| frame.contains("<fin") && frame.contains("pm-self-query"))
+        .await
+        .expect("self-PM MAM query completes");
+    assert_eq!(
+        frames.iter().filter(|frame| frame.contains(&body)).count(),
+        1,
+        "self-PM must have exactly one archived result: {frames:?}"
+    );
+
+    let _ = admin.close().await;
 }
 
 /// `muc#roomconfig_allowpm` (#1257): `none` disables PMs with

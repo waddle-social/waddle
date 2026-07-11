@@ -518,6 +518,110 @@ async fn test_query_with_pagination() {
 }
 
 #[tokio::test]
+async fn sqlite_full_occupant_with_excludes_siblings_before_pagination() {
+    let storage = create_test_storage().await;
+    assert_full_occupant_with_excludes_siblings_before_pagination(&storage).await;
+}
+
+#[tokio::test]
+async fn inmemory_full_occupant_with_excludes_siblings_before_pagination() {
+    let storage = InMemoryMamStorage::new();
+    assert_full_occupant_with_excludes_siblings_before_pagination(&storage).await;
+}
+
+async fn assert_full_occupant_with_excludes_siblings_before_pagination(storage: &dyn MamStorage) {
+    let archive = bare("user@example.com");
+    let owner_account = jid("user@example.com");
+    let alice_occupant = jid("room@conference.example.com/alice");
+    let bob_occupant = jid("room@conference.example.com/bob");
+    let base = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+
+    for (id, seconds, from, to, body) in [
+        (
+            "alice-incoming",
+            0,
+            alice_occupant.clone(),
+            owner_account.clone(),
+            "alice incoming",
+        ),
+        (
+            "bob-incoming",
+            1,
+            bob_occupant.clone(),
+            owner_account.clone(),
+            "bob incoming",
+        ),
+        (
+            "alice-outgoing",
+            2,
+            owner_account.clone(),
+            alice_occupant.clone(),
+            "alice outgoing",
+        ),
+        (
+            "bob-outgoing",
+            3,
+            owner_account.clone(),
+            bob_occupant.clone(),
+            "bob outgoing",
+        ),
+        (
+            "alice-later",
+            4,
+            alice_occupant.clone(),
+            owner_account.clone(),
+            "alice later",
+        ),
+    ] {
+        storage
+            .store_message(
+                &archive,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    timestamp: base + ChronoDuration::seconds(seconds),
+                    body: Some(body.to_string()),
+                    ..ArchivedMessage::for_test(from, to)
+                },
+            )
+            .await
+            .expect("store interleaved MUC PM");
+    }
+
+    let first = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                with: Some(alice_occupant.clone()),
+                max: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query alice first page");
+    assert_eq!(bodies(&first), vec!["alice incoming", "alice outgoing"]);
+    assert_eq!(first.count, Some(3));
+    assert!(!first.complete);
+
+    let second = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                with: Some(alice_occupant),
+                after_id: first.last_id.clone(),
+                max: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query alice second page");
+    assert_eq!(bodies(&second), vec!["alice later"]);
+    assert_eq!(second.count, Some(3));
+    assert!(second.complete);
+}
+
+#[tokio::test]
 async fn test_sqlite_rsm_after_uses_archive_order_not_lexical_id_order() {
     let storage = create_test_storage().await;
     assert_rsm_after_uses_archive_order_not_lexical_id_order(&storage).await;

@@ -20,6 +20,8 @@ export interface XmppStatusSnapshot {
  */
 type SessionCatchupCoverage = {
   dmJids: readonly string[];
+  /** DM cursor keys authoritatively scoped as full MUC occupant JIDs. */
+  dmOccupantJids?: readonly string[];
   roomJids: readonly string[];
 };
 
