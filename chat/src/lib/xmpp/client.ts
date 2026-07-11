@@ -1488,7 +1488,10 @@ export class BrowserXmppClient {
 
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
     if (!body.trim() && !opts.files?.length) return null;
-    const normalizedPeerJid = this.directMessageAddress(peerJid);
+    const explicitScope = typeof opts.mucPm === "boolean"
+      ? opts.mucPm ? "muc-occupant" : "account"
+      : undefined;
+    const normalizedPeerJid = this.directMessageAddress(peerJid, explicitScope);
     // XEP-0045 §7.5: mark MUC PMs so the builder appends the muc#user
     // <x/> element (sent-carbon classification on our other devices).
     const mucPm = normalizedPeerJid.includes("/");
@@ -1604,17 +1607,18 @@ export class BrowserXmppClient {
     if (thread?.parent) opts.parentThreadId = thread.parent;
     return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);
   }
-  async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, this.directMessageAddress(peerJid), "chat", state, thread); }
+  async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, this.directMessageAddress(peerJid, scope), "chat", state, thread); }
   async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
-  async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, this.directMessageAddress(peerJid), "chat", messageId, thread); }
-  async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"], preview?: Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, thread?: { id: string; parent?: string }): Promise<string | null> {
+  async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
+  async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"], preview?: Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
-    const opts: SendDirectMessageOptions = { markup, references, ...preview, ...(this.directMessageAddress(peerJid).includes("/") ? { mucPm: true } : {}) };
+    const address = this.directMessageAddress(peerJid, scope);
+    const opts: SendDirectMessageOptions = { markup, references, ...preview, ...(address.includes("/") ? { mucPm: true } : {}) };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
-    return await this.compatSendCorrection(xmpp, this.directMessageAddress(peerJid), "chat", body, replacesId, opts);
+    return await this.compatSendCorrection(xmpp, address, "chat", body, replacesId, opts);
   }
-  async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, this.directMessageAddress(peerJid), "chat", messageId, emojis, thread); }
+  async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, emojis, thread); }
   async sendDmInCallReaction(peerJid: string, sid: string, emoji: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendInCallReaction(xmpp, peerJid, "chat", sid, emoji); }
 
   /**

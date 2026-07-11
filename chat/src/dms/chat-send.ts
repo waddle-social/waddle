@@ -1,6 +1,7 @@
 import { ref, type Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { DmConversationScope } from "@/lib/xmpp-client";
 import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { composerLinkPreviewPayloadIsFresh, type ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
@@ -28,12 +29,14 @@ type UseChatSendDeps = {
   clearActionError: () => void;
   normalizeError: (e: unknown) => string;
   scrollToPinnedEdgeAndPin: () => Promise<boolean>;
+  conversationScope?: (peerJid: string) => DmConversationScope;
   // Mirror of useMucSend's contract: the orchestrator handles XEP-0085 chat
   // state cleanup until that axis lands its own composable in PR 5.
   onSendComplete: (
     result: ChatSendResult,
     peerJid: string,
     isStillActive: boolean,
+    scope: DmConversationScope,
   ) => void;
 };
 
@@ -48,6 +51,7 @@ export function useChatSend(deps: UseChatSendDeps) {
     clearActionError,
     normalizeError,
     scrollToPinnedEdgeAndPin,
+    conversationScope,
     onSendComplete,
   } = deps;
 
@@ -76,6 +80,7 @@ export function useChatSend(deps: UseChatSendDeps) {
     const hasFiles = !!files && files.length > 0;
     if (!client || !peerJid || !session.value) return;
     if (!bodyText.trim() && !hasFiles) return;
+    const scope = conversationScope?.(peerJid) ?? "account";
 
     if (hasFiles) {
       for (const f of files!) {
@@ -124,6 +129,7 @@ export function useChatSend(deps: UseChatSendDeps) {
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(thread ? { threadId: thread.id } : {}),
         ...(thread?.parent ? { parentThreadId: thread.parent } : {}),
+        mucPm: scope === "muc-occupant",
       });
       const msgId = result?.id ?? null;
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
@@ -176,7 +182,7 @@ export function useChatSend(deps: UseChatSendDeps) {
       // orchestrator (chat-state cleanup, XEP-0085 "active" send) can't be
       // mistaken for a send failure and surface as actionError.
       try {
-        onSendComplete(result ?? null, peerJid, isStillActive);
+        onSendComplete(result ?? null, peerJid, isStillActive, scope);
       } catch (callbackError) {
         console.warn("useChatSend onSendComplete callback threw", callbackError);
       }
@@ -196,6 +202,7 @@ export function useChatSend(deps: UseChatSendDeps) {
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
     if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
+    const scope = conversationScope?.(activePeerJid.value) ?? "account";
     const message = findMessageById(messages.value, messageId);
     const targetId = message?.correctionTargetId ?? messageId;
     const freshLinkPreview = composerLinkPreviewPayloadIsFresh(linkPreview) ? linkPreview : undefined;
@@ -212,6 +219,7 @@ export function useChatSend(deps: UseChatSendDeps) {
           linkPreviewExpiresAt: freshLinkPreview.expiresAt,
         } : undefined,
         dmThreadRefFromMessage(message),
+        scope,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

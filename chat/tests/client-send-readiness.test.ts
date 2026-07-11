@@ -4,7 +4,7 @@ import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
-import { BrowserXmppClient, roomBareJidFor, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
+import { BrowserXmppClient, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
@@ -1168,6 +1168,82 @@ describe("client send readiness", () => {
       (client as unknown as { directMessageAddress: (peerJid: string) => string })
         .directMessageAddress("user@accounts.example/phone"),
     ).toBe("user@accounts.example");
+  });
+
+  test("explicit restored scope preserves every MUC-PM outbound target before discovery", async () => {
+    const sentTargets: string[] = [];
+    const captureTarget = async (target: string) => { sentTargets.push(target); };
+    const xmpp = {
+      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-send"; }),
+      send_chat_state: mock(captureTarget),
+      send_displayed: mock(captureTarget),
+      send_retraction: mock(captureTarget),
+      send_correction: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-correction"; }),
+      send_reaction: mock(captureTarget),
+    };
+    const client = new BrowserXmppClient(session());
+    const occupant = "room@rooms.custom.example/alice";
+    (client as unknown as { xmpp: typeof xmpp }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    expect(client.isMucPmPeer(occupant)).toBe(false);
+    await client.sendDirectMessage(occupant, "hello", { id: "muc-pm-send", mucPm: true });
+    await client.sendDmChatState(occupant, "composing", undefined, "muc-occupant");
+    await client.sendDmDisplayed(occupant, "message-1", undefined, "muc-occupant");
+    await client.sendDmRetraction(occupant, "message-1", undefined, "muc-occupant");
+    await client.sendDmCorrection(
+      occupant,
+      "edited",
+      "message-1",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "muc-occupant",
+    );
+    await client.sendDmReaction(occupant, "message-1", ["👍"], undefined, "muc-occupant");
+
+    expect(sentTargets).toEqual(Array(6).fill(occupant));
+    expect((xmpp.send_chat_message.mock.calls[0]?.[2] as { muc_pm?: boolean }).muc_pm).toBe(true);
+  });
+
+  test("restored conversation scope reaches every DM composer and mutation send", async () => {
+    const occupant = "room@rooms.custom.example/alice";
+    const sendDirectMessage = mock(async () => ({ id: "outbound-1", state: "sending" as const }));
+    const sendDmChatState = mock(async () => undefined);
+    const sendDmCorrection = mock(async () => "correction-1");
+    const sendDmReaction = mock(async () => undefined);
+    const sendDmRetraction = mock(async () => undefined);
+    const messaging = useDirectMessages(
+      ref(session()),
+      ref({
+        sendDirectMessage,
+        sendDmChatState,
+        sendDmCorrection,
+        sendDmReaction,
+        sendDmRetraction,
+        isMucPmPeer: () => false,
+      } as never),
+      ref(occupant),
+      normalizeError,
+      ref(""),
+      () => undefined,
+      ref<DmConversationScope | null>("muc-occupant"),
+    );
+
+    await messaging.sendMessage("private hello", []);
+    await messaging.editMessage("outbound-1", "edited");
+    await messaging.toggleReaction("outbound-1", "👍");
+    await messaging.retractMessage("outbound-1");
+    messaging.notifyComposing();
+    await Promise.resolve();
+
+    expect(sendDirectMessage.mock.calls[0]?.[2]).toMatchObject({ mucPm: true });
+    expect(sendDmCorrection.mock.calls[0]?.[7]).toBe("muc-occupant");
+    expect(sendDmReaction.mock.calls[0]?.[4]).toBe("muc-occupant");
+    expect(sendDmRetraction.mock.calls[0]?.[3]).toBe("muc-occupant");
+    expect(sendDmChatState.mock.calls.some((call) => call[3] === "muc-occupant")).toBe(true);
+    messaging.disconnect();
   });
 
   test("native failed-resume fallback owns resend for live unacked DM sends", async () => {

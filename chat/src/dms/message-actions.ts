@@ -1,6 +1,6 @@
 import type { Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, DmConversationScope } from "@/lib/xmpp-client";
 import type { ExtensionAnnotationAction, TimelineMessage } from "@/lib/chat-ui";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { findMessageById } from "@/lib/message-ids";
@@ -22,6 +22,7 @@ type UseDmMessageActionsDeps = {
   clearActionError: () => void;
   normalizeError: (e: unknown) => string;
   applyReaction: (messageId: string, nick: string, emojis: string[]) => void;
+  conversationScope?: (peerJid: string) => DmConversationScope;
 };
 
 export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
@@ -34,6 +35,7 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     clearActionError,
     normalizeError,
     applyReaction,
+    conversationScope,
   } = deps;
 
   /**
@@ -45,6 +47,8 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activePeerJid.value || !session.value) return;
     const msg = findMessageById(messages.value, messageId);
+    const peerJid = activePeerJid.value;
+    const scope = conversationScope?.(peerJid) ?? "account";
     const targetId = msg?.replyableId ?? msg?.id ?? messageId;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
@@ -60,7 +64,7 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     applyReaction(targetId, myNick, nextEmojis);
 
     try {
-      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis, dmThreadRefFromMessage(msg));
+      await xmppClient.value.sendDmReaction(peerJid, targetId, nextEmojis, dmThreadRefFromMessage(msg), scope);
     } catch (e) {
       applyReaction(targetId, myNick, previousEmojis);
       actionError.value = normalizeError(e);
@@ -78,10 +82,12 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
   async function retractMessage(messageId: string) {
     if (!xmppClient.value || !activePeerJid.value) return;
     const target = findMessageById(messages.value, messageId);
+    const peerJid = activePeerJid.value;
+    const scope = conversationScope?.(peerJid) ?? "account";
     const targetId = target?.replyableId ?? target?.id ?? messageId;
     clearActionError();
     try {
-      await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId, dmThreadRefFromMessage(target));
+      await xmppClient.value.sendDmRetraction(peerJid, targetId, dmThreadRefFromMessage(target), scope);
     } catch (e) {
       actionError.value = normalizeError(e);
     }

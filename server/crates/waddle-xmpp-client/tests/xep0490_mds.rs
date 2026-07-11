@@ -20,15 +20,21 @@ fn stanza_id(value: &str) -> StanzaId {
     StanzaId::new(value).expect("test stanza id is non-empty")
 }
 
-fn item(namespace: &str, chat_id: &str, stanza_id: &str, by: &str) -> Element {
+fn item(namespace: &str, chat_id: &Jid, stanza_id: &StanzaId, by: &Jid) -> Element {
     Element::builder("item", namespace)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), chat_id)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            chat_id.as_str(),
+        )
         .append(
             Element::builder("displayed", NS_MDS)
                 .append(
                     Element::builder("stanza-id", NS_STANZA_ID)
-                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
-                        .attr(minidom::rxml::xml_ncname!("by").to_owned(), by)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            stanza_id.as_str(),
+                        )
+                        .attr(minidom::rxml::xml_ncname!("by").to_owned(), by.as_str())
                         .build(),
                 )
                 .build(),
@@ -61,15 +67,15 @@ fn xep0490_catchup_preserves_two_occupants_in_one_room() {
                         .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
                         .append(item(
                             NS_PUBSUB,
-                            "room@conference.example/alice",
-                            "sid-alice",
-                            "example.com",
+                            &jid("room@conference.example/alice"),
+                            &stanza_id("sid-alice"),
+                            &jid("example.com"),
                         ))
                         .append(item(
                             NS_PUBSUB,
-                            "room@conference.example/bob",
-                            "sid-bob",
-                            "example.com",
+                            &jid("room@conference.example/bob"),
+                            &stanza_id("sid-bob"),
+                            &jid("example.com"),
                         ))
                         .build(),
                 )
@@ -97,9 +103,9 @@ fn xep0490_cross_resource_event_preserves_full_occupant() {
                         .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
                         .append(item(
                             NS_PUBSUB_EVENT,
-                            "room@conference.example/alice",
-                            "sid-alice",
-                            "example.com",
+                            &jid("room@conference.example/alice"),
+                            &stanza_id("sid-alice"),
+                            &jid("example.com"),
                         ))
                         .build(),
                 )

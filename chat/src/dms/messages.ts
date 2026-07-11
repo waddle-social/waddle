@@ -73,7 +73,7 @@ export function useDirectMessages(
   const loadErrorPeerJid = ref<string | null>(null);
   const loadErrorMessage = ref("");
 
-  const chatStates = useDmChatStates({ xmppClient, activePeerJid });
+  const chatStates = useDmChatStates({ xmppClient, activePeerJid, conversationScope });
   const {
     typingUsers,
     addTypingUser,
@@ -181,7 +181,8 @@ export function useDirectMessages(
     clearActionError,
     normalizeError,
     scrollToPinnedEdgeAndPin,
-    onSendComplete: (result, peerJid, isStillActive) => {
+    conversationScope,
+    onSendComplete: (result, peerJid, isStillActive, scope) => {
       if (!isStillActive) {
         // Client swap or peer change happened during the send. Don't
         // emit XEP-0085 "active" through the new session targeting the
@@ -190,7 +191,7 @@ export function useDirectMessages(
       }
       chatStates.resetOnSend();
       if (result?.state === "sending" && xmppClient.value) {
-        void xmppClient.value.sendDmChatState(peerJid, "active").catch(() => undefined);
+        void xmppClient.value.sendDmChatState(peerJid, "active", undefined, scope).catch(() => undefined);
       }
     },
   });
@@ -258,6 +259,7 @@ export function useDirectMessages(
     clearActionError,
     normalizeError,
     applyReaction,
+    conversationScope,
   });
   const {
     toggleReaction,
