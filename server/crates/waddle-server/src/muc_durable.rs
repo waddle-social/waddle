@@ -61,7 +61,9 @@ use waddle_xmpp::muc::{
     DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomConfig,
     SubjectState,
 };
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, SharedNodeIdentity};
+use waddle_xmpp::ownership::{
+    ClaimEpoch, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
+};
 use waddle_xmpp::{Affiliation, XmppError};
 
 use crate::clustering::relay::RelayHandle;
@@ -216,6 +218,21 @@ impl PostgresMucRoomStore {
         Ok(fence)
     }
 
+    async fn guard_fence_identity(
+        &self,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<CurrentNodeIdentityGuard, XmppError> {
+        self.node_identity
+            .guard_if_current(&fence.owner)
+            .await
+            .ok_or_else(|| {
+                XmppError::internal(format!(
+                    "durable write for room {room_jid} aborted during node identity rotation"
+                ))
+            })
+    }
+
     /// Take the fencing lock inside `tx` — the exact `SELECT ... FOR SHARE`
     /// shape `sm_persistence_fenced::assert_fenced` already established —
     /// for `room_jid` at `epoch`. See that function's doc comment for the
@@ -346,6 +363,7 @@ impl MucDurableStore for PostgresMucRoomStore {
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
             let fence = self.fence_for(room_jid)?;
+            let _identity_guard = self.guard_fence_identity(room_jid, &fence).await?;
             let config_json = serde_json::to_string(config).map_err(|error| {
                 XmppError::internal(format!("durable room config encode failed: {error}"))
             })?;
@@ -382,6 +400,7 @@ impl MucDurableStore for PostgresMucRoomStore {
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
             let fence = self.fence_for(room_jid)?;
+            let _identity_guard = self.guard_fence_identity(room_jid, &fence).await?;
             let subject_json = subject
                 .map(serde_json::to_string)
                 .transpose()
@@ -422,6 +441,7 @@ impl MucDurableStore for PostgresMucRoomStore {
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
             let fence = self.fence_for(room_jid)?;
+            let _identity_guard = self.guard_fence_identity(room_jid, &fence).await?;
             let mut tx = self.db.begin().await.map_err(db_err)?;
             self.assert_fenced(&mut tx, room_jid, &fence).await?;
             if entry.affiliation == Affiliation::None {
@@ -463,6 +483,7 @@ impl MucDurableStore for PostgresMucRoomStore {
     fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
             let fence = self.fence_for(room_jid)?;
+            let _identity_guard = self.guard_fence_identity(room_jid, &fence).await?;
             let mut tx = self.db.begin().await.map_err(db_err)?;
             self.assert_fenced(&mut tx, room_jid, &fence).await?;
             tx.execute(
@@ -631,7 +652,7 @@ mod tests {
         );
         assert!(store.current_claim_fence(&jid).is_some());
 
-        live_identity.set(node_identity());
+        live_identity.rotate(node_identity()).await;
 
         assert!(
             !store

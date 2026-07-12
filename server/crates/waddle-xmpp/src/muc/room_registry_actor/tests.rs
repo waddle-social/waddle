@@ -1922,7 +1922,7 @@ mod ownership_claims_tests {
             epoch,
         );
 
-        identity.set(foreign_identity());
+        identity.rotate(foreign_identity()).await;
         let outcome = registry
             .ask(ReconcileReclaimedRoom {
                 room_jid: jid.clone(),
@@ -1981,7 +1981,7 @@ mod ownership_claims_tests {
             .expect("first reconcile");
         assert_eq!(first, ReclaimedRoomOutcome::PendingRetry);
 
-        identity.set(foreign_identity());
+        identity.rotate(foreign_identity()).await;
         let retried = registry
             .ask(ReconcileReclaimedRoom {
                 room_jid: jid.clone(),
@@ -2039,7 +2039,7 @@ mod ownership_claims_tests {
         while claim_store.fence_calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        identity.set(foreign_identity());
+        identity.rotate(foreign_identity()).await;
 
         let result = create.await.expect("join create");
         assert!(matches!(
@@ -2070,6 +2070,77 @@ mod ownership_claims_tests {
                 .expect("retry exact cleanup"),
             1
         );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn queued_rotation_wins_before_the_final_publication_guard() {
+        let registry = spawn_registry().await;
+        let old_owner = this_identity();
+        let identity = SharedNodeIdentity::new(old_owner.clone());
+        let boundary_blocker = identity
+            .guard_if_current(&old_owner)
+            .await
+            .expect("old identity starts current");
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(
+            old_owner.clone(),
+            ClaimEpoch(21),
+        ));
+        claim_store.set_fence_delay(std::time::Duration::from_millis(100));
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: identity.clone(),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("queued-rotation-at-publish-boundary");
+        let registry_for_create = registry.clone();
+        let jid_for_create = jid.clone();
+        let create = tokio::spawn(async move {
+            registry_for_create
+                .ask(GetOrCreateRoom {
+                    room_jid: jid_for_create,
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+        });
+        while claim_store.fence_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let rotating_identity = identity.clone();
+        let rotation = tokio::spawn(async move {
+            rotating_identity.rotate(foreign_identity()).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !rotation.is_finished(),
+            "the synthetic boundary guard must hold rotation before publication"
+        );
+        drop(boundary_blocker);
+        rotation.await.expect("rotation task");
+
+        assert!(matches!(
+            create.await.expect("join create"),
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
+                if *room == jid
+        ));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("lookup")
+            .is_none());
         assert!(claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
@@ -2120,7 +2191,7 @@ mod ownership_claims_tests {
             .pop()
             .expect("pending old retry");
 
-        identity.set(new_owner.clone());
+        identity.rotate(new_owner.clone()).await;
         registry
             .ask(GetOrCreateRoom {
                 room_jid: jid.clone(),
