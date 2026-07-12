@@ -3,6 +3,78 @@ use super::*;
 
 const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+struct SmEnableClaimGuard {
+    registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    stream_id: String,
+    armed: bool,
+}
+
+impl SmEnableClaimGuard {
+    fn new(
+        registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+        stream_id: String,
+    ) -> Self {
+        Self {
+            registry,
+            stream_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SmEnableClaimGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && !self
+                .registry
+                .defer_unpublished_enabled_claim_release(&self.stream_id)
+        {
+            warn!(
+                stream_id = %self.stream_id,
+                "SM enable cancelled before publication but exact claim cleanup could not be inventoried"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod enable_claim_guard_tests {
+    use super::SmEnableClaimGuard;
+    use std::sync::Arc;
+    use waddle_xmpp::ownership::{ClaimStore as _, Entity, EntityType};
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    #[tokio::test]
+    async fn dropped_prepublication_guard_defers_and_releases_the_exact_claim() {
+        let store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("sm-node", "incarnation");
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+            store.clone(),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(identity),
+        ));
+        let stream_id = "cancelled-before-enabled-publication";
+        assert!(registry.ensure_session_claim(stream_id).await);
+
+        drop(SmEnableClaimGuard::new(
+            registry.clone(),
+            stream_id.to_string(),
+        ));
+
+        assert_eq!(registry.pending_claim_release_count(), 1);
+        assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert!(store
+            .current_claim(&Entity::new(EntityType::SmSession, stream_id))
+            .await
+            .expect("claim lookup")
+            .is_none());
+    }
+}
+
 mod registration;
 
 pub(super) use registration::{
@@ -276,6 +348,12 @@ async fn handle_sm_enable(
     if !claimed {
         return vec![SmFailed::with_condition("resource-constraint").to_xml()];
     }
+    let mut claim_guard = enable.resume.then(|| {
+        SmEnableClaimGuard::new(
+            state.deps.protocol.sm_session_registry.clone(),
+            stream_id.clone(),
+        )
+    });
     // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR token issuance rides this same
     // `<enable/>`/`<enabled/>` exchange inline (`<isr-enable/>`/
     // `<isr-enabled/>`) — never a standalone IQ (the retired conformance
@@ -318,12 +396,6 @@ async fn handle_sm_enable(
                             }
                             Err(_) => {
                                 warn!(stream_id = %stream_id, "ISR token issuance timed out; rejecting SM enable before state commit");
-                                state
-                                    .deps
-                                    .protocol
-                                    .sm_session_registry
-                                    .abandon_enabled_claim(&stream_id)
-                                    .await;
                                 return vec![
                                     SmFailed::with_condition("resource-constraint").to_xml()
                                 ];
@@ -353,6 +425,9 @@ async fn handle_sm_enable(
                 stream_id.clone(),
             )),
         );
+    }
+    if let Some(guard) = claim_guard.as_mut() {
+        guard.disarm();
     }
 
     info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");

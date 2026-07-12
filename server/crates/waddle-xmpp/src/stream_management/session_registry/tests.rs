@@ -728,6 +728,76 @@ async fn hung_enable_claim_is_bounded_and_not_recorded() {
         .contains_key("hung-enable"));
 }
 
+#[tokio::test]
+async fn cancelled_enable_acquisition_retains_and_releases_commit_before_drop() {
+    use crate::ownership::ClaimStore as _;
+
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(me.clone()),
+    ));
+    let stream_id = "cancelled-commit-before-ensure-return";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    let task = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.ensure_session_claim(stream_id).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if store
+                .current_claim(&entity)
+                .await
+                .expect("claim lookup")
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("claim committed before cancellation");
+
+    task.abort();
+    assert!(task
+        .await
+        .expect_err("enable task cancelled")
+        .is_cancelled());
+    assert_eq!(
+        registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisition")
+            .len(),
+        1
+    );
+    assert!(registry.has_claim_fence_reservation(stream_id));
+
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisition")
+        .is_empty());
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup after retry")
+        .is_none());
+    assert_eq!(registry.claim_fence_capacity_used(), 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn enable_claim_commit_before_timeout_is_reconciled_and_released() {
     let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");

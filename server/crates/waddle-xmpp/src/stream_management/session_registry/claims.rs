@@ -15,9 +15,64 @@ fn sm_session_entity(stream_id: &str) -> Entity {
     Entity::new(EntityType::SmSession, stream_id.to_string())
 }
 
+struct PendingEnableAcquisitionGuard<'a> {
+    registry: &'a InMemorySmSessionRegistry,
+    stream_id: String,
+    identity: crate::ownership::NodeIdentity,
+    armed: bool,
+}
+
+impl<'a> PendingEnableAcquisitionGuard<'a> {
+    fn new(
+        registry: &'a InMemorySmSessionRegistry,
+        stream_id: &str,
+        identity: crate::ownership::NodeIdentity,
+    ) -> Self {
+        Self {
+            registry,
+            stream_id: stream_id.to_string(),
+            identity,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingEnableAcquisitionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut pending) = self.registry.pending_claim_acquisitions.write() {
+            pending.insert((
+                self.stream_id.clone(),
+                self.identity.clone(),
+                PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+            ));
+        } else {
+            tracing::warn!(
+                stream_id = %self.stream_id,
+                "cancelled SM enable acquisition could not retain ambiguous claim responsibility"
+            );
+        }
+    }
+}
+
 impl InMemorySmSessionRegistry {
-    pub async fn abandon_enabled_claim(&self, stream_id: &str) {
-        self.release_claim_store_entry(stream_id).await;
+    /// Atomically move a claim acquired for `<enable/>` out of the active
+    /// live-authority map and into terminal exact-release inventory. This is
+    /// synchronous so a cancellation guard can call it from `Drop` when the
+    /// WebSocket task disappears before enabled state is published.
+    pub fn defer_unpublished_enabled_claim_release(&self, stream_id: &str) -> bool {
+        let fence = self
+            .claim_fences
+            .read()
+            .ok()
+            .and_then(|fences| fences.get(stream_id).cloned());
+        fence.is_some_and(|fence| self.try_record_terminal_claim_fence(stream_id, fence))
     }
     /// Remove every expired session and return the detached state in full.
     ///
@@ -637,7 +692,9 @@ impl InMemorySmSessionRegistry {
         }
         let entity = sm_session_entity(stream_id);
         let identity = self.node_identity.current();
-        match tokio::time::timeout(
+        let mut acquisition_guard =
+            PendingEnableAcquisitionGuard::new(self, stream_id, identity.clone());
+        let claimed = match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
             self.claim_store.ensure_claimed(&entity, &identity),
         )
@@ -648,9 +705,10 @@ impl InMemorySmSessionRegistry {
                 if !self.try_record_claim_fence(stream_id, fence.clone()) {
                     self.cancel_claim_fence_reservation(stream_id);
                     self.release_claim_store_entry_under(stream_id, fence).await;
-                    return false;
+                    false
+                } else {
+                    true
                 }
-                true
             }
             Ok(Ok(epoch)) => {
                 let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
@@ -686,7 +744,9 @@ impl InMemorySmSessionRegistry {
                 .await;
                 false
             }
-        }
+        };
+        acquisition_guard.disarm();
+        claimed
     }
 
     /// Atomically claim a resumable session for a single resume attempt.
