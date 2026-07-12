@@ -317,6 +317,124 @@ impl InMemorySmSessionRegistry {
         true
     }
 
+    /// Retain exact cleanup while local liveness cannot be read. Unlike a
+    /// terminal conversion, this keeps a matching active fence in place: a
+    /// poisoned session-map lock is not evidence that the lifecycle ended.
+    /// Adding a fence already represented by the active map consumes no new
+    /// capacity; an externally reclaimed fence must fit the normal bound.
+    pub(super) fn try_record_uncertain_release_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let (Ok(reservations), Ok(mut pending), Ok(fences)) = (
+            self.claim_fence_reservations.read(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.read(),
+        ) else {
+            return false;
+        };
+        let key = (stream_id.to_string(), fence.clone());
+        if pending.contains(&key) {
+            return true;
+        }
+        let represented_exact = fences.get(stream_id) == Some(&fence);
+        let represented_other = fences.contains_key(stream_id)
+            || pending.iter().any(|(id, _)| id == stream_id)
+            || reservations.contains(stream_id);
+        if represented_other && !represented_exact {
+            // Direction cannot be inferred from numeric epochs across node
+            // incarnations. Only the verified-hydration path may replace a
+            // same-stream generation.
+            return false;
+        }
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+            .count();
+        let occupied = pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len());
+        if !represented_exact && occupied >= self.max_sessions {
+            return false;
+        }
+        pending.insert(key);
+        true
+    }
+
+    /// Publish a reclaimed fence only after `ensure_claimed` proved that it
+    /// is the backend's current owner+epoch. That proof makes replacement of
+    /// every older same-stream generation directional and lets the new fence
+    /// consume an existing reservation without growing bounded inventory.
+    pub(super) fn try_record_verified_reclaimed_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let mut superseded = Vec::new();
+        let recorded = {
+            let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+                self.claim_fence_reservations.write(),
+                self.pending_claim_releases.write(),
+                self.claim_fences.write(),
+            ) else {
+                return false;
+            };
+            let represented = reservations.remove(stream_id)
+                || fences.contains_key(stream_id)
+                || pending.iter().any(|(id, _)| id == stream_id);
+            let current_not_pending = fences
+                .iter()
+                .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+                .count();
+            let occupied = pending
+                .len()
+                .saturating_add(current_not_pending)
+                .saturating_add(reservations.len());
+            if !represented && occupied >= self.max_sessions {
+                return false;
+            }
+            if let Some(old) = fences.remove(stream_id) {
+                if old != fence {
+                    superseded.push(old);
+                }
+            }
+            pending.retain(|(id, old)| {
+                if id == stream_id {
+                    if old != &fence {
+                        superseded.push(old.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            fences.insert(stream_id.to_string(), fence.clone());
+            true
+        };
+        if recorded {
+            if let Ok(mut acquisitions) = self.pending_claim_acquisitions.write() {
+                acquisitions.retain(|(id, _, _)| id != stream_id);
+            }
+            if let Some(storage) = &self.persistence {
+                let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+                superseded.sort_by(|left, right| {
+                    left.owner()
+                        .node_id
+                        .cmp(&right.owner().node_id)
+                        .then_with(|| left.owner().node_epoch.cmp(&right.owner().node_epoch))
+                        .then_with(|| left.epoch().cmp(&right.epoch()))
+                });
+                superseded.dedup();
+                for old in superseded {
+                    storage.evict_claim_cache(&session_id, &old);
+                }
+            }
+        }
+        recorded
+    }
+
     /// Create a new in-memory registry with default settings.
     pub fn new() -> Self {
         Self {
@@ -687,9 +805,6 @@ impl InMemorySmSessionRegistry {
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
     ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
-        let Some(storage) = &self.persistence else {
-            return Ok(ReclaimedHydrationOutcome::MissingDurable);
-        };
         if entity.entity_type != EntityType::SmSession {
             return Ok(ReclaimedHydrationOutcome::LostClaim);
         }
@@ -719,9 +834,6 @@ impl InMemorySmSessionRegistry {
                 .and_then(|fences| fences.get(&stream_id).cloned())
                 .as_ref()
                 == Some(caller_fence);
-            if !exact_fence {
-                return Ok(ReclaimedHydrationOutcome::LostClaim);
-            }
             match tokio::time::timeout(
                 CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
                 self.claim_store
@@ -733,6 +845,11 @@ impl InMemorySmSessionRegistry {
                 Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
                 Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
                 Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
+            }
+            if !exact_fence
+                && !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone())
+            {
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
             debug!(
                 stream_id = %stream_id,
@@ -783,6 +900,12 @@ impl InMemorySmSessionRegistry {
             );
             return Ok(ReclaimedHydrationOutcome::LostClaim);
         }
+        if !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone()) {
+            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+        }
+        let Some(storage) = &self.persistence else {
+            return Ok(ReclaimedHydrationOutcome::MissingDurable);
+        };
 
         let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
         let persisted = match storage.get_session(&session_id).await {
@@ -960,10 +1083,26 @@ impl InMemorySmSessionRegistry {
     ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
         let stream_lock = self.stream_lock(&entity.id)?;
         let _stream_guard = stream_lock.lock().await;
-        if self.stream_is_live_or_uncertain(&entity.id) {
-            // Responsibility transferred back to the live local session.
-            // Never let terminal cleanup release its claim.
-            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+        match self.stream_liveness(&entity.id) {
+            Some(true) => {
+                // Responsibility transferred back to the live local session.
+                // Never let terminal cleanup release its claim.
+                return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+            }
+            None => {
+                if !self.try_record_uncertain_release_fence(&entity.id, fence.clone()) {
+                    return Err(SmRegistryError::Internal(
+                        "release_reclaimed_claim: local liveness is uncertain and exact retry capacity is exhausted".to_string(),
+                    ));
+                }
+                // Retain the exact fence locally as well as reporting a
+                // retryable failure. This covers both the supervised worker
+                // and one-shot self-fence callers.
+                return Err(SmRegistryError::Internal(
+                    "release_reclaimed_claim: local session liveness is uncertain; exact cleanup retained".to_string(),
+                ));
+            }
+            Some(false) => {}
         }
         if !self.reserve_claim_fence_capacity(&entity.id) {
             return Err(SmRegistryError::Internal(

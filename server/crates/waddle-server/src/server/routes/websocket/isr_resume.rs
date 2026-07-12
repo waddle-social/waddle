@@ -275,14 +275,14 @@ pub(super) async fn handle_isr_resume_authenticate(
         Ok(epoch) => epoch,
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "ISR resume failed: could not confirm claim epoch");
-            if let Err(release_error) = state
+            if let Err(cleanup_error) = state
                 .deps
                 .protocol
                 .sm_session_registry
-                .release_claim(&resume.previd)
+                .reconcile_claim_after_epoch_lookup_failure(&resume.previd)
                 .await
             {
-                warn!(stream_id = %resume.previd, error = %release_error, "Failed to release ISR resume claim after epoch failure");
+                warn!(stream_id = %resume.previd, %cleanup_error, "Failed to reconcile ISR claim after epoch failure");
             }
             return vec![sasl2_failure("temporary-auth-failure")];
         }
@@ -294,10 +294,14 @@ pub(super) async fn handle_isr_resume_authenticate(
             .deps
             .protocol
             .sm_session_registry
-            .release_claim(&resume.previd)
+            .abandon_claim_after_identity_rotation(&resume.previd, &claim_fence)
             .await
         {
-            warn!(stream_id = %resume.previd, %error, "Failed to release ISR claim after node identity rotation");
+            warn!(
+                stream_id = %resume.previd,
+                %error,
+                "Failed to retire ISR claim after node identity rotation; exact cleanup retained"
+            );
         }
         return vec![sasl2_failure("temporary-auth-failure")];
     }

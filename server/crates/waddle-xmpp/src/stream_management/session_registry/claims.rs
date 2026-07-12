@@ -242,19 +242,13 @@ impl InMemorySmSessionRegistry {
         attempted
     }
 
-    fn stream_liveness(&self, stream_id: &str) -> Option<bool> {
+    pub(super) fn stream_liveness(&self, stream_id: &str) -> Option<bool> {
         match (self.sessions.read(), self.claimed_sessions.read()) {
             (Ok(sessions), Ok(claimed)) => {
                 Some(sessions.contains_key(stream_id) || claimed.contains_key(stream_id))
             }
             _ => None,
         }
-    }
-
-    pub(super) fn stream_is_live_or_uncertain(&self, stream_id: &str) -> bool {
-        // A poisoned live-state lock is uncertainty. Never release a claim
-        // on the basis of an incomplete/failed local probe.
-        self.stream_liveness(stream_id).unwrap_or(true)
     }
 
     /// Retire a rejected-enable acquisition only after a bounded,
@@ -358,6 +352,16 @@ impl InMemorySmSessionRegistry {
         identity: crate::ownership::NodeIdentity,
         disposition: PendingClaimAcquisitionDisposition,
     ) {
+        let stream_lock =
+            if disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession {
+                self.stream_lock(stream_id).ok()
+            } else {
+                None
+            };
+        let _stream_guard = match &stream_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let entity = sm_session_entity(stream_id);
         match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
@@ -368,32 +372,42 @@ impl InMemorySmSessionRegistry {
             Ok(Ok(epoch)) => {
                 let pending_key = (stream_id.to_string(), identity.clone(), disposition);
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
-                let recorded = self.try_record_claim_fence(stream_id, fence.clone());
-                if !recorded {
-                    self.cancel_claim_fence_reservation(stream_id);
-                }
                 match disposition {
                     PendingClaimAcquisitionDisposition::ReleaseRejectedEnable => {
+                        let recorded = self.try_record_claim_fence(stream_id, fence.clone());
+                        if !recorded {
+                            self.cancel_claim_fence_reservation(stream_id);
+                        }
                         if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
                             pending.remove(&pending_key);
                         }
                         self.release_claim_store_entry_under(stream_id, fence).await;
                     }
-                    PendingClaimAcquisitionDisposition::RetainDetachedSession
-                        if recorded && self.node_identity.current() == identity =>
-                    {
-                        if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                            pending.remove(&pending_key);
-                        }
-                    }
                     PendingClaimAcquisitionDisposition::RetainDetachedSession => {
-                        if self.node_identity.current() != identity {
+                        let (recorded, release_stale) =
+                            self.node_identity.with_current(|current_identity| {
+                                let release_stale = current_identity != &identity;
+                                let recorded = if release_stale {
+                                    self.try_record_terminal_claim_fence(stream_id, fence.clone())
+                                } else {
+                                    self.try_record_claim_fence(stream_id, fence.clone())
+                                };
+                                if recorded {
+                                    if let Ok(mut pending) = self.pending_claim_acquisitions.write()
+                                    {
+                                        pending.remove(&pending_key);
+                                    }
+                                }
+                                (recorded, release_stale)
+                            });
+                        if !recorded {
                             if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                                pending.remove(&pending_key);
+                                pending.insert(pending_key);
                             }
+                            return;
+                        }
+                        if release_stale {
                             self.release_claim_store_entry_under(stream_id, fence).await;
-                        } else if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                            pending.insert(pending_key);
                         }
                     }
                 }
@@ -453,6 +467,131 @@ impl InMemorySmSessionRegistry {
                 storage.evict_claim_cache(&session_id, &fence);
             }
         }
+    }
+
+    /// Retire a claimed session after this process rotates away from the
+    /// incarnation recorded in `expected`. The exact fence is converted to
+    /// terminal retry inventory before local resumability is removed, so a
+    /// timeout, cancellation, or backend failure cannot strand an untracked
+    /// old-incarnation claim. A stale caller cannot retire a replacement
+    /// lifecycle because the active fence must still match exactly.
+    pub async fn abandon_claim_after_identity_rotation(
+        &self,
+        stream_id: &str,
+        expected: &super::super::persistence::SmClaimFence,
+    ) -> Result<(), SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let stream_guard = stream_lock.lock().await;
+        let active_matches = self
+            .claim_fences
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(stream_id)
+            == Some(expected);
+        if !active_matches {
+            return Err(SmRegistryError::Internal(
+                "identity-rotation cleanup no longer owns the expected exact fence".to_string(),
+            ));
+        }
+        if !self.try_record_terminal_claim_fence(stream_id, expected.clone()) {
+            return Err(SmRegistryError::Internal(
+                "identity-rotation cleanup could not retain the exact fence".to_string(),
+            ));
+        }
+        self.sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id);
+        self.claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id);
+        drop(stream_guard);
+
+        self.release_claim_store_entry_under(stream_id, expected.clone())
+            .await;
+        Ok(())
+    }
+
+    /// Reconcile an ISR epoch-lookup failure atomically with respect to node
+    /// identity rotation. Reading the live identity inside the stream shard
+    /// closes both rotation windows: a stale route snapshot cannot preserve
+    /// an old-incarnation claim, and rotation cannot occur between the stale
+    /// test and ordinary claimed-to-detached reinsertion.
+    pub async fn reconcile_claim_after_epoch_lookup_failure(
+        &self,
+        stream_id: &str,
+    ) -> Result<(), SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let stream_guard = stream_lock.lock().await;
+        let fence = self
+            .claim_fences
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(stream_id)
+            .cloned();
+        let release_fence = self.node_identity.with_current(|current_identity| {
+            if let Some(stale) = fence
+                .as_ref()
+                .filter(|active| active.owner() != current_identity)
+            {
+                if !self.try_record_terminal_claim_fence(stream_id, stale.clone()) {
+                    return Err(SmRegistryError::Internal(
+                        "stale-identity cleanup could not retain the exact fence".to_string(),
+                    ));
+                }
+                self.sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                    .remove(stream_id);
+                self.claimed_sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                    .remove(stream_id);
+                return Ok(Some(stale.clone()));
+            }
+
+            let resumable = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .get(stream_id)
+                .is_some_and(|session| !session.is_expired());
+            if !resumable {
+                if let Some(fence) = &fence {
+                    if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                        return Err(SmRegistryError::Internal(
+                            "epoch-failure cleanup could not retain the exact fence".to_string(),
+                        ));
+                    }
+                }
+                self.claimed_sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                    .remove(stream_id);
+                return Ok(fence.clone());
+            }
+            let session = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .remove(stream_id)
+                .ok_or_else(|| {
+                    SmRegistryError::Internal(
+                        "claimed session disappeared under its stream shard".to_string(),
+                    )
+                })?;
+            self.sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .insert(stream_id.to_string(), session);
+            Ok(None)
+        })?;
+        drop(stream_guard);
+        if let Some(fence) = release_fence {
+            self.release_claim_store_entry_under(stream_id, fence).await;
+        }
+        Ok(())
     }
 
     /// Confirm that a drained session has been fully promoted —

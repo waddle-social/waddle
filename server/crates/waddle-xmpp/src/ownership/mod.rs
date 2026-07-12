@@ -284,6 +284,17 @@ impl SharedNodeIdentity {
             .clone()
     }
 
+    /// Inspect the current incarnation while preventing `set` from rotating
+    /// it. The closure must remain synchronous and short; this guard exists
+    /// for atomic in-memory lifecycle transitions, never backend I/O.
+    pub fn with_current<R>(&self, inspect: impl FnOnce(&NodeIdentity) -> R) -> R {
+        let identity = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inspect(&identity)
+    }
+
     /// Replace the current identity. Called by `self_fence::run_node_lease`
     /// every time this node mints a fresh identity (initial registration
     /// and every post-fence re-registration).
