@@ -3,11 +3,31 @@
 //! unset, mirroring `clustering::claims`'s own test style exactly.
 
 use super::*;
-use crate::clustering::claims::PostgresClaimStore;
+
+#[test]
+fn stale_sm_cache_failure_does_not_evict_new_generation() {
+    let stream_id = SmSessionId::new("old-a-new-b".to_string());
+    let owner = NodeIdentity::new("node-a", "incarnation-a");
+    let fence_a = SmClaimFence::new(owner.clone(), ClaimEpoch(1));
+    let fence_b = SmClaimFence::new(owner, ClaimEpoch(2));
+    let cell_a = Arc::new(OnceCell::new());
+    cell_a.set(fence_a.clone()).expect("initialize A");
+    let cell_b = Arc::new(OnceCell::new());
+    cell_b.set(fence_b.clone()).expect("initialize B");
+    let cache = DashMap::new();
+    cache.insert(stream_id.clone(), cell_b.clone());
+
+    remove_sm_claim_cell_if(&cache, &stream_id, &cell_a);
+    remove_sm_claim_fence_if(&cache, &stream_id, &fence_a);
+
+    assert!(Arc::ptr_eq(cache.get(&stream_id).unwrap().value(), &cell_b));
+    assert_eq!(cache.get(&stream_id).unwrap().get(), Some(&fence_b));
+}
+use crate::clustering::claims::{NodeLeaseStore as _, PostgresClaimStore};
 use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
-use waddle_xmpp::ownership::{NodeIdentity, StalePredicate};
+use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, StalePredicate};
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
 
@@ -95,6 +115,7 @@ struct Fixture {
     claims: PostgresClaimStore,
     claims_db: Database,
     identity: NodeIdentity,
+    shared_identity: SharedNodeIdentity,
     /// Holds `clustering::claims::clustering_control_plane_table_lock()` for
     /// this fixture's — and thus the whole test's — lifetime. Every test in
     /// this module truncates the shared `sm_sessions`/`sm_unacked`/
@@ -139,7 +160,7 @@ async fn fixture() -> Option<Fixture> {
     let fenced = PostgresFencedSmPersistence::open(
         claims_db.clone(),
         claim_store_for_fenced,
-        shared_identity,
+        shared_identity.clone(),
     )
     .await
     .expect("open fenced SM persistence");
@@ -162,6 +183,7 @@ async fn fixture() -> Option<Fixture> {
         claims,
         claims_db,
         identity,
+        shared_identity,
         _table_lock: table_lock,
     })
 }
@@ -460,6 +482,75 @@ async fn delete_session_aborts_before_any_write_once_the_claim_is_stolen() {
             .expect("get_session")
             .is_some(),
         "delete_session must roll back before deleting anything once fencing fails"
+    );
+}
+
+/// A claim row may be deleted and recreated at epoch zero. The epoch alone,
+/// even paired with a stable node id, therefore cannot distinguish process
+/// incarnations. Every fenced persistence transaction must bind node_epoch.
+#[tokio::test]
+async fn quarantine_rejects_same_node_id_new_incarnation_after_epoch_aba() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-incarnation-aba");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("old incarnation establishes epoch-zero claim and durable row");
+
+    let old_epoch = f
+        .claims
+        .current_claim(&entity)
+        .await
+        .expect("read old claim")
+        .expect("old claim exists")
+        .claim_epoch;
+    assert_eq!(old_epoch, ClaimEpoch(0));
+    assert_eq!(
+        f.claims
+            .release_exact(&entity, &f.identity, old_epoch)
+            .await
+            .expect("release old claim"),
+        waddle_xmpp::ownership::ExactReleaseOutcome::Released
+    );
+
+    let replacement =
+        NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    f.claims
+        .register(&replacement, None)
+        .await
+        .expect("same node id re-registers under a new incarnation");
+    let replacement_epoch = f
+        .claims
+        .acquire(&entity, &replacement)
+        .await
+        .expect("replacement recreates claim at epoch zero");
+    assert_eq!(replacement_epoch, old_epoch, "exercise claim-epoch ABA");
+
+    let old_fence = SmClaimFence::new(f.identity.clone(), old_epoch);
+    f.shared_identity.set(replacement.clone());
+    let cached_write_error = f
+        .fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect_err("cached old-incarnation fence must not be rebound to the replacement");
+    assert!(matches!(
+        cached_write_error,
+        SmPersistenceError::NotOwner { .. }
+    ));
+    let error = f
+        .fenced
+        .quarantine_session(&stream_id, &old_fence)
+        .await
+        .expect_err("old-incarnation quarantine must fail exact fencing");
+    assert!(matches!(error, SmPersistenceError::NotOwner { .. }));
+    assert!(
+        f.fenced
+            .get_session(&stream_id)
+            .await
+            .expect("read durable row")
+            .is_some(),
+        "failed old-incarnation quarantine must preserve the new owner's durable row"
     );
 }
 

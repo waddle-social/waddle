@@ -203,7 +203,7 @@ pub struct ClaimSnapshot {
 /// write. `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 7) so this type
 /// can travel wire-typed on the MUC Demote relay ask.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct ClaimEpoch(pub i64);
 
@@ -335,7 +335,7 @@ pub enum ClaimError {
     #[error("entity already claimed by another node")]
     AlreadyClaimed,
 
-    /// A `steal_stale` / `steal_for_resume` / `release` CAS affected zero
+    /// A `steal_stale` / `steal_for_resume` CAS affected zero
     /// rows: the observed epoch was stale, the staleness predicate was not
     /// satisfied (the owner is not actually stale), or the claim no longer
     /// exists.
@@ -373,6 +373,13 @@ pub enum ClaimError {
     /// refused.
     #[error("this node is draining and refuses to acquire a new claim")]
     Draining,
+}
+
+/// Result of an ownership- and epoch-exact release attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactReleaseOutcome {
+    Released,
+    NotOwned,
 }
 
 /// Entity ownership claims: which node currently owns a given `UserActor`/
@@ -495,14 +502,29 @@ pub trait ClaimStore: Send + Sync {
         mine: ClaimEpoch,
     ) -> Result<bool, ClaimError>;
 
-    /// Release a held claim (epoch-gated, best-effort: releasing a claim
-    /// already stolen out from under `me` is a no-op, not an error).
+    /// Best-effort, idempotent release of a held claim. A missing, stolen,
+    /// foreign-incarnation, or stale-epoch row is already terminal cleanup
+    /// and therefore succeeds.
     async fn release(
         &self,
         entity: &Entity,
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError>;
+
+    /// Release only the exact owner incarnation and epoch, reporting whether
+    /// a row was actually deleted. Recovery workflows use this when a zero-row
+    /// no-op must not be mistaken for confirmed ownership cleanup.
+    async fn release_exact(
+        &self,
+        _entity: &Entity,
+        _me: &NodeIdentity,
+        _mine: ClaimEpoch,
+    ) -> Result<ExactReleaseOutcome, ClaimError> {
+        Err(ClaimError::Backend(
+            "exact release outcome is not implemented by this claim store".to_string(),
+        ))
+    }
 
     /// Batched release for graceful drain (~18k modeled claims, ADR-0017
     /// Phase 3 Slice 10) — one round-trip, not one-at-a-time. Releases every

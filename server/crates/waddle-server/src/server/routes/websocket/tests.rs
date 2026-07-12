@@ -96,6 +96,18 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+pub(crate) async fn create_test_websocket_state_with_sm_registry(
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        None,
+        None,
+        Some(sm_session_registry),
+    )
+    .await
+}
+
 /// Build a test [`WebSocketState`] with clustering-enabled
 /// [`crate::clustering::ClusteringHandles`] and a caller-supplied SM-session
 /// registry (e.g. one backed by [`crate::sm_persistence_fenced::PostgresFencedSmPersistence`]

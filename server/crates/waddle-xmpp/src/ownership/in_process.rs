@@ -184,27 +184,43 @@ impl ClaimStore for InProcessClaimStore {
     async fn fence(
         &self,
         entity: &Entity,
-        _me: &NodeIdentity,
+        me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<bool, ClaimError> {
         let claims = self.lock()?;
-        Ok(claims.get(entity).map(|record| record.epoch) == Some(mine))
+        Ok(
+            matches!(claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine),
+        )
     }
 
     async fn release(
         &self,
         entity: &Entity,
-        _me: &NodeIdentity,
+        me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError> {
         let mut claims = self.lock()?;
-        // Epoch-gated exactly like `PostgresClaimStore`'s CAS: a losing
-        // epoch is a no-op (the claim was re-issued since the caller
-        // observed `mine`), and releasing an absent claim is idempotent.
-        if claims.get(entity).map(|record| record.epoch) == Some(mine) {
+        if matches!(claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
+        {
             claims.remove(entity);
         }
         Ok(())
+    }
+
+    async fn release_exact(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<crate::ownership::ExactReleaseOutcome, ClaimError> {
+        let mut claims = self.lock()?;
+        if matches!(claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
+        {
+            claims.remove(entity);
+            Ok(crate::ownership::ExactReleaseOutcome::Released)
+        } else {
+            Ok(crate::ownership::ExactReleaseOutcome::NotOwned)
+        }
     }
 
     async fn release_many(
@@ -264,11 +280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_is_epoch_gated_and_idempotent() {
-        // Mirrors `PostgresClaimStore`'s `release_is_epoch_gated_and_idempotent`
-        // (`waddle-server/src/clustering/claims.rs`): a losing epoch is a
-        // no-op — the claim survives — and releasing an absent claim is
-        // not an error.
+    async fn release_is_idempotent_and_exact_release_reports_ownership() {
         let store = InProcessClaimStore::new();
         let e = entity("stream-1");
         let epoch0 = store.acquire(&e, &me()).await.expect("acquire");
@@ -281,7 +293,7 @@ mod tests {
         store
             .release(&e, &me(), epoch0)
             .await
-            .expect("stale release is a no-op, not an error");
+            .expect("stale release is an idempotent no-op");
         let err = store
             .acquire(&e, &me())
             .await
@@ -298,6 +310,39 @@ mod tests {
             .acquire(&e, &me())
             .await
             .expect("entity claimable again after a current-epoch release");
+
+        assert_eq!(
+            store
+                .release_exact(&e, &me(), ClaimEpoch(99))
+                .await
+                .expect("exact release"),
+            crate::ownership::ExactReleaseOutcome::NotOwned
+        );
+    }
+
+    #[tokio::test]
+    async fn same_node_id_from_another_incarnation_cannot_fence_or_release() {
+        let store = InProcessClaimStore::new();
+        let entity = entity("incarnation-fence");
+        let owner = NodeIdentity::new("same-node", "epoch-a");
+        let replacement = NodeIdentity::new("same-node", "epoch-b");
+        let claim_epoch = store.acquire(&entity, &owner).await.expect("acquire");
+
+        assert!(!store
+            .fence(&entity, &replacement, claim_epoch)
+            .await
+            .expect("fence"));
+        assert_eq!(
+            store
+                .release_exact(&entity, &replacement, claim_epoch)
+                .await
+                .expect("exact release"),
+            crate::ownership::ExactReleaseOutcome::NotOwned
+        );
+        assert!(store
+            .fence(&entity, &owner, claim_epoch)
+            .await
+            .expect("original owner remains"));
     }
 
     #[tokio::test]

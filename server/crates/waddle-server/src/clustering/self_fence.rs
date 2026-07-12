@@ -177,7 +177,7 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// by the time it runs. Default no-op, mirroring [`Self::demote`]'s
     /// own no-op default: correct for [`NoLocallyClaimedEntities`], which
     /// owns nothing to hydrate.
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
+    async fn hydrate_reclaimed(&self, entities: &[(Entity, NodeIdentity, ClaimEpoch)]) {
         let _ = entities;
     }
 
@@ -475,7 +475,7 @@ async fn reclaim_own_expired_claims<L>(
         }
     };
 
-    let mut reclaimed: Vec<(Entity, ClaimEpoch)> = Vec::new();
+    let mut reclaimed: Vec<(Entity, NodeIdentity, ClaimEpoch)> = Vec::new();
     for candidate in candidates {
         if candidate.owner != *old_identity {
             // Another node's genuinely dead claim — not this node's own
@@ -495,7 +495,7 @@ async fn reclaim_own_expired_claims<L>(
             )
             .await
         {
-            Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
+            Ok(new_epoch) => reclaimed.push((candidate.entity, fresh.clone(), new_epoch)),
             Err(ClaimError::Conflict) => {
                 // The general orphan reaper (or another node) already
                 // reclaimed it first — safe, no-op.
@@ -1971,11 +1971,12 @@ mod tests {
             self.healthy.load(Ordering::SeqCst)
         }
 
-        async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
-            self.hydrated
-                .lock()
-                .expect("lock")
-                .extend(entities.iter().map(|(entity, _epoch)| entity.clone()));
+        async fn hydrate_reclaimed(&self, entities: &[(Entity, NodeIdentity, ClaimEpoch)]) {
+            self.hydrated.lock().expect("lock").extend(
+                entities
+                    .iter()
+                    .map(|(entity, _owner, _epoch)| entity.clone()),
+            );
         }
     }
 

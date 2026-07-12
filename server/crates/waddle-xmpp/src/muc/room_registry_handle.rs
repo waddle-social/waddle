@@ -36,10 +36,14 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CreateInstantRoom, CreateRoom, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
-    DestroyRoomReason, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, ReapSealedRoom,
-    RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
-    WireClusteringClaims,
+    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DestroyRoom,
+    DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom,
+    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom, IsMucJid,
+    IsPendingRoomRelease, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
+    PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom,
+    ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
+    RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -280,6 +284,48 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        reserve_pending_reclaimed_room(room_jid: BareJid) -> bool,
+        "reserve_pending_reclaimed_room",
+        ReservePendingReclaimedRoom { room_jid }
+    );
+
+    registry_method!(
+        pending_reclaimed_room_backlog() -> PendingReclaimedRoomBacklog,
+        "pending_reclaimed_room_backlog",
+        GetPendingReclaimedRoomBacklog
+    );
+
+    registry_method!(
+        pending_room_release_backlog() -> PendingRoomReleaseBacklog,
+        "pending_room_release_backlog",
+        GetPendingRoomReleaseBacklog
+    );
+
+    registry_method!(
+        retry_pending_room_releases(limit: usize) -> usize,
+        "retry_pending_room_releases",
+        RetryPendingRoomReleases { limit }
+    );
+
+    registry_method!(
+        list_pending_room_release_jids() -> Vec<BareJid>,
+        "list_pending_room_release_jids",
+        ListPendingRoomReleaseJids
+    );
+
+    registry_method!(
+        is_pending_room_release(room_jid: BareJid) -> bool,
+        "is_pending_room_release",
+        IsPendingRoomRelease { room_jid }
+    );
+
+    registry_method!(
+        cancel_pending_reclaimed_room_reservation(room_jid: BareJid) -> (),
+        "cancel_pending_reclaimed_room_reservation",
+        CancelPendingReclaimedRoomReservation { room_jid }
+    );
+
+    registry_method!(
         /// Get an existing room or create one if absent. The reply's
         /// [`RoomAcquisition::creation`] bit is authoritative for the
         /// XEP-0045 §10.1.1 creator Owner grant (#1134).
@@ -377,6 +423,57 @@ impl RoomRegistry {
         "room_count",
         RoomCount
     );
+
+    registry_method!(
+        /// Serialize proactive orphan-claim adoption against demand-side
+        /// room creation, hydrating durable rooms and releasing claims that
+        /// have no restorable state.
+        reconcile_reclaimed_room(
+            room_jid: BareJid,
+            claim_fence: super::RoomClaimFenceContext,
+            previous_owner: crate::ownership::NodeIdentity
+        ) -> ReclaimedRoomOutcome,
+        "reconcile_reclaimed_room",
+        ReconcileReclaimedRoom { room_jid, claim_fence, previous_owner }
+    );
+
+    registry_method!(
+        /// Return a bounded page of reclaimed epochs awaiting actor
+        /// installation or confirmed release. Each item is retried through
+        /// `reconcile_reclaimed_room` as its own mailbox message.
+        list_pending_reclaimed_rooms(limit: usize) -> Vec<PendingReclaimedRoom>,
+        "list_pending_reclaimed_rooms",
+        ListPendingReclaimedRooms { limit }
+    );
+
+    /// Enqueue a newly won epoch in the registry's idempotent retry set before
+    /// beginning fallible adoption work. This intentionally waits only for
+    /// mailbox acceptance, not a handler reply: an `ask` reply timeout is an
+    /// uncertain commit and must never trigger concurrent exact release.
+    pub async fn remember_pending_reclaimed_room(
+        &self,
+        room_jid: BareJid,
+        claim_fence: super::RoomClaimFenceContext,
+        previous_owner: crate::ownership::NodeIdentity,
+    ) -> Result<(), RoomRegistryError> {
+        self.inner
+            .tell(RememberPendingReclaimedRoom {
+                room_jid,
+                claim_fence,
+                previous_owner,
+            })
+            .mailbox_timeout(ROOM_REGISTRY_MAILBOX_TIMEOUT)
+            .await
+            .map_err(|error| {
+                metrics::record_actor_request_dropped(
+                    ACTOR_LABEL,
+                    "remember_pending_reclaimed_room",
+                    "tell",
+                    send_error_reason(&error),
+                );
+                RoomRegistryError::Unavailable
+            })
+    }
 
     /// Wire the real clustering-backed claim store/identity/durable store
     /// into this already-spawned registry (ADR-0017 Phase 3 Slice 7). See

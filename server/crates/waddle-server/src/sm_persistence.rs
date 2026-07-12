@@ -263,7 +263,12 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            Ok(Some(decode_session(&row)?))
+            Ok(Some(decode_session(&row).map_err(|error| {
+                SmPersistenceError::Corrupt {
+                    stream_id: stream_id.clone(),
+                    detail: error.to_string(),
+                }
+            })?))
         } else {
             Ok(None)
         }
@@ -406,7 +411,12 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            out.push(decode_unacked(&row)?);
+            out.push(
+                decode_unacked(&row).map_err(|error| SmPersistenceError::Corrupt {
+                    stream_id: stream_id.clone(),
+                    detail: error.to_string(),
+                })?,
+            );
         }
         Ok(out)
     }

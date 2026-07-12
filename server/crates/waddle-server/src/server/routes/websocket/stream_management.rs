@@ -1,6 +1,8 @@
 use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
 use super::*;
 
+const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 mod registration;
 
 pub(super) use registration::{
@@ -246,8 +248,6 @@ async fn handle_sm_enable(
         Some(m) => m,
         None => max_resume_secs,
     };
-    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
-
     // ADR-0017 Phase 3 Slice 6, element 8: ensure this node's `ClaimStore`
     // claim on this SM session at `<enable/>` time — not only at detach
     // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
@@ -259,28 +259,15 @@ async fn handle_sm_enable(
     // with the detach-time call for the same stream id later in this
     // session's lifetime. No-op in practice for single-node deployments
     // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
-    state
+    let claimed = state
         .deps
         .protocol
         .sm_session_registry
         .ensure_session_claim(&stream_id)
         .await;
-
-    // Publish the stream id onto the registry's ConnectionEntry so
-    // the offline-flush path can claim `pending_delivery` rows under
-    // a session id that's unique to this XEP-0198 session (not just
-    // the resource JID — distinct SM sessions on the same resource
-    // would otherwise share the same key, causing cross-session row
-    // deletion). Locked Q7b SM-ack lifecycle (issue #209).
-    if let Some(jid) = phase.bound_jid() {
-        state.deps.protocol.connection_registry.set_sm_stream_id(
-            jid,
-            Some(waddle_xmpp::pending_delivery::SmSessionId::new(
-                stream_id.clone(),
-            )),
-        );
+    if !claimed {
+        return vec![SmFailed::with_condition("resource-constraint").to_xml()];
     }
-
     // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR token issuance rides this same
     // `<enable/>`/`<enabled/>` exchange inline (`<isr-enable/>`/
     // `<isr-enabled/>`) — never a standalone IQ (the retired conformance
@@ -310,11 +297,28 @@ async fn handle_sm_enable(
             Some(mechanism) if mechanism == waddle_xmpp::isr::ISR_PINNED_MECHANISM => {
                 match state.deps.app_state.clustering_claims.isr_token_store() {
                     Some(isr_token_store) => {
-                        match isr_token_store.issue(&stream_id, mechanism).await {
-                            Ok(issued) => Some(issued.token),
-                            Err(error) => {
+                        match tokio::time::timeout(
+                            SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT,
+                            isr_token_store.issue(&stream_id, mechanism),
+                        )
+                        .await
+                        {
+                            Ok(Ok(issued)) => Some(issued.token),
+                            Ok(Err(error)) => {
                                 warn!(stream_id = %stream_id, %error, "ISR token issuance failed");
                                 None
+                            }
+                            Err(_) => {
+                                warn!(stream_id = %stream_id, "ISR token issuance timed out; rejecting SM enable before state commit");
+                                state
+                                    .deps
+                                    .protocol
+                                    .sm_session_registry
+                                    .abandon_enabled_claim(&stream_id)
+                                    .await;
+                                return vec![
+                                    SmFailed::with_condition("resource-constraint").to_xml()
+                                ];
                             }
                         }
                     }
@@ -332,6 +336,16 @@ async fn handle_sm_enable(
             None => None,
         }
     };
+
+    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
+    if let Some(jid) = phase.bound_jid() {
+        state.deps.protocol.connection_registry.set_sm_stream_id(
+            jid,
+            Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                stream_id.clone(),
+            )),
+        );
+    }
 
     info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
     let mut enabled = if enable.resume {

@@ -97,6 +97,287 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
     s
 }
 
+struct HangingReleaseClaimStore {
+    inner: crate::ownership::InProcessClaimStore,
+    hang_release: std::sync::atomic::AtomicBool,
+    hang_ensure: std::sync::atomic::AtomicBool,
+    commit_then_hang_ensure_once: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl crate::ownership::ClaimStore for HangingReleaseClaimStore {
+    async fn ensure_schema(&self) -> Result<(), crate::ownership::ClaimError> {
+        self.inner.ensure_schema().await
+    }
+
+    async fn acquire(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner.acquire(entity, me).await
+    }
+
+    async fn ensure_claimed(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        if self
+            .commit_then_hang_ensure_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.inner.ensure_claimed(entity, me).await?;
+            return std::future::pending().await;
+        }
+        if self.hang_ensure.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::future::pending().await;
+        }
+        self.inner.ensure_claimed(entity, me).await
+    }
+
+    async fn steal_stale(
+        &self,
+        entity: &crate::ownership::Entity,
+        observed: crate::ownership::ClaimEpoch,
+        staleness: crate::ownership::StalePredicate,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner
+            .steal_stale(entity, observed, staleness, me)
+            .await
+    }
+
+    async fn steal_for_resume(
+        &self,
+        entity: &crate::ownership::Entity,
+        observed: crate::ownership::ClaimEpoch,
+        witness: crate::ownership::ResumeIdentityProof,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner
+            .steal_for_resume(entity, observed, witness, me)
+            .await
+    }
+
+    async fn current_claim(
+        &self,
+        entity: &crate::ownership::Entity,
+    ) -> Result<Option<crate::ownership::ClaimSnapshot>, crate::ownership::ClaimError> {
+        self.inner.current_claim(entity).await
+    }
+
+    async fn fence(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+        mine: crate::ownership::ClaimEpoch,
+    ) -> Result<bool, crate::ownership::ClaimError> {
+        self.inner.fence(entity, me, mine).await
+    }
+
+    async fn release(
+        &self,
+        _entity: &crate::ownership::Entity,
+        _me: &crate::ownership::NodeIdentity,
+        _mine: crate::ownership::ClaimEpoch,
+    ) -> Result<(), crate::ownership::ClaimError> {
+        if self.hang_release.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending().await
+        } else {
+            self.inner.release(_entity, _me, _mine).await
+        }
+    }
+
+    async fn release_many(
+        &self,
+        entities: &[crate::ownership::Entity],
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<(), crate::ownership::ClaimError> {
+        self.inner.release_many(entities, me).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn hung_claim_release_is_bounded_and_retains_exact_fence() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(HangingReleaseClaimStore {
+            inner: crate::ownership::InProcessClaimStore::new(),
+            hang_release: std::sync::atomic::AtomicBool::new(true),
+            hang_ensure: std::sync::atomic::AtomicBool::new(false),
+            commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        }),
+        crate::ownership::SharedNodeIdentity::new(me),
+    );
+    let stream_id = "hung-release";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store claimed session");
+
+    let taken = tokio::time::timeout(
+        super::core::CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT + Duration::from_millis(1),
+        registry.take_session(stream_id),
+    )
+    .await
+    .expect("hung release must remain bounded")
+    .expect("bounded take");
+    assert!(taken.is_some());
+    assert!(registry
+        .claim_fences
+        .read()
+        .expect("fences")
+        .contains_key(stream_id));
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_release_retry_clears_retained_exact_fence() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(true),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+    });
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "retry-release";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    registry
+        .take_session(stream_id)
+        .await
+        .expect("take session");
+    assert_eq!(registry.pending_claim_release_count(), 1);
+
+    store
+        .hang_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 1);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_drained_session_is_not_a_terminal_release_retry() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(make_test_session("shutdown-in-flight"))
+        .await
+        .expect("store session");
+    assert_eq!(
+        registry
+            .drain_all_for_shutdown()
+            .await
+            .expect("drain")
+            .len(),
+        1
+    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn hung_enable_claim_is_bounded_and_not_recorded() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(HangingReleaseClaimStore {
+            inner: crate::ownership::InProcessClaimStore::new(),
+            hang_release: std::sync::atomic::AtomicBool::new(false),
+            hang_ensure: std::sync::atomic::AtomicBool::new(true),
+            commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        }),
+        crate::ownership::SharedNodeIdentity::new(me),
+    );
+    assert!(!registry.ensure_session_claim("hung-enable").await);
+    assert!(!registry
+        .claim_fences
+        .read()
+        .expect("fences")
+        .contains_key("hung-enable"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn enable_claim_commit_before_timeout_is_reconciled_and_released() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+    });
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "commit-before-timeout";
+
+    assert!(!registry.ensure_session_claim(stream_id).await);
+
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("read reconciled claim")
+            .is_none()
+    );
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.claim_fence_capacity_used(), 0);
+}
+
+#[test]
+fn timed_out_release_generations_cannot_outgrow_claim_capacity() {
+    let registry = InMemorySmSessionRegistry::with_capacity(2);
+    let owner = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let first = super::super::persistence::SmClaimFence::new(
+        owner.clone(),
+        crate::ownership::ClaimEpoch(1),
+    );
+    let second =
+        super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(2));
+    let stream_id = "generation-churn";
+
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    assert!(registry.try_record_claim_fence(stream_id, first.clone()));
+    registry
+        .pending_claim_releases
+        .write()
+        .expect("pending releases")
+        .insert((stream_id.to_string(), first.clone()));
+
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    assert!(registry.try_record_claim_fence(stream_id, second.clone()));
+    assert_eq!(registry.claim_fence_capacity_used(), 2);
+    assert!(registry
+        .pending_claim_releases
+        .read()
+        .expect("pending releases")
+        .contains(&(stream_id.to_string(), first)));
+    assert_eq!(
+        registry
+            .claim_fences
+            .read()
+            .expect("current fences")
+            .get(stream_id),
+        Some(&second)
+    );
+    registry
+        .pending_claim_releases
+        .write()
+        .expect("pending releases")
+        .insert((stream_id.to_string(), second));
+    assert!(!registry.reserve_claim_fence_capacity(stream_id));
+    assert_eq!(registry.claim_fence_capacity_used(), 2);
+}
+
 #[test]
 fn stream_locks_are_fixed_shards_not_per_stream_entries() {
     let registry = InMemorySmSessionRegistry::new();
@@ -2584,8 +2865,9 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
         "stream-already-present".to_string(),
     );
     let epoch = crate::ownership::ClaimEpoch(0);
+    let fence = super::super::persistence::SmClaimFence::new(me, epoch);
     let hydrated = registry
-        .hydrate_reclaimed(&[(entity, epoch)])
+        .hydrate_reclaimed(&[(entity, fence)])
         .await
         .expect("hydrate_reclaimed");
     assert_eq!(
@@ -2605,6 +2887,67 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
     );
 }
 
+#[tokio::test]
+async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
+    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::local();
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "stream-stale-work".to_string(),
+    );
+    let current_epoch = claim_store
+        .acquire(&entity, &me)
+        .await
+        .expect("seed current claim");
+    storage
+        .upsert_session(super::super::persistence::PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-stale-work"),
+            user_id: "user@example.com".to_string(),
+            jid: make_test_jid(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            max_resume_time: Some(300),
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: Duration::from_secs(300),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("seed durable row");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(
+            claim_store,
+            crate::ownership::SharedNodeIdentity::new(me.clone()),
+        );
+
+    let stale_fence = super::super::persistence::SmClaimFence::new(
+        me,
+        crate::ownership::ClaimEpoch(current_epoch.0 + 1),
+    );
+
+    let outcome = registry
+        .hydrate_reclaimed_typed(&entity, &stale_fence)
+        .await
+        .expect("hydrate stale work");
+
+    assert_eq!(outcome, super::ReclaimedHydrationOutcome::LostClaim);
+    assert!(registry
+        .peek_session("stream-stale-work")
+        .await
+        .expect("peek")
+        .is_none());
+}
+
 /// Persistence wrapper that pauses inside `get_session` for one designated
 /// stream id — lets the mid-flight race test below deterministically
 /// interleave a concurrent live-path mutator (`store_session`) with
@@ -2617,6 +2960,8 @@ struct GatedGetSessionPersistence {
     armed: std::sync::atomic::AtomicBool,
     reached: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
+    corrupt: std::sync::atomic::AtomicBool,
+    quarantined: std::sync::atomic::AtomicBool,
 }
 
 impl GatedGetSessionPersistence {
@@ -2627,6 +2972,8 @@ impl GatedGetSessionPersistence {
             armed: std::sync::atomic::AtomicBool::new(false),
             reached: tokio::sync::Notify::new(),
             proceed: tokio::sync::Notify::new(),
+            corrupt: std::sync::atomic::AtomicBool::new(false),
+            quarantined: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -2647,6 +2994,12 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         Option<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        if self.corrupt.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::super::persistence::SmPersistenceError::Corrupt {
+                stream_id: stream_id.clone(),
+                detail: "injected corrupt row".to_string(),
+            });
+        }
         if self.armed.load(std::sync::atomic::Ordering::SeqCst)
             && stream_id.as_str() == self.gate_stream
         {
@@ -2660,6 +3013,16 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
     ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.delete_session(stream_id).await
+    }
+
+    async fn quarantine_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        _expected_fence: &super::super::persistence::SmClaimFence,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.quarantined
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.inner.delete_session(stream_id).await
     }
 
@@ -2714,6 +3077,76 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
     > {
         self.inner.list_all_sessions().await
     }
+}
+
+#[tokio::test]
+async fn hydrate_reclaimed_quarantines_corrupt_persistence_before_terminal_outcome() {
+    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new("unused"));
+    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::local();
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "stream-poison".to_string(),
+    );
+    storage
+        .inner
+        .upsert_session(super::super::persistence::PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-poison"),
+            user_id: "poison@example.com".to_string(),
+            jid: make_test_jid(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            max_resume_time: Some(300),
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: Duration::from_secs(300),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("seed poison row");
+    let epoch = claim_store
+        .acquire(&entity, &me)
+        .await
+        .expect("seed exact claim");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(
+            claim_store,
+            crate::ownership::SharedNodeIdentity::new(me.clone()),
+        );
+    storage
+        .corrupt
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let outcome = registry
+        .hydrate_reclaimed_typed(
+            &entity,
+            &super::super::persistence::SmClaimFence::new(me, epoch),
+        )
+        .await
+        .expect("hydrate poison");
+
+    assert_eq!(outcome, super::ReclaimedHydrationOutcome::PoisonReleased);
+    assert!(storage
+        .quarantined
+        .load(std::sync::atomic::Ordering::SeqCst));
+    storage
+        .corrupt
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(storage
+        .inner
+        .get_session(&crate::pending_delivery::SmSessionId::new("stream-poison"))
+        .await
+        .expect("read after quarantine")
+        .is_none());
 }
 
 #[tokio::test]
@@ -2789,7 +3222,10 @@ async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_
         .armed
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let hydrate_registry = std::sync::Arc::clone(&registry);
-    let hydrate_entities = vec![(entity, epoch)];
+    let hydrate_entities = vec![(
+        entity,
+        super::super::persistence::SmClaimFence::new(me, epoch),
+    )];
     let hydrate =
         tokio::spawn(async move { hydrate_registry.hydrate_reclaimed(&hydrate_entities).await });
     storage.reached.notified().await;

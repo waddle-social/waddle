@@ -11,13 +11,14 @@ use super::super::{
 };
 use super::{
     create_test_server_owner_session, create_test_session, create_test_websocket_state,
-    message_frame_xml_with_id, register_test_native_user, scram_client_final_from_challenge,
-    snapshot_room,
+    create_test_websocket_state_with_sm_registry, message_frame_xml_with_id,
+    register_test_native_user, scram_client_final_from_challenge, snapshot_room,
 };
 use crate::auth::Session;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::{BareJid, FullJid};
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use waddle_xmpp::{
     protocol::{Blocklist, ConnectionPhase, InboundEvent},
@@ -26,6 +27,91 @@ use waddle_xmpp::{
     Stanza,
 };
 use xmpp_parsers::minidom::Element;
+
+struct HangingEnsureClaimStore {
+    inner: waddle_xmpp::ownership::InProcessClaimStore,
+}
+
+#[async_trait::async_trait]
+impl waddle_xmpp::ownership::ClaimStore for HangingEnsureClaimStore {
+    async fn ensure_schema(&self) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.inner.ensure_schema().await
+    }
+
+    async fn acquire(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.inner.acquire(entity, me).await
+    }
+
+    async fn ensure_claimed(
+        &self,
+        _entity: &waddle_xmpp::ownership::Entity,
+        _me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        std::future::pending().await
+    }
+
+    async fn steal_stale(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        observed: waddle_xmpp::ownership::ClaimEpoch,
+        staleness: waddle_xmpp::ownership::StalePredicate,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.inner
+            .steal_stale(entity, observed, staleness, me)
+            .await
+    }
+
+    async fn steal_for_resume(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        observed: waddle_xmpp::ownership::ClaimEpoch,
+        witness: waddle_xmpp::ownership::ResumeIdentityProof,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.inner
+            .steal_for_resume(entity, observed, witness, me)
+            .await
+    }
+
+    async fn current_claim(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+    ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, waddle_xmpp::ownership::ClaimError>
+    {
+        self.inner.current_claim(entity).await
+    }
+
+    async fn fence(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+        mine: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
+        self.inner.fence(entity, me, mine).await
+    }
+
+    async fn release(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+        mine: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.inner.release(entity, me, mine).await
+    }
+
+    async fn release_many(
+        &self,
+        entities: &[waddle_xmpp::ownership::Entity],
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.inner.release_many(entities, me).await
+    }
+}
 
 fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
     element_to_xml(
@@ -232,6 +318,40 @@ async fn sm_enable_requires_resource_binding() {
     let el = Element::from_str(&responses[0]).expect("xml");
     assert_eq!(el.name(), "failed");
     assert!(!conn.sm_state.enabled);
+}
+
+#[tokio::test]
+async fn sm_enable_claim_timeout_returns_failure_without_enabling_state() {
+    let registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_claim_store(
+            Arc::new(HangingEnsureClaimStore {
+                inner: waddle_xmpp::ownership::InProcessClaimStore::new(),
+            }),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::new("sm-node", "incarnation"),
+            ),
+        ),
+    );
+    let state = create_test_websocket_state_with_sm_registry(registry).await;
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("bound jid"), false);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1);
+    let failed = Element::from_str(&responses[0]).expect("failed xml");
+    assert_eq!(failed.name(), "failed");
+    assert!(failed
+        .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(!conn.sm_state.enabled);
+    assert!(conn.sm_state.stream_id.is_none());
 }
 
 #[tokio::test]

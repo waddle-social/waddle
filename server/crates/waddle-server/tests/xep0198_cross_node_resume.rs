@@ -441,13 +441,19 @@ async fn pure_two_node_detached_steal_race_exactly_one_winner() {
 
     // The winner's full pipeline (hydrate + claim_session) still resumes
     // correctly, exactly like `attempt_cross_node_resume`'s own branch 1.
-    let (winning_registry, winning_epoch) = match (result_b, result_c) {
-        (Ok(epoch), Err(_)) => (&registry_b, epoch),
-        (Err(_), Ok(epoch)) => (&registry_c, epoch),
+    let (winning_registry, winning_owner, winning_epoch) = match (result_b, result_c) {
+        (Ok(epoch), Err(_)) => (&registry_b, identity_b_now, epoch),
+        (Err(_), Ok(epoch)) => (&registry_c, identity_c_now, epoch),
         other => panic!("expected exactly one winner and one Conflict, got {other:?}"),
     };
     winning_registry
-        .hydrate_reclaimed(&[(entity, winning_epoch)])
+        .hydrate_reclaimed(&[(
+            entity,
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                winning_owner,
+                winning_epoch,
+            ),
+        )])
         .await
         .expect("hydrate_reclaimed succeeds for the winner");
     let resumed = winning_registry

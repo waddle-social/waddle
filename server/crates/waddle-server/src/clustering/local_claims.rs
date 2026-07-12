@@ -118,11 +118,30 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
     /// reclaim and the general reaper share one hydration implementation.
     /// A no-op before `wire` runs, mirroring `demote`/`owned`'s identical
     /// unwired behavior.
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, waddle_xmpp::ownership::ClaimEpoch)]) {
+    async fn hydrate_reclaimed(
+        &self,
+        entities: &[(
+            Entity,
+            waddle_xmpp::ownership::NodeIdentity,
+            waddle_xmpp::ownership::ClaimEpoch,
+        )],
+    ) {
         let Some(registry) = self.registry.get() else {
             return;
         };
-        if let Err(error) = registry.hydrate_reclaimed(entities).await {
+        let fenced = entities
+            .iter()
+            .map(|(entity, owner, epoch)| {
+                (
+                    entity.clone(),
+                    waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                        owner.clone(),
+                        *epoch,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = registry.hydrate_reclaimed(&fenced).await {
             tracing::warn!(
                 %error,
                 "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
@@ -208,10 +227,16 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         // `CreateInstantRoom` acquire the claim before spawning), so this
         // enumeration is exactly the owned-entity set.
         match registry.list_rooms().await {
-            Ok(jids) => jids
-                .into_iter()
-                .map(|jid| Entity::new(EntityType::RoomActor, jid.to_string()))
-                .collect(),
+            Ok(mut jids) => {
+                if let Ok(pending) = registry.list_pending_room_release_jids().await {
+                    jids.extend(pending);
+                    jids.sort();
+                    jids.dedup();
+                }
+                jids.into_iter()
+                    .map(|jid| Entity::new(EntityType::RoomActor, jid.to_string()))
+                    .collect()
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -279,6 +304,13 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
+        if registry
+            .is_pending_room_release(room_jid.clone())
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
         let Ok(Some(actor_ref)) = registry.get_room(room_jid).await else {
             tracing::warn!(
                 %entity,
@@ -328,6 +360,15 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
+        // The actor was already sealed/removed before this exact fence was
+        // queued, so no additional mailbox barrier is required at shutdown.
+        if registry
+            .is_pending_room_release(room_jid.clone())
+            .await
+            .unwrap_or(false)
+        {
+            return true;
+        }
         let Ok(Some(actor_ref)) = registry.get_room(room_jid).await else {
             tracing::warn!(
                 %entity,
@@ -718,11 +759,18 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         }
     }
 
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, waddle_xmpp::ownership::ClaimEpoch)]) {
+    async fn hydrate_reclaimed(
+        &self,
+        entities: &[(
+            Entity,
+            waddle_xmpp::ownership::NodeIdentity,
+            waddle_xmpp::ownership::ClaimEpoch,
+        )],
+    ) {
         let (sm_entities, rest): (Vec<_>, Vec<_>) = entities
             .iter()
             .cloned()
-            .partition(|(entity, _)| entity.entity_type == EntityType::SmSession);
+            .partition(|(entity, _, _)| entity.entity_type == EntityType::SmSession);
         if !sm_entities.is_empty() {
             self.sm.hydrate_reclaimed(&sm_entities).await;
         }
