@@ -291,20 +291,70 @@ impl ClaimStore for PostgresClaimStore {
         )
         .await
         .map_err(db_err)?;
-        conn.execute(
+        // Claim generations must never repeat after a row is deleted and
+        // recreated. Bootstrap the sequence under a transaction-scoped
+        // advisory lock so concurrent startup migrations cannot race their
+        // `setval`, then lock the claims table while advancing the sequence
+        // past every generation already present in a pre-sequence schema.
+        // The table lock also excludes concurrent INSERT/UPDATE statements
+        // until the new default and sequence floor commit together.
+        let mut tx = self.db.begin().await.map_err(db_err)?;
+        tx.query("SELECT pg_advisory_xact_lock(6841445497037937991)", ())
+            .await
+            .map_err(db_err)?;
+        tx.execute(
+            r#"
+            CREATE SEQUENCE IF NOT EXISTS clustering_claim_epoch_seq
+                AS BIGINT MINVALUE 0 START WITH 1
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_claims (
                 entity      TEXT PRIMARY KEY,
                 entity_type TEXT NOT NULL,
                 node_id     TEXT NOT NULL,
                 node_epoch  TEXT NOT NULL,
-                claim_epoch BIGINT NOT NULL DEFAULT 0
+                claim_epoch BIGINT NOT NULL
+                    DEFAULT nextval('clustering_claim_epoch_seq'::regclass)
             )
             "#,
             (),
         )
         .await
         .map_err(db_err)?;
+        tx.execute("LOCK TABLE clustering_claims IN ACCESS EXCLUSIVE MODE", ())
+            .await
+            .map_err(db_err)?;
+        tx.execute(
+            r#"
+            ALTER TABLE clustering_claims
+            ALTER COLUMN claim_epoch
+            SET DEFAULT nextval('clustering_claim_epoch_seq'::regclass)
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        tx.query(
+            r#"
+            SELECT setval(
+                'clustering_claim_epoch_seq',
+                GREATEST(
+                    (SELECT COALESCE(MAX(claim_epoch), 0) FROM clustering_claims),
+                    (SELECT last_value FROM clustering_claim_epoch_seq)
+                ),
+                true
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
         conn.execute(
             r#"
             CREATE INDEX IF NOT EXISTS clustering_claims_node_id_node_epoch
@@ -368,16 +418,17 @@ impl ClaimStore for PostgresClaimStore {
         // every subsequent `acquire`/`steal_stale` call under ordinary
         // READ COMMITTED semantics by the time this node's drain loop
         // itself proceeds to iterate owned entities.
-        let affected = conn
-            .execute(
+        let mut inserted = conn
+            .query(
                 r#"
                 INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch)
-                SELECT ?, ?, ?, ?, 0
+                SELECT ?, ?, ?, ?, nextval('clustering_claim_epoch_seq'::regclass)
                 WHERE NOT EXISTS (
                     SELECT 1 FROM clustering_nodes
                     WHERE node_id = ? AND node_epoch = ? AND draining
                 )
                 ON CONFLICT (entity) DO NOTHING
+                RETURNING claim_epoch
                 "#,
                 crate::db_params![
                     entity_key(entity),
@@ -390,8 +441,8 @@ impl ClaimStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        if affected == 1 {
-            return Ok(ClaimEpoch(0));
+        if let Some(row) = inserted.next().await.map_err(db_err)? {
+            return Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?));
         }
         // Zero rows affected: either a genuine conflict (someone already
         // holds this entity) or this node's own draining gate blocked the
@@ -526,7 +577,6 @@ impl ClaimStore for PostgresClaimStore {
                     return Err(ClaimError::SmSessionExcludedFromStealIntent);
                 }
                 let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-                let next_epoch = observed.0 + 1;
                 // FIX 1(a) — council-adjudicated redesign closing the veto
                 // race (write skew under READ COMMITTED between this CAS
                 // and `clear_steal_intent`'s DELETE, both previously gated
@@ -599,8 +649,8 @@ impl ClaimStore for PostgresClaimStore {
                 // missing, expired, or draining local lease must not be able
                 // to acquire a new claim merely because it won this CAS after
                 // another node's watchdog expired it.
-                let affected = conn
-                    .execute(
+                let mut rows = conn
+                    .query(
                         r#"
                         WITH live_stealer AS (
                             SELECT 1 FROM clustering_nodes
@@ -621,11 +671,13 @@ impl ClaimStore for PostgresClaimStore {
                             RETURNING 1
                         )
                         UPDATE clustering_claims
-                        SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                        SET node_id = ?, node_epoch = ?,
+                            claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
                         WHERE entity = ?
                           AND claim_epoch = ?
                           AND EXISTS (SELECT 1 FROM consumed)
                           AND EXISTS (SELECT 1 FROM live_stealer)
+                        RETURNING claim_epoch
                         "#,
                         crate::db_params![
                             me.node_id.clone(),
@@ -636,7 +688,6 @@ impl ClaimStore for PostgresClaimStore {
                             observed.0,
                             me.node_id.clone(),
                             me.node_epoch.clone(),
-                            next_epoch,
                             entity_key(entity),
                             observed.0,
                         ],
@@ -650,15 +701,13 @@ impl ClaimStore for PostgresClaimStore {
                         );
                         db_err(error)
                     })?;
-                if affected == 1 {
-                    Ok(ClaimEpoch(next_epoch))
-                } else {
-                    Err(ClaimError::Conflict)
+                match rows.next().await.map_err(db_err)? {
+                    Some(row) => Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
+                    None => Err(ClaimError::Conflict),
                 }
             }
             StalePredicate::OwnerStale => {
                 let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-                let next_epoch = observed.0 + 1;
                 // Owner-stale steal CAS (element 4): the `NOT EXISTS`
                 // correlated subquery realizes the ADR's "LEFT JOIN"
                 // predicate (`nodes.node_id IS NULL OR nodes.expired OR
@@ -680,11 +729,12 @@ impl ClaimStore for PostgresClaimStore {
                 // live-stealer predicate, not just "not draining". A node
                 // whose own row is missing or committed expired is not allowed
                 // to win orphaned claims under its dead identity.
-                let affected = conn
-                    .execute(
+                let mut rows = conn
+                    .query(
                         r#"
                         UPDATE clustering_claims
-                        SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                        SET node_id = ?, node_epoch = ?,
+                            claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
                         WHERE entity = ?
                           AND claim_epoch = ?
                           AND NOT EXISTS (
@@ -700,11 +750,11 @@ impl ClaimStore for PostgresClaimStore {
                               AND NOT expired
                               AND NOT draining
                           )
+                        RETURNING claim_epoch
                         "#,
                         crate::db_params![
                             me.node_id.clone(),
                             me.node_epoch.clone(),
-                            next_epoch,
                             entity_key(entity),
                             observed.0,
                             me.node_id.clone(),
@@ -713,10 +763,9 @@ impl ClaimStore for PostgresClaimStore {
                     )
                     .await
                     .map_err(db_err)?;
-                if affected == 1 {
-                    Ok(ClaimEpoch(next_epoch))
-                } else {
-                    Err(ClaimError::Conflict)
+                match rows.next().await.map_err(db_err)? {
+                    Some(row) => Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
+                    None => Err(ClaimError::Conflict),
                 }
             }
         }
@@ -730,32 +779,31 @@ impl ClaimStore for PostgresClaimStore {
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let next_epoch = observed.0 + 1;
         // Consent/epoch-only steal CAS (element 4's third variant): no
         // staleness predicate at all — authorized exclusively by the
         // caller already holding a `ResumeIdentityProof`, which only
         // `ownership::resume::verify_resume_identity` can mint.
-        let affected = conn
-            .execute(
+        let mut rows = conn
+            .query(
                 r#"
                 UPDATE clustering_claims
-                SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                SET node_id = ?, node_epoch = ?,
+                    claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
                 WHERE entity = ? AND claim_epoch = ?
+                RETURNING claim_epoch
                 "#,
                 crate::db_params![
                     me.node_id.clone(),
                     me.node_epoch.clone(),
-                    next_epoch,
                     entity_key(entity),
                     observed.0,
                 ],
             )
             .await
             .map_err(db_err)?;
-        if affected == 1 {
-            Ok(ClaimEpoch(next_epoch))
-        } else {
-            Err(ClaimError::Conflict)
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
+            None => Err(ClaimError::Conflict),
         }
     }
 
@@ -1749,12 +1797,12 @@ impl NodeLeaseStore for PostgresClaimStore {
         lease_ttl: Duration,
     ) -> Result<ClaimEpoch, ClaimError> {
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let next_epoch = observed.0 + 1;
-        let affected = conn
-            .execute(
+        let mut rows = conn
+            .query(
                 r#"
                 UPDATE clustering_claims
-                SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                SET node_id = ?, node_epoch = ?,
+                    claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
                 WHERE entity = ?
                   AND entity_type = ?
                   AND claim_epoch = ?
@@ -1776,11 +1824,11 @@ impl NodeLeaseStore for PostgresClaimStore {
                       AND NOT draining
                       AND heartbeat >= now() - (? || ' milliseconds')::interval
                   )
+                RETURNING claim_epoch
                 "#,
                 crate::db_params![
                     me.node_id.clone(),
                     me.node_epoch.clone(),
-                    next_epoch,
                     entity_key(entity),
                     EntityType::SmSession.as_db_str().to_string(),
                     observed.0,
@@ -1792,10 +1840,9 @@ impl NodeLeaseStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        if affected == 1 {
-            Ok(ClaimEpoch(next_epoch))
-        } else {
-            Err(ClaimError::Conflict)
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
+            None => Err(ClaimError::Conflict),
         }
     }
 
@@ -1902,12 +1949,12 @@ impl NodeLeaseStore for PostgresClaimStore {
             return Err(ClaimError::Conflict);
         }
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let next_epoch = observed.0 + 1;
-        let affected = conn
-            .execute(
+        let mut rows = conn
+            .query(
                 r#"
                 UPDATE clustering_claims
-                SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                SET node_id = ?, node_epoch = ?,
+                    claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
                 WHERE entity = ?
                   AND entity_type = ?
                   AND claim_epoch = ?
@@ -1925,11 +1972,11 @@ impl NodeLeaseStore for PostgresClaimStore {
                       AND NOT draining
                       AND heartbeat >= now() - (? || ' milliseconds')::interval
                   )
+                RETURNING claim_epoch
                 "#,
                 crate::db_params![
                     me.node_id.clone(),
                     me.node_epoch.clone(),
-                    next_epoch,
                     entity_key(entity),
                     EntityType::RoomActor.as_db_str().to_string(),
                     observed.0,
@@ -1940,10 +1987,9 @@ impl NodeLeaseStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        if affected == 1 {
-            Ok(ClaimEpoch(next_epoch))
-        } else {
-            Err(ClaimError::Conflict)
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
+            None => Err(ClaimError::Conflict),
         }
     }
 
@@ -2123,7 +2169,7 @@ mod tests {
         let me = node_identity();
         let entity = sm_entity("stream-1");
         let epoch = store.acquire(&entity, &me).await.expect("first acquire");
-        assert_eq!(epoch, ClaimEpoch(0));
+        assert!(store.fence(&entity, &me, epoch).await.expect("fence"));
 
         let other = node_identity();
         let err = store
@@ -2147,7 +2193,7 @@ mod tests {
             .ensure_claimed(&entity, &me)
             .await
             .expect("ensure_claimed acquires fresh");
-        assert_eq!(epoch, ClaimEpoch(0));
+        assert!(store.fence(&entity, &me, epoch).await.expect("fence"));
     }
 
     /// FIX 1: a second `ensure_claimed` call under the exact same
@@ -2173,7 +2219,6 @@ mod tests {
             .await
             .expect("second ensure_claimed under the same identity self-reacquires");
         assert_eq!(first, second);
-        assert_eq!(second, ClaimEpoch(0));
     }
 
     /// FIX 1: `ensure_claimed` under a genuinely different node/epoch than
@@ -2279,47 +2324,47 @@ mod tests {
         let room_entity = Entity::new(EntityType::RoomActor, "42");
         let sm_entity_same_id = Entity::new(EntityType::SmSession, "42");
 
-        store
+        let user_epoch = store
             .acquire(&user_entity, &me)
             .await
             .expect("acquire user_actor:42");
-        store
+        let room_epoch = store
             .acquire(&room_entity, &me)
             .await
             .expect("acquire room_actor:42 must not collide with user_actor:42");
-        store
+        let sm_epoch = store
             .acquire(&sm_entity_same_id, &me)
             .await
             .expect("acquire sm_session:42 must not collide with either of the above");
 
         assert!(store
-            .fence(&user_entity, &me, ClaimEpoch(0))
+            .fence(&user_entity, &me, user_epoch)
             .await
             .expect("fence user_actor:42"));
         assert!(store
-            .fence(&room_entity, &me, ClaimEpoch(0))
+            .fence(&room_entity, &me, room_epoch)
             .await
             .expect("fence room_actor:42"));
         assert!(store
-            .fence(&sm_entity_same_id, &me, ClaimEpoch(0))
+            .fence(&sm_entity_same_id, &me, sm_epoch)
             .await
             .expect("fence sm_session:42"));
 
         // Releasing one must not affect the others.
         store
-            .release(&user_entity, &me, ClaimEpoch(0))
+            .release(&user_entity, &me, user_epoch)
             .await
             .expect("release user_actor:42");
         assert!(!store
-            .fence(&user_entity, &me, ClaimEpoch(0))
+            .fence(&user_entity, &me, user_epoch)
             .await
             .expect("fence user_actor:42 after release"));
         assert!(store
-            .fence(&room_entity, &me, ClaimEpoch(0))
+            .fence(&room_entity, &me, room_epoch)
             .await
             .expect("room_actor:42 untouched by user_actor:42's release"));
         assert!(store
-            .fence(&sm_entity_same_id, &me, ClaimEpoch(0))
+            .fence(&sm_entity_same_id, &me, sm_epoch)
             .await
             .expect("sm_session:42 untouched by user_actor:42's release"));
     }
@@ -2368,7 +2413,7 @@ mod tests {
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &stealer)
             .await
             .expect("steal succeeds once the owner is committed-expired");
-        assert_eq!(epoch1, ClaimEpoch(1));
+        assert!(epoch1.0 > epoch0.0);
         assert!(store.fence(&entity, &stealer, epoch1).await.expect("fence"));
     }
 
@@ -2391,7 +2436,7 @@ mod tests {
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &stealer)
             .await
             .expect("steal from a node with no nodes-row succeeds");
-        assert_eq!(epoch1, ClaimEpoch(1));
+        assert!(epoch1.0 > epoch0.0);
     }
 
     #[tokio::test]
@@ -2473,7 +2518,7 @@ mod tests {
             .steal_for_resume(&entity, epoch0, proof, &stealer)
             .await
             .expect("consent CAS steals from a fresh owner");
-        assert_eq!(epoch1, ClaimEpoch(1));
+        assert!(epoch1.0 > epoch0.0);
     }
 
     #[tokio::test]
@@ -2554,6 +2599,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_and_recreate_never_reuses_a_claim_generation() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = room_entity("generation-recreate@muc.example.com");
+        let first = store.acquire(&entity, &owner).await.expect("first acquire");
+        assert_eq!(
+            store
+                .release_exact(&entity, &owner, first)
+                .await
+                .expect("exact release"),
+            waddle_xmpp::ownership::ExactReleaseOutcome::Released
+        );
+
+        let recreated = store
+            .acquire(&entity, &owner)
+            .await
+            .expect("recreate under the same node incarnation");
+        assert!(recreated.0 > first.0);
+        assert_eq!(
+            store
+                .release_exact(&entity, &owner, first)
+                .await
+                .expect("stale exact release"),
+            waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned
+        );
+        assert!(store
+            .fence(&entity, &owner, recreated)
+            .await
+            .expect("recreated claim remains held"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_schema_setup_advances_sequence_past_existing_generations() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query("SELECT last_value FROM clustering_claim_epoch_seq", ())
+            .await
+            .expect("sequence value");
+        let last = rows
+            .next()
+            .await
+            .expect("sequence row")
+            .expect("sequence row present")
+            .get::<i64>(0)
+            .expect("last_value");
+        let legacy_epoch = last.checked_add(1_000).expect("test sequence headroom");
+        let legacy = room_entity("legacy-generation@muc.example.com");
+        let owner = node_identity();
+        conn.execute(
+            r#"
+            INSERT INTO clustering_claims
+                (entity, entity_type, node_id, node_epoch, claim_epoch)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+            crate::db_params![
+                entity_key(&legacy),
+                EntityType::RoomActor.as_db_str().to_string(),
+                owner.node_id.clone(),
+                owner.node_epoch.clone(),
+                legacy_epoch,
+            ],
+        )
+        .await
+        .expect("seed pre-sequence generation");
+
+        let store_a = PostgresClaimStore::new(store.db.clone());
+        let store_b = PostgresClaimStore::new(store.db.clone());
+        let (a, b) = tokio::join!(store_a.ensure_schema(), store_b.ensure_schema());
+        a.expect("first concurrent schema setup");
+        b.expect("second concurrent schema setup");
+
+        conn.execute(
+            "DELETE FROM clustering_claims WHERE entity = ?",
+            crate::db_params![entity_key(&legacy)],
+        )
+        .await
+        .expect("remove legacy row");
+        let fresh = room_entity("post-migration-generation@muc.example.com");
+        let fresh_epoch = store
+            .acquire(&fresh, &owner)
+            .await
+            .expect("acquire after schema migration");
+        assert!(fresh_epoch.0 > legacy_epoch);
+    }
+
+    #[tokio::test]
     async fn release_many_clears_every_owned_entity_in_one_round_trip() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(store) = clean_store().await else {
@@ -2563,27 +2701,21 @@ mod tests {
         let a = sm_entity("stream-a");
         let b = sm_entity("stream-b");
         let c = sm_entity("stream-c");
-        store.acquire(&a, &owner).await.expect("acquire a");
-        store.acquire(&b, &owner).await.expect("acquire b");
+        let a_epoch = store.acquire(&a, &owner).await.expect("acquire a");
+        let b_epoch = store.acquire(&b, &owner).await.expect("acquire b");
         // c is owned by someone else — release_many must not touch it.
         let other = node_identity();
-        store.acquire(&c, &other).await.expect("acquire c");
+        let c_epoch = store.acquire(&c, &other).await.expect("acquire c");
 
         store
             .release_many(&[a.clone(), b.clone(), c.clone()], &owner)
             .await
             .expect("release_many");
 
-        assert!(!store
-            .fence(&a, &owner, ClaimEpoch(0))
-            .await
-            .expect("fence a"));
-        assert!(!store
-            .fence(&b, &owner, ClaimEpoch(0))
-            .await
-            .expect("fence b"));
+        assert!(!store.fence(&a, &owner, a_epoch).await.expect("fence a"));
+        assert!(!store.fence(&b, &owner, b_epoch).await.expect("fence b"));
         assert!(store
-            .fence(&c, &other, ClaimEpoch(0))
+            .fence(&c, &other, c_epoch)
             .await
             .expect("fence c: untouched, still owned by other"));
     }
@@ -2642,13 +2774,13 @@ mod tests {
             .steal_for_resume(&entity, epoch0, proof, &me)
             .await
             .expect("same-node resume steal succeeds (no staleness required)");
-        assert_eq!(epoch1, ClaimEpoch(1), "epoch bumped by the resume steal");
+        assert!(epoch1.0 > epoch0.0, "epoch bumped by the resume steal");
         assert!(
             store
                 .fence(&entity, &me, epoch1)
                 .await
                 .expect("fence check"),
-            "the entity is genuinely, freshly re-claimed under epoch 1"
+            "the entity is genuinely, freshly re-claimed under a new generation"
         );
 
         // The stale batch entry's `release_many` call is blind to that
@@ -2720,7 +2852,7 @@ mod tests {
             .await
             .expect("steal task join")
             .expect("steal succeeds once the FOR SHARE lock is released");
-        assert_eq!(stolen_epoch, ClaimEpoch(1));
+        assert!(stolen_epoch.0 > epoch0.0);
 
         // The original owner's fencing check against its old epoch now
         // observes zero rows — it has been fenced out.
@@ -3380,7 +3512,7 @@ mod tests {
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &live_stealer)
             .await
             .expect("a live stealer can still reclaim the dead owner's claim");
-        assert_eq!(epoch1, ClaimEpoch(epoch0.0 + 1));
+        assert!(epoch1.0 > epoch0.0);
     }
 
     #[tokio::test]
@@ -3428,7 +3560,7 @@ mod tests {
             .steal_orphaned_sm_session_claim(&entity, epoch0, &live_stealer, NODE_LEASE_TTL)
             .await
             .expect("a heartbeat-fresh stealer can reclaim the orphaned SM session claim");
-        assert_eq!(epoch1, ClaimEpoch(epoch0.0 + 1));
+        assert!(epoch1.0 > epoch0.0);
     }
 
     // --- ADR-0017 Phase 3 Slice 10: current_generation (Q5's mechanism) --
@@ -3753,7 +3885,7 @@ mod tests {
             )
             .await
             .expect("an uncleared, aged-out intent makes the entity stealable");
-        assert_eq!(epoch1, ClaimEpoch(1));
+        assert!(epoch1.0 > epoch0.0);
     }
 
     #[tokio::test]
@@ -3829,7 +3961,7 @@ mod tests {
             )
             .await
             .expect("a live stealer can consume and win the aged intent");
-        assert_eq!(epoch1, ClaimEpoch(epoch0.0 + 1));
+        assert!(epoch1.0 > epoch0.0);
     }
 
     #[tokio::test]
@@ -3978,7 +4110,7 @@ mod tests {
             )
             .await
             .expect("current-epoch stealer wins on the surviving intent");
-        assert_eq!(epoch2, ClaimEpoch(epoch1.0 + 1));
+        assert!(epoch2.0 > epoch1.0);
         let consumed = store
             .owner_steal_intents(&real_stealer)
             .await

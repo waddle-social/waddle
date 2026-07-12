@@ -39,10 +39,26 @@ struct ClaimRecord {
     epoch: ClaimEpoch,
 }
 
+#[derive(Default)]
+struct ClaimState {
+    claims: HashMap<Entity, ClaimRecord>,
+    next_generation: i64,
+}
+
+impl ClaimState {
+    fn allocate_generation(&mut self) -> Result<ClaimEpoch, ClaimError> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.checked_add(1).ok_or_else(|| {
+            ClaimError::Backend("in-process claim generation exhausted".to_string())
+        })?;
+        Ok(ClaimEpoch(generation))
+    }
+}
+
 /// In-memory claim bookkeeping for the single-node case.
 #[derive(Default)]
 pub struct InProcessClaimStore {
-    claims: Mutex<HashMap<Entity, ClaimRecord>>,
+    state: Mutex<ClaimState>,
 }
 
 impl InProcessClaimStore {
@@ -50,8 +66,8 @@ impl InProcessClaimStore {
         Self::default()
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<Entity, ClaimRecord>>, ClaimError> {
-        self.claims.lock().map_err(|_| ClaimError::Poisoned)
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ClaimState>, ClaimError> {
+        self.state.lock().map_err(|_| ClaimError::Poisoned)
     }
 }
 
@@ -63,7 +79,7 @@ impl ClaimStore for InProcessClaimStore {
     }
 
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
-        let mut claims = self.lock()?;
+        let mut state = self.lock()?;
         // Same contract as `PostgresClaimStore::acquire` (INSERT ... ON
         // CONFLICT DO NOTHING): a fresh claim only succeeds when the
         // entity is currently unclaimed. A second acquire against an
@@ -71,17 +87,18 @@ impl ClaimStore for InProcessClaimStore {
         // would against the real CAS — this is same-node contention
         // (e.g. two connections racing to claim the same SM session),
         // which is real and must be enforced, not idempotent-Ok'd away.
-        if claims.contains_key(entity) {
+        if state.claims.contains_key(entity) {
             return Err(ClaimError::AlreadyClaimed);
         }
-        claims.insert(
+        let epoch = state.allocate_generation()?;
+        state.claims.insert(
             entity.clone(),
             ClaimRecord {
                 owner: me.clone(),
-                epoch: ClaimEpoch(0),
+                epoch,
             },
         );
-        Ok(ClaimEpoch(0))
+        Ok(epoch)
     }
 
     async fn ensure_claimed(
@@ -95,17 +112,18 @@ impl ClaimStore for InProcessClaimStore {
         // the lock rather than by calling `acquire` and re-locking on
         // conflict, since this store already holds everything it needs
         // under one lock acquisition.
-        let mut claims = self.lock()?;
-        match claims.get(entity) {
+        let mut state = self.lock()?;
+        match state.claims.get(entity) {
             None => {
-                claims.insert(
+                let epoch = state.allocate_generation()?;
+                state.claims.insert(
                     entity.clone(),
                     ClaimRecord {
                         owner: me.clone(),
-                        epoch: ClaimEpoch(0),
+                        epoch,
                     },
                 );
-                Ok(ClaimEpoch(0))
+                Ok(epoch)
             }
             Some(record) if record.owner == *me => Ok(record.epoch),
             Some(_) => Err(ClaimError::AlreadyClaimed),
@@ -131,11 +149,11 @@ impl ClaimStore for InProcessClaimStore {
         // so `_staleness` is accepted but not consulted — same simplification
         // the "trivial single node" module doc already makes for every other
         // method.
-        let mut claims = self.lock()?;
-        match claims.get(entity) {
+        let mut state = self.lock()?;
+        match state.claims.get(entity) {
             Some(record) if record.epoch == observed => {
-                let new_epoch = ClaimEpoch(record.epoch.0 + 1);
-                claims.insert(
+                let new_epoch = state.allocate_generation()?;
+                state.claims.insert(
                     entity.clone(),
                     ClaimRecord {
                         owner: me.clone(),
@@ -171,8 +189,8 @@ impl ClaimStore for InProcessClaimStore {
         &self,
         entity: &Entity,
     ) -> Result<Option<super::ClaimSnapshot>, ClaimError> {
-        let claims = self.lock()?;
-        Ok(claims.get(entity).map(|record| super::ClaimSnapshot {
+        let state = self.lock()?;
+        Ok(state.claims.get(entity).map(|record| super::ClaimSnapshot {
             owner: record.owner.clone(),
             claim_epoch: record.epoch,
             // No node-liveness table in this single-node store (see this
@@ -187,9 +205,9 @@ impl ClaimStore for InProcessClaimStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<bool, ClaimError> {
-        let claims = self.lock()?;
+        let state = self.lock()?;
         Ok(
-            matches!(claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine),
+            matches!(state.claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine),
         )
     }
 
@@ -199,10 +217,10 @@ impl ClaimStore for InProcessClaimStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError> {
-        let mut claims = self.lock()?;
-        if matches!(claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
+        let mut state = self.lock()?;
+        if matches!(state.claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
         {
-            claims.remove(entity);
+            state.claims.remove(entity);
         }
         Ok(())
     }
@@ -213,10 +231,10 @@ impl ClaimStore for InProcessClaimStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<crate::ownership::ExactReleaseOutcome, ClaimError> {
-        let mut claims = self.lock()?;
-        if matches!(claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
+        let mut state = self.lock()?;
+        if matches!(state.claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
         {
-            claims.remove(entity);
+            state.claims.remove(entity);
             Ok(crate::ownership::ExactReleaseOutcome::Released)
         } else {
             Ok(crate::ownership::ExactReleaseOutcome::NotOwned)
@@ -230,9 +248,9 @@ impl ClaimStore for InProcessClaimStore {
     ) -> Result<(), ClaimError> {
         // Claim-epoch-blind by the trait contract (the node-identity gate
         // is trivially satisfied here: this store *is* the one node).
-        let mut claims = self.lock()?;
+        let mut state = self.lock()?;
         for entity in entities {
-            claims.remove(entity);
+            state.claims.remove(entity);
         }
         Ok(())
     }
@@ -269,14 +287,40 @@ mod tests {
             .expect_err("second acquire against a still-held entity loses the race");
         assert!(matches!(err, ClaimError::AlreadyClaimed));
 
-        // Once released, the entity is claimable again from epoch 0 —
-        // mirroring a fresh Postgres `INSERT` after the row is deleted.
+        // Once released, the entity is claimable again under a generation
+        // that can never alias the deleted claim.
         store.release(&e, &me(), first).await.expect("release");
         let reacquired = store
             .acquire(&e, &me())
             .await
             .expect("re-acquire after release");
-        assert_eq!(reacquired, ClaimEpoch(0));
+        assert!(reacquired.0 > first.0);
+        assert_eq!(
+            store
+                .release_exact(&e, &me(), first)
+                .await
+                .expect("stale exact release"),
+            crate::ownership::ExactReleaseOutcome::NotOwned
+        );
+        assert!(store
+            .fence(&e, &me(), reacquired)
+            .await
+            .expect("recreated generation remains held"));
+    }
+
+    #[tokio::test]
+    async fn generations_are_monotonic_across_entities_and_steals() {
+        let store = InProcessClaimStore::new();
+        let a = entity("generation-a");
+        let b = entity("generation-b");
+        let a0 = store.acquire(&a, &me()).await.expect("acquire a");
+        let b0 = store.acquire(&b, &me()).await.expect("acquire b");
+        let a1 = store
+            .steal_stale(&a, a0, StalePredicate::OwnerStale, &me())
+            .await
+            .expect("steal a");
+
+        assert!(a0.0 < b0.0 && b0.0 < a1.0);
     }
 
     #[tokio::test]
@@ -529,21 +573,15 @@ mod tests {
         let store = InProcessClaimStore::new();
         let a = entity("stream-a");
         let b = entity("stream-b");
-        store.acquire(&a, &me()).await.expect("acquire a");
-        store.acquire(&b, &me()).await.expect("acquire b");
+        let a_epoch = store.acquire(&a, &me()).await.expect("acquire a");
+        let b_epoch = store.acquire(&b, &me()).await.expect("acquire b");
 
         store
             .release_many(&[a.clone(), b.clone()], &me())
             .await
             .expect("release_many");
 
-        assert!(!store
-            .fence(&a, &me(), ClaimEpoch(0))
-            .await
-            .expect("fence a"));
-        assert!(!store
-            .fence(&b, &me(), ClaimEpoch(0))
-            .await
-            .expect("fence b"));
+        assert!(!store.fence(&a, &me(), a_epoch).await.expect("fence a"));
+        assert!(!store.fence(&b, &me(), b_epoch).await.expect("fence b"));
     }
 }
