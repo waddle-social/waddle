@@ -305,7 +305,7 @@ impl LocallyClaimedEntities for RoomLocalClaims {
             return true;
         };
         if registry
-            .is_pending_room_release(room_jid.clone())
+            .is_current_room_pending_release(room_jid.clone())
             .await
             .unwrap_or(false)
         {
@@ -363,7 +363,7 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         // The actor was already sealed/removed before this exact fence was
         // queued, so no additional mailbox barrier is required at shutdown.
         if registry
-            .is_pending_room_release(room_jid.clone())
+            .is_current_room_pending_release(room_jid.clone())
             .await
             .unwrap_or(false)
         {

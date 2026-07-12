@@ -38,10 +38,10 @@ use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DestroyRoom,
     DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom,
-    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom, IsMucJid,
-    IsPendingRoomRelease, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
-    PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom,
-    ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
+    IsCurrentRoomPendingRelease, IsMucJid, ListPendingReclaimedRooms, ListPendingRoomReleaseJids,
+    ListRooms, PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog,
+    ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
     ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
     RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
@@ -314,9 +314,9 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        is_pending_room_release(room_jid: BareJid) -> bool,
-        "is_pending_room_release",
-        IsPendingRoomRelease { room_jid }
+        is_current_room_pending_release(room_jid: BareJid) -> bool,
+        "is_current_room_pending_release",
+        IsCurrentRoomPendingRelease { room_jid }
     );
 
     registry_method!(

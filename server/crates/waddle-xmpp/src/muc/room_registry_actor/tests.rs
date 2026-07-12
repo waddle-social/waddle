@@ -1971,6 +1971,7 @@ mod ownership_claims_tests {
         let identity = SharedNodeIdentity::new(old_owner.clone());
         let claim_store = Arc::new(DeadOwnerClaimStore::seeded(old_owner, ClaimEpoch(20)));
         claim_store.set_fence_delay(std::time::Duration::from_millis(100));
+        claim_store.fail_next_release();
         registry
             .ask(WireClusteringClaims {
                 claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
@@ -2007,9 +2008,32 @@ mod ownership_claims_tests {
                 if *room == jid
         ));
         assert!(registry
-            .ask(GetRoom { room_jid: jid })
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
             .await
             .expect("lookup")
+            .is_none());
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("pending exact cleanup")
+                .depth,
+            1,
+            "failed post-hydration cleanup must retain its exact fence"
+        );
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 8 })
+                .await
+                .expect("retry exact cleanup"),
+            1
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
             .is_none());
     }
 
@@ -2424,6 +2448,12 @@ mod ownership_claims_tests {
             1,
             "publishing cancels only the exact live fence, not another ABA generation"
         );
+        assert!(!registry
+            .ask(IsCurrentRoomPendingRelease {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("current-fence pending query"));
         assert_eq!(
             registry
                 .ask(RetryPendingRoomReleases { limit: 8 })

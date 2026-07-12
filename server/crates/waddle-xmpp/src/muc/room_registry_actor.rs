@@ -421,15 +421,7 @@ impl RoomRegistryActor {
             && self.node_identity.current() == claim_fence.owner();
         if !still_owned {
             actor_ref.kill();
-            let _ = tokio::time::timeout(
-                ROOM_OWNERSHIP_CALL_TIMEOUT,
-                self.claim_store.release_exact(
-                    &claim_fence.entity,
-                    &claim_fence.owner(),
-                    claim_fence.epoch,
-                ),
-            )
-            .await;
+            self.release_room_claim(&room_jid, &claim_fence).await;
             return Err(RoomRegistryError::OwnershipUnavailable(room_jid));
         }
         self.publish_room(room_jid, actor_ref.clone(), claim_fence);
@@ -659,7 +651,7 @@ pub struct PendingRoomReleaseBacklog {
 
 pub struct GetPendingRoomReleaseBacklog;
 pub struct ListPendingRoomReleaseJids;
-pub struct IsPendingRoomRelease {
+pub struct IsCurrentRoomPendingRelease {
     pub room_jid: BareJid,
 }
 
@@ -682,17 +674,19 @@ impl kameo::message::Message<ListPendingRoomReleaseJids> for RoomRegistryActor {
     }
 }
 
-impl kameo::message::Message<IsPendingRoomRelease> for RoomRegistryActor {
+impl kameo::message::Message<IsCurrentRoomPendingRelease> for RoomRegistryActor {
     type Reply = bool;
 
     async fn handle(
         &mut self,
-        msg: IsPendingRoomRelease,
+        msg: IsCurrentRoomPendingRelease,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let Some(entry) = self.rooms.get(&msg.room_jid) else {
+            return false;
+        };
         self.pending_room_releases
-            .keys()
-            .any(|(room_jid, _)| room_jid == &msg.room_jid)
+            .contains_key(&(msg.room_jid, entry.claim_fence.clone()))
     }
 }
 
