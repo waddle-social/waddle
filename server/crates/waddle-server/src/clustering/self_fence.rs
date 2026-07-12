@@ -350,7 +350,7 @@ pub struct NodeLeaseRunConfig {
     pub claim_store: Arc<dyn ClaimStore>,
     /// Live, shared view of this node's current identity (ADR-0017 Phase 3
     /// Slice 4 follow-up plumbing note): [`run_node_lease`] calls
-    /// [`waddle_xmpp::ownership::SharedNodeIdentity::set`] on it every
+    /// [`waddle_xmpp::ownership::SharedNodeIdentity::rotate`] on it every
     /// time it mints a fresh identity (initial value and every post-fence
     /// re-registration), so any other holder of a clone — e.g. the
     /// Postgres-fenced `SmPersistenceStorage`'s claim-acquire calls —
@@ -705,7 +705,7 @@ pub async fn run_node_lease<L>(
     // see `live_identity`'s doc comment and the `identity = fresh;`
     // reassignment below, which keeps it current across every
     // re-registration.
-    live_identity.set(identity.clone());
+    live_identity.rotate(identity.clone()).await;
     let mut isolation = IsolationTracker::new();
     let mut backoff = ReregistrationBackoff::new(
         self_fence_cfg.reregister_backoff_base,
@@ -1048,7 +1048,7 @@ pub async fn run_node_lease<L>(
                         // `acquire_claim_store_entry_for_detach`) during
                         // the retry window did so under `live_identity`'s
                         // STALE, pre-fence value (this loop only calls
-                        // `live_identity.set(fresh)` a few lines below, once
+                        // `live_identity.rotate(fresh)` a few lines below, once
                         // re-registration itself succeeds), so that
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
@@ -1113,7 +1113,7 @@ pub async fn run_node_lease<L>(
                         }
 
                         identity = fresh;
-                        live_identity.set(identity.clone());
+                        live_identity.rotate(identity.clone()).await;
                         backoff.reset();
                         readiness.set_ready(true);
                         tracing::info!(

@@ -225,16 +225,31 @@ pub(super) async fn dispatch_to_room(
                     "DispatchToRoom: fenced ownership check observed 0 rows; this node has \
                      been deposed — evicting the local room actor and bouncing the sender"
                 );
-                let _ = room_registry
+                match room_registry
                     .ask(DestroyRoom {
                         room_jid: room_jid.clone(),
                         // Eviction, not destruction: the room now lives
                         // on the stealing node — its durable rows MUST
                         // survive this local teardown.
-                        reason:
-                            waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::LocalEviction,
+                        reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::DeposedEviction,
                     })
-                    .await;
+                    .await
+                {
+                    Ok(
+                        waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
+                        | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+                    ) => {}
+                    Ok(outcome) => warn!(
+                        room = %room_jid,
+                        ?outcome,
+                        "DispatchToRoom: deposed local actor eviction was unexpectedly refused"
+                    ),
+                    Err(error) => warn!(
+                        room = %room_jid,
+                        %error,
+                        "DispatchToRoom: failed to ask registry to evict deposed local actor"
+                    ),
+                }
                 let reply = build_message_error_reply(
                     &incoming,
                     &room_jid,

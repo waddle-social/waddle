@@ -88,13 +88,15 @@ impl EntityType {
 
 /// Wire length bound on [`Entity::id`] (ADR-0017 Phase 3 Slice 7 FIX 9,
 /// council-adjudicated). Mirrors
-/// [`crate::pending_delivery::SM_SESSION_ID_MAX_LEN`]'s exact rationale one
+/// [`crate::pending_delivery::SM_SESSION_ID_MAX_LEN`]'s defensive rationale one
 /// type over: `Entity` now travels wire-typed on the MUC Demote relay ask
 /// (deviation 60), which is NOT a stanza and so never passes through the
 /// bounded XML stanza codec — without a field-level bound of its own, a
 /// malicious (or buggy) allowlisted peer could ship a multi-MB `id`.
-/// Production ids are bare JIDs or room JIDs, far under this cap.
-pub const ENTITY_ID_MAX_LEN: usize = 128;
+/// RFC 7622 section 3.1 permits 1023 octets in each bare-JID part, plus
+/// the `@` separator, so the bound must admit every valid 2047-octet bare
+/// JID used for `UserActor` and `RoomActor` ownership.
+pub const ENTITY_ID_MAX_LEN: usize = 2047;
 
 /// [`Entity::id`] exceeded [`ENTITY_ID_MAX_LEN`] at deserialization.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -109,11 +111,10 @@ pub struct EntityIdTooLong {
 /// `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 7) so this type can
 /// travel wire-typed on the MUC Demote relay ask. `Deserialize` is
 /// hand-written (below), not derived, so it can enforce [`ENTITY_ID_MAX_LEN`]
-/// on the `id` field — mirroring [`crate::pending_delivery::SmSessionId`]'s
-/// identical hand-written bound exactly, one type over (FIX 9). [`Self::new`]
-/// itself stays unvalidated, for the same reason `SmSessionId::new` does: every
-/// production caller mints ids far under the cap, and the wire boundary is
-/// where an untrusted length actually arrives.
+/// on the `id` field — applying [`crate::pending_delivery::SmSessionId`]'s
+/// same boundary defense one type over (FIX 9). [`Self::new`]
+/// itself stays unvalidated, for the same reason `SmSessionId::new` does: the
+/// wire boundary is where an untrusted length actually arrives.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Entity {
     pub entity_type: EntityType,
@@ -203,7 +204,7 @@ pub struct ClaimSnapshot {
 /// write. `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 7) so this type
 /// can travel wire-typed on the MUC Demote relay ask.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct ClaimEpoch(pub i64);
 
@@ -247,7 +248,7 @@ impl NodeIdentity {
 /// would silently keep acquiring/fencing claims under a `node_epoch` that
 /// stopped being current the moment this node last self-fenced (ADR-0017
 /// Phase 3 plan, Slice 4 follow-up plumbing note). This type is that
-/// shared, updatable view: `self_fence::run_node_lease` calls [`Self::set`]
+/// shared, updatable view: `self_fence::run_node_lease` calls [`Self::rotate`]
 /// every time it mints a fresh identity, and any other holder of a clone
 /// calls [`Self::current`] to read the latest value at the moment it
 /// actually needs it (never earlier, never cached across an `.await`).
@@ -259,11 +260,30 @@ impl NodeIdentity {
 /// Slice 4) that only ever reads it, without forcing the reader to depend
 /// on the `clustering` Cargo feature.
 #[derive(Clone)]
-pub struct SharedNodeIdentity(std::sync::Arc<std::sync::RwLock<NodeIdentity>>);
+pub struct SharedNodeIdentity {
+    identity: std::sync::Arc<std::sync::RwLock<NodeIdentity>>,
+    rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+}
+
+/// Shared authority to use one node identity at a publication or commit
+/// boundary. Identity rotation takes the exclusive side of the same gate.
+pub struct CurrentNodeIdentityGuard {
+    identity: NodeIdentity,
+    _rotation_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl CurrentNodeIdentityGuard {
+    pub fn identity(&self) -> &NodeIdentity {
+        &self.identity
+    }
+}
 
 impl SharedNodeIdentity {
     pub fn new(initial: NodeIdentity) -> Self {
-        Self(std::sync::Arc::new(std::sync::RwLock::new(initial)))
+        Self {
+            identity: std::sync::Arc::new(std::sync::RwLock::new(initial)),
+            rotation_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
+        }
     }
 
     /// The identity this node currently believes it holds, cloned out
@@ -271,24 +291,39 @@ impl SharedNodeIdentity {
     /// across an `.await`.
     ///
     /// A poisoned lock (a panicking holder) still yields a usable
-    /// identity: `NodeIdentity` has no invariant `set` can partially
+    /// identity: `NodeIdentity` has no invariant `rotate` can partially
     /// break (both fields are plain, independently-assigned `String`s),
     /// so recovering via the poison error's inner guard is safe and keeps
     /// one panicking holder from cascading into every future
     /// claim-fencing call this process ever makes.
     pub fn current(&self) -> NodeIdentity {
-        self.0
+        self.identity
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    /// Replace the current identity. Called by `self_fence::run_node_lease`
-    /// every time this node mints a fresh identity (initial registration
-    /// and every post-fence re-registration).
-    pub fn set(&self, identity: NodeIdentity) {
+    /// Acquire authority to use `expected`. Once returned, rotation cannot
+    /// complete until the guard is dropped. Writer preference also prevents
+    /// a new stale guard from passing a rotation that has already started.
+    pub async fn guard_if_current(
+        &self,
+        expected: &NodeIdentity,
+    ) -> Option<CurrentNodeIdentityGuard> {
+        let rotation_guard = self.rotation_gate.clone().read_owned().await;
+        let identity = self.current();
+        (identity == *expected).then_some(CurrentNodeIdentityGuard {
+            identity,
+            _rotation_guard: rotation_guard,
+        })
+    }
+
+    /// Replace the current identity only after every in-flight guarded
+    /// publication or transaction has completed.
+    pub async fn rotate(&self, identity: NodeIdentity) {
+        let _rotation_guard = self.rotation_gate.write().await;
         *self
-            .0
+            .identity
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
     }
@@ -335,7 +370,7 @@ pub enum ClaimError {
     #[error("entity already claimed by another node")]
     AlreadyClaimed,
 
-    /// A `steal_stale` / `steal_for_resume` / `release` CAS affected zero
+    /// A `steal_stale` / `steal_for_resume` CAS affected zero
     /// rows: the observed epoch was stale, the staleness predicate was not
     /// satisfied (the owner is not actually stale), or the claim no longer
     /// exists.
@@ -373,6 +408,13 @@ pub enum ClaimError {
     /// refused.
     #[error("this node is draining and refuses to acquire a new claim")]
     Draining,
+}
+
+/// Result of an ownership- and epoch-exact release attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactReleaseOutcome {
+    Released,
+    NotOwned,
 }
 
 /// Entity ownership claims: which node currently owns a given `UserActor`/
@@ -495,14 +537,29 @@ pub trait ClaimStore: Send + Sync {
         mine: ClaimEpoch,
     ) -> Result<bool, ClaimError>;
 
-    /// Release a held claim (epoch-gated, best-effort: releasing a claim
-    /// already stolen out from under `me` is a no-op, not an error).
+    /// Best-effort, idempotent release of a held claim. A missing, stolen,
+    /// foreign-incarnation, or stale-epoch row is already terminal cleanup
+    /// and therefore succeeds.
     async fn release(
         &self,
         entity: &Entity,
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError>;
+
+    /// Release only the exact owner incarnation and epoch, reporting whether
+    /// a row was actually deleted. Recovery workflows use this when a zero-row
+    /// no-op must not be mistaken for confirmed ownership cleanup.
+    async fn release_exact(
+        &self,
+        _entity: &Entity,
+        _me: &NodeIdentity,
+        _mine: ClaimEpoch,
+    ) -> Result<ExactReleaseOutcome, ClaimError> {
+        Err(ClaimError::Backend(
+            "exact release outcome is not implemented by this claim store".to_string(),
+        ))
+    }
 
     /// Batched release for graceful drain (~18k modeled claims, ADR-0017
     /// Phase 3 Slice 10) — one round-trip, not one-at-a-time. Releases every
@@ -613,15 +670,42 @@ mod tests {
         assert!(ClaimEpoch(0) < ClaimEpoch(1));
     }
 
-    #[test]
-    fn shared_node_identity_set_is_visible_through_every_clone() {
+    #[tokio::test]
+    async fn shared_node_identity_rotation_is_visible_through_every_clone() {
         let shared = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-0"));
         let clone = shared.clone();
         assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-0"));
 
-        shared.set(NodeIdentity::new("node-a", "epoch-1"));
+        shared.rotate(NodeIdentity::new("node-a", "epoch-1")).await;
 
         assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-1"));
         assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
+    }
+
+    #[tokio::test]
+    async fn guarded_identity_boundary_delays_rotation_until_use_completes() {
+        let old = NodeIdentity::new("node-a", "epoch-0");
+        let new = NodeIdentity::new("node-a", "epoch-1");
+        let shared = SharedNodeIdentity::new(old.clone());
+        let guard = shared
+            .guard_if_current(&old)
+            .await
+            .expect("old identity starts current");
+        let rotating = shared.clone();
+        let rotation = tokio::spawn(async move {
+            rotating.rotate(new).await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !rotation.is_finished(),
+            "rotation must wait at the exact post-check/use boundary"
+        );
+        assert_eq!(guard.identity(), &old);
+        drop(guard);
+
+        rotation.await.expect("rotation task");
+        assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
+        assert!(shared.guard_if_current(&old).await.is_none());
     }
 }

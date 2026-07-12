@@ -1,6 +1,20 @@
 use super::*;
 use waddle_xmpp::mam::MamStorageError;
 use waddle_xmpp::muc::RoomClaimFenceContext;
+use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
+
+/// Archive fencing authority resolved for one room write. `Guarded` owns
+/// the identity-rotation read guard through the archive transaction, while
+/// `OwnershipLost` distinguishes a configured clustered room with no valid
+/// fence from a genuinely unclustered `Unfenced` deployment.
+pub(super) enum RoomArchiveFence {
+    Unfenced,
+    Guarded {
+        context: RoomClaimFenceContext,
+        _identity_guard: CurrentNodeIdentityGuard,
+    },
+    OwnershipLost,
+}
 
 /// Outcome of a groupchat archive write attempt (ADR-0017 Phase 3 Slice 7
 /// FIX 1, council-adjudicated). `OwnershipLost` is the fenced backstop
@@ -24,31 +38,46 @@ pub(super) enum ArchiveGroupchatOutcome {
 /// node_id)` fencing context for `room`, the SAME mechanism
 /// `dispatch_to_room`'s own `check_fenced_fanout` pre-fan-out check reads
 /// from — threaded here rather than re-derived from a second, independent
-/// source. `None` whenever clustering is disabled, this binary lacks the
-/// `clustering` Cargo feature, or no durable store is configured for this
-/// room (matches `check_fenced_fanout`'s own `None`-means-unfenced
-/// contract): callers fall back to the portable, unfenced
-/// `MamStorage::store_message` path, byte-identical to pre-Slice-7
-/// behavior.
-pub(super) fn resolve_room_claim_fence(
-    deps: &Deps<'_>,
-    room: &BareJid,
-) -> Option<RoomClaimFenceContext> {
+/// source. A genuinely unclustered deployment resolves to `Unfenced` and
+/// retains the portable `MamStorage::store_message` path. Once a clustered
+/// durable store is configured, a missing, stale, or rotated fence resolves
+/// to `OwnershipLost`; it can never silently become an unfenced write.
+pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) -> RoomArchiveFence {
     #[cfg(feature = "clustering")]
     {
-        let state = deps.web_socket_state?;
-        let store = state
-            .deps
-            .app_state
-            .clustering_claims
-            .muc_durable_store
-            .as_ref()?;
-        store.current_claim_fence(room)
+        let Some(state) = deps.web_socket_state else {
+            return RoomArchiveFence::Unfenced;
+        };
+        let clustering = &state.deps.app_state.clustering_claims;
+        let Some(store) = clustering.muc_durable_store.as_ref() else {
+            return RoomArchiveFence::Unfenced;
+        };
+        guard_clustered_room_claim_fence(
+            store.current_claim_fence(room),
+            clustering.node_identity.as_ref(),
+        )
+        .await
     }
     #[cfg(not(feature = "clustering"))]
     {
         let _ = (deps, room);
-        None
+        RoomArchiveFence::Unfenced
+    }
+}
+
+async fn guard_clustered_room_claim_fence(
+    fence: Option<RoomClaimFenceContext>,
+    node_identity: Option<&SharedNodeIdentity>,
+) -> RoomArchiveFence {
+    let (Some(context), Some(node_identity)) = (fence, node_identity) else {
+        return RoomArchiveFence::OwnershipLost;
+    };
+    let Some(identity_guard) = node_identity.guard_if_current(&context.owner).await else {
+        return RoomArchiveFence::OwnershipLost;
+    };
+    RoomArchiveFence::Guarded {
+        context,
+        _identity_guard: identity_guard,
     }
 }
 
@@ -57,9 +86,12 @@ pub(super) async fn archive_groupchat_message(
     room: &BareJid,
     message: &Message,
     sender_nickname_generation: u64,
-    fence: Option<&RoomClaimFenceContext>,
+    fence: &RoomArchiveFence,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    if matches!(fence, RoomArchiveFence::OwnershipLost) {
+        return ArchiveGroupchatOutcome::OwnershipLost;
+    }
     // XEP-0313 §MUC Archives: for non-anonymous rooms the *archived*
     // copy carries a room-authored `<x xmlns='muc#user'><item
     // jid='real-jid' affiliation role/></x>` disclosing the sender's
@@ -126,7 +158,7 @@ pub(super) async fn finish_archive_groupchat_message(
     archive_clone: Message,
     archive_id: String,
     sender_nickname_generation: u64,
-    fence: Option<&RoomClaimFenceContext>,
+    fence: &RoomArchiveFence,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
@@ -193,12 +225,13 @@ pub(super) async fn finish_archive_groupchat_message(
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
     let store_result = match fence {
-        Some(fence) => {
+        RoomArchiveFence::Guarded { context, .. } => {
             mam_storage
-                .store_message_fenced(room, &archived, fence)
+                .store_message_fenced(room, &archived, context)
                 .await
         }
-        None => mam_storage.store_message(room, &archived).await,
+        RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
+        RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
     };
     match store_result {
         Ok(stored_id) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
@@ -226,6 +259,66 @@ pub(super) async fn finish_archive_groupchat_message(
             );
             ArchiveGroupchatOutcome::Skipped
         }
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod room_archive_fence_tests {
+    use super::*;
+    use std::time::Duration;
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    fn fence(owner: NodeIdentity) -> RoomClaimFenceContext {
+        RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, "room@muc.example.com"),
+            owner,
+            ClaimEpoch(7),
+        )
+    }
+
+    #[tokio::test]
+    async fn configured_cluster_without_a_room_fence_fails_closed() {
+        let identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+        assert!(matches!(
+            guard_clustered_room_claim_fence(None, Some(&identity)).await,
+            RoomArchiveFence::OwnershipLost
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_room_fence_fails_closed_after_identity_rotation() {
+        let old = NodeIdentity::new("node-a", "epoch-a");
+        let identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-b"));
+        assert!(matches!(
+            guard_clustered_room_claim_fence(Some(fence(old)), Some(&identity)).await,
+            RoomArchiveFence::OwnershipLost
+        ));
+    }
+
+    #[tokio::test]
+    async fn guarded_room_fence_blocks_rotation_through_the_archive_boundary() {
+        let old = NodeIdentity::new("node-a", "epoch-a");
+        let replacement = NodeIdentity::new("node-a", "epoch-b");
+        let identity = SharedNodeIdentity::new(old.clone());
+        let guarded = guard_clustered_room_claim_fence(Some(fence(old)), Some(&identity)).await;
+        assert!(matches!(guarded, RoomArchiveFence::Guarded { .. }));
+
+        let rotating_identity = identity.clone();
+        let mut rotation = tokio::spawn(async move {
+            rotating_identity.rotate(replacement).await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut rotation)
+                .await
+                .is_err(),
+            "identity rotation must wait while the MAM fence authority is live"
+        );
+
+        drop(guarded);
+        tokio::time::timeout(Duration::from_secs(1), rotation)
+            .await
+            .expect("rotation unblocks when archive authority drops")
+            .expect("rotation task completes");
     }
 }
 

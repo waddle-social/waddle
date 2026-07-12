@@ -705,8 +705,8 @@ pub async fn start_if_enabled(
         let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(
             crate::muc_durable::PostgresMucRoomStore::open(
                 db.clone(),
-                live_identity.clone(),
                 clustering_stop.clone(),
+                live_identity.clone(),
             )
             .await
             .map_err(ClusteringError::MucDurableStoreInit)?,

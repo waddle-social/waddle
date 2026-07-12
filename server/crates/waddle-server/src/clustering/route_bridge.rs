@@ -5036,8 +5036,33 @@ mod tests {
         envelope
     }
 
-    fn signed_envelope(keypair: &Keypair) -> RemoteStanzaEnvelope {
-        sign_envelope(envelope(), keypair)
+    async fn envelope_for_services(
+        services: &OrderedRelayDeliveryServices,
+    ) -> RemoteStanzaEnvelope {
+        async fn epoch_for(services: &OrderedRelayDeliveryServices, entity: &Entity) -> ClaimEpoch {
+            services
+                .claim_store
+                .current_claim(entity)
+                .await
+                .expect("claim lookup")
+                .expect("seeded claim")
+                .claim_epoch
+        }
+
+        let mut envelope = envelope();
+        envelope.origin_claim.epoch = epoch_for(services, &origin_entity()).await;
+        envelope.sender_claim.epoch = epoch_for(services, &sender_entity()).await;
+        let target_epoch = epoch_for(services, &target_entity()).await;
+        envelope.target_claim.epoch = target_epoch;
+        envelope.channel.target_epoch = target_epoch;
+        envelope
+    }
+
+    async fn signed_envelope_for_services(
+        services: &OrderedRelayDeliveryServices,
+        keypair: &Keypair,
+    ) -> RemoteStanzaEnvelope {
+        sign_envelope(envelope_for_services(services).await, keypair)
     }
 
     fn test_peer_id() -> String {
@@ -5127,7 +5152,8 @@ mod tests {
         )
         .await;
 
-        let err = validate_claims(&services, &signed_envelope(&keypair))
+        let envelope = signed_envelope_for_services(&services, &keypair).await;
+        let err = validate_claims(&services, &envelope)
             .await
             .expect_err("foreign target owner is not this relay");
 
@@ -5150,7 +5176,8 @@ mod tests {
         )
         .await;
 
-        validate_claims(&services, &signed_envelope(&keypair))
+        let envelope = signed_envelope_for_services(&services, &keypair).await;
+        validate_claims(&services, &envelope)
             .await
             .expect("claims match origin and receiver");
     }
@@ -5165,7 +5192,7 @@ mod tests {
             keypair.public().to_peer_id().to_string(),
         )
         .await;
-        let mut envelope = envelope();
+        let mut envelope = envelope_for_services(&services).await;
         envelope.sender_claim.epoch = ClaimEpoch(99);
         let envelope = sign_envelope(envelope, &keypair);
 
@@ -5262,10 +5289,10 @@ mod tests {
             CancellationToken::new(),
             &ClusteringMessagingConfig::default(),
         );
-        bridge.wire(Arc::new(services));
-        let mut envelope = envelope();
+        let mut envelope = envelope_for_services(&services).await;
         envelope.payload = iq_payload();
         let envelope = sign_envelope(envelope, &keypair);
+        bridge.wire(Arc::new(services));
 
         let err = bridge
             .deliver_reserved(&envelope)
@@ -5298,10 +5325,10 @@ mod tests {
             CancellationToken::new(),
             &ClusteringMessagingConfig::default(),
         );
-        bridge.wire(Arc::new(services));
-        let mut envelope = envelope();
+        let mut envelope = envelope_for_services(&services).await;
         envelope.payload = iq_payload();
         let envelope = sign_envelope(envelope, &keypair);
+        bridge.wire(Arc::new(services));
 
         bridge
             .deliver_reserved(&envelope)
@@ -5494,8 +5521,8 @@ mod tests {
             CancellationToken::new(),
             &ClusteringMessagingConfig::default(),
         );
+        let envelope = sign_envelope(envelope_for_services(&services).await, &keypair);
         bridge.wire(Arc::new(services));
-        let envelope = sign_envelope(envelope(), &keypair);
 
         let err = bridge
             .deliver_reserved(&envelope)

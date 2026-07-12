@@ -412,15 +412,15 @@ mod tests {
         let room_a = room("room-a@muc.example.com");
         let room_b = room("room-b@muc.example.com");
         let sm_c = sm("stream-c");
-        claim_store
+        let room_a_epoch = claim_store
             .acquire(&room_a, &me)
             .await
             .expect("acquire room a");
-        claim_store
+        let room_b_epoch = claim_store
             .acquire(&room_b, &me)
             .await
             .expect("acquire room b");
-        claim_store.acquire(&sm_c, &me).await.expect("acquire sm c");
+        let sm_c_epoch = claim_store.acquire(&sm_c, &me).await.expect("acquire sm c");
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
             owned: vec![room_a.clone(), room_b.clone(), sm_c.clone()],
@@ -440,21 +440,21 @@ mod tests {
 
         assert!(
             !claim_store
-                .fence(&room_a, &me, ClaimEpoch(0))
+                .fence(&room_a, &me, room_a_epoch)
                 .await
                 .unwrap_or(true),
             "room_a's claim must be released by the drain"
         );
         assert!(
             !claim_store
-                .fence(&room_b, &me, ClaimEpoch(0))
+                .fence(&room_b, &me, room_b_epoch)
                 .await
                 .unwrap_or(true),
             "room_b's claim must be released by the drain"
         );
         assert!(
             claim_store
-                .fence(&sm_c, &me, ClaimEpoch(0))
+                .fence(&sm_c, &me, sm_c_epoch)
                 .await
                 .unwrap_or(false),
             "the sm_session entity must be left untouched by the generic drain loop \
@@ -538,8 +538,9 @@ mod tests {
         let entities: Vec<Entity> = (0..5)
             .map(|i| room(&format!("room-{i}@muc.example.com")))
             .collect();
+        let mut epochs = Vec::with_capacity(entities.len());
         for entity in &entities {
-            claim_store.acquire(entity, &me).await.expect("acquire");
+            epochs.push(claim_store.acquire(entity, &me).await.expect("acquire"));
         }
         let seal_calls = Arc::new(Mutex::new(Vec::new()));
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
@@ -564,12 +565,9 @@ mod tests {
             entities.len(),
             "every owned room must have had its seal attempted exactly once"
         );
-        for entity in &entities {
+        for (entity, epoch) in entities.iter().zip(epochs) {
             assert!(
-                !claim_store
-                    .fence(entity, &me, ClaimEpoch(0))
-                    .await
-                    .unwrap_or(true),
+                !claim_store.fence(entity, &me, epoch).await.unwrap_or(true),
                 "every successfully-sealed entity must end up released"
             );
         }
@@ -630,16 +628,16 @@ mod tests {
         let mut entities = Vec::with_capacity(MODELED_ENTITY_COUNT);
         for i in 0..MODELED_ENTITY_COUNT {
             let entity = room(&format!("room-{i}@muc.example.com"));
-            claim_store_typed
+            let epoch = claim_store_typed
                 .acquire(&entity, &me)
                 .await
                 .expect("acquire");
-            entities.push(entity);
+            entities.push((entity, epoch));
         }
         let claim_store: Arc<dyn ClaimStore> = Arc::new(claim_store_typed);
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
-            owned: entities.clone(),
+            owned: entities.iter().map(|(entity, _)| entity.clone()).collect(),
             outcome: SealOutcome::Succeed,
             seal_calls: Arc::new(Mutex::new(Vec::new())),
             demote_calls: Arc::new(AtomicU32::new(0)),
@@ -662,12 +660,9 @@ mod tests {
 
         // Spot-check a sample: genuinely released, not merely "didn't
         // time out."
-        for entity in entities.iter().step_by(200) {
+        for (entity, epoch) in entities.iter().step_by(200) {
             assert!(
-                !claim_store
-                    .fence(entity, &me, ClaimEpoch(0))
-                    .await
-                    .unwrap_or(true),
+                !claim_store.fence(entity, &me, *epoch).await.unwrap_or(true),
                 "entity {entity} must have been released by the modeled-scale drain"
             );
         }
