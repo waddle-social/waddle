@@ -8,14 +8,14 @@ struct RememberOrdinaryReleaseForTest {
 }
 
 impl kameo::message::Message<RememberOrdinaryReleaseForTest> for RoomRegistryActor {
-    type Reply = ();
+    type Reply = bool;
 
     async fn handle(
         &mut self,
         msg: RememberOrdinaryReleaseForTest,
         _ctx: &mut Context<Self, Self::Reply>,
-    ) {
-        self.remember_pending_room_release(msg.room_jid, msg.claim_fence);
+    ) -> Self::Reply {
+        self.remember_pending_room_release(msg.room_jid, msg.claim_fence)
     }
 }
 
@@ -2454,6 +2454,12 @@ mod ownership_claims_tests {
             })
             .await
             .expect("current-fence pending query"));
+        assert!(!registry
+            .ask(IsPendingRoomReleaseOnly {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("pending-only query"));
         assert_eq!(
             registry
                 .ask(RetryPendingRoomReleases { limit: 8 })
@@ -2506,6 +2512,16 @@ mod ownership_claims_tests {
     #[tokio::test]
     async fn full_release_backlog_does_not_seal_inactive_room() {
         let registry = spawn_registry().await;
+        let jid = test_room_jid("must-remain-open");
+        let acquisition = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create target before saturating cleanup inventory");
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let jid = test_room_jid(&format!("backlog-{index}"));
             registry
@@ -2516,16 +2532,6 @@ mod ownership_claims_tests {
                 .await
                 .expect("fill backlog");
         }
-        let jid = test_room_jid("must-remain-open");
-        let acquisition = registry
-            .ask(GetOrCreateRoom {
-                room_jid: jid.clone(),
-                waddle_id: "w".to_string(),
-                channel_id: "c".to_string(),
-                config: RoomConfig::default(),
-            })
-            .await
-            .expect("create target");
         assert!(!registry
             .ask(DestroyRoomIfInactive {
                 room_jid: jid,
@@ -2539,6 +2545,73 @@ mod ownership_claims_tests {
             .ask(IsSealed)
             .await
             .expect("sealed probe"));
+    }
+
+    #[tokio::test]
+    async fn full_release_backlog_refuses_new_claim_and_never_grows() {
+        let registry = spawn_registry().await;
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let jid = test_room_jid(&format!("bounded-backlog-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: jid.clone(),
+                    claim_fence: room_claim_fence(&jid, ClaimEpoch(index as i64)),
+                })
+                .await
+                .expect("fill backlog"));
+        }
+        let overflow_jid = test_room_jid("bounded-overflow");
+        assert!(!registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: overflow_jid.clone(),
+                claim_fence: room_claim_fence(&overflow_jid, ClaimEpoch(999)),
+            })
+            .await
+            .expect("bounded insertion outcome"));
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: overflow_jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
+                if *room == overflow_jid
+        ));
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("bounded backlog")
+                .depth,
+            MAX_PENDING_ROOM_RELEASES
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_only_room_is_shutdown_sealable_but_not_current_live_generation() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("pending-only");
+        assert!(registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: room_claim_fence(&jid, ClaimEpoch(7)),
+            })
+            .await
+            .expect("remember pending-only generation"));
+
+        assert!(!registry
+            .ask(IsCurrentRoomPendingRelease {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("generation-scoped live query"));
+        assert!(registry
+            .ask(IsPendingRoomReleaseOnly { room_jid: jid })
+            .await
+            .expect("shutdown pending-only query"));
     }
 
     #[tokio::test]

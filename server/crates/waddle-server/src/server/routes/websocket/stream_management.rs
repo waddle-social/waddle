@@ -248,8 +248,8 @@ async fn handle_sm_enable(
         Some(m) => m,
         None => max_resume_secs,
     };
-    // ADR-0017 Phase 3 Slice 6, element 8: ensure this node's `ClaimStore`
-    // claim on this SM session at `<enable/>` time — not only at detach
+    // ADR-0017 Phase 3 Slice 6, element 8: for a resumable enable, ensure
+    // this node's `ClaimStore` claim at `<enable/>` time — not only at detach
     // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
     // claim row for a still-live session, a cross-node resume attempt
     // would have nothing to discover: it needs the `clustering_claims` row
@@ -259,12 +259,20 @@ async fn handle_sm_enable(
     // with the detach-time call for the same stream id later in this
     // session's lifetime. No-op in practice for single-node deployments
     // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
-    let claimed = state
-        .deps
-        .protocol
-        .sm_session_registry
-        .ensure_session_claim(&stream_id)
-        .await;
+    // A non-resumable stream has no `previd`, is never detached, and cannot
+    // be discovered or resumed cross-node. Giving it a durable ownership
+    // claim would retain an entity with no terminal close path, so it does
+    // not participate in clustered SM ownership at all.
+    let claimed = if enable.resume {
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim(&stream_id)
+            .await
+    } else {
+        true
+    };
     if !claimed {
         return vec![SmFailed::with_condition("resource-constraint").to_xml()];
     }

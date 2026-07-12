@@ -183,7 +183,10 @@ impl RoomRegistryActor {
         &mut self,
         room_jid: BareJid,
         claim_fence: super::RoomClaimFenceContext,
-    ) {
+    ) -> bool {
+        if !self.has_pending_release_capacity(&room_jid, &claim_fence) {
+            return false;
+        }
         self.pending_retry_order = self.pending_retry_order.wrapping_add(1);
         let retry_order = self.pending_retry_order;
         self.pending_room_releases
@@ -194,6 +197,7 @@ impl RoomRegistryActor {
                 retry_order,
                 first_pending_at: std::time::Instant::now(),
             });
+        true
     }
 
     fn clear_pending_room_release(
@@ -252,9 +256,18 @@ impl RoomRegistryActor {
     /// attempted via any cross-node proxy — see that variant's doc
     /// comment for why that is out of this slice's scope.
     async fn acquire_room_claim(
-        &self,
+        &mut self,
         room_jid: &BareJid,
     ) -> Result<super::RoomClaimFenceContext, RoomRegistryError> {
+        // A newly acquired generation can require an exact terminal-release
+        // retry if identity rotates or actor preparation loses its final
+        // fence. Refuse acquisition while the bounded retry inventory is
+        // saturated; acquiring first would create responsibility that the
+        // registry has nowhere bounded to retain.
+        if self.pending_room_releases.len() >= MAX_PENDING_ROOM_RELEASES {
+            warn!(room = %room_jid, "room claim acquisition refused: exact-release retry backlog is full");
+            return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
+        }
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
         let identity = self.node_identity.current();
         let epoch = match tokio::time::timeout(
@@ -275,11 +288,8 @@ impl RoomRegistryActor {
             Err(_) => return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone())),
         };
         if self.node_identity.current() != identity {
-            let _ = tokio::time::timeout(
-                ROOM_OWNERSHIP_CALL_TIMEOUT,
-                self.claim_store.release_exact(&entity, &identity, epoch),
-            )
-            .await;
+            let claim_fence = super::RoomClaimFenceContext::new(entity, identity, epoch);
+            self.release_room_claim(room_jid, &claim_fence).await;
             return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()));
         }
         Ok(super::RoomClaimFenceContext::new(entity, identity, epoch))
@@ -573,11 +583,15 @@ impl RoomRegistryActor {
             }
             Ok(Err(error)) => {
                 warn!(room = %room_jid, %error, "failed to release room ownership claim");
-                self.remember_pending_room_release(room_jid.clone(), claim_fence.clone());
+                if !self.remember_pending_room_release(room_jid.clone(), claim_fence.clone()) {
+                    tracing::error!(room = %room_jid, "exact-release retry backlog saturated despite pre-admission guard; claim remains fenced for node-expiry recovery");
+                }
             }
             Err(_) => {
                 warn!(room = %room_jid, "timed out releasing room ownership claim; retaining exact fence for a later retry");
-                self.remember_pending_room_release(room_jid.clone(), claim_fence.clone());
+                if !self.remember_pending_room_release(room_jid.clone(), claim_fence.clone()) {
+                    tracing::error!(room = %room_jid, "exact-release retry backlog saturated despite pre-admission guard; claim remains fenced for node-expiry recovery");
+                }
             }
         }
     }
@@ -654,6 +668,9 @@ pub struct ListPendingRoomReleaseJids;
 pub struct IsCurrentRoomPendingRelease {
     pub room_jid: BareJid,
 }
+pub struct IsPendingRoomReleaseOnly {
+    pub room_jid: BareJid,
+}
 
 impl kameo::message::Message<ListPendingRoomReleaseJids> for RoomRegistryActor {
     type Reply = Vec<BareJid>;
@@ -687,6 +704,22 @@ impl kameo::message::Message<IsCurrentRoomPendingRelease> for RoomRegistryActor 
         };
         self.pending_room_releases
             .contains_key(&(msg.room_jid, entry.claim_fence.clone()))
+    }
+}
+
+impl kameo::message::Message<IsPendingRoomReleaseOnly> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: IsPendingRoomReleaseOnly,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        !self.rooms.contains_key(&msg.room_jid)
+            && self
+                .pending_room_releases
+                .keys()
+                .any(|(room_jid, _)| room_jid == &msg.room_jid)
     }
 }
 

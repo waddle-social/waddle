@@ -121,12 +121,30 @@ impl InMemorySmSessionRegistry {
             };
             pending
                 .iter()
-                .take(limit)
                 .map(|(stream_id, fence)| (stream_id.clone(), fence.clone()))
                 .collect::<Vec<_>>()
         };
-        let attempted = pending.len();
+        let mut attempted = 0;
         for (stream_id, fence) in pending {
+            if attempted >= limit {
+                break;
+            }
+            let Ok(stream_lock) = self.stream_lock(&stream_id) else {
+                continue;
+            };
+            let _stream_guard = stream_lock.lock().await;
+            let live_again = match (self.sessions.read(), self.claimed_sessions.read()) {
+                (Ok(sessions), Ok(claimed)) => {
+                    sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+                }
+                // A poisoned live-state lock is uncertainty. Never release a
+                // claim on the basis of an incomplete/failed local probe.
+                _ => true,
+            };
+            if live_again {
+                continue;
+            }
+            attempted += 1;
             self.release_claim_store_entry_under(&stream_id, fence)
                 .await;
         }

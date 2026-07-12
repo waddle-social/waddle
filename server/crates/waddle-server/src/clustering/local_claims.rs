@@ -360,10 +360,14 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
-        // The actor was already sealed/removed before this exact fence was
-        // queued, so no additional mailbox barrier is required at shutdown.
+        // A pending-release-only JID has already removed/sealed its actor,
+        // so no mailbox barrier remains to run. Unlike the live-health query
+        // above, shutdown intentionally accepts any retained exact generation
+        // for this JID: `owned()` enumerates those pending-only JIDs precisely
+        // so the drain can release the backend claim without requiring a live
+        // actor that terminal removal deliberately destroyed.
         if registry
-            .is_current_room_pending_release(room_jid.clone())
+            .is_pending_room_release_only(room_jid.clone())
             .await
             .unwrap_or(false)
         {

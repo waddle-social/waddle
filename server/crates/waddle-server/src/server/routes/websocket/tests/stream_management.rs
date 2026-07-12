@@ -860,6 +860,39 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
     assert_eq!(ack2_el.attr("h"), Some("1"));
 }
 
+#[tokio::test]
+async fn non_resumable_sm_enable_does_not_create_cluster_claim() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/non-resumable".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid, false);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='false'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert_eq!(responses.len(), 1);
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    assert_eq!(enabled.name(), "enabled");
+    assert_eq!(enabled.attr("resume"), None);
+    let stream_id = enabled.attr("id").expect("SM id");
+    assert!(conn.sm_state.enabled);
+    assert!(!conn.sm_state.is_resumable());
+    assert!(
+        !state
+            .deps
+            .protocol
+            .sm_session_registry
+            .locally_owned_claim_ids()
+            .expect("local claim snapshot")
+            .contains(&stream_id.to_string()),
+        "non-resumable SM must not retain a clustered ownership claim"
+    );
+}
+
 /// Enable SM on a fresh ready connection and return the negotiated
 /// stream id. Shared setup for the live `<a h='N'/>` validation tests
 /// (issue #1099).

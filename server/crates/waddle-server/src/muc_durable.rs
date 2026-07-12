@@ -497,7 +497,23 @@ impl MucDurableStore for PostgresMucRoomStore {
     /// lands, unconditionally (both archiving-on and archiving-off).
     fn check_fenced_fanout<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
         Box::pin(async move {
-            let fence = self.fence_for(room_jid)?;
+            let fence = self
+                .claim_fences
+                .get(room_jid)
+                .map(|entry| entry.clone())
+                .ok_or_else(|| {
+                    XmppError::internal(format!(
+                        "no claim epoch recorded for room {room_jid}; fenced fan-out skipped"
+                    ))
+                })?;
+            // Identity rotation is a definitive local ownership loss, not a
+            // transient storage failure. Return `Ok(false)` so fan-out and
+            // mutation gates fail closed instead of taking their transient
+            // error path (which intentionally fails open).
+            if self.node_identity.current() != fence.owner {
+                remove_room_claim_fence_if(&self.claim_fences, room_jid, &fence);
+                return Ok(false);
+            }
             let key = room_entity_key(room_jid);
             let conn = self.db.guard().await.map_err(db_err)?;
             let mut rows = conn
@@ -617,6 +633,13 @@ mod tests {
 
         live_identity.set(node_identity());
 
+        assert!(
+            !store
+                .check_fenced_fanout(&jid)
+                .await
+                .expect("identity rotation is definitive ownership loss"),
+            "a rotated cached fence must return false, never a transient error that callers fail open"
+        );
         assert!(store.current_claim_fence(&jid).is_none());
         assert!(store.claim_fences.get(&jid).is_none());
     }

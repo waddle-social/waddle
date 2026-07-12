@@ -288,6 +288,50 @@ async fn terminal_release_retry_clears_retained_exact_fence() {
     assert_eq!(registry.pending_claim_release_count(), 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn terminal_release_retry_skips_stream_that_became_live_again() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(true),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "retry-became-live";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("initial store");
+    registry
+        .take_session(stream_id)
+        .await
+        .expect("terminal take");
+    assert_eq!(registry.pending_claim_release_count(), 1);
+
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("same stream becomes resumable again");
+    store
+        .hang_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        registry.retry_pending_claim_releases(8).await,
+        0,
+        "a terminal retry must not release a stream that is live again"
+    );
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert!(registry
+        .peek_session(stream_id)
+        .await
+        .expect("live session probe")
+        .is_some());
+}
+
 #[tokio::test]
 async fn shutdown_drained_session_is_not_a_terminal_release_retry() {
     let registry = InMemorySmSessionRegistry::new();
