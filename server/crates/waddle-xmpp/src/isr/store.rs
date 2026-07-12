@@ -117,6 +117,16 @@ pub trait IsrTokenStore: Send + Sync {
         mechanism: &str,
     ) -> Result<IssuedIsrToken, IsrTokenStoreError>;
 
+    /// Revoke a provisional issuance only if the row still contains the
+    /// exact token and mechanism returned by [`Self::issue`]. A delayed
+    /// cleanup must never delete a newer issuance or a token rotated by a
+    /// successful resume. Returns whether this exact issuance was removed.
+    async fn revoke_if_current(
+        &self,
+        sm_id: &str,
+        issued: &IssuedIsrToken,
+    ) -> Result<bool, IsrTokenStoreError>;
+
     /// Fenced, single-use, constant-time consume. See the trait-level doc
     /// for the locked spec this must implement exactly.
     async fn consume(
@@ -179,6 +189,25 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
             .map_err(|_| IsrTokenStoreError::Poisoned)?;
         tokens.insert(sm_id.to_string(), issued.clone());
         Ok(issued)
+    }
+
+    async fn revoke_if_current(
+        &self,
+        sm_id: &str,
+        issued: &IssuedIsrToken,
+    ) -> Result<bool, IsrTokenStoreError> {
+        let mut tokens = self
+            .tokens
+            .write()
+            .map_err(|_| IsrTokenStoreError::Poisoned)?;
+        let matches = tokens.get(sm_id).is_some_and(|current| {
+            current.mechanism == issued.mechanism
+                && bool::from(current.token.as_bytes().ct_eq(issued.token.as_bytes()))
+        });
+        if matches {
+            tokens.remove(sm_id);
+        }
+        Ok(matches)
     }
 
     async fn consume(
@@ -315,5 +344,28 @@ mod tests {
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
+    }
+
+    #[tokio::test]
+    async fn provisional_revoke_is_exact_and_cannot_delete_a_newer_issue() {
+        let store = InMemoryIsrTokenStore::new();
+        let old = store.issue("sm-1", "PLAIN").await.expect("old issue");
+        let current = store.issue("sm-1", "PLAIN").await.expect("new issue");
+
+        assert!(!store
+            .revoke_if_current("sm-1", &old)
+            .await
+            .expect("stale revoke"));
+        assert!(store
+            .revoke_if_current("sm-1", &current)
+            .await
+            .expect("exact revoke"));
+        assert_eq!(
+            store
+                .consume("sm-1", current.token.as_bytes(), "PLAIN", &fence())
+                .await
+                .expect("lookup after revoke"),
+            IsrConsumeOutcome::NoSuchToken
+        );
     }
 }

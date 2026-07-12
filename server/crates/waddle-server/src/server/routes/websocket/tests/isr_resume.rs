@@ -32,6 +32,7 @@ use waddle_xmpp::stream_management::{DetachedSession, SmResume, SmSessionRegistr
 struct HangIssueOnceIsrTokenStore {
     inner: waddle_xmpp::isr::InMemoryIsrTokenStore,
     hang_once: std::sync::atomic::AtomicBool,
+    revoked: Option<Arc<tokio::sync::Notify>>,
 }
 
 fn register_isr_publish_owner(
@@ -67,6 +68,18 @@ impl IsrTokenStore for HangIssueOnceIsrTokenStore {
             return std::future::pending().await;
         }
         self.inner.issue(sm_id, mechanism).await
+    }
+
+    async fn revoke_if_current(
+        &self,
+        sm_id: &str,
+        issued: &waddle_xmpp::isr::IssuedIsrToken,
+    ) -> Result<bool, waddle_xmpp::isr::IsrTokenStoreError> {
+        let revoked = self.inner.revoke_if_current(sm_id, issued).await?;
+        if let Some(notify) = &self.revoked {
+            notify.notify_one();
+        }
+        Ok(revoked)
     }
 
     async fn consume(
@@ -314,6 +327,7 @@ async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() 
     let isr_token_store: Arc<dyn IsrTokenStore> = Arc::new(HangIssueOnceIsrTokenStore {
         inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
         hang_once: std::sync::atomic::AtomicBool::new(true),
+        revoked: None,
     });
     let state = create_test_websocket_state_with_clustering(
         ClusteringHandles {
@@ -349,6 +363,76 @@ async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() 
     conn.publish_pending_sm_enable(state.as_ref());
     assert!(conn.sm_state.enabled);
     assert!(enabled.get_child("isr-enabled", ISR_NS).is_some());
+}
+
+#[tokio::test]
+async fn dropped_isr_enable_commit_revokes_the_committed_provisional_token() {
+    let claim_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "incarnation"));
+    let sm_session_registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(claim_store.clone(), node_identity.clone()),
+    );
+    let revoked = Arc::new(tokio::sync::Notify::new());
+    let isr_token_store = Arc::new(HangIssueOnceIsrTokenStore {
+        inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
+        hang_once: std::sync::atomic::AtomicBool::new(false),
+        revoked: Some(revoked.clone()),
+    });
+    let state = create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(claim_store),
+            node_identity: Some(node_identity.clone()),
+            isr_token_store: Some(isr_token_store.clone()),
+            ..ClusteringHandles::default()
+        },
+        sm_session_registry,
+    )
+    .await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        &format!(
+            "<enable xmlns='urn:xmpp:sm:3' resume='true'>\
+                <isr-enable xmlns='{ISR_NS}' mechanism='PLAIN'/>\
+             </enable>"
+        ),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    let token = enabled
+        .get_child("isr-enabled", ISR_NS)
+        .and_then(|element| element.attr("token"))
+        .expect("issued ISR token")
+        .to_string();
+    assert!(!conn.sm_state.enabled);
+    assert!(conn.pending_sm_enable_commit.is_some());
+
+    let revoke_completed = revoked.notified();
+    drop(conn.pending_sm_enable_commit.take());
+    tokio::time::timeout(std::time::Duration::from_secs(1), revoke_completed)
+        .await
+        .expect("bounded provisional revoke");
+
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        node_identity.current(),
+        waddle_xmpp::ownership::ClaimEpoch(0),
+    );
+    assert_eq!(
+        isr_token_store
+            .consume(&stream_id, token.as_bytes(), ISR_PINNED_MECHANISM, &fence)
+            .await
+            .expect("consume after dropped publication"),
+        waddle_xmpp::isr::IsrConsumeOutcome::NoSuchToken
+    );
 }
 
 #[tokio::test]

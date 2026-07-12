@@ -156,6 +156,27 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         })
     }
 
+    async fn revoke_if_current(
+        &self,
+        sm_id: &str,
+        issued: &IssuedIsrToken,
+    ) -> Result<bool, IsrTokenStoreError> {
+        let conn = self.db.guard().await.map_err(db_err)?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM clustering_isr_tokens \
+                 WHERE sm_id = ? AND token = ? AND mechanism = ?",
+                crate::db_params![
+                    sm_id.to_string(),
+                    issued.token.clone(),
+                    issued.mechanism.clone()
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        Ok(deleted > 0)
+    }
+
     async fn consume(
         &self,
         sm_id: &str,
@@ -421,6 +442,28 @@ mod tests {
             .await
             .expect("consume");
         assert_eq!(replay, IsrConsumeOutcome::Mismatched);
+    }
+
+    #[tokio::test]
+    async fn provisional_revoke_cannot_delete_a_newer_postgres_issue() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db);
+        store.ensure_schema().await.expect("ensure isr schema");
+        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let old = store.issue(&sm_id, "PLAIN").await.expect("old issue");
+        let current = store.issue(&sm_id, "PLAIN").await.expect("new issue");
+
+        assert!(!store
+            .revoke_if_current(&sm_id, &old)
+            .await
+            .expect("stale revoke"));
+        assert!(store
+            .revoke_if_current(&sm_id, &current)
+            .await
+            .expect("exact revoke"));
     }
 
     #[tokio::test]
