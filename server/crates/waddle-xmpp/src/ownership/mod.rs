@@ -248,7 +248,7 @@ impl NodeIdentity {
 /// would silently keep acquiring/fencing claims under a `node_epoch` that
 /// stopped being current the moment this node last self-fenced (ADR-0017
 /// Phase 3 plan, Slice 4 follow-up plumbing note). This type is that
-/// shared, updatable view: `self_fence::run_node_lease` calls [`Self::set`]
+/// shared, updatable view: `self_fence::run_node_lease` calls [`Self::rotate`]
 /// every time it mints a fresh identity, and any other holder of a clone
 /// calls [`Self::current`] to read the latest value at the moment it
 /// actually needs it (never earlier, never cached across an `.await`).
@@ -260,11 +260,30 @@ impl NodeIdentity {
 /// Slice 4) that only ever reads it, without forcing the reader to depend
 /// on the `clustering` Cargo feature.
 #[derive(Clone)]
-pub struct SharedNodeIdentity(std::sync::Arc<std::sync::RwLock<NodeIdentity>>);
+pub struct SharedNodeIdentity {
+    identity: std::sync::Arc<std::sync::RwLock<NodeIdentity>>,
+    rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+}
+
+/// Shared authority to use one node identity at a publication or commit
+/// boundary. Identity rotation takes the exclusive side of the same gate.
+pub struct CurrentNodeIdentityGuard {
+    identity: NodeIdentity,
+    _rotation_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl CurrentNodeIdentityGuard {
+    pub fn identity(&self) -> &NodeIdentity {
+        &self.identity
+    }
+}
 
 impl SharedNodeIdentity {
     pub fn new(initial: NodeIdentity) -> Self {
-        Self(std::sync::Arc::new(std::sync::RwLock::new(initial)))
+        Self {
+            identity: std::sync::Arc::new(std::sync::RwLock::new(initial)),
+            rotation_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
+        }
     }
 
     /// The identity this node currently believes it holds, cloned out
@@ -272,24 +291,39 @@ impl SharedNodeIdentity {
     /// across an `.await`.
     ///
     /// A poisoned lock (a panicking holder) still yields a usable
-    /// identity: `NodeIdentity` has no invariant `set` can partially
+    /// identity: `NodeIdentity` has no invariant `rotate` can partially
     /// break (both fields are plain, independently-assigned `String`s),
     /// so recovering via the poison error's inner guard is safe and keeps
     /// one panicking holder from cascading into every future
     /// claim-fencing call this process ever makes.
     pub fn current(&self) -> NodeIdentity {
-        self.0
+        self.identity
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    /// Replace the current identity. Called by `self_fence::run_node_lease`
-    /// every time this node mints a fresh identity (initial registration
-    /// and every post-fence re-registration).
-    pub fn set(&self, identity: NodeIdentity) {
+    /// Acquire authority to use `expected`. Once returned, rotation cannot
+    /// complete until the guard is dropped. Writer preference also prevents
+    /// a new stale guard from passing a rotation that has already started.
+    pub async fn guard_if_current(
+        &self,
+        expected: &NodeIdentity,
+    ) -> Option<CurrentNodeIdentityGuard> {
+        let rotation_guard = self.rotation_gate.clone().read_owned().await;
+        let identity = self.current();
+        (identity == *expected).then_some(CurrentNodeIdentityGuard {
+            identity,
+            _rotation_guard: rotation_guard,
+        })
+    }
+
+    /// Replace the current identity only after every in-flight guarded
+    /// publication or transaction has completed.
+    pub async fn rotate(&self, identity: NodeIdentity) {
+        let _rotation_guard = self.rotation_gate.write().await;
         *self
-            .0
+            .identity
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
     }
@@ -636,15 +670,42 @@ mod tests {
         assert!(ClaimEpoch(0) < ClaimEpoch(1));
     }
 
-    #[test]
-    fn shared_node_identity_set_is_visible_through_every_clone() {
+    #[tokio::test]
+    async fn shared_node_identity_rotation_is_visible_through_every_clone() {
         let shared = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-0"));
         let clone = shared.clone();
         assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-0"));
 
-        shared.set(NodeIdentity::new("node-a", "epoch-1"));
+        shared.rotate(NodeIdentity::new("node-a", "epoch-1")).await;
 
         assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-1"));
         assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
+    }
+
+    #[tokio::test]
+    async fn guarded_identity_boundary_delays_rotation_until_use_completes() {
+        let old = NodeIdentity::new("node-a", "epoch-0");
+        let new = NodeIdentity::new("node-a", "epoch-1");
+        let shared = SharedNodeIdentity::new(old.clone());
+        let guard = shared
+            .guard_if_current(&old)
+            .await
+            .expect("old identity starts current");
+        let rotating = shared.clone();
+        let rotation = tokio::spawn(async move {
+            rotating.rotate(new).await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !rotation.is_finished(),
+            "rotation must wait at the exact post-check/use boundary"
+        );
+        assert_eq!(guard.identity(), &old);
+        drop(guard);
+
+        rotation.await.expect("rotation task");
+        assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
+        assert!(shared.guard_if_current(&old).await.is_none());
     }
 }

@@ -386,7 +386,9 @@ async fn test_remove_user_releases_with_the_acquisition_identity_after_identity_
         .await
         .expect("get_or_create");
 
-    shared_identity.set(NodeIdentity::new("node-this", "epoch-after-self-fence"));
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "epoch-after-self-fence"))
+        .await;
 
     let removed = registry
         .ask(RemoveUser {
@@ -557,7 +559,9 @@ async fn test_register_after_identity_rotation_reclaims_before_reusing_stale_use
         .await
         .expect("create");
 
-    shared_identity.set(NodeIdentity::new("node-this", "epoch-after-self-fence"));
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "epoch-after-self-fence"))
+        .await;
     claim_store.set_owner_lease_fresh(false);
 
     let (tx, _rx) = outbound_channel();
@@ -636,7 +640,9 @@ async fn test_register_after_identity_rotation_force_detaches_stale_actor_resour
         .expect("get old")
         .expect("old actor");
 
-    shared_identity.set(NodeIdentity::new("node-this", "epoch-after-self-fence"));
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "epoch-after-self-fence"))
+        .await;
     claim_store.set_owner_lease_fresh(false);
 
     let force_detach_task = tokio::spawn({

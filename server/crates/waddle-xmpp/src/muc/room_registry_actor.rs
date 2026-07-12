@@ -532,25 +532,26 @@ impl RoomRegistryActor {
         let actor_ref = self
             .prepare_room(room_jid.clone(), waddle_id, channel_id, config)
             .await;
-        let still_owned = self.node_identity.current() == claim_fence.owner()
-            && matches!(
-                tokio::time::timeout(
-                    ROOM_OWNERSHIP_CALL_TIMEOUT,
-                    self.claim_store.fence(
-                        &claim_fence.entity,
-                        &claim_fence.owner(),
-                        claim_fence.epoch,
-                    ),
-                )
-                .await,
-                Ok(Ok(true))
+        let owner = claim_fence.owner();
+        let still_owned = matches!(
+            tokio::time::timeout(
+                ROOM_OWNERSHIP_CALL_TIMEOUT,
+                self.claim_store
+                    .fence(&claim_fence.entity, &owner, claim_fence.epoch),
             )
-            && self.node_identity.current() == claim_fence.owner();
-        if !still_owned {
+            .await,
+            Ok(Ok(true))
+        );
+        let identity_guard = if still_owned {
+            self.node_identity.guard_if_current(&owner).await
+        } else {
+            None
+        };
+        let Some(_identity_guard) = identity_guard else {
             actor_ref.kill();
             self.release_room_claim(&room_jid, &claim_fence).await;
             return Err(RoomRegistryError::OwnershipUnavailable(room_jid));
-        }
+        };
         self.publish_room(room_jid, actor_ref.clone(), claim_fence);
         Ok(actor_ref)
     }
@@ -1298,12 +1299,12 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     )
                     .await
                     {
-                        Ok(Ok(true)) if self.node_identity.current() == identity => {}
+                        Ok(Ok(true)) => {}
                         Ok(Ok(false)) => {
                             self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
                             return ReclaimedRoomOutcome::LostRace;
                         }
-                        Ok(Ok(true)) | Ok(Err(_)) | Err(_) => {
+                        Ok(Err(_)) | Err(_) => {
                             self.remember_pending_reclaimed_room(
                                 msg.room_jid,
                                 claim_fence,
@@ -1312,6 +1313,16 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                             return ReclaimedRoomOutcome::PendingRetry;
                         }
                     }
+                    let identity_handle = self.node_identity.clone();
+                    let Some(_identity_guard) = identity_handle.guard_if_current(&identity).await
+                    else {
+                        self.remember_pending_reclaimed_room(
+                            msg.room_jid,
+                            claim_fence,
+                            msg.previous_owner,
+                        );
+                        return ReclaimedRoomOutcome::PendingRetry;
+                    };
                     if let Some(current) = self.rooms.get_mut(&msg.room_jid) {
                         current.claim_fence = claim_fence.clone();
                     }
@@ -1416,18 +1427,24 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
         )
         .await;
         match publish_owned {
-            Ok(Ok(true)) if self.node_identity.current() == identity => {}
+            Ok(Ok(true)) => {}
             Ok(Ok(false)) => {
                 actor_ref.kill();
                 self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
                 return ReclaimedRoomOutcome::LostRace;
             }
-            Ok(Ok(true)) | Ok(Err(_)) | Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 actor_ref.kill();
                 self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
                 return ReclaimedRoomOutcome::PendingRetry;
             }
         }
+        let identity_handle = self.node_identity.clone();
+        let Some(_identity_guard) = identity_handle.guard_if_current(&identity).await else {
+            actor_ref.kill();
+            self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
+            return ReclaimedRoomOutcome::PendingRetry;
+        };
         self.poisoned_rooms.remove(&msg.room_jid);
         self.publish_room(msg.room_jid, actor_ref, claim_fence);
         ReclaimedRoomOutcome::Hydrated
