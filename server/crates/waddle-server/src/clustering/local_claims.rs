@@ -208,10 +208,16 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         // `CreateInstantRoom` acquire the claim before spawning), so this
         // enumeration is exactly the owned-entity set.
         match registry.list_rooms().await {
-            Ok(jids) => jids
-                .into_iter()
-                .map(|jid| Entity::new(EntityType::RoomActor, jid.to_string()))
-                .collect(),
+            Ok(mut jids) => {
+                if let Ok(pending) = registry.list_pending_room_release_jids().await {
+                    jids.extend(pending);
+                    jids.sort();
+                    jids.dedup();
+                }
+                jids.into_iter()
+                    .map(|jid| Entity::new(EntityType::RoomActor, jid.to_string()))
+                    .collect()
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -279,6 +285,13 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
+        if registry
+            .is_current_room_pending_release(room_jid.clone())
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
         let Ok(Some(actor_ref)) = registry.get_room(room_jid).await else {
             tracing::warn!(
                 %entity,
@@ -328,6 +341,13 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
+        if registry
+            .is_current_identity_pending_room_release_only(room_jid.clone())
+            .await
+            .unwrap_or(false)
+        {
+            return true;
+        }
         let Ok(Some(actor_ref)) = registry.get_room(room_jid).await else {
             tracing::warn!(
                 %entity,

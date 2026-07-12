@@ -1,4 +1,5 @@
 use super::*;
+use crate::muc::RoomClaimFenceContext;
 use crate::xep::xep0421::OccupantIdSecret;
 use std::time::Duration;
 
@@ -33,6 +34,29 @@ async fn idle_mailbox_depth_is_zero() {
     );
     // A freshly-spawned, idle registry has drained its mailbox: depth 0.
     assert_eq!(registry.mailbox_depth(), Some(0));
+}
+
+#[tokio::test]
+async fn reclaimed_room_reservations_are_bounded() {
+    let registry = test_registry();
+    for index in 0..crate::muc::room_registry_actor::MAX_PENDING_RECLAIMED_ROOMS {
+        assert!(registry
+            .reserve_pending_reclaimed_room(test_room_jid(&format!("pending-{index}")))
+            .await
+            .expect("reservation ask"));
+    }
+    assert!(!registry
+        .reserve_pending_reclaimed_room(test_room_jid("overflow"))
+        .await
+        .expect("overflow reservation ask"));
+    let backlog = registry
+        .pending_reclaimed_room_backlog()
+        .await
+        .expect("backlog");
+    assert_eq!(
+        backlog.depth,
+        crate::muc::room_registry_actor::MAX_PENDING_RECLAIMED_ROOMS
+    );
 }
 
 #[tokio::test]
@@ -71,6 +95,27 @@ async fn wedged_request_maps_to_typed_timeout_error() {
 
     let result = pending.await;
     assert_eq!(result, Err(RoomRegistryError::Timeout));
+
+    // Pending-reclaim registration is mailbox-acknowledged, not reply-
+    // acknowledged. Even though the actor remains wedged in the handler
+    // above, successful enqueue is definitive and cannot be mistaken for an
+    // uncertain commit followed by concurrent exact release.
+    let queued_room = test_room_jid("queued-reclaim");
+    let accepted = registry
+        .remember_pending_reclaimed_room(
+            queued_room.clone(),
+            RoomClaimFenceContext::new(
+                crate::ownership::Entity::new(
+                    crate::ownership::EntityType::RoomActor,
+                    queued_room.to_string(),
+                ),
+                crate::ownership::NodeIdentity::new("current", "incarnation"),
+                crate::ownership::ClaimEpoch(7),
+            ),
+            crate::ownership::NodeIdentity::new("dead", "incarnation"),
+        )
+        .await;
+    assert_eq!(accepted, Ok(()));
 }
 
 #[tokio::test]

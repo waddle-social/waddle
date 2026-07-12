@@ -1315,11 +1315,12 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                 waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
                 | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
             ) => None,
-            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
-                Some(format!(
-                    "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
-                ))
-            }
+            Ok(
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed
+                | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
+            ) => Some(format!(
+                "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
+            )),
             Err(error) => Some(format!(
                 "cascade destroy failed for room {room_jid}: {error}"
             )),
