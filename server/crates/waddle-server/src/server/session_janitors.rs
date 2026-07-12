@@ -509,13 +509,19 @@ pub(crate) fn spawn_orphan_reaper_janitor(
     {
         let weak_state = Arc::downgrade(websocket_state);
         let registry = websocket_state.deps.protocol.sm_session_registry.clone();
-        let stop = websocket_state
+        let Some(stop) = websocket_state
             .deps
             .app_state
             .clustering_claims
             .stop_token
             .clone()
-            .unwrap_or_else(|| websocket_state.deps.shutdown.stop_token());
+        else {
+            // The binary may include clustering support while runtime
+            // clustering is disabled. In that configuration no clustering
+            // supervisor or registry-lifetime watcher may be attached to the
+            // process-wide shutdown token.
+            return;
+        };
         let room_registry_actor = websocket_state.deps.protocol.room_registry.clone();
         tokio::spawn(async move {
             let registry_lifetime_watch =
@@ -554,6 +560,28 @@ pub(crate) fn spawn_orphan_reaper_janitor(
         let _ = websocket_state;
         let _ = interval;
     }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test]
+async fn clustering_disabled_orphan_reaper_does_not_bind_process_shutdown() {
+    let state =
+        crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles::default(),
+            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+        )
+        .await;
+    let shutdown = state.deps.shutdown.stop_token();
+
+    spawn_orphan_reaper_janitor(&state, Duration::from_millis(1));
+    state.deps.protocol.room_registry.kill();
+    state.deps.protocol.room_registry.wait_for_shutdown().await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        !shutdown.is_cancelled(),
+        "runtime-disabled clustering must not turn RoomRegistry death into process shutdown"
+    );
 }
 
 #[cfg(feature = "clustering")]

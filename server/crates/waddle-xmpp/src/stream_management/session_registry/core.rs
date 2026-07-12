@@ -976,20 +976,37 @@ impl InMemorySmSessionRegistry {
                 "release_reclaimed_claim: failed to retain exact claim fence".to_string(),
             ));
         }
-        self.release_claim_store_entry_under(&entity.id, fence.clone())
-            .await;
-        let retained = self
-            .pending_claim_releases
-            .read()
-            .is_ok_and(|pending| pending.contains(&(entity.id.clone(), fence.clone())));
-        if retained {
-            Err(SmRegistryError::Internal(
-                "release_reclaimed_claim: exact release failed and was retained for retry"
-                    .to_string(),
-            ))
-        } else {
-            Ok(crate::ownership::ExactReleaseOutcome::Released)
+        let outcome = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store
+                .release_exact(entity, fence.owner(), fence.epoch()),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) | Err(_) => {
+                if let Ok(mut pending) = self.pending_claim_releases.write() {
+                    pending.insert((entity.id.clone(), fence.clone()));
+                }
+                return Err(SmRegistryError::Internal(
+                    "release_reclaimed_claim: exact release failed and was retained for retry"
+                        .to_string(),
+                ));
+            }
+        };
+        if let Ok(mut fences) = self.claim_fences.write() {
+            if fences.get(&entity.id) == Some(fence) {
+                fences.remove(&entity.id);
+            }
         }
+        if let Ok(mut pending) = self.pending_claim_releases.write() {
+            pending.remove(&(entity.id.clone(), fence.clone()));
+        }
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
+            storage.evict_claim_cache(&session_id, fence);
+        }
+        Ok(outcome)
     }
 }
 

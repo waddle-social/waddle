@@ -555,6 +555,51 @@ async fn quarantine_rejects_same_node_id_new_incarnation_after_epoch_aba() {
 }
 
 #[tokio::test]
+async fn identity_rotation_exactly_releases_the_cached_old_incarnation_before_retry() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-identity-rotation-cleanup");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("old incarnation establishes the cached claim fence");
+
+    let replacement =
+        NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    f.shared_identity.set(replacement.clone());
+
+    let rotation_error = f
+        .fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect_err("the first post-rotation write performs cleanup and retries explicitly");
+    assert!(matches!(
+        rotation_error,
+        SmPersistenceError::NotOwner { .. }
+    ));
+    assert!(
+        f.claims
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup after exact cleanup")
+            .is_none(),
+        "the stale incarnation must not block the replacement identity"
+    );
+
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("the replacement identity acquires on the explicit retry");
+    let claim = f
+        .claims
+        .current_claim(&entity)
+        .await
+        .expect("replacement claim lookup")
+        .expect("replacement claim exists");
+    assert_eq!(claim.owner, replacement);
+}
+
+#[tokio::test]
 async fn record_promotion_failure_aborts_before_any_write_once_the_claim_is_stolen() {
     let Some(f) = fixture().await else { return };
     let stream_id = SmSessionId::new("stream-promo-stolen");

@@ -205,6 +205,19 @@ impl crate::ownership::ClaimStore for HangingReleaseClaimStore {
         }
     }
 
+    async fn release_exact(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+        mine: crate::ownership::ClaimEpoch,
+    ) -> Result<crate::ownership::ExactReleaseOutcome, crate::ownership::ClaimError> {
+        if self.hang_release.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending().await
+        } else {
+            self.inner.release_exact(entity, me, mine).await
+        }
+    }
+
     async fn release_many(
         &self,
         entities: &[crate::ownership::Entity],
@@ -686,6 +699,49 @@ async fn reclaimed_terminal_release_failure_retains_exact_retry() {
         1,
         "failed inline terminal release must retain the supplied exact fence for retry"
     );
+}
+
+#[tokio::test]
+async fn reclaimed_terminal_release_reports_not_owned_without_touching_replacement() {
+    use crate::ownership::ClaimStore as _;
+
+    let old_owner = crate::ownership::NodeIdentity::new("old-reclaimer", "old-incarnation");
+    let replacement = crate::ownership::NodeIdentity::new("replacement", "new-incarnation");
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "reclaimed-release-lost-race",
+    );
+    let old_epoch = store.acquire(&entity, &old_owner).await.expect("old claim");
+    assert_eq!(
+        store
+            .release_exact(&entity, &old_owner, old_epoch)
+            .await
+            .expect("release old generation"),
+        crate::ownership::ExactReleaseOutcome::Released
+    );
+    let replacement_epoch = store
+        .acquire(&entity, &replacement)
+        .await
+        .expect("replacement claim");
+    let old_fence = super::super::persistence::SmClaimFence::new(old_owner.clone(), old_epoch);
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(old_owner),
+    );
+
+    assert_eq!(
+        registry
+            .release_reclaimed_claim(&entity, &old_fence)
+            .await
+            .expect("exact lost-race outcome"),
+        crate::ownership::ExactReleaseOutcome::NotOwned
+    );
+    assert!(store
+        .fence(&entity, &replacement, replacement_epoch)
+        .await
+        .expect("replacement fence"));
+    assert_eq!(registry.pending_claim_release_count(), 0);
 }
 
 #[tokio::test]

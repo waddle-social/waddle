@@ -425,9 +425,34 @@ impl PostgresFencedSmPersistence {
 
         match result {
             Ok(fence) if self.node_identity.current() == *fence.owner() => Ok(fence.clone()),
-            Ok(_) => {
-                self.remove_claim_cell_if(stream_id, &cell);
-                Err(SmPersistenceError::NotOwner { entity })
+            Ok(fence) => {
+                // `ensure_claimed` may have committed under the previous
+                // incarnation immediately before self-fence rotation. Keep
+                // the resolved cell as exact retry inventory until that old
+                // owner+epoch is confirmed gone; otherwise a current-
+                // identity retry conflicts with our own stranded claim.
+                match self
+                    .claim_store
+                    .release_exact(&entity, fence.owner(), fence.epoch())
+                    .await
+                {
+                    Ok(
+                        waddle_xmpp::ownership::ExactReleaseOutcome::Released
+                        | waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned,
+                    ) => {
+                        self.remove_claim_cell_if(stream_id, &cell);
+                        Err(SmPersistenceError::NotOwner { entity })
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            stream_id = %stream_id,
+                            %error,
+                            "PostgresFencedSmPersistence: stale-incarnation exact claim cleanup \
+                             failed; retaining the immutable fence for retry"
+                        );
+                        Err(claim_error_to_sm_persistence_error(error, entity))
+                    }
+                }
             }
             Err(error) => {
                 tracing::warn!(
