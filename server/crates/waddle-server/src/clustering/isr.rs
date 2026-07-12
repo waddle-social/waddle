@@ -134,26 +134,26 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         Ok(())
     }
 
-    async fn issue(
+    async fn persist_issued(
         &self,
         sm_id: &str,
-        mechanism: &str,
-    ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
-        let token = generate_isr_token();
+        issued: &IssuedIsrToken,
+    ) -> Result<(), IsrTokenStoreError> {
         let conn = self.db.guard().await.map_err(db_err)?;
         conn.execute(
             "INSERT INTO clustering_isr_tokens (sm_id, token, mechanism, created_at) \
              VALUES (?, ?, ?, now()) \
              ON CONFLICT (sm_id) DO UPDATE SET \
                  token = EXCLUDED.token, mechanism = EXCLUDED.mechanism, created_at = now()",
-            crate::db_params![sm_id.to_string(), token.clone(), mechanism.to_string()],
+            crate::db_params![
+                sm_id.to_string(),
+                issued.token.clone(),
+                issued.mechanism.clone()
+            ],
         )
         .await
         .map_err(db_err)?;
-        Ok(IssuedIsrToken {
-            token,
-            mechanism: mechanism.to_string(),
-        })
+        Ok(())
     }
 
     async fn revoke_if_current(

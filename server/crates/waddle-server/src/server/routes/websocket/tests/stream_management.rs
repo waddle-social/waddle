@@ -916,7 +916,7 @@ async fn resumable_enable_cancelled_before_write_never_publishes_and_releases_ex
 }
 
 #[tokio::test]
-async fn replaced_connection_cannot_publish_or_strand_its_post_write_enable_claim() {
+async fn replaced_connection_commits_written_enable_without_publishing_stale_alias() {
     let state = create_test_websocket_state().await;
     let mut old_conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/replaced-enable".parse().expect("jid");
@@ -944,7 +944,10 @@ async fn replaced_connection_cannot_publish_or_strand_its_post_write_enable_clai
 
     old_conn.publish_pending_sm_enable(state.as_ref());
 
-    assert!(!old_conn.sm_state.enabled);
+    assert!(
+        old_conn.sm_state.enabled,
+        "a successfully written <enabled/> commits local XEP-0198 state"
+    );
     assert!(old_conn.pending_sm_enable_commit.is_none());
     assert!(
         state
@@ -967,6 +970,13 @@ async fn replaced_connection_cannot_publish_or_strand_its_post_write_enable_clai
         "stale publication must not create a reverse-index alias"
     );
     let registry = &state.deps.protocol.sm_session_registry;
+    assert_eq!(registry.pending_claim_release_count(), 0);
+
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut old_conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
     assert_eq!(registry.pending_claim_release_count(), 1);
     assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
 }

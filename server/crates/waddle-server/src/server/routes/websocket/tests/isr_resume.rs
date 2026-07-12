@@ -29,9 +29,10 @@ use waddle_xmpp::isr::{IsrTokenStore, ISR_NS, ISR_PINNED_MECHANISM};
 use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::stream_management::{DetachedSession, SmResume, SmSessionRegistry};
 
-struct HangIssueOnceIsrTokenStore {
+struct ControlledPersistIsrTokenStore {
     inner: waddle_xmpp::isr::InMemoryIsrTokenStore,
     hang_once: std::sync::atomic::AtomicBool,
+    error_once: std::sync::atomic::AtomicBool,
     revoked: Option<Arc<tokio::sync::Notify>>,
 }
 
@@ -51,23 +52,32 @@ fn register_isr_publish_owner(
 }
 
 #[async_trait::async_trait]
-impl IsrTokenStore for HangIssueOnceIsrTokenStore {
+impl IsrTokenStore for ControlledPersistIsrTokenStore {
     async fn ensure_schema(&self) -> Result<(), waddle_xmpp::isr::IsrTokenStoreError> {
         self.inner.ensure_schema().await
     }
 
-    async fn issue(
+    async fn persist_issued(
         &self,
         sm_id: &str,
-        mechanism: &str,
-    ) -> Result<waddle_xmpp::isr::IssuedIsrToken, waddle_xmpp::isr::IsrTokenStoreError> {
+        issued: &waddle_xmpp::isr::IssuedIsrToken,
+    ) -> Result<(), waddle_xmpp::isr::IsrTokenStoreError> {
+        if self
+            .error_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(waddle_xmpp::isr::IsrTokenStoreError::Backend(
+                "injected persistence failure".to_string(),
+            ));
+        }
+        self.inner.persist_issued(sm_id, issued).await?;
         if self
             .hang_once
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return std::future::pending().await;
         }
-        self.inner.issue(sm_id, mechanism).await
+        Ok(())
     }
 
     async fn revoke_if_current(
@@ -316,7 +326,7 @@ async fn isr_enable_mints_a_token_when_clustering_and_postgres_are_available() {
 }
 
 #[tokio::test]
-async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() {
+async fn timed_out_isr_persist_revokes_ambiguous_commit_and_enable_is_retry_safe() {
     let claim_store: std::sync::Arc<dyn ClaimStore> =
         std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let node_identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "incarnation"));
@@ -324,10 +334,12 @@ async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() 
         InMemorySmSessionRegistry::new()
             .with_claim_store(claim_store.clone(), node_identity.clone()),
     );
-    let isr_token_store: Arc<dyn IsrTokenStore> = Arc::new(HangIssueOnceIsrTokenStore {
+    let revoked = Arc::new(tokio::sync::Notify::new());
+    let isr_token_store: Arc<dyn IsrTokenStore> = Arc::new(ControlledPersistIsrTokenStore {
         inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
         hang_once: std::sync::atomic::AtomicBool::new(true),
-        revoked: None,
+        error_once: std::sync::atomic::AtomicBool::new(false),
+        revoked: Some(revoked.clone()),
     });
     let state = create_test_websocket_state_with_clustering(
         ClusteringHandles {
@@ -349,6 +361,7 @@ async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() 
          </enable>"
     );
 
+    let revoke_completed = revoked.notified();
     let failed = handle_xmpp_frame(&enable, "example.com", state.as_ref(), &mut conn).await;
     let failed = Element::from_str(&failed[0]).expect("failed xml");
     assert_eq!(failed.name(), "failed");
@@ -356,6 +369,9 @@ async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() 
         .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas")
         .is_some());
     assert!(!conn.sm_state.enabled);
+    tokio::time::timeout(std::time::Duration::from_secs(1), revoke_completed)
+        .await
+        .expect("exact cleanup of ambiguous committed issuance");
 
     let retried = handle_xmpp_frame(&enable, "example.com", state.as_ref(), &mut conn).await;
     let enabled = Element::from_str(&retried[0]).expect("enabled xml");
@@ -363,6 +379,58 @@ async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() 
     conn.publish_pending_sm_enable(state.as_ref());
     assert!(conn.sm_state.enabled);
     assert!(enabled.get_child("isr-enabled", ISR_NS).is_some());
+}
+
+#[tokio::test]
+async fn isr_persist_error_returns_sm_failure_instead_of_tokenless_success() {
+    let claim_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "incarnation"));
+    let sm_session_registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(claim_store.clone(), node_identity.clone()),
+    );
+    let isr_token_store: Arc<dyn IsrTokenStore> = Arc::new(ControlledPersistIsrTokenStore {
+        inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
+        hang_once: std::sync::atomic::AtomicBool::new(false),
+        error_once: std::sync::atomic::AtomicBool::new(true),
+        revoked: None,
+    });
+    let state = create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(claim_store),
+            node_identity: Some(node_identity),
+            isr_token_store: Some(isr_token_store),
+            ..ClusteringHandles::default()
+        },
+        sm_session_registry,
+    )
+    .await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/persist-error".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        &format!(
+            "<enable xmlns='urn:xmpp:sm:3' resume='true'>\
+                <isr-enable xmlns='{ISR_NS}' mechanism='PLAIN'/>\
+             </enable>"
+        ),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1);
+    let failed = Element::from_str(&responses[0]).expect("failed xml");
+    assert_eq!(failed.name(), "failed");
+    assert!(failed
+        .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(!conn.sm_state.enabled);
+    assert!(conn.pending_sm_enable_commit.is_none());
 }
 
 #[tokio::test]
@@ -375,9 +443,10 @@ async fn dropped_isr_enable_commit_revokes_the_committed_provisional_token() {
             .with_claim_store(claim_store.clone(), node_identity.clone()),
     );
     let revoked = Arc::new(tokio::sync::Notify::new());
-    let isr_token_store = Arc::new(HangIssueOnceIsrTokenStore {
+    let isr_token_store = Arc::new(ControlledPersistIsrTokenStore {
         inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
         hang_once: std::sync::atomic::AtomicBool::new(false),
+        error_once: std::sync::atomic::AtomicBool::new(false),
         revoked: Some(revoked.clone()),
     });
     let state = create_test_websocket_state_with_clustering(

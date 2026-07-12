@@ -15,8 +15,8 @@
 //! without a live Postgres instance, not because single-node ISR is a
 //! supported deployment shape.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use subtle::ConstantTimeEq;
@@ -30,6 +30,18 @@ use crate::stream_management::persistence::SmClaimFence;
 pub struct IssuedIsrToken {
     pub token: String,
     pub mechanism: String,
+}
+
+impl IssuedIsrToken {
+    /// Generate a fresh typed issuance before any fallible persistence await.
+    /// Keeping the exact value in the caller lets cancellation cleanup revoke
+    /// a write whose commit outcome became ambiguous.
+    pub fn new(mechanism: impl Into<String>) -> Self {
+        Self {
+            token: super::generate_isr_token(),
+            mechanism: mechanism.into(),
+        }
+    }
 }
 
 /// Outcome of a fenced [`IsrTokenStore::consume`] attempt.
@@ -89,6 +101,267 @@ pub enum IsrTokenStoreError {
     Poisoned,
 }
 
+const DEFAULT_REVOCATION_CAPACITY: usize = 128;
+const REVOCATION_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const REVOCATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Bounded process-local responsibility for exact provisional ISR-token
+/// revocation. Capacity is reserved before persistence starts; cancellation
+/// therefore cannot create committed cleanup work that has nowhere to live.
+#[derive(Clone)]
+pub struct IsrRevocationQueue {
+    inner: Arc<IsrRevocationQueueInner>,
+}
+
+struct IsrRevocationQueueInner {
+    state: Mutex<IsrRevocationQueueState>,
+    capacity: usize,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct IsrRevocationQueueState {
+    entries: VecDeque<IsrRevocationEntry>,
+    worker_running: bool,
+}
+
+struct IsrRevocationEntry {
+    id: u64,
+    sm_id: String,
+    store: Arc<dyn IsrTokenStore>,
+    issued: IssuedIsrToken,
+    state: IsrRevocationState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IsrRevocationState {
+    Reserved,
+    Active,
+    InFlight,
+}
+
+/// A pre-persistence capacity reservation. Dropping an armed reservation
+/// activates exact cleanup; disarming it after the `<enabled/>` write removes
+/// the inventory entry because the token now belongs to the live SM session.
+pub struct IsrRevocationReservation {
+    queue: IsrRevocationQueue,
+    id: u64,
+    armed: bool,
+}
+
+impl Default for IsrRevocationQueue {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_REVOCATION_CAPACITY)
+    }
+}
+
+/// Return the bounded revocation inventory associated with this exact store
+/// instance. Weak registry entries avoid extending a store's lifetime when it
+/// has no reserved or active cleanup work.
+pub fn revocation_queue_for_store(store: &Arc<dyn IsrTokenStore>) -> IsrRevocationQueue {
+    static QUEUES: std::sync::OnceLock<
+        Mutex<HashMap<usize, std::sync::Weak<IsrRevocationQueueInner>>>,
+    > = std::sync::OnceLock::new();
+    let key = Arc::as_ptr(store) as *const () as usize;
+    let queues = QUEUES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut queues = queues
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    queues.retain(|_, queue| queue.strong_count() > 0);
+    if let Some(inner) = queues.get(&key).and_then(std::sync::Weak::upgrade) {
+        return IsrRevocationQueue { inner };
+    }
+    let queue = IsrRevocationQueue::default();
+    queues.insert(key, Arc::downgrade(&queue.inner));
+    queue
+}
+
+impl IsrRevocationQueue {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(IsrRevocationQueueInner {
+                state: Mutex::new(IsrRevocationQueueState::default()),
+                capacity,
+                next_id: std::sync::atomic::AtomicU64::new(1),
+            }),
+        }
+    }
+
+    /// Reserve cleanup capacity before persisting `issued`. Returns `None`
+    /// under backpressure, allowing the caller to reject enablement before a
+    /// token can be committed without retained cleanup responsibility.
+    pub fn reserve(
+        &self,
+        sm_id: String,
+        store: Arc<dyn IsrTokenStore>,
+        issued: IssuedIsrToken,
+    ) -> Option<IsrRevocationReservation> {
+        let mut state = self.inner.state.lock().ok()?;
+        if state.entries.len() >= self.inner.capacity {
+            return None;
+        }
+        let id = self
+            .inner
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.entries.push_back(IsrRevocationEntry {
+            id,
+            sm_id,
+            store,
+            issued,
+            state: IsrRevocationState::Reserved,
+        });
+        Some(IsrRevocationReservation {
+            queue: self.clone(),
+            id,
+            armed: true,
+        })
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .map(|state| state.entries.len())
+            .unwrap_or(0)
+    }
+
+    fn remove(&self, id: u64) {
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.entries.retain(|entry| entry.id != id);
+        }
+    }
+
+    fn activate(&self, id: u64) {
+        if let Ok(mut state) = self.inner.state.lock() {
+            if let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == id) {
+                entry.state = IsrRevocationState::Active;
+            }
+        }
+        self.start_worker();
+    }
+
+    fn start_worker(&self) {
+        let should_start = self.inner.state.lock().is_ok_and(|mut state| {
+            if state.worker_running
+                || !state
+                    .entries
+                    .iter()
+                    .any(|entry| entry.state == IsrRevocationState::Active)
+            {
+                return false;
+            }
+            state.worker_running = true;
+            true
+        });
+        if !should_start {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            if let Ok(mut state) = self.inner.state.lock() {
+                state.worker_running = false;
+            }
+            return;
+        };
+        let queue = self.clone();
+        runtime.spawn(async move { queue.run_worker().await });
+    }
+
+    async fn run_worker(self) {
+        let mut guard = IsrRevocationWorkerGuard {
+            queue: self.clone(),
+            armed: true,
+        };
+        loop {
+            let work = self.inner.state.lock().ok().and_then(|mut state| {
+                let Some(entry) = state
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.state == IsrRevocationState::Active)
+                else {
+                    state.worker_running = false;
+                    return None;
+                };
+                entry.state = IsrRevocationState::InFlight;
+                Some((
+                    entry.id,
+                    entry.sm_id.clone(),
+                    Arc::clone(&entry.store),
+                    entry.issued.clone(),
+                ))
+            });
+            let Some((id, sm_id, store, issued)) = work else {
+                guard.disarm();
+                return;
+            };
+            let completed = matches!(
+                tokio::time::timeout(
+                    REVOCATION_ATTEMPT_TIMEOUT,
+                    store.revoke_if_current(&sm_id, &issued),
+                )
+                .await,
+                Ok(Ok(_))
+            );
+            if let Ok(mut state) = self.inner.state.lock() {
+                let Some(index) = state.entries.iter().position(|entry| entry.id == id) else {
+                    continue;
+                };
+                if completed {
+                    state.entries.remove(index);
+                } else if let Some(mut entry) = state.entries.remove(index) {
+                    entry.state = IsrRevocationState::Active;
+                    state.entries.push_back(entry);
+                }
+            }
+            if !completed {
+                tokio::time::sleep(REVOCATION_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
+impl IsrRevocationReservation {
+    pub fn disarm(mut self) {
+        self.queue.remove(self.id);
+        self.armed = false;
+    }
+}
+
+impl Drop for IsrRevocationReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.queue.activate(self.id);
+        }
+    }
+}
+
+struct IsrRevocationWorkerGuard {
+    queue: IsrRevocationQueue,
+    armed: bool,
+}
+
+impl IsrRevocationWorkerGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for IsrRevocationWorkerGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.queue.inner.state.lock() {
+            state.worker_running = false;
+            for entry in &mut state.entries {
+                if entry.state == IsrRevocationState::InFlight {
+                    entry.state = IsrRevocationState::Active;
+                }
+            }
+        }
+    }
+}
+
 /// Postgres-authoritative, epoch-fenced ISR token storage (ADR-0017 Phase 3
 /// Slice 8, element 10). See the module doc for the trait/impl split
 /// rationale.
@@ -105,6 +378,15 @@ pub trait IsrTokenStore: Send + Sync {
     /// Create the backing schema if it does not exist. Idempotent.
     async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError>;
 
+    /// Persist the exact caller-generated issuance for `sm_id`. The caller
+    /// retains this value across the await so cancellation or an ambiguous
+    /// backend outcome can be followed by [`Self::revoke_if_current`].
+    async fn persist_issued(
+        &self,
+        sm_id: &str,
+        issued: &IssuedIsrToken,
+    ) -> Result<(), IsrTokenStoreError>;
+
     /// Mint and store a fresh token for `sm_id`, pinned to `mechanism`
     /// (XEP-0397's "mechanism pinning", element 10: the entities involved
     /// MUST only use or allow this mechanism when performing ISR with the
@@ -115,7 +397,11 @@ pub trait IsrTokenStore: Send + Sync {
         &self,
         sm_id: &str,
         mechanism: &str,
-    ) -> Result<IssuedIsrToken, IsrTokenStoreError>;
+    ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
+        let issued = IssuedIsrToken::new(mechanism);
+        self.persist_issued(sm_id, &issued).await?;
+        Ok(issued)
+    }
 
     /// Revoke a provisional issuance only if the row still contains the
     /// exact token and mechanism returned by [`Self::issue`]. A delayed
@@ -174,21 +460,17 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
         Ok(())
     }
 
-    async fn issue(
+    async fn persist_issued(
         &self,
         sm_id: &str,
-        mechanism: &str,
-    ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
-        let issued = IssuedIsrToken {
-            token: super::generate_isr_token(),
-            mechanism: mechanism.to_string(),
-        };
+        issued: &IssuedIsrToken,
+    ) -> Result<(), IsrTokenStoreError> {
         let mut tokens = self
             .tokens
             .write()
             .map_err(|_| IsrTokenStoreError::Poisoned)?;
         tokens.insert(sm_id.to_string(), issued.clone());
-        Ok(issued)
+        Ok(())
     }
 
     async fn revoke_if_current(
@@ -241,10 +523,7 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
             // XEP's anti-brute-force MUST.
             return Ok(IsrConsumeOutcome::Mismatched);
         }
-        let rotated = IssuedIsrToken {
-            token: super::generate_isr_token(),
-            mechanism: mechanism.to_string(),
-        };
+        let rotated = IssuedIsrToken::new(mechanism);
         tokens.insert(sm_id.to_string(), rotated.clone());
         Ok(IsrConsumeOutcome::Matched { rotated })
     }
@@ -263,6 +542,65 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailFirstRevokeStore {
+        inner: InMemoryIsrTokenStore,
+        attempts: std::sync::atomic::AtomicUsize,
+        revoked: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl IsrTokenStore for FailFirstRevokeStore {
+        async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn persist_issued(
+            &self,
+            sm_id: &str,
+            issued: &IssuedIsrToken,
+        ) -> Result<(), IsrTokenStoreError> {
+            self.inner.persist_issued(sm_id, issued).await
+        }
+
+        async fn revoke_if_current(
+            &self,
+            sm_id: &str,
+            issued: &IssuedIsrToken,
+        ) -> Result<bool, IsrTokenStoreError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                return Err(IsrTokenStoreError::Backend(
+                    "injected first revoke failure".to_string(),
+                ));
+            }
+            let revoked = self.inner.revoke_if_current(sm_id, issued).await?;
+            self.revoked.notify_one();
+            Ok(revoked)
+        }
+
+        async fn consume(
+            &self,
+            sm_id: &str,
+            presented_token: &[u8],
+            mechanism: &str,
+            fence: &SmClaimFence,
+        ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
+            self.inner
+                .consume(sm_id, presented_token, mechanism, fence)
+                .await
+        }
+
+        async fn sweep_expired(
+            &self,
+            max_age: std::time::Duration,
+        ) -> Result<u64, IsrTokenStoreError> {
+            self.inner.sweep_expired(max_age).await
+        }
+    }
 
     fn fence() -> SmClaimFence {
         SmClaimFence::new(
@@ -367,5 +705,52 @@ mod tests {
                 .expect("lookup after revoke"),
             IsrConsumeOutcome::NoSuchToken
         );
+    }
+
+    #[tokio::test]
+    async fn revocation_queue_retries_an_exact_issuance_after_transient_failure() {
+        let store = Arc::new(FailFirstRevokeStore {
+            inner: InMemoryIsrTokenStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            revoked: tokio::sync::Notify::new(),
+        });
+        let issued = IssuedIsrToken::new("PLAIN");
+        store
+            .persist_issued("sm-retry", &issued)
+            .await
+            .expect("persist provisional token");
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+        let reservation = queue
+            .reserve("sm-retry".to_string(), dyn_store, issued)
+            .expect("reserve cleanup capacity");
+        let revoked = store.revoked.notified();
+
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(1), revoked)
+            .await
+            .expect("second revoke succeeds after first failure");
+
+        assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn revocation_queue_reserves_capacity_before_persistence() {
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let store: Arc<dyn IsrTokenStore> = Arc::new(InMemoryIsrTokenStore::new());
+        let reservation = queue
+            .reserve(
+                "sm-one".to_string(),
+                store.clone(),
+                IssuedIsrToken::new("PLAIN"),
+            )
+            .expect("first reservation");
+
+        assert!(queue
+            .reserve("sm-two".to_string(), store, IssuedIsrToken::new("PLAIN"),)
+            .is_none());
+        reservation.disarm();
+        assert_eq!(queue.pending_len(), 0);
     }
 }

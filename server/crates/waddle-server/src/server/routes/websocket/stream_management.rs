@@ -6,13 +6,8 @@ const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duratio
 struct SmEnableClaimGuard {
     registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
     stream_id: String,
-    provisional_isr_token: Option<ProvisionalIsrToken>,
+    provisional_isr_token: Option<waddle_xmpp::isr::IsrRevocationReservation>,
     armed: bool,
-}
-
-struct ProvisionalIsrToken {
-    store: std::sync::Arc<dyn waddle_xmpp::isr::IsrTokenStore>,
-    issued: waddle_xmpp::isr::IssuedIsrToken,
 }
 
 /// Typed post-write effect for `<enable/>`. The resumable claim is acquired
@@ -48,26 +43,34 @@ impl SmEnableCommit {
         bound_jid: Option<&jid::FullJid>,
         registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
-        let (Some(jid), Some(owner)) = (bound_jid, registry_owner) else {
-            return;
+        let registry_published = match (bound_jid, registry_owner) {
+            (Some(jid), Some(owner)) => state
+                .deps
+                .protocol
+                .connection_registry
+                .set_sm_stream_id_if_owner(
+                    jid,
+                    owner,
+                    Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                        self.stream_id.clone(),
+                    )),
+                ),
+            _ => false,
         };
-        if !state
-            .deps
-            .protocol
-            .connection_registry
-            .set_sm_stream_id_if_owner(
-                jid,
-                owner,
-                Some(waddle_xmpp::pending_delivery::SmSessionId::new(
-                    self.stream_id.clone(),
-                )),
-            )
-        {
-            return;
-        }
+
+        // The transport has already written `<enabled/>`; XEP-0198 makes
+        // that positive reply the SM-session commit point. A concurrent
+        // same-JID replacement may reject only the shared registry alias,
+        // never roll back the state the peer has already observed.
         sm_state.enable(self.stream_id.clone(), self.resume, Some(self.max));
         if let Some(guard) = self.claim_guard.as_mut() {
             guard.disarm();
+        }
+        if !registry_published {
+            debug!(
+                stream_id = %self.stream_id,
+                "SM enabled after transport commit without publishing a stale registry alias"
+            );
         }
         info!(stream_id = %self.stream_id, resume = self.resume, max = self.max, "SM enabled");
     }
@@ -88,15 +91,22 @@ impl SmEnableClaimGuard {
 
     fn retain_provisional_isr_token(
         &mut self,
+        queue: &waddle_xmpp::isr::IsrRevocationQueue,
         store: std::sync::Arc<dyn waddle_xmpp::isr::IsrTokenStore>,
         issued: waddle_xmpp::isr::IssuedIsrToken,
-    ) {
-        self.provisional_isr_token = Some(ProvisionalIsrToken { store, issued });
+    ) -> bool {
+        let Some(reservation) = queue.reserve(self.stream_id.clone(), store, issued) else {
+            return false;
+        };
+        self.provisional_isr_token = Some(reservation);
+        true
     }
 
     fn disarm(&mut self) {
         self.armed = false;
-        self.provisional_isr_token = None;
+        if let Some(reservation) = self.provisional_isr_token.take() {
+            reservation.disarm();
+        }
     }
 }
 
@@ -114,38 +124,9 @@ impl Drop for SmEnableClaimGuard {
                 "SM enable cancelled before publication but exact claim cleanup could not be inventoried"
             );
         }
-        let Some(provisional) = self.provisional_isr_token.take() else {
-            return;
-        };
-        let stream_id = self.stream_id.clone();
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            warn!(
-                stream_id,
-                "SM enable cancelled outside a Tokio runtime; provisional ISR token remains for expiry sweep"
-            );
-            return;
-        };
-        runtime.spawn(async move {
-            match tokio::time::timeout(
-                SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT,
-                provisional
-                    .store
-                    .revoke_if_current(&stream_id, &provisional.issued),
-            )
-            .await
-            {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) => {
-                    debug!(stream_id, "Provisional ISR token was already superseded or removed");
-                }
-                Ok(Err(error)) => {
-                    warn!(stream_id, %error, "Failed to revoke provisional ISR token; expiry sweep retains cleanup responsibility");
-                }
-                Err(_) => {
-                    warn!(stream_id, "Timed out revoking provisional ISR token; expiry sweep retains cleanup responsibility");
-                }
-            }
-        });
+        // Dropping the armed reservation activates bounded exact revocation.
+        // Its queue retains and redrives responsibility until deletion or a
+        // proven exact-value mismatch shows that this issuance was superseded.
     }
 }
 
@@ -189,13 +170,12 @@ mod enable_claim_guard_tests {
             self.inner.ensure_schema().await
         }
 
-        async fn issue(
+        async fn persist_issued(
             &self,
             sm_id: &str,
-            mechanism: &str,
-        ) -> Result<waddle_xmpp::isr::IssuedIsrToken, waddle_xmpp::isr::IsrTokenStoreError>
-        {
-            self.inner.issue(sm_id, mechanism).await
+            issued: &waddle_xmpp::isr::IssuedIsrToken,
+        ) -> Result<(), waddle_xmpp::isr::IsrTokenStoreError> {
+            self.inner.persist_issued(sm_id, issued).await
         }
 
         async fn revoke_if_current(
@@ -271,7 +251,12 @@ mod enable_claim_guard_tests {
         assert!(registry.ensure_session_claim(stream_id).await.is_some());
         let issued = token_store.issue(stream_id, "PLAIN").await.expect("issue");
         let mut guard = SmEnableClaimGuard::new(registry, stream_id.to_string());
-        guard.retain_provisional_isr_token(token_store.clone(), issued.clone());
+        let revocations = waddle_xmpp::isr::IsrRevocationQueue::default();
+        assert!(guard.retain_provisional_isr_token(
+            &revocations,
+            token_store.clone(),
+            issued.clone()
+        ));
 
         let revoked = token_store.revoked.notified();
         drop(guard);
@@ -619,24 +604,31 @@ async fn handle_sm_enable(
             Some(mechanism) if mechanism == waddle_xmpp::isr::ISR_PINNED_MECHANISM => {
                 match state.deps.app_state.clustering_claims.isr_token_store() {
                     Some(isr_token_store) => {
+                        let issued = waddle_xmpp::isr::IssuedIsrToken::new(mechanism);
+                        let revocations =
+                            waddle_xmpp::isr::revocation_queue_for_store(&isr_token_store);
+                        if claim_guard.as_mut().is_none_or(|guard| {
+                            !guard.retain_provisional_isr_token(
+                                &revocations,
+                                isr_token_store.clone(),
+                                issued.clone(),
+                            )
+                        }) {
+                            warn!(stream_id = %stream_id, "ISR provisional-revocation inventory is full");
+                            return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+                        }
                         match tokio::time::timeout(
                             SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT,
-                            isr_token_store.issue(&stream_id, mechanism),
+                            isr_token_store.persist_issued(&stream_id, &issued),
                         )
                         .await
                         {
-                            Ok(Ok(issued)) => {
-                                if let Some(guard) = claim_guard.as_mut() {
-                                    guard.retain_provisional_isr_token(
-                                        isr_token_store.clone(),
-                                        issued.clone(),
-                                    );
-                                }
-                                Some(issued.token)
-                            }
+                            Ok(Ok(())) => Some(issued.token),
                             Ok(Err(error)) => {
                                 warn!(stream_id = %stream_id, %error, "ISR token issuance failed");
-                                None
+                                return vec![
+                                    SmFailed::with_condition("resource-constraint").to_xml()
+                                ];
                             }
                             Err(_) => {
                                 warn!(stream_id = %stream_id, "ISR token issuance timed out; rejecting SM enable before state commit");
