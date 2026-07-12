@@ -855,7 +855,7 @@ async fn self_fence_reclaim_reuses_full_old_incarnation_slot_when_liveness_is_po
         .await
         .expect("self-fence reclaim");
     let fresh_fence = super::super::persistence::SmClaimFence::new(fresh_owner, fresh_epoch);
-    identity_handle.set(fresh_fence.owner().clone());
+    identity_handle.rotate(fresh_fence.owner().clone()).await;
     assert_eq!(
         registry
             .hydrate_reclaimed_typed(&entity, &fresh_fence)
