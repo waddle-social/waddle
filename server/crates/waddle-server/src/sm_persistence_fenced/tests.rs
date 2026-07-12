@@ -663,6 +663,53 @@ async fn upsert_session_fails_closed_when_entity_already_claimed_by_another_node
     );
 }
 
+#[tokio::test]
+async fn fenced_transaction_guard_blocks_identity_rotation_until_commit_finishes() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-identity-commit-boundary");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("seed session and claim");
+    let fence = f
+        .fenced
+        .claim_fence_for(&stream_id)
+        .await
+        .expect("claim fence");
+    let mut tx = f.fenced.db.begin().await.expect("transaction");
+    let identity_guard = f
+        .fenced
+        .assert_fenced(&mut tx, &stream_id, &fence)
+        .await
+        .expect("fenced transaction authority");
+
+    let rotating_identity = f.shared_identity.clone();
+    let replacement =
+        NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    let rotation = tokio::spawn(async move {
+        rotating_identity.rotate(replacement).await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !rotation.is_finished(),
+        "identity rotation must wait while a fenced transaction is authorized"
+    );
+
+    tx.execute(
+        "UPDATE sm_sessions SET inbound_count = inbound_count + 1 WHERE stream_id = ?",
+        crate::db_params![stream_id.as_str().to_string()],
+    )
+    .await
+    .expect("guarded mutation");
+    tx.commit().await.expect("guarded commit");
+    assert!(
+        !rotation.is_finished(),
+        "commit completion alone must not release identity authority early"
+    );
+    drop(identity_guard);
+    rotation.await.expect("rotation task");
+}
+
 /// Proves `delete_session`'s fencing check and its subsequent DELETEs are
 /// genuinely atomic — not merely "usually fine": a concurrent steal can
 /// never land in the window between the `FOR SHARE` SELECT succeeding and

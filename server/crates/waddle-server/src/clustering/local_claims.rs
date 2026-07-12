@@ -111,6 +111,28 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         true
     }
 
+    fn reserve_reclaimed_claim_capacity(&self, entity: &Entity) -> bool {
+        self.registry
+            .get()
+            .is_some_and(|registry| registry.reserve_reclaimed_claim_capacity(entity))
+    }
+
+    fn cancel_reclaimed_claim_capacity(&self, entity: &Entity) {
+        if let Some(registry) = self.registry.get() {
+            registry.cancel_reclaimed_claim_capacity(entity);
+        }
+    }
+
+    fn defer_uncertain_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        owner: &waddle_xmpp::ownership::NodeIdentity,
+    ) {
+        if let Some(registry) = self.registry.get() {
+            registry.defer_uncertain_reclaimed_claim(entity, owner);
+        }
+    }
+
     /// FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda): delegates straight
     /// to `InMemorySmSessionRegistry::hydrate_reclaimed` — the same
     /// targeted, per-entity-shard-locked hydration path the orphan reaper
@@ -764,6 +786,29 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
             EntityType::SmSession => self.sm.health_check(entity).await,
             EntityType::RoomActor => self.room.health_check(entity).await,
             EntityType::UserActor => self.user.health_check(entity).await,
+        }
+    }
+
+    fn reserve_reclaimed_claim_capacity(&self, entity: &Entity) -> bool {
+        match entity.entity_type {
+            EntityType::SmSession => self.sm.reserve_reclaimed_claim_capacity(entity),
+            EntityType::RoomActor | EntityType::UserActor => false,
+        }
+    }
+
+    fn cancel_reclaimed_claim_capacity(&self, entity: &Entity) {
+        if entity.entity_type == EntityType::SmSession {
+            self.sm.cancel_reclaimed_claim_capacity(entity);
+        }
+    }
+
+    fn defer_uncertain_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        owner: &waddle_xmpp::ownership::NodeIdentity,
+    ) {
+        if entity.entity_type == EntityType::SmSession {
+            self.sm.defer_uncertain_reclaimed_claim(entity, owner);
         }
     }
 

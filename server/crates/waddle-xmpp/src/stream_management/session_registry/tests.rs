@@ -337,6 +337,66 @@ fn reclaimed_claim_admission_is_bounded_before_the_ownership_cas() {
     assert!(registry.reserve_reclaimed_claim_capacity(&second));
 }
 
+#[tokio::test]
+async fn pending_claim_retry_limit_is_shared_across_acquisitions_and_releases() {
+    use crate::ownership::ClaimStore as _;
+
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(me.clone()),
+    );
+    let acquisition_id = "budgeted-acquisition";
+    assert!(registry.reserve_claim_fence_capacity(acquisition_id));
+    registry.sessions.write().expect("sessions").insert(
+        acquisition_id.to_string(),
+        make_test_session(acquisition_id),
+    );
+    registry
+        .pending_claim_acquisitions
+        .write()
+        .expect("pending acquisitions")
+        .insert((
+            acquisition_id.to_string(),
+            me.clone(),
+            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+        ));
+
+    let release_id = "budgeted-release";
+    let release_entity =
+        crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, release_id);
+    let release_epoch = store
+        .acquire(&release_entity, &me)
+        .await
+        .expect("release claim");
+    registry
+        .pending_claim_releases
+        .write()
+        .expect("pending releases")
+        .insert((
+            release_id.to_string(),
+            super::super::persistence::SmClaimFence::new(me, release_epoch),
+        ));
+
+    assert_eq!(registry.retry_pending_claim_releases(1).await, 0);
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        1,
+        "the exact release must retain the shared budget's next slot"
+    );
+    assert!(store
+        .current_claim(&release_entity)
+        .await
+        .expect("release lookup")
+        .is_some());
+}
+
 #[tokio::test(start_paused = true)]
 async fn terminal_release_retry_clears_retained_exact_fence() {
     let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");

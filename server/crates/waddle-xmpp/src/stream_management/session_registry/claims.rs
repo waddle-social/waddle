@@ -192,7 +192,9 @@ impl InMemorySmSessionRegistry {
             .read()
             .map(|pending| pending.iter().take(limit).cloned().collect::<Vec<_>>())
             .unwrap_or_default();
+        let mut budget_used = 0;
         for (stream_id, identity, disposition) in uncertain {
+            budget_used += 1;
             // Rejected-enable reconciliation is a terminal release retry.
             // The same stream id may have become detached/claimed through a
             // later successful local path while the original acquisition was
@@ -227,7 +229,7 @@ impl InMemorySmSessionRegistry {
         };
         let mut attempted = 0;
         for (stream_id, fence) in pending {
-            if attempted >= limit {
+            if budget_used >= limit {
                 break;
             }
             let Ok(stream_lock) = self.stream_lock(&stream_id) else {
@@ -250,6 +252,7 @@ impl InMemorySmSessionRegistry {
                 }
                 Some(false) => {}
             }
+            budget_used += 1;
             attempted += 1;
             self.release_claim_store_entry_under(&stream_id, fence)
                 .await;

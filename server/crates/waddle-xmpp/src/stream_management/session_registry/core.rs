@@ -1098,6 +1098,13 @@ impl InMemorySmSessionRegistry {
             }
             Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
         }
+        let Some(_identity_guard) = self
+            .node_identity
+            .guard_if_current(caller_fence.owner())
+            .await
+        else {
+            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+        };
         {
             let mut sessions = self
                 .sessions

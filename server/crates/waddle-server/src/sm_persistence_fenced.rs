@@ -130,7 +130,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::OnceCell;
-use waddle_xmpp::ownership::{ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity};
+use waddle_xmpp::ownership::{
+    ClaimError, ClaimStore, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
+};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
@@ -494,7 +496,7 @@ impl PostgresFencedSmPersistence {
         tx: &mut Transaction<'_>,
         stream_id: &SmSessionId,
         fence: &SmClaimFence,
-    ) -> Result<(), SmPersistenceError> {
+    ) -> Result<CurrentNodeIdentityGuard, SmPersistenceError> {
         if self.node_identity.current() != *fence.owner() {
             self.remove_claim_fence_if(stream_id, fence);
             return Err(SmPersistenceError::NotOwner {
@@ -519,14 +521,21 @@ impl PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
             .is_some();
-        if held && self.node_identity.current() == *fence.owner() {
-            Ok(())
-        } else {
+        if !held {
             self.remove_claim_fence_if(stream_id, fence);
-            Err(SmPersistenceError::NotOwner {
+            return Err(SmPersistenceError::NotOwner {
                 entity: sm_session_entity(stream_id),
-            })
+            });
         }
+        self.node_identity
+            .guard_if_current(fence.owner())
+            .await
+            .ok_or_else(|| {
+                self.remove_claim_fence_if(stream_id, fence);
+                SmPersistenceError::NotOwner {
+                    entity: sm_session_entity(stream_id),
+                }
+            })
     }
 
     async fn guard_query(
@@ -560,7 +569,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
 
         // Divergence (a): ignore `session.detached_at`; stamp Postgres
         // `now()` in SQL instead (both the fresh-insert VALUES and the
@@ -664,7 +673,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
@@ -698,7 +707,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, expected_fence)
+        let _identity_guard = self
+            .assert_fenced(&mut tx, stream_id, expected_fence)
             .await?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
@@ -733,7 +743,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
         tx.execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
              VALUES (?, ?, ?, ?)",
@@ -763,7 +773,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
         let removed = tx
             .execute(
                 "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence <= ?",
@@ -788,7 +798,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
         let mut removed = 0u64;
         for sequence in sequences {
             removed += tx
@@ -919,7 +929,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
 
         // Drop any pre-existing unacked rows first (see the portable
         // impl's identical comment on this statement's ordering
@@ -1017,7 +1027,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
         let mut rows = tx
             .query(
                 "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \

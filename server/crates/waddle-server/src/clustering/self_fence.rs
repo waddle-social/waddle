@@ -181,6 +181,20 @@ pub trait LocallyClaimedEntities: Send + Sync {
         let _ = entities;
     }
 
+    /// Reserve bounded local responsibility before inline self-fence reclaim
+    /// performs an ownership-changing CAS.
+    fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
+        true
+    }
+
+    /// Cancel a reservation after an ownership CAS is known not to have won.
+    fn cancel_reclaimed_claim_capacity(&self, _entity: &Entity) {}
+
+    /// Retain responsibility when cancellation makes the CAS outcome
+    /// ambiguous. The implementation reconciles with a read-only lookup;
+    /// the one-shot ownership mutation is never replayed.
+    fn defer_uncertain_reclaimed_claim(&self, _entity: &Entity, _owner: &NodeIdentity) {}
+
     /// ADR-0017 Phase 3 Slice 10: complete `entity`'s final fenced write —
     /// whatever "durable, up to date, and safe to hand to a new owner"
     /// means for this entity kind — and report whether it is now safe to
@@ -475,7 +489,6 @@ async fn reclaim_own_expired_claims<L>(
         }
     };
 
-    let mut reclaimed: Vec<(Entity, NodeIdentity, ClaimEpoch)> = Vec::new();
     for candidate in candidates {
         if candidate.owner != *old_identity {
             // Another node's genuinely dead claim — not this node's own
@@ -486,6 +499,11 @@ async fn reclaim_own_expired_claims<L>(
             // 4's "residual window" carried-risk note.
             continue;
         }
+        if !local_claims.reserve_reclaimed_claim_capacity(&candidate.entity) {
+            break;
+        }
+        let mut reservation =
+            InlineReclaimReservation::new(local_claims, candidate.entity.clone(), fresh.clone());
         match claim_store
             .steal_stale(
                 &candidate.entity,
@@ -495,12 +513,19 @@ async fn reclaim_own_expired_claims<L>(
             )
             .await
         {
-            Ok(new_epoch) => reclaimed.push((candidate.entity, fresh.clone(), new_epoch)),
+            Ok(new_epoch) => {
+                reservation.transfer();
+                local_claims
+                    .hydrate_reclaimed(&[(candidate.entity, fresh.clone(), new_epoch)])
+                    .await;
+            }
             Err(ClaimError::Conflict) => {
+                reservation.cancel();
                 // The general orphan reaper (or another node) already
                 // reclaimed it first — safe, no-op.
             }
             Err(error) => {
+                reservation.cancel();
                 tracing::warn!(
                     entity_id = %candidate.entity.id,
                     %error,
@@ -509,9 +534,52 @@ async fn reclaim_own_expired_claims<L>(
             }
         }
     }
+}
 
-    if !reclaimed.is_empty() {
-        local_claims.hydrate_reclaimed(&reclaimed).await;
+/// Cancellation guard for the one-shot inline reclaim CAS. A timeout may
+/// drop the future after Postgres committed but before the result arrived;
+/// converting the reservation into a read-only lookup keeps that possibly
+/// won claim owned without replaying the stale observed epoch.
+struct InlineReclaimReservation<'a> {
+    local_claims: &'a dyn LocallyClaimedEntities,
+    entity: Entity,
+    owner: NodeIdentity,
+    armed: bool,
+}
+
+impl<'a> InlineReclaimReservation<'a> {
+    fn new(
+        local_claims: &'a dyn LocallyClaimedEntities,
+        entity: Entity,
+        owner: NodeIdentity,
+    ) -> Self {
+        Self {
+            local_claims,
+            entity,
+            owner,
+            armed: true,
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.local_claims
+            .cancel_reclaimed_claim_capacity(&self.entity);
+        self.armed = false;
+    }
+
+    /// The exact returned epoch is about to be handed to hydration, which
+    /// consumes the existing reservation into exact-fence responsibility.
+    fn transfer(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InlineReclaimReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.local_claims
+                .defer_uncertain_reclaimed_claim(&self.entity, &self.owner);
+        }
     }
 }
 
@@ -1278,6 +1346,8 @@ mod tests {
         /// consume-CTE design between this node's health check and its
         /// clear call.
         clear_reports_zero_rows: Arc<AtomicBool>,
+        orphaned_sm_claims:
+            Arc<std::sync::Mutex<Vec<crate::clustering::claims::OrphanedSmSessionClaim>>>,
     }
 
     impl FakeLease {
@@ -1293,6 +1363,7 @@ mod tests {
                 steal_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 clear_reports_zero_rows: Arc::new(AtomicBool::new(false)),
+                orphaned_sm_claims: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
     }
@@ -1382,11 +1453,7 @@ mod tests {
         async fn list_orphaned_sm_session_claims(
             &self,
         ) -> Result<Vec<crate::clustering::claims::OrphanedSmSessionClaim>, ClaimError> {
-            // Not exercised by this module's tests (the orphan reaper is
-            // tested against `PostgresClaimStore` directly, in
-            // `session_janitors.rs`/`claims.rs`); this fake never has
-            // orphaned candidates.
-            Ok(Vec::new())
+            Ok(self.orphaned_sm_claims.lock().expect("lock").clone())
         }
         async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
             // Not exercised by this module's tests (the rollout-aware
@@ -1980,6 +2047,41 @@ mod tests {
         }
     }
 
+    struct CapacityLocalClaims {
+        remaining: AtomicU32,
+        admission_attempts: AtomicU32,
+        hydrated: std::sync::Mutex<Vec<Entity>>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for CapacityLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
+            self.admission_attempts.fetch_add(1, Ordering::SeqCst);
+            self.remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        }
+
+        async fn hydrate_reclaimed(&self, entities: &[(Entity, NodeIdentity, ClaimEpoch)]) {
+            self.hydrated
+                .lock()
+                .expect("lock")
+                .extend(entities.iter().map(|(entity, _, _)| entity.clone()));
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn run_node_lease_clears_a_healthy_owners_steal_intent() {
         let interval = Duration::from_millis(50);
@@ -2254,6 +2356,68 @@ mod tests {
     // the real `PostgresClaimStore`/`NodeLeaseStore` CAS, not a fake
     // double, because the whole point is proving `steal_stale(OwnerStale)`
     // actually wins against a real `clustering_claims` row.
+
+    #[tokio::test]
+    async fn inline_reclaim_stops_before_a_cas_when_exact_fence_capacity_is_full() {
+        let old = identity();
+        let fresh = identity();
+        let first = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            "capacity-first",
+        );
+        let second = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            "capacity-second",
+        );
+        let store = waddle_xmpp::ownership::InProcessClaimStore::new();
+        let first_epoch = store.acquire(&first, &old).await.expect("first claim");
+        let second_epoch = store.acquire(&second, &old).await.expect("second claim");
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        *lease.orphaned_sm_claims.lock().expect("lock") = vec![
+            crate::clustering::claims::OrphanedSmSessionClaim {
+                entity: first.clone(),
+                epoch: first_epoch,
+                owner: old.clone(),
+            },
+            crate::clustering::claims::OrphanedSmSessionClaim {
+                entity: second.clone(),
+                epoch: second_epoch,
+                owner: old.clone(),
+            },
+        ];
+        let local = CapacityLocalClaims {
+            remaining: AtomicU32::new(1),
+            admission_attempts: AtomicU32::new(0),
+            hydrated: std::sync::Mutex::new(Vec::new()),
+        };
+
+        reclaim_own_expired_claims(&lease, &store, &old, &fresh, &local).await;
+
+        assert_eq!(local.admission_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            local.hydrated.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&first)
+        );
+        assert_eq!(
+            store
+                .current_claim(&first)
+                .await
+                .expect("first lookup")
+                .expect("first claim remains")
+                .owner,
+            fresh
+        );
+        assert_eq!(
+            store
+                .current_claim(&second)
+                .await
+                .expect("second lookup")
+                .expect("second claim remains")
+                .owner,
+            old,
+            "capacity rejection must happen before the second ownership CAS"
+        );
+    }
 
     #[tokio::test]
     async fn fix4_inline_post_fence_reclaim_hydrates_this_nodes_own_expired_sm_session_claims() {
