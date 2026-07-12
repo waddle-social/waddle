@@ -250,38 +250,3 @@ pub fn record_claims_abandoned_on_drain(count: u64) {
     })
     .add(count, &[]);
 }
-
-/// Count bounded proactive `RoomActor` orphan-reconciliation outcomes.
-pub fn record_room_orphan_reconciliation(outcome: &'static str, count: u64) {
-    static C: OnceLock<Counter<u64>> = OnceLock::new();
-    C.get_or_init(|| {
-        meter()
-            .u64_counter("waddle.clustering.room_orphan_reconciliations")
-            .with_description("Proactive RoomActor orphan-claim reconciliation outcomes")
-            .with_unit("claim")
-            .build()
-    })
-    .add(count, &[opentelemetry::KeyValue::new("outcome", outcome)]);
-}
-
-pub fn record_room_orphan_pending_backlog(depth: usize, oldest_age_ms: u64) {
-    static DEPTH: OnceLock<Gauge<u64>> = OnceLock::new();
-    DEPTH
-        .get_or_init(|| {
-            meter()
-                .u64_gauge("waddle.clustering.room_orphan_pending_depth")
-                .with_description("Reclaimed room epochs awaiting adoption or release")
-                .with_unit("claim")
-                .build()
-        })
-        .record(depth as u64, &[]);
-    static AGE: OnceLock<Gauge<u64>> = OnceLock::new();
-    AGE.get_or_init(|| {
-        meter()
-            .u64_gauge("waddle.clustering.room_orphan_pending_oldest_age_ms")
-            .with_description("Age of the oldest pending reclaimed room epoch")
-            .with_unit("ms")
-            .build()
-    })
-    .record(oldest_age_ms, &[]);
-}

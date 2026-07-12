@@ -56,9 +56,6 @@ const ISR_TOKEN_SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(feature = "clustering")]
 const STALE_NODE_WATCHDOG_CANDIDATE_LIMIT: usize = 64;
 
-#[cfg(feature = "clustering")]
-const ORPHANED_ROOM_CANDIDATE_LIMIT: usize = 64;
-
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -487,34 +484,19 @@ pub(crate) fn spawn_orphan_reaper_janitor(
     #[cfg(feature = "clustering")]
     {
         let weak_state = Arc::downgrade(websocket_state);
-        let Some(stop) = websocket_state
-            .deps
-            .app_state
-            .clustering_claims
-            .stop_token
-            .clone()
-        else {
-            return;
-        };
-        let room_registry = websocket_state.deps.protocol.room_registry.clone();
         tokio::spawn(async move {
-            let registry_watch = spawn_room_registry_lifetime_watch(room_registry, stop.clone());
             let mut ticker = tokio::time::interval(interval);
             // Skip the first (immediate) tick, mirroring the other janitors
             // — no need to sweep before the node-lease loop has even
             // registered this node.
             ticker.tick().await;
             loop {
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    _ = ticker.tick() => {}
-                }
+                ticker.tick().await;
                 let Some(state) = weak_state.upgrade() else {
                     break;
                 };
                 run_orphan_reaper_sweep(&state).await;
             }
-            let _ = registry_watch.await;
         });
     }
     #[cfg(not(feature = "clustering"))]
@@ -522,20 +504,6 @@ pub(crate) fn spawn_orphan_reaper_janitor(
         let _ = websocket_state;
         let _ = interval;
     }
-}
-
-#[cfg(feature = "clustering")]
-fn spawn_room_registry_lifetime_watch(
-    room_registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    node_cancel: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        tokio::select! {
-            biased;
-            _ = node_cancel.cancelled() => {}
-            _ = room_registry.wait_for_shutdown() => node_cancel.cancel(),
-        }
-    })
 }
 
 #[cfg(feature = "clustering")]
@@ -678,9 +646,12 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         Ok(candidates) => candidates,
         Err(error) => {
             warn!(%error, "orphan reaper: list_orphaned_sm_session_claims failed");
-            Vec::new()
+            return;
         }
     };
+    if candidates.is_empty() {
+        return;
+    }
 
     // ADR-0017 Phase 3 Slice 10 (Q5's rollout-aware placement rule): an
     // old-generation node backs off before racing a matching/newer
@@ -777,217 +748,6 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
                     "orphan reaper: hydrate_reclaimed (post-steal targeted hydrate) failed"
                 );
             }
-        }
-    }
-
-    let room_registry =
-        waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
-    let mut room_hydrated = 0u64;
-    let mut room_released = 0u64;
-    let mut room_already_live = 0u64;
-    let mut room_adopted_local = 0u64;
-    let mut room_pending_retry = 0u64;
-    let mut room_lost_race = 0u64;
-    let mut room_failed = 0u64;
-
-    if let Err(error) = room_registry.retry_pending_room_releases(1).await {
-        debug!(%error, "orphan reaper: pending ordinary RoomActor release retry failed");
-    }
-    match room_registry
-        .list_pending_reclaimed_rooms(ORPHANED_ROOM_CANDIDATE_LIMIT)
-        .await
-    {
-        Ok(pending) => {
-            for pending_room in pending {
-                match room_registry
-                    .reconcile_reclaimed_room(
-                        pending_room.room_jid,
-                        pending_room.claim_fence,
-                        pending_room.previous_owner,
-                    )
-                    .await
-                {
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
-                        room_hydrated += 1
-                    }
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
-                        room_released += 1
-                    }
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
-                    ) => room_already_live += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AdoptedLocal,
-                    ) => room_adopted_local += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
-                    ) => room_pending_retry += 1,
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
-                        room_lost_race += 1
-                    }
-                    Err(error) => {
-                        debug!(%error, "orphan reaper: pending RoomActor retry ask failed");
-                        return;
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            debug!(%error, "orphan reaper: pending RoomActor listing failed");
-            return;
-        }
-    }
-    if let Ok(mut backlog) = room_registry.pending_reclaimed_room_backlog().await {
-        if let Ok(releases) = room_registry.pending_room_release_backlog().await {
-            backlog.depth = backlog.depth.saturating_add(releases.depth);
-            backlog.oldest_age_ms = backlog.oldest_age_ms.max(releases.oldest_age_ms);
-        }
-        crate::clustering::metrics::record_room_orphan_pending_backlog(
-            backlog.depth,
-            backlog.oldest_age_ms,
-        );
-    }
-
-    let room_candidates = match node_lease
-        .list_orphaned_room_actor_claims(ORPHANED_ROOM_CANDIDATE_LIMIT)
-        .await
-    {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            warn!(%error, "orphan reaper: list_orphaned_room_actor_claims failed");
-            Vec::new()
-        }
-    };
-    for candidate in room_candidates {
-        let Ok(room_jid) = candidate.entity.id.parse::<jid::BareJid>() else {
-            room_failed += 1;
-            continue;
-        };
-        match room_registry
-            .reserve_pending_reclaimed_room(room_jid.clone())
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(error) => {
-                debug!(room = %room_jid, %error, "orphan reaper: room adoption reservation failed");
-                break;
-            }
-        }
-        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-room").await
-        {
-            let _ = room_registry
-                .cancel_pending_reclaimed_room_reservation(room_jid)
-                .await;
-            return;
-        }
-        if let Err(error) = node_lease.expire(&candidate.owner, lease_ttl).await {
-            let _ = room_registry
-                .cancel_pending_reclaimed_room_reservation(room_jid)
-                .await;
-            room_failed += 1;
-            debug!(entity_id = %candidate.entity.id, %error, "orphan reaper: room owner expire failed");
-            continue;
-        }
-        if !backoff_delay.is_zero() {
-            tokio::time::sleep(backoff_delay).await;
-        }
-        match node_lease
-            .steal_orphaned_room_actor_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
-            .await
-        {
-            Ok(new_epoch) => {
-                let fence = waddle_xmpp::muc::RoomClaimFenceContext::new(
-                    candidate.entity.clone(),
-                    me.clone(),
-                    new_epoch,
-                );
-                if room_registry
-                    .remember_pending_reclaimed_room(
-                        room_jid.clone(),
-                        fence.clone(),
-                        candidate.owner.clone(),
-                    )
-                    .await
-                    .is_err()
-                {
-                    let _ = room_registry
-                        .cancel_pending_reclaimed_room_reservation(room_jid)
-                        .await;
-                    room_failed += 1;
-                    continue;
-                }
-                let result = room_registry
-                    .reconcile_reclaimed_room(room_jid.clone(), fence, candidate.owner.clone())
-                    .await;
-                if let Some(store) = clustering.muc_durable_store.as_ref() {
-                    if !matches!(
-                        result,
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AdoptedLocal)
-                            | Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace)
-                            | Err(_)
-                    ) {
-                        let _ = store
-                            .notify_previous_owner_demoted(
-                                &room_jid,
-                                &candidate.owner.node_id,
-                                &candidate.owner.node_epoch,
-                                new_epoch,
-                            )
-                            .await;
-                    }
-                }
-                match result {
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
-                        room_hydrated += 1
-                    }
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
-                        room_released += 1
-                    }
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
-                    ) => room_already_live += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AdoptedLocal,
-                    ) => room_adopted_local += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
-                    ) => room_pending_retry += 1,
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
-                        room_lost_race += 1
-                    }
-                    Err(error) => {
-                        debug!(room = %room_jid, %error, "orphan reaper: reclaimed room adoption ask failed");
-                        return;
-                    }
-                }
-            }
-            Err(ClaimError::Conflict) => {
-                room_lost_race += 1;
-                let _ = room_registry
-                    .cancel_pending_reclaimed_room_reservation(room_jid)
-                    .await;
-            }
-            Err(error) => {
-                room_failed += 1;
-                let _ = room_registry
-                    .cancel_pending_reclaimed_room_reservation(room_jid)
-                    .await;
-                debug!(entity_id = %candidate.entity.id, %error, "orphan reaper: RoomActor steal failed");
-            }
-        }
-    }
-    for (outcome, count) in [
-        ("hydrated", room_hydrated),
-        ("released", room_released),
-        ("already_live", room_already_live),
-        ("adopted_local", room_adopted_local),
-        ("pending_retry", room_pending_retry),
-        ("lost_race", room_lost_race),
-        ("failed", room_failed),
-    ] {
-        if count > 0 {
-            crate::clustering::metrics::record_room_orphan_reconciliation(outcome, count);
         }
     }
 
