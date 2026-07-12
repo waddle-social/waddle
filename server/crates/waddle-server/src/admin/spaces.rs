@@ -1317,17 +1317,15 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             ) => None,
             Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
                 Some(format!(
-                "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
-            ))
+                    "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
+                ))
             }
             Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
                 Some(format!(
                     "cascade destroy refused for room {room_jid}: exact-release retry backlog is full; retry deletion"
                 ))
             }
-            Err(error) => Some(format!(
-                "cascade destroy failed for room {room_jid}: {error}"
-            )),
+            Err(error) => Some(format!("cascade destroy failed for room {room_jid}: {error}")),
         };
         if let Some(message) = failure {
             let failed_restores =
