@@ -2612,6 +2612,59 @@ mod ownership_claims_tests {
             .ask(IsPendingRoomReleaseOnly { room_jid: jid })
             .await
             .expect("shutdown pending-only query"));
+        assert!(!registry
+            .ask(IsCurrentIdentityPendingRoomReleaseOnly {
+                room_jid: test_room_jid("pending-only"),
+            })
+            .await
+            .expect("current-identity shutdown query"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_batches_only_pending_room_fences_from_current_identity() {
+        let registry = spawn_registry().await;
+        let current_jid = test_room_jid("pending-current-identity");
+        let stale_jid = test_room_jid("pending-stale-identity");
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::new(InProcessClaimStore::new()),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire current identity");
+        assert!(registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: current_jid.clone(),
+                claim_fence: room_claim_fence(&current_jid, ClaimEpoch(8)),
+            })
+            .await
+            .expect("remember current fence"));
+        assert!(registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: stale_jid.clone(),
+                claim_fence: RoomClaimFenceContext::new(
+                    Entity::new(EntityType::RoomActor, stale_jid.to_string()),
+                    foreign_identity(),
+                    ClaimEpoch(9),
+                ),
+            })
+            .await
+            .expect("remember stale fence"));
+
+        assert!(registry
+            .ask(IsCurrentIdentityPendingRoomReleaseOnly {
+                room_jid: current_jid,
+            })
+            .await
+            .expect("current fence query"));
+        assert!(!registry
+            .ask(IsCurrentIdentityPendingRoomReleaseOnly {
+                room_jid: stale_jid,
+            })
+            .await
+            .expect("stale fence query"));
     }
 
     #[tokio::test]

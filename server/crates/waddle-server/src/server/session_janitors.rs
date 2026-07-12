@@ -1099,43 +1099,14 @@ impl OrphanReaperSupervisor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReclaimedRegistration {
     Registered,
-    Released,
-    LostRace,
-    CleanupScheduled,
     CleanupDeferredToNodeExpiry,
 }
 
 #[cfg(feature = "clustering")]
 struct ReclaimedRegistrationContext<'a> {
-    workers: &'a OrphanReaperWorkers,
     room_registry: &'a waddle_xmpp::muc::RoomRegistry,
-    claim_store: &'a Arc<dyn waddle_xmpp::ownership::ClaimStore>,
     previous_owner: &'a waddle_xmpp::ownership::NodeIdentity,
     me: &'a waddle_xmpp::ownership::NodeIdentity,
-}
-
-#[cfg(feature = "clustering")]
-fn reclaimed_cleanup_registration(
-    room_jid: &jid::BareJid,
-    outcome: WorkEnqueueOutcome,
-) -> ReclaimedRegistration {
-    match outcome {
-        WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {
-            ReclaimedRegistration::CleanupScheduled
-        }
-        WorkEnqueueOutcome::RetainedForRestart => {
-            debug!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart");
-            ReclaimedRegistration::CleanupScheduled
-        }
-        WorkEnqueueOutcome::RetainedForRedrive => {
-            debug!(room = %room_jid, "orphan reaper: exact cleanup channel full; responsibility retained for active redrive");
-            ReclaimedRegistration::CleanupScheduled
-        }
-        WorkEnqueueOutcome::Rejected => {
-            debug!(room = %room_jid, "orphan reaper: exact cleanup inventory saturated after steal; durable claim remains fenced for recovery after node expiry");
-            ReclaimedRegistration::CleanupDeferredToNodeExpiry
-        }
-    }
 }
 
 #[cfg(feature = "clustering")]
@@ -1165,46 +1136,19 @@ async fn register_reclaimed_epoch_or_cleanup(
         .room_registry
         .cancel_pending_reclaimed_room_reservation(room_jid.clone())
         .await;
-    match tokio::time::timeout(
-        ORPHANED_ROOM_RELEASE_TIMEOUT,
-        context
-            .claim_store
-            .release_exact(entity, context.me, claim_epoch),
-    )
-    .await
-    {
-        Ok(Ok(waddle_xmpp::ownership::ExactReleaseOutcome::Released)) => {
-            ReclaimedRegistration::Released
-        }
-        Ok(Ok(waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned)) => {
-            ReclaimedRegistration::LostRace
-        }
-        Ok(Err(error)) => {
-            debug!(room = %room_jid, %error, "orphan reaper: exact cleanup after pending-registration failure failed");
-            let queued = context.workers.enqueue_release(ExactReleaseWork {
-                claim_store: context.claim_store.clone(),
-                entity: entity.clone(),
-                owner: context.me.clone(),
-                epoch: claim_epoch,
-            });
-            reclaimed_cleanup_registration(room_jid, queued)
-        }
-        Err(_) => {
-            debug!(room = %room_jid, "orphan reaper: exact cleanup after pending-registration failure timed out");
-            let queued = context.workers.enqueue_release(ExactReleaseWork {
-                claim_store: context.claim_store.clone(),
-                entity: entity.clone(),
-                owner: context.me.clone(),
-                epoch: claim_epoch,
-            });
-            reclaimed_cleanup_registration(room_jid, queued)
-        }
-    }
+    // The registry is the serialization authority for demand creation and
+    // reclaimed-room adoption. Releasing outside it after registration
+    // failure can race a demand-side self-reacquire/publication and delete
+    // that live claim. Keep the won epoch fenced and defer it to ordinary
+    // stale-node recovery instead; no unsynchronized cleanup worker is
+    // allowed to act on this room generation.
+    debug!(room = %room_jid, "orphan reaper: pending registration failed after steal; leaving claim fenced for node-expiry recovery");
+    ReclaimedRegistration::CleanupDeferredToNodeExpiry
 }
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
-async fn stopped_registry_after_steal_exactly_releases_unregistered_epoch() {
+async fn stopped_registry_after_steal_defers_claim_to_node_expiry() {
     use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore};
 
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
@@ -1223,16 +1167,9 @@ async fn stopped_registry_after_steal_exactly_releases_unregistered_epoch() {
     let room_jid: jid::BareJid = "stopped-registry@muc.example.com".parse().expect("room");
     let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
     let epoch = claim_store.acquire(&entity, &me).await.expect("won epoch");
-    let supervisor = OrphanReaperSupervisor::new(
-        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
-        tokio_util::sync::CancellationToken::new(),
-    );
-
     let outcome = register_reclaimed_epoch_or_cleanup(
         ReclaimedRegistrationContext {
-            workers: &supervisor.workers,
             room_registry: &registry,
-            claim_store: &claim_store,
             previous_owner: &previous,
             me: &me,
         },
@@ -1241,13 +1178,15 @@ async fn stopped_registry_after_steal_exactly_releases_unregistered_epoch() {
         epoch,
     )
     .await;
-    assert_eq!(outcome, ReclaimedRegistration::Released);
-    assert!(claim_store
-        .current_claim(&entity)
-        .await
-        .expect("claim")
-        .is_none());
-    supervisor.shutdown().await;
+    assert_eq!(outcome, ReclaimedRegistration::CleanupDeferredToNodeExpiry);
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim")
+            .is_some(),
+        "registration failure must not release outside the registry and race demand recreation"
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -1662,20 +1601,6 @@ fn hydration_reservations_do_not_overcommit_a_127_of_128_queue() {
 }
 
 #[cfg(all(test, feature = "clustering"))]
-#[test]
-fn rejected_cleanup_is_never_reported_as_scheduled() {
-    let room_jid: jid::BareJid = "saturated@muc.example.com".parse().expect("room JID");
-    assert_eq!(
-        reclaimed_cleanup_registration(&room_jid, WorkEnqueueOutcome::Rejected),
-        ReclaimedRegistration::CleanupDeferredToNodeExpiry
-    );
-    assert_eq!(
-        reclaimed_cleanup_registration(&room_jid, WorkEnqueueOutcome::RetainedForRedrive),
-        ReclaimedRegistration::CleanupScheduled
-    );
-}
-
-#[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
 async fn full_hydration_channel_retains_and_redrives_pending_work() {
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
@@ -1926,7 +1851,7 @@ async fn run_orphan_reaper_sweep_with_workers(
     use waddle_xmpp::ownership::ClaimError;
 
     let clustering = &state.deps.app_state.clustering_claims;
-    let Some((claim_store, identity_handle)) = clustering.claim_pair() else {
+    let Some((_claim_store, identity_handle)) = clustering.claim_pair() else {
         return;
     };
     let Some(node_lease) = clustering.node_lease.clone() else {
@@ -2178,9 +2103,7 @@ async fn run_orphan_reaper_sweep_with_workers(
             Ok(new_epoch) => {
                 match register_reclaimed_epoch_or_cleanup(
                     ReclaimedRegistrationContext {
-                        workers,
                         room_registry: &room_registry,
-                        claim_store: &claim_store,
                         previous_owner: &candidate.owner,
                         me: &me,
                     },
@@ -2191,18 +2114,6 @@ async fn run_orphan_reaper_sweep_with_workers(
                 .await
                 {
                     ReclaimedRegistration::Registered => {}
-                    ReclaimedRegistration::Released => {
-                        room_released += 1;
-                        continue;
-                    }
-                    ReclaimedRegistration::LostRace => {
-                        room_lost_race += 1;
-                        continue;
-                    }
-                    ReclaimedRegistration::CleanupScheduled => {
-                        room_failed += 1;
-                        continue;
-                    }
                     ReclaimedRegistration::CleanupDeferredToNodeExpiry => {
                         room_failed += 1;
                         continue;

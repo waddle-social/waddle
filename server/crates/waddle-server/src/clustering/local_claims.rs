@@ -129,23 +129,33 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         let Some(registry) = self.registry.get() else {
             return;
         };
-        let fenced = entities
-            .iter()
-            .map(|(entity, owner, epoch)| {
-                (
-                    entity.clone(),
-                    waddle_xmpp::stream_management::persistence::SmClaimFence::new(
-                        owner.clone(),
-                        *epoch,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        if let Err(error) = registry.hydrate_reclaimed(&fenced).await {
-            tracing::warn!(
-                %error,
-                "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
+        for (entity, owner, epoch) in entities {
+            let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                owner.clone(),
+                *epoch,
             );
+            match registry.hydrate_reclaimed_typed(entity, &fence).await {
+                Ok(
+                    waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
+                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased,
+                ) => {
+                    if let Err(error) = registry.release_reclaimed_claim(entity, &fence).await {
+                        tracing::warn!(
+                            entity_id = %entity.id,
+                            %error,
+                            "SmSessionLocalClaims::hydrate_reclaimed: terminal exact release failed; responsibility retained for retry"
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        entity_id = %entity.id,
+                        %error,
+                        "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
+                    );
+                }
+            }
         }
     }
 }
@@ -360,14 +370,14 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
-        // A pending-release-only JID has already removed/sealed its actor,
-        // so no mailbox barrier remains to run. Unlike the live-health query
-        // above, shutdown intentionally accepts any retained exact generation
-        // for this JID: `owned()` enumerates those pending-only JIDs precisely
-        // so the drain can release the backend claim without requiring a live
-        // actor that terminal removal deliberately destroyed.
+        // A pending-release-only JID has no mailbox barrier left to run, but
+        // the generic drain can release only the CURRENT node identity via
+        // epoch-blind `release_many`. Admit it only when every retained exact
+        // fence belongs to that identity. An older-incarnation fence is
+        // deliberately abandoned (truthfully counted by the drain) for stale
+        // node recovery rather than falsely reported released.
         if registry
-            .is_pending_room_release_only(room_jid.clone())
+            .is_current_identity_pending_room_release_only(room_jid.clone())
             .await
             .unwrap_or(false)
         {
@@ -841,6 +851,35 @@ mod tests {
     async fn unwired_instance_owns_nothing() {
         let local_claims = SmSessionLocalClaims::new();
         assert!(local_claims.owned().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inline_reclaim_releases_claim_when_durable_session_is_missing() {
+        use waddle_xmpp::ownership::{ClaimStore as _, InProcessClaimStore, NodeIdentity};
+
+        let local_claims = SmSessionLocalClaims::new();
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let identity = NodeIdentity::new("self-fence-node", "fresh-incarnation");
+        let entity = Entity::new(EntityType::SmSession, "missing-inline-reclaim");
+        let epoch = claim_store
+            .acquire(&entity, &identity)
+            .await
+            .expect("won inline reclaim epoch");
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+            claim_store.clone(),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(identity.clone()),
+        ));
+        local_claims.wire(registry);
+
+        local_claims
+            .hydrate_reclaimed(&[(entity.clone(), identity, epoch)])
+            .await;
+
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .is_none(), "MissingDurable must exact-release the inline self-fence claim instead of dropping the typed terminal outcome");
     }
 
     #[tokio::test]

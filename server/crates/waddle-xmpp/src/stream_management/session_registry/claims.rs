@@ -160,7 +160,7 @@ impl InMemorySmSessionRegistry {
         attempted
     }
 
-    fn stream_is_live_or_uncertain(&self, stream_id: &str) -> bool {
+    pub(super) fn stream_is_live_or_uncertain(&self, stream_id: &str) -> bool {
         match (self.sessions.read(), self.claimed_sessions.read()) {
             (Ok(sessions), Ok(claimed)) => {
                 sessions.contains_key(stream_id) || claimed.contains_key(stream_id)

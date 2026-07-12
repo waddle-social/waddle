@@ -39,12 +39,12 @@ use super::room_registry_actor::{
     CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DestroyRoom,
     DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom,
     GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
-    IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
-    ListPendingRoomReleaseJids, ListRooms, PendingReclaimedRoom, PendingReclaimedRoomBacklog,
-    PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom,
-    RememberPendingReclaimedRoom, ReservePendingReclaimedRoom, RetryPendingRoomReleases,
-    RoomAcquisition, RoomCount, RoomExists, RoomRegistryActor, RoomRegistryError,
-    WireClusteringClaims,
+    IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease, IsMucJid,
+    IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
+    PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom,
+    ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
+    RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -324,6 +324,12 @@ impl RoomRegistry {
         is_pending_room_release_only(room_jid: BareJid) -> bool,
         "is_pending_room_release_only",
         IsPendingRoomReleaseOnly { room_jid }
+    );
+
+    registry_method!(
+        is_current_identity_pending_room_release_only(room_jid: BareJid) -> bool,
+        "is_current_identity_pending_room_release_only",
+        IsCurrentIdentityPendingRoomReleaseOnly { room_jid }
     );
 
     registry_method!(

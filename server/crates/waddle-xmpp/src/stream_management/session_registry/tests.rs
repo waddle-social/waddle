@@ -381,6 +381,45 @@ async fn rejected_enable_reconciliation_skips_stream_that_became_live_again() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn reclaimed_terminal_release_failure_retains_exact_retry() {
+    use crate::ownership::ClaimStore as _;
+
+    let me = crate::ownership::NodeIdentity::new("reclaimer", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(true),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "missing-reclaimed-terminal",
+    );
+    let epoch = store.acquire(&entity, &me).await.expect("claim");
+    let fence = super::super::persistence::SmClaimFence::new(me.clone(), epoch);
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store, crate::ownership::SharedNodeIdentity::new(me));
+
+    assert_eq!(
+        registry
+            .hydrate_reclaimed_typed(&entity, &fence)
+            .await
+            .expect("typed hydration"),
+        ReclaimedHydrationOutcome::MissingDurable
+    );
+    assert!(registry
+        .release_reclaimed_claim(&entity, &fence)
+        .await
+        .is_err());
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        1,
+        "failed inline terminal release must retain the supplied exact fence for retry"
+    );
+}
+
 #[tokio::test]
 async fn shutdown_drained_session_is_not_a_terminal_release_retry() {
     let registry = InMemorySmSessionRegistry::new();

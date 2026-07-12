@@ -914,10 +914,38 @@ impl InMemorySmSessionRegistry {
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
     ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
-        self.claim_store
-            .release_exact(entity, fence.owner(), fence.epoch())
-            .await
-            .map_err(|error| SmRegistryError::Internal(error.to_string()))
+        let stream_lock = self.stream_lock(&entity.id)?;
+        let _stream_guard = stream_lock.lock().await;
+        if self.stream_is_live_or_uncertain(&entity.id) {
+            // Responsibility transferred back to the live local session.
+            // Never let terminal cleanup release its claim.
+            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+        }
+        if !self.reserve_claim_fence_capacity(&entity.id) {
+            return Err(SmRegistryError::Internal(
+                "release_reclaimed_claim: exact-release retry capacity exhausted".to_string(),
+            ));
+        }
+        if !self.try_record_claim_fence(&entity.id, fence.clone()) {
+            self.cancel_claim_fence_reservation(&entity.id);
+            return Err(SmRegistryError::Internal(
+                "release_reclaimed_claim: failed to retain exact claim fence".to_string(),
+            ));
+        }
+        self.release_claim_store_entry_under(&entity.id, fence.clone())
+            .await;
+        let retained = self
+            .pending_claim_releases
+            .read()
+            .is_ok_and(|pending| pending.contains(&(entity.id.clone(), fence.clone())));
+        if retained {
+            Err(SmRegistryError::Internal(
+                "release_reclaimed_claim: exact release failed and was retained for retry"
+                    .to_string(),
+            ))
+        } else {
+            Ok(crate::ownership::ExactReleaseOutcome::Released)
+        }
     }
 }
 

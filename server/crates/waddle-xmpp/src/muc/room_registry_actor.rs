@@ -692,6 +692,9 @@ pub struct IsCurrentRoomPendingRelease {
 pub struct IsPendingRoomReleaseOnly {
     pub room_jid: BareJid,
 }
+pub struct IsCurrentIdentityPendingRoomReleaseOnly {
+    pub room_jid: BareJid,
+}
 
 impl kameo::message::Message<ListPendingRoomReleaseJids> for RoomRegistryActor {
     type Reply = Vec<BareJid>;
@@ -743,6 +746,32 @@ impl kameo::message::Message<IsPendingRoomReleaseOnly> for RoomRegistryActor {
                 .pending_room_releases
                 .keys()
                 .any(|(room_jid, _)| room_jid == &msg.room_jid)
+    }
+}
+
+impl kameo::message::Message<IsCurrentIdentityPendingRoomReleaseOnly> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: IsCurrentIdentityPendingRoomReleaseOnly,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self
+            .rooms
+            .get(&msg.room_jid)
+            .is_some_and(|entry| entry.actor_ref.is_alive())
+        {
+            return false;
+        }
+        let current_identity = self.node_identity.current();
+        let mut pending = self
+            .pending_room_releases
+            .keys()
+            .filter(|(room_jid, _)| room_jid == &msg.room_jid)
+            .peekable();
+        pending.peek().is_some()
+            && pending.all(|(_, claim_fence)| claim_fence.owner() == current_identity)
     }
 }
 
