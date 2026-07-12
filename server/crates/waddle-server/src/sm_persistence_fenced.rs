@@ -124,7 +124,7 @@
 //! self-reacquire path once that same node's own restore/reaper pass claims
 //! it — see those modules' doc comments for the full lifecycle.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -141,6 +141,8 @@ use crate::db::{Database, DatabaseDriver, Transaction};
 use crate::sm_persistence::codec::{
     decode_session, decode_unacked, serialize_presence_payloads, serialize_stanza, show_wire_str,
 };
+
+const STALE_CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn remove_sm_claim_cell_if(
     claim_fences: &DashMap<SmSessionId, Arc<OnceCell<SmClaimFence>>>,
@@ -431,19 +433,21 @@ impl PostgresFencedSmPersistence {
                 // the resolved cell as exact retry inventory until that old
                 // owner+epoch is confirmed gone; otherwise a current-
                 // identity retry conflicts with our own stranded claim.
-                match self
-                    .claim_store
-                    .release_exact(&entity, fence.owner(), fence.epoch())
-                    .await
+                match tokio::time::timeout(
+                    STALE_CLAIM_RELEASE_TIMEOUT,
+                    self.claim_store
+                        .release_exact(&entity, fence.owner(), fence.epoch()),
+                )
+                .await
                 {
-                    Ok(
+                    Ok(Ok(
                         waddle_xmpp::ownership::ExactReleaseOutcome::Released
                         | waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned,
-                    ) => {
+                    )) => {
                         self.remove_claim_cell_if(stream_id, &cell);
                         Err(SmPersistenceError::NotOwner { entity })
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         tracing::warn!(
                             stream_id = %stream_id,
                             %error,
@@ -451,6 +455,17 @@ impl PostgresFencedSmPersistence {
                              failed; retaining the immutable fence for retry"
                         );
                         Err(claim_error_to_sm_persistence_error(error, entity))
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            stream_id = %stream_id,
+                            timeout = ?STALE_CLAIM_RELEASE_TIMEOUT,
+                            "PostgresFencedSmPersistence: stale-incarnation exact claim cleanup \
+                             timed out; retaining the immutable fence for retry"
+                        );
+                        Err(SmPersistenceError::Other(
+                            "stale-incarnation exact claim cleanup timed out".to_string(),
+                        ))
                     }
                 }
             }

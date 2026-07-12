@@ -74,11 +74,10 @@ impl IsrTokenStore for HangIssueOnceIsrTokenStore {
         sm_id: &str,
         presented_token: &[u8],
         mechanism: &str,
-        me: &NodeIdentity,
-        mine: waddle_xmpp::ownership::ClaimEpoch,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
     ) -> Result<waddle_xmpp::isr::IsrConsumeOutcome, waddle_xmpp::isr::IsrTokenStoreError> {
         self.inner
-            .consume(sm_id, presented_token, mechanism, me, mine)
+            .consume(sm_id, presented_token, mechanism, fence)
             .await
     }
 

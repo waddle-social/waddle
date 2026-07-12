@@ -1821,7 +1821,7 @@ impl NodeLeaseStore for PostgresClaimStore {
                 r#"
                 WITH fenced AS (
                     SELECT 1 FROM clustering_claims
-                    WHERE entity = ? AND node_id = ? AND claim_epoch = ?
+                    WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
                     FOR SHARE
                 )
                 DELETE FROM clustering_steal_intents
@@ -1831,6 +1831,7 @@ impl NodeLeaseStore for PostgresClaimStore {
                 crate::db_params![
                     entity_key(entity),
                     me.node_id.clone(),
+                    me.node_epoch.clone(),
                     mine.0,
                     entity_key(entity),
                 ],
@@ -2989,8 +2990,13 @@ mod tests {
         let mut fencing_tx = store.db.begin().await.expect("begin fencing tx");
         let held = fencing_tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![entity_key(&entity), owner.node_id.clone(), epoch0.0],
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity_key(&entity),
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    epoch0.0,
+                ],
             )
             .await
             .expect("fencing select")

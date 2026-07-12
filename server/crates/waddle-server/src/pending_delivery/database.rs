@@ -5,6 +5,7 @@ mod schema;
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
 
 use waddle_xmpp::ownership::{ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity};
+use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 // ---------------------------------------------------------------------------
 // Database-backed PendingDeliveryStorage (issue #209, slice (b) production
@@ -402,6 +403,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .ensure_claimed(&entity, &identity)
             .await
             .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
+        let claim_fence = SmClaimFence::new(identity, epoch);
+        if fencing.node_identity.current() != *claim_fence.owner() {
+            return Err(PendingStorageError::NotOwner { entity });
+        }
 
         let PreparedInsertRow {
             row_id,
@@ -427,8 +432,13 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), origin_stream_id);
         let mut fence_rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![entity_key, identity.node_id.clone(), epoch.0],
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity_key,
+                    claim_fence.owner().node_id.clone(),
+                    claim_fence.owner().node_epoch.clone(),
+                    claim_fence.epoch().0,
+                ],
             )
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
@@ -437,7 +447,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?
             .is_some();
-        if !held {
+        if !held || fencing.node_identity.current() != *claim_fence.owner() {
             return Err(PendingStorageError::NotOwner { entity });
         }
 
@@ -488,6 +498,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 .await
                 .map_err(|e| PendingStorageError::Other(e.to_string()))?,
         };
+
+        if fencing.node_identity.current() != *claim_fence.owner() {
+            return Err(PendingStorageError::NotOwner { entity });
+        }
 
         tx.commit()
             .await
