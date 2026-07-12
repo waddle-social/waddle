@@ -178,7 +178,9 @@ async fn isr_identity_rotation_forgets_local_session_and_releases_old_exact_clai
         waddle_xmpp::ownership::EntityType::SmSession,
         stream_id,
     );
-    identity_handle.set(NodeIdentity::new("sm-node", "new-incarnation"));
+    identity_handle
+        .rotate(NodeIdentity::new("sm-node", "new-incarnation"))
+        .await;
     registry
         .reconcile_claim_after_epoch_lookup_failure(stream_id)
         .await

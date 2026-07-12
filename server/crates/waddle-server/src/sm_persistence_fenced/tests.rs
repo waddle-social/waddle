@@ -528,7 +528,7 @@ async fn quarantine_rejects_same_node_id_new_incarnation_after_epoch_aba() {
     assert_eq!(replacement_epoch, old_epoch, "exercise claim-epoch ABA");
 
     let old_fence = SmClaimFence::new(f.identity.clone(), old_epoch);
-    f.shared_identity.set(replacement.clone());
+    f.shared_identity.rotate(replacement.clone()).await;
     let cached_write_error = f
         .fenced
         .upsert_session(fixture_session(stream_id.as_str()))
@@ -566,7 +566,7 @@ async fn identity_rotation_exactly_releases_the_cached_old_incarnation_before_re
 
     let replacement =
         NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
-    f.shared_identity.set(replacement.clone());
+    f.shared_identity.rotate(replacement.clone()).await;
 
     let rotation_error = f
         .fenced
