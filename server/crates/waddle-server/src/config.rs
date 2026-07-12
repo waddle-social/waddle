@@ -168,7 +168,7 @@ pub struct ClusteringConfig {
     /// dials seed peers, picking up pod churn
     /// (`WADDLE_CLUSTERING_DIAL_INTERVAL_MS`).
     pub dial_interval: Duration,
-    /// Cadence for the orphan reaper's `sm_session` claim sweep (ADR-0017
+    /// Cadence for the orphan reaper's `sm_session` and `RoomActor` claim sweep (ADR-0017
     /// Phase 3 Slice 5, element 9) — `WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS`.
     /// The only cluster timer that, prior to ADR-0017 Phase 3 Slice 11's
     /// corrigenda (deviation 111), had no env override at all (every

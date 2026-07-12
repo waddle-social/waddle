@@ -872,6 +872,35 @@ impl ClaimStore for PostgresClaimStore {
         Ok(())
     }
 
+    async fn release_exact(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let affected = conn
+            .execute(
+                r#"
+                DELETE FROM clustering_claims
+                WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
+                "#,
+                crate::db_params![
+                    entity_key(entity),
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    mine.0,
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        if affected == 1 {
+            Ok(waddle_xmpp::ownership::ExactReleaseOutcome::Released)
+        } else {
+            Ok(waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned)
+        }
+    }
+
     async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError> {
         if entities.is_empty() {
             return Ok(());
@@ -1184,6 +1213,28 @@ pub trait NodeLeaseStore: Send + Sync {
         Err(ClaimError::Conflict)
     }
 
+    /// Bounded advisory scan for `RoomActor` claims whose recorded owner
+    /// lease is committed-stale. The subsequent epoch-fenced steal is the
+    /// authority; this candidate list is read-only.
+    async fn list_orphaned_room_actor_claims(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<OrphanedRoomActorClaim>, ClaimError> {
+        Ok(Vec::new())
+    }
+
+    /// Reaper-only stale-owner steal for a `RoomActor`, bound to both the
+    /// observed claim epoch and the sweeping node's fresh lease.
+    async fn steal_orphaned_room_actor_claim(
+        &self,
+        _entity: &Entity,
+        _observed: ClaimEpoch,
+        _me: &NodeIdentity,
+        _lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        Err(ClaimError::Conflict)
+    }
+
     /// The current deployment generation's `pod_template_hash` (ADR-0017
     /// Phase 3 Slice 10, Q5's operational definition): the hash stamped on
     /// the non-expired `clustering_nodes` row with the greatest
@@ -1203,6 +1254,13 @@ pub trait NodeLeaseStore: Send + Sync {
 /// [`NodeLeaseStore::list_orphaned_sm_session_claims`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanedSmSessionClaim {
+    pub entity: Entity,
+    pub epoch: ClaimEpoch,
+    pub owner: NodeIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedRoomActorClaim {
     pub entity: Entity,
     pub epoch: ClaimEpoch,
     pub owner: NodeIdentity,
@@ -1727,6 +1785,154 @@ impl NodeLeaseStore for PostgresClaimStore {
                     EntityType::SmSession.as_db_str().to_string(),
                     observed.0,
                     EntityType::SmSession.as_db_str().to_string(),
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    lease_ttl.as_millis().to_string(),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        if affected == 1 {
+            Ok(ClaimEpoch(next_epoch))
+        } else {
+            Err(ClaimError::Conflict)
+        }
+    }
+
+    async fn list_orphaned_room_actor_claims(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<OrphanedRoomActorClaim>, ClaimError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let scan_limit = limit.saturating_mul(4);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT entity, node_id, node_epoch, claim_epoch
+                FROM clustering_claims
+                WHERE entity_type = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes n
+                    WHERE n.node_id = clustering_claims.node_id
+                      AND NOT n.expired
+                      AND n.node_epoch = clustering_claims.node_epoch
+                  )
+                ORDER BY entity
+                LIMIT ?
+                "#,
+                crate::db_params![
+                    EntityType::RoomActor.as_db_str().to_string(),
+                    i64::try_from(scan_limit).unwrap_or(i64::MAX),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        let mut malformed = Vec::new();
+        while let Some(row) = rows.next().await.map_err(db_err)? {
+            let encoded: String = row.get(0).map_err(db_err)?;
+            let node_id: String = row.get(1).map_err(db_err)?;
+            let node_epoch: String = row.get(2).map_err(db_err)?;
+            let claim_epoch: i64 = row.get(3).map_err(db_err)?;
+            let Some(entity) = decode_entity(&encoded, EntityType::RoomActor) else {
+                malformed.push((encoded, node_id, node_epoch, claim_epoch));
+                continue;
+            };
+            if entity.id.parse::<jid::BareJid>().is_err() {
+                malformed.push((encoded, node_id, node_epoch, claim_epoch));
+                continue;
+            }
+            out.push(OrphanedRoomActorClaim {
+                entity,
+                epoch: ClaimEpoch(claim_epoch),
+                owner: NodeIdentity::new(node_id, node_epoch),
+            });
+            if out.len() == limit {
+                break;
+            }
+        }
+        drop(rows);
+        let mut quarantined = 0usize;
+        for (encoded, node_id, node_epoch, claim_epoch) in malformed {
+            let affected = conn
+                .execute(
+                    r#"
+                    DELETE FROM clustering_claims
+                    WHERE entity = ? AND entity_type = ? AND node_id = ? AND node_epoch = ?
+                      AND claim_epoch = ?
+                      AND NOT EXISTS (
+                        SELECT 1 FROM clustering_nodes n
+                        WHERE n.node_id = clustering_claims.node_id
+                          AND NOT n.expired
+                          AND n.node_epoch = clustering_claims.node_epoch
+                      )
+                    "#,
+                    crate::db_params![
+                        encoded,
+                        EntityType::RoomActor.as_db_str().to_string(),
+                        node_id,
+                        node_epoch,
+                        claim_epoch,
+                    ],
+                )
+                .await
+                .map_err(db_err)?;
+            quarantined += usize::from(affected == 1);
+        }
+        if quarantined > 0 {
+            tracing::debug!(
+                quarantined,
+                "quarantined malformed stale RoomActor claim rows"
+            );
+        }
+        Ok(out)
+    }
+
+    async fn steal_orphaned_room_actor_claim(
+        &self,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        me: &NodeIdentity,
+        lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        if entity.entity_type != EntityType::RoomActor {
+            return Err(ClaimError::Conflict);
+        }
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let next_epoch = observed.0 + 1;
+        let affected = conn
+            .execute(
+                r#"
+                UPDATE clustering_claims
+                SET node_id = ?, node_epoch = ?, claim_epoch = ?
+                WHERE entity = ?
+                  AND entity_type = ?
+                  AND claim_epoch = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes n
+                    WHERE n.node_id = clustering_claims.node_id
+                      AND NOT n.expired
+                      AND n.node_epoch = clustering_claims.node_epoch
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM clustering_nodes
+                    WHERE node_id = ?
+                      AND node_epoch = ?
+                      AND NOT expired
+                      AND NOT draining
+                      AND heartbeat >= now() - (? || ' milliseconds')::interval
+                  )
+                "#,
+                crate::db_params![
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    next_epoch,
+                    entity_key(entity),
+                    EntityType::RoomActor.as_db_str().to_string(),
+                    observed.0,
                     me.node_id.clone(),
                     me.node_epoch.clone(),
                     lease_ttl.as_millis().to_string(),

@@ -36,7 +36,7 @@ use jid::BareJid;
 
 use super::affiliation::AffiliationEntry;
 use super::{RoomConfig, SubjectState};
-use crate::ownership::{ClaimEpoch, Entity};
+use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
 use crate::XmppError;
 
 /// Boxed future returned by every [`MucDurableStore`] method, mirroring
@@ -46,18 +46,32 @@ pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppErr
 
 /// Typed fencing context for a room's currently-recorded Postgres claim
 /// (ADR-0017 Phase 3 Slice 7 FIX 1, council-adjudicated): the same
-/// `(Entity, ClaimEpoch, node_id)` triple [`MucDurableStore::check_fenced_fanout`]
-/// resolves internally via [`MucDurableStore::record_claim_epoch`]'s cache,
+/// `(Entity, ClaimEpoch, NodeIdentity)` tuple [`MucDurableStore::check_fenced_fanout`]
+/// resolves internally via [`MucDurableStore::record_claim_fence`]'s cache,
 /// exposed here so a caller that needs to run its OWN fenced write against a
 /// DIFFERENT store (MAM's `store_message_fenced`, which cannot share a SQL
 /// transaction with this store's own `assert_fenced`) can bind the identical
 /// typed values into its own `SELECT ... FOR SHARE` check, rather than
 /// re-deriving them from a second, independent source of truth.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoomClaimFenceContext {
     pub entity: Entity,
     pub epoch: ClaimEpoch,
-    pub node_id: String,
+    pub owner: NodeIdentity,
+}
+
+impl RoomClaimFenceContext {
+    pub fn new(entity: Entity, owner: NodeIdentity, epoch: ClaimEpoch) -> Self {
+        Self {
+            entity,
+            epoch,
+            owner,
+        }
+    }
+
+    pub fn owner(&self) -> NodeIdentity {
+        self.owner.clone()
+    }
 }
 
 /// Full durable snapshot of a room's long-lived state: configuration,
@@ -76,7 +90,7 @@ pub struct DurableRoomState {
 /// Durable backing store for MUC room ownership (ADR-0017 Phase 3 Slice 7).
 ///
 /// Every write is epoch-fenced against this node's currently-recorded claim
-/// on the room's `RoomActor` entity (see [`Self::record_claim_epoch`]) —
+/// on the room's `RoomActor` entity (see [`Self::record_claim_fence`]) —
 /// "epoch-fenced like all claimed-entity writes" per element 7.
 ///
 /// **Fail-open contract, revised (ADR-0017 Phase 3 Slice 7 FIX 2,
@@ -168,20 +182,20 @@ pub trait MucDurableStore: Send + Sync {
     /// fencing SQL. Default no-op: single-node/non-clustering deployments
     /// never configure a `MucDurableStore` at all, so this is never
     /// called there.
-    fn record_claim_epoch(&self, room_jid: &BareJid, epoch: ClaimEpoch) {
-        let _ = (room_jid, epoch);
+    fn record_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+        let _ = (room_jid, fence);
     }
 
     /// Best-effort cache hygiene on claim release (dormancy eviction /
     /// explicit destroy): forget the recorded epoch so a stale cache
     /// entry cannot linger past this node's ownership. Default no-op.
-    fn forget_claim_epoch(&self, room_jid: &BareJid) {
-        let _ = room_jid;
+    fn forget_claim_fence(&self, room_jid: &BareJid, expected: &RoomClaimFenceContext) {
+        let _ = (room_jid, expected);
     }
 
     /// The two-part demotion protocol's guaranteed backstop (element 7): a
     /// fenced `SELECT ... FOR SHARE` against this room's claim (at the
-    /// epoch [`Self::record_claim_epoch`] last recorded), run before every
+    /// fence [`Self::record_claim_fence`] last recorded), run before every
     /// local fan-out. `Ok(true)` iff this node still holds the claim;
     /// `Ok(false)` means a steal has committed and the caller must demote
     /// locally and not deliver. Default `Ok(true)` (never demotes):
@@ -201,7 +215,7 @@ pub trait MucDurableStore: Send + Sync {
     /// cannot share a transaction with this store) can bind them into an
     /// equivalent `SELECT ... FOR SHARE` check without re-deriving them from
     /// a second, independent mechanism. `None` when no epoch is cached for
-    /// this room (this node has never claimed it, or `forget_claim_epoch`
+    /// this room (this node has never claimed it, or `forget_claim_fence`
     /// ran) — callers treat that exactly like a fencing failure. Default
     /// `None`: single-node/non-clustering deployments never configure a
     /// `MucDurableStore` at all, so this default only matters for tests

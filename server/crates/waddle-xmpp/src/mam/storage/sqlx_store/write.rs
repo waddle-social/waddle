@@ -232,10 +232,11 @@ pub(super) async fn store_message_fenced(
         fence.entity.id
     );
     let held = sqlx::query(
-        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND claim_epoch = $3 FOR SHARE",
+        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND node_epoch = $3 AND claim_epoch = $4 FOR SHARE",
     )
     .bind(&entity_key)
-    .bind(&fence.node_id)
+    .bind(&fence.owner.node_id)
+    .bind(&fence.owner.node_epoch)
     .bind(fence.epoch.0)
     .fetch_optional(&mut *tx)
     .await?

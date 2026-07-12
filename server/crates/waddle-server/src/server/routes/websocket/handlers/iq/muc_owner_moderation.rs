@@ -299,7 +299,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 // atomically restored the room — nothing was torn down, so
                 // answer retryable, never a false success.
                 Ok(
-                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
+                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed
+                    | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
                 ) => {
                     return vec![build_iq_error_xml_typed(
                         id,
