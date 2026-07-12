@@ -923,6 +923,9 @@ mod tests {
         let message = ArchivedMessage {
             id: first_id.clone(),
             body: Some("hello, fenced world".to_string()),
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new(
+                uuid::Uuid::new_v4().to_string(),
+            )),
             message_type: xmpp_parsers::message::MessageType::Groupchat,
             ..ArchivedMessage::for_test(
                 format!("{jid}/alice").parse().expect("valid full jid"),
@@ -949,6 +952,14 @@ mod tests {
             .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &stealer)
             .await
             .expect("steal succeeds against a dead-owner claim");
+
+        let duplicate_result = mam_storage
+            .store_message_fenced(&jid, &message, &fence)
+            .await;
+        assert!(
+            matches!(duplicate_result, Err(MamStorageError::NotOwner { .. })),
+            "origin-id dedup must not bypass the deposed owner's fence: {duplicate_result:?}"
+        );
 
         let second_message = ArchivedMessage {
             id: second_id.clone(),

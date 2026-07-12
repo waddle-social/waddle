@@ -241,16 +241,15 @@ impl ClaimStore for InProcessClaimStore {
         }
     }
 
-    async fn release_many(
-        &self,
-        entities: &[Entity],
-        _me: &NodeIdentity,
-    ) -> Result<(), ClaimError> {
-        // Claim-epoch-blind by the trait contract (the node-identity gate
-        // is trivially satisfied here: this store *is* the one node).
+    async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError> {
+        // Claim-epoch-blind by the trait contract, but still exact-owner
+        // gated so an old process incarnation cannot drain claims acquired
+        // by a replacement sharing the same stable node id.
         let mut state = self.lock()?;
         for entity in entities {
-            state.claims.remove(entity);
+            if matches!(state.claims.get(entity), Some(record) if record.owner == *me) {
+                state.claims.remove(entity);
+            }
         }
         Ok(())
     }
@@ -583,5 +582,39 @@ mod tests {
 
         assert!(!store.fence(&a, &me(), a_epoch).await.expect("fence a"));
         assert!(!store.fence(&b, &me(), b_epoch).await.expect("fence b"));
+    }
+
+    #[tokio::test]
+    async fn release_many_only_removes_claims_owned_by_the_exact_incarnation() {
+        let store = InProcessClaimStore::new();
+        let old_identity = NodeIdentity::new("stable-node", "epoch-a");
+        let current_identity = NodeIdentity::new("stable-node", "epoch-b");
+        let old_entity = entity("old-incarnation");
+        let current_entity = entity("current-incarnation");
+        let old_epoch = store
+            .acquire(&old_entity, &old_identity)
+            .await
+            .expect("old incarnation acquires claim");
+        let current_epoch = store
+            .acquire(&current_entity, &current_identity)
+            .await
+            .expect("current incarnation acquires claim");
+
+        store
+            .release_many(
+                &[old_entity.clone(), current_entity.clone()],
+                &current_identity,
+            )
+            .await
+            .expect("current incarnation drains its claims");
+
+        assert!(store
+            .fence(&old_entity, &old_identity, old_epoch)
+            .await
+            .expect("old claim remains fenced"));
+        assert!(!store
+            .fence(&current_entity, &current_identity, current_epoch)
+            .await
+            .expect("current claim was released"));
     }
 }

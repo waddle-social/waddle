@@ -3387,13 +3387,18 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
             waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
             | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
         ) => None,
-        Ok(
-            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed
-            | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
-        ) => Some(internal_err(format!(
-            "room destroy refused for {}: durable room-state wipe failed",
-            args.channel_jid
-        ))),
+        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+            Some(internal_err(format!(
+                "room destroy refused for {}: durable room-state wipe failed",
+                args.channel_jid
+            )))
+        }
+        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
+            Some(internal_err(format!(
+                "room destroy refused for {}: exact-release retry backlog is full; retry deletion",
+                args.channel_jid
+            )))
+        }
         Err(error) => Some(send_err("room_registry ask DestroyRoom")(error)),
     };
     if let Some(error) = failure {

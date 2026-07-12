@@ -42,13 +42,13 @@ pub(super) async fn archive_groupchat_event(
     // ADR-0017 Phase 3 Slice 7 FIX 1: resolve the SAME typed fencing
     // context `dispatch_to_room`'s own pre-fan-out check reads, so the
     // fenced archive write below agrees with it by construction.
-    let fence = resolve_room_claim_fence(deps, &room);
+    let fence = resolve_room_claim_fence(deps, &room).await;
     let archive_id = match archive_groupchat_message(
         mam_storage,
         &room,
         &message,
         sender_nickname_generation,
-        fence.as_ref(),
+        &fence,
         sender_item.as_ref(),
     )
     .await
