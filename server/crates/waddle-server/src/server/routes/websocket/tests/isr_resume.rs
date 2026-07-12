@@ -29,6 +29,66 @@ use waddle_xmpp::isr::{IsrTokenStore, ISR_NS, ISR_PINNED_MECHANISM};
 use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::stream_management::{DetachedSession, SmResume, SmSessionRegistry};
 
+struct HangIssueOnceIsrTokenStore {
+    inner: waddle_xmpp::isr::InMemoryIsrTokenStore,
+    hang_once: std::sync::atomic::AtomicBool,
+}
+
+fn register_isr_publish_owner(
+    state: &super::super::state::WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+) {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+}
+
+#[async_trait::async_trait]
+impl IsrTokenStore for HangIssueOnceIsrTokenStore {
+    async fn ensure_schema(&self) -> Result<(), waddle_xmpp::isr::IsrTokenStoreError> {
+        self.inner.ensure_schema().await
+    }
+
+    async fn issue(
+        &self,
+        sm_id: &str,
+        mechanism: &str,
+    ) -> Result<waddle_xmpp::isr::IssuedIsrToken, waddle_xmpp::isr::IsrTokenStoreError> {
+        if self
+            .hang_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return std::future::pending().await;
+        }
+        self.inner.issue(sm_id, mechanism).await
+    }
+
+    async fn consume(
+        &self,
+        sm_id: &str,
+        presented_token: &[u8],
+        mechanism: &str,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+    ) -> Result<waddle_xmpp::isr::IsrConsumeOutcome, waddle_xmpp::isr::IsrTokenStoreError> {
+        self.inner
+            .consume(sm_id, presented_token, mechanism, fence)
+            .await
+    }
+
+    async fn sweep_expired(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<u64, waddle_xmpp::isr::IsrTokenStoreError> {
+        self.inner.sweep_expired(max_age).await
+    }
+}
+
 async fn test_db() -> Option<Database> {
     let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
     let db = Database::from_config(
@@ -214,7 +274,8 @@ async fn isr_enable_mints_a_token_when_clustering_and_postgres_are_available() {
 
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    conn.phase = ConnectionPhase::ready(jid, false);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(fixture.state.as_ref(), &mut conn, &jid);
 
     let responses = handle_xmpp_frame(
         &format!(
@@ -227,6 +288,7 @@ async fn isr_enable_mints_a_token_when_clustering_and_postgres_are_available() {
         &mut conn,
     )
     .await;
+    conn.publish_pending_sm_enable(fixture.state.as_ref());
 
     assert_eq!(responses.len(), 1);
     let enabled = Element::from_str(&responses[0]).expect("enabled xml");
@@ -241,12 +303,62 @@ async fn isr_enable_mints_a_token_when_clustering_and_postgres_are_available() {
 }
 
 #[tokio::test]
+async fn hung_isr_issue_fails_before_sm_state_commit_and_enable_is_retry_safe() {
+    let claim_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "incarnation"));
+    let sm_session_registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(claim_store.clone(), node_identity.clone()),
+    );
+    let isr_token_store: Arc<dyn IsrTokenStore> = Arc::new(HangIssueOnceIsrTokenStore {
+        inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
+        hang_once: std::sync::atomic::AtomicBool::new(true),
+    });
+    let state = create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(claim_store),
+            node_identity: Some(node_identity),
+            isr_token_store: Some(isr_token_store),
+            ..ClusteringHandles::default()
+        },
+        sm_session_registry,
+    )
+    .await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(state.as_ref(), &mut conn, &jid);
+    let enable = format!(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'>\
+            <isr-enable xmlns='{ISR_NS}' mechanism='PLAIN'/>\
+         </enable>"
+    );
+
+    let failed = handle_xmpp_frame(&enable, "example.com", state.as_ref(), &mut conn).await;
+    let failed = Element::from_str(&failed[0]).expect("failed xml");
+    assert_eq!(failed.name(), "failed");
+    assert!(failed
+        .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(!conn.sm_state.enabled);
+
+    let retried = handle_xmpp_frame(&enable, "example.com", state.as_ref(), &mut conn).await;
+    let enabled = Element::from_str(&retried[0]).expect("enabled xml");
+    assert_eq!(enabled.name(), "enabled");
+    conn.publish_pending_sm_enable(state.as_ref());
+    assert!(conn.sm_state.enabled);
+    assert!(enabled.get_child("isr-enabled", ISR_NS).is_some());
+}
+
+#[tokio::test]
 async fn isr_enable_is_silently_ignored_without_clustering() {
     // No clustering/Postgres wired at all — the plain default fixture.
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    conn.phase = ConnectionPhase::ready(jid, false);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(state.as_ref(), &mut conn, &jid);
 
     let responses = handle_xmpp_frame(
         &format!(
@@ -259,6 +371,7 @@ async fn isr_enable_is_silently_ignored_without_clustering() {
         &mut conn,
     )
     .await;
+    conn.publish_pending_sm_enable(state.as_ref());
 
     let enabled = Element::from_str(&responses[0]).expect("enabled xml");
     assert!(
@@ -282,7 +395,8 @@ async fn isr_enable_is_ignored_when_not_resumable() {
 
     let mut conn = WsConnState::new();
     let jid: FullJid = "grace@example.com/web".parse().expect("jid");
-    conn.phase = ConnectionPhase::ready(jid, false);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(fixture.state.as_ref(), &mut conn, &jid);
 
     let responses = handle_xmpp_frame(
         &format!(
@@ -295,6 +409,7 @@ async fn isr_enable_is_ignored_when_not_resumable() {
         &mut conn,
     )
     .await;
+    conn.publish_pending_sm_enable(fixture.state.as_ref());
 
     assert_eq!(responses.len(), 1);
     let enabled = Element::from_str(&responses[0]).expect("enabled xml");
@@ -610,6 +725,7 @@ async fn isr_resume_authenticated_but_impossible_wraps_failed_in_success() {
 async fn handle_isr_resume_authenticate_is_a_noop_failure_without_clustering() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
+    let mut pending_sm_enable_commit = None;
     let ctx = SmCtx {
         phase: &mut conn.phase,
         sm_state: &mut conn.sm_state,
@@ -626,6 +742,7 @@ async fn handle_isr_resume_authenticate_is_a_noop_failure_without_clustering() {
         suppress_sm_record_next_batch: &mut conn.suppress_sm_record_next_batch,
         roster_interested: &mut conn.roster_interested,
         blocklist_interested: &mut conn.blocklist_interested,
+        pending_sm_enable_commit: &mut pending_sm_enable_commit,
     };
     let responses = handle_isr_resume_authenticate(
         "PLAIN".to_string(),

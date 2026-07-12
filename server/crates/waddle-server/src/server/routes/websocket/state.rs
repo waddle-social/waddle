@@ -703,6 +703,10 @@ pub(super) struct WsConnState {
     /// and duplicate queue entries. The main loop resets the flag to
     /// `false` after skipping the record step.
     pub(super) suppress_sm_record_next_batch: bool,
+    /// Post-write `<enable/>` publication. While present, a resumable claim
+    /// remains guarded and SM stays locally disabled; dropping the
+    /// connection or failing the write terminalizes the exact claim.
+    pub(super) pending_sm_enable_commit: Option<super::stream_management::SmEnableCommit>,
     /// Inbound text frames pulled off the socket by the mid-batch ack
     /// drain (issue #1089) that were NOT `<a/>` acks. The batch writer
     /// may only consume acks out of order; everything else must reach
@@ -775,12 +779,30 @@ impl WsConnState {
             pending_resume_h: None,
             registry_owner: None,
             suppress_sm_record_next_batch: false,
+            pending_sm_enable_commit: None,
             deferred_inbound: std::collections::VecDeque::new(),
             send_window_pause_deadline: None,
             send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
+    }
+
+    /// Apply the typed `<enable/>` effect after its `<enabled/>` frame has
+    /// been written. This is synchronous by design: no cancellation point
+    /// may exist between transport success, local SM enablement, registry
+    /// publication, and disarming exact-claim cleanup.
+    pub(super) fn publish_pending_sm_enable(&mut self, state: &WebSocketState) {
+        let Some(commit) = self.pending_sm_enable_commit.take() else {
+            return;
+        };
+        let bound_jid = self.phase.bound_jid().cloned();
+        commit.publish(
+            state,
+            &mut self.sm_state,
+            bound_jid.as_ref(),
+            self.registry_owner.as_ref(),
+        );
     }
 
     /// Initialize the per-connection [`XmppStateMachine`] in the

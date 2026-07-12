@@ -1,6 +1,158 @@
 use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
 use super::*;
 
+const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct SmEnableClaimGuard {
+    registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    stream_id: String,
+    armed: bool,
+}
+
+/// Typed post-write effect for `<enable/>`. The resumable claim is acquired
+/// before the response is built, but neither local SM state nor connection-
+/// registry publication occurs until the transport confirms that the
+/// `<enabled/>` frame was written.
+pub(super) struct SmEnableCommit {
+    claim_guard: Option<SmEnableClaimGuard>,
+    stream_id: String,
+    resume: bool,
+    max: u32,
+}
+
+impl SmEnableCommit {
+    fn new(
+        claim_guard: Option<SmEnableClaimGuard>,
+        stream_id: String,
+        resume: bool,
+        max: u32,
+    ) -> Self {
+        Self {
+            claim_guard,
+            stream_id,
+            resume,
+            max,
+        }
+    }
+
+    pub(super) fn publish(
+        mut self,
+        state: &WebSocketState,
+        sm_state: &mut StreamManagementState,
+        bound_jid: Option<&jid::FullJid>,
+        registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        let (Some(jid), Some(owner)) = (bound_jid, registry_owner) else {
+            return;
+        };
+        if !state
+            .deps
+            .protocol
+            .connection_registry
+            .set_sm_stream_id_if_owner(
+                jid,
+                owner,
+                Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                    self.stream_id.clone(),
+                )),
+            )
+        {
+            return;
+        }
+        sm_state.enable(self.stream_id.clone(), self.resume, Some(self.max));
+        if let Some(guard) = self.claim_guard.as_mut() {
+            guard.disarm();
+        }
+        info!(stream_id = %self.stream_id, resume = self.resume, max = self.max, "SM enabled");
+    }
+}
+
+impl SmEnableClaimGuard {
+    fn new(
+        registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+        stream_id: String,
+    ) -> Self {
+        Self {
+            registry,
+            stream_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SmEnableClaimGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && !self
+                .registry
+                .defer_unpublished_enabled_claim_release(&self.stream_id)
+        {
+            warn!(
+                stream_id = %self.stream_id,
+                "SM enable cancelled before publication but exact claim cleanup could not be inventoried"
+            );
+        }
+    }
+}
+
+pub(super) fn defer_superseded_sm_claim(state: &WebSocketState, sm_state: &StreamManagementState) {
+    if !sm_state.is_resumable() {
+        return;
+    }
+    let Some(stream_id) = sm_state.stream_id.as_deref() else {
+        return;
+    };
+    if !state
+        .deps
+        .protocol
+        .sm_session_registry
+        .defer_superseded_enabled_claim_release(stream_id)
+    {
+        warn!(
+            stream_id,
+            "Superseded SM connection could not inventory its exact terminal claim"
+        );
+    }
+}
+
+#[cfg(test)]
+mod enable_claim_guard_tests {
+    use super::SmEnableClaimGuard;
+    use std::sync::Arc;
+    use waddle_xmpp::ownership::{ClaimStore as _, Entity, EntityType};
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    #[tokio::test]
+    async fn dropped_prepublication_guard_defers_and_releases_the_exact_claim() {
+        let store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("sm-node", "incarnation");
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+            store.clone(),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(identity),
+        ));
+        let stream_id = "cancelled-before-enabled-publication";
+        assert!(registry.ensure_session_claim(stream_id).await.is_some());
+
+        drop(SmEnableClaimGuard::new(
+            registry.clone(),
+            stream_id.to_string(),
+        ));
+
+        assert_eq!(registry.pending_claim_release_count(), 1);
+        assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert!(store
+            .current_claim(&Entity::new(EntityType::SmSession, stream_id))
+            .await
+            .expect("claim lookup")
+            .is_none());
+    }
+}
+
 mod registration;
 
 pub(super) use registration::{
@@ -86,6 +238,7 @@ pub(super) struct SmCtx<'a> {
     pub(super) suppress_sm_record_next_batch: &'a mut bool,
     pub(super) roster_interested: &'a mut bool,
     pub(super) blocklist_interested: &'a mut bool,
+    pub(super) pending_sm_enable_commit: &'a mut Option<SmEnableCommit>,
 }
 
 /// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
@@ -98,7 +251,16 @@ pub(super) async fn handle_sm_stanza(
     use waddle_xmpp::stream_management::SmAck;
 
     match sm {
-        SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase).await,
+        SmStanza::Enable(enable) => {
+            handle_sm_enable(
+                enable,
+                state,
+                ctx.sm_state,
+                ctx.phase,
+                ctx.pending_sm_enable_commit,
+            )
+            .await
+        }
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
@@ -226,6 +388,7 @@ async fn handle_sm_enable(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
     phase: &ConnectionPhase,
+    pending_commit: &mut Option<SmEnableCommit>,
 ) -> Vec<String> {
     use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
 
@@ -246,8 +409,8 @@ async fn handle_sm_enable(
         Some(m) => m,
         None => max_resume_secs,
     };
-    // ADR-0017 Phase 3 Slice 6, element 8: ensure this node's `ClaimStore`
-    // claim on this SM session at `<enable/>` time — not only at detach
+    // ADR-0017 Phase 3 Slice 6, element 8: for a resumable enable, ensure
+    // this node's `ClaimStore` claim at `<enable/>` time — not only at detach
     // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
     // claim row for a still-live session, a cross-node resume attempt
     // would have nothing to discover: it needs the `clustering_claims` row
@@ -257,37 +420,39 @@ async fn handle_sm_enable(
     // with the detach-time call for the same stream id later in this
     // session's lifetime. No-op in practice for single-node deployments
     // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
-    let Some(claim_publication) = state
-        .deps
-        .protocol
-        .sm_session_registry
-        .ensure_session_claim(&stream_id)
-        .await
-    else {
-        warn!(
-            stream_id = %stream_id,
-            "SM enable rejected because exact claim admission did not complete"
-        );
-        return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+    // A non-resumable stream has no `previd`, is never detached, and cannot
+    // be discovered or resumed cross-node. Giving it a durable ownership
+    // claim would retain an entity with no terminal close path, so it does
+    // not participate in clustered SM ownership at all.
+    let claim_publication = if enable.resume {
+        let Some(publication) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim(&stream_id)
+            .await
+        else {
+            warn!(
+                stream_id = %stream_id,
+                "SM enable rejected because exact claim admission did not complete"
+            );
+            return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+        };
+        Some(publication)
+    } else {
+        None
     };
-    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
+    let mut claim_guard = enable.resume.then(|| {
+        SmEnableClaimGuard::new(
+            state.deps.protocol.sm_session_registry.clone(),
+            stream_id.clone(),
+        )
+    });
+    // Publishing the armed pre-transport guard transfers exact cleanup
+    // responsibility into the pending commit. Keep identity authority until
+    // that synchronous hand-off is complete; later fallible work and the
+    // socket write must not hold the rotation gate.
     drop(claim_publication);
-
-    // Publish the stream id onto the registry's ConnectionEntry so
-    // the offline-flush path can claim `pending_delivery` rows under
-    // a session id that's unique to this XEP-0198 session (not just
-    // the resource JID — distinct SM sessions on the same resource
-    // would otherwise share the same key, causing cross-session row
-    // deletion). Locked Q7b SM-ack lifecycle (issue #209).
-    if let Some(jid) = phase.bound_jid() {
-        state.deps.protocol.connection_registry.set_sm_stream_id(
-            jid,
-            Some(waddle_xmpp::pending_delivery::SmSessionId::new(
-                stream_id.clone(),
-            )),
-        );
-    }
-
     // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR token issuance rides this same
     // `<enable/>`/`<enabled/>` exchange inline (`<isr-enable/>`/
     // `<isr-enabled/>`) — never a standalone IQ (the retired conformance
@@ -317,11 +482,22 @@ async fn handle_sm_enable(
             Some(mechanism) if mechanism == waddle_xmpp::isr::ISR_PINNED_MECHANISM => {
                 match state.deps.app_state.clustering_claims.isr_token_store() {
                     Some(isr_token_store) => {
-                        match isr_token_store.issue(&stream_id, mechanism).await {
-                            Ok(issued) => Some(issued.token),
-                            Err(error) => {
+                        match tokio::time::timeout(
+                            SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT,
+                            isr_token_store.issue(&stream_id, mechanism),
+                        )
+                        .await
+                        {
+                            Ok(Ok(issued)) => Some(issued.token),
+                            Ok(Err(error)) => {
                                 warn!(stream_id = %stream_id, %error, "ISR token issuance failed");
                                 None
+                            }
+                            Err(_) => {
+                                warn!(stream_id = %stream_id, "ISR token issuance timed out; rejecting SM enable before state commit");
+                                return vec![
+                                    SmFailed::with_condition("resource-constraint").to_xml()
+                                ];
                             }
                         }
                     }
@@ -340,15 +516,20 @@ async fn handle_sm_enable(
         }
     };
 
-    info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
     let mut enabled = if enable.resume {
-        SmEnabled::with_resume(stream_id, max)
+        SmEnabled::with_resume(stream_id.clone(), max)
     } else {
-        SmEnabled::new(stream_id)
+        SmEnabled::new(stream_id.clone())
     };
     if let Some(token) = isr_token {
         enabled = enabled.with_isr_token(token);
     }
+    *pending_commit = Some(SmEnableCommit::new(
+        claim_guard,
+        stream_id,
+        enable.resume,
+        max,
+    ));
     vec![enabled.to_xml()]
 }
 
@@ -485,6 +666,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         suppress_sm_record_next_batch,
         roster_interested,
         blocklist_interested,
+        pending_sm_enable_commit: _,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a

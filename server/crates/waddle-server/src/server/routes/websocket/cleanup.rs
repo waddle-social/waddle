@@ -345,6 +345,7 @@ pub(super) async fn cleanup_connection_shutdown(
             .connection_registry
             .entry_if_owner(&jid, owner)
         else {
+            super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
             return ConnectionShutdownOutcome::NotPersisted;
         };
