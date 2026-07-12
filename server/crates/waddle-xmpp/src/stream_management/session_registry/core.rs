@@ -118,6 +118,14 @@ pub struct InMemorySmSessionRegistry {
     /// retain ownership).
     pub(super) pending_claim_acquisitions:
         RwLock<HashSet<(String, NodeIdentity, PendingClaimAcquisitionDisposition)>>,
+    /// Exact reclaimed-session hydration work that has not yet reached a
+    /// terminal outcome. This registry-owned inventory is the common safety
+    /// net for both the supervised orphan reaper and the one-shot inline
+    /// self-fence path: once a node wins a claim, a transient durable read or
+    /// an identity rotation must not leave that live-owned claim invisible to
+    /// every future orphan scan.
+    pub(super) pending_reclaimed_hydrations:
+        RwLock<HashMap<(String, super::super::persistence::SmClaimFence), Entity>>,
     /// Capacity reserved before an acquisition whose exact epoch is not yet
     /// known. A reservation survives an ambiguous timeout and is consumed
     /// only when reconciliation either records the resulting fence or proves
@@ -449,6 +457,7 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
             remote_resume: None,
         }
@@ -468,6 +477,7 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
             remote_resume: None,
         }
@@ -808,6 +818,42 @@ impl InMemorySmSessionRegistry {
         if entity.entity_type != EntityType::SmSession {
             return Ok(ReclaimedHydrationOutcome::LostClaim);
         }
+        let key = (entity.id.clone(), caller_fence.clone());
+        self.pending_reclaimed_hydrations
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .insert(key.clone(), entity.clone());
+
+        let outcome = self.hydrate_reclaimed_once(entity, caller_fence).await?;
+        if matches!(
+            outcome,
+            ReclaimedHydrationOutcome::Hydrated
+                | ReclaimedHydrationOutcome::AlreadyPresent
+                | ReclaimedHydrationOutcome::LostClaim
+        ) {
+            self.clear_pending_reclaimed_hydration(entity, caller_fence);
+        }
+        Ok(outcome)
+    }
+
+    fn clear_pending_reclaimed_hydration(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+    ) {
+        if let Ok(mut pending) = self.pending_reclaimed_hydrations.write() {
+            pending.remove(&(entity.id.clone(), fence.clone()));
+        }
+    }
+
+    async fn hydrate_reclaimed_once(
+        &self,
+        entity: &Entity,
+        caller_fence: &super::super::persistence::SmClaimFence,
+    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+        if entity.entity_type != EntityType::SmSession {
+            return Ok(ReclaimedHydrationOutcome::LostClaim);
+        }
         if self.node_identity.current() != *caller_fence.owner() {
             return Ok(ReclaimedHydrationOutcome::StaleIdentity);
         }
@@ -1076,6 +1122,53 @@ impl InMemorySmSessionRegistry {
         Ok(hydrated)
     }
 
+    /// Retry bounded reclaimed-session work retained by
+    /// [`Self::hydrate_reclaimed_typed`]. A live node's won claim is no
+    /// longer discoverable by the orphan scan, so this inventory — not a
+    /// future scan — owns retry until hydration succeeds, ownership is
+    /// disproved, or terminal cleanup completes.
+    pub async fn retry_pending_reclaimed_hydrations(&self, limit: usize) -> usize {
+        let pending = self
+            .pending_reclaimed_hydrations
+            .read()
+            .map(|pending| {
+                pending
+                    .iter()
+                    .take(limit)
+                    .map(|((_, fence), entity)| (entity.clone(), fence.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut attempted = 0;
+        for (entity, fence) in pending {
+            attempted += 1;
+            match self.hydrate_reclaimed_typed(&entity, &fence).await {
+                Ok(
+                    ReclaimedHydrationOutcome::MissingDurable
+                    | ReclaimedHydrationOutcome::PoisonReleased
+                    | ReclaimedHydrationOutcome::StaleIdentity,
+                ) => {
+                    let _ = self.release_reclaimed_claim(&entity, &fence).await;
+                }
+                Ok(
+                    ReclaimedHydrationOutcome::Hydrated
+                    | ReclaimedHydrationOutcome::AlreadyPresent
+                    | ReclaimedHydrationOutcome::LostClaim
+                    | ReclaimedHydrationOutcome::TransientFailure,
+                )
+                | Err(_) => {}
+            }
+        }
+        attempted
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_reclaimed_hydration_count(&self) -> usize {
+        self.pending_reclaimed_hydrations
+            .read()
+            .map_or(0, |pending| pending.len())
+    }
+
     pub async fn release_reclaimed_claim(
         &self,
         entity: &Entity,
@@ -1087,6 +1180,7 @@ impl InMemorySmSessionRegistry {
             Some(true) => {
                 // Responsibility transferred back to the live local session.
                 // Never let terminal cleanup release its claim.
+                self.clear_pending_reclaimed_hydration(entity, fence);
                 return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
             }
             None => {
@@ -1145,6 +1239,7 @@ impl InMemorySmSessionRegistry {
             let session_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
             storage.evict_claim_cache(&session_id, fence);
         }
+        self.clear_pending_reclaimed_hydration(entity, fence);
         Ok(outcome)
     }
 }

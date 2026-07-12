@@ -688,7 +688,7 @@ async fn reclaimed_terminal_release_failure_retains_exact_retry() {
             .hydrate_reclaimed_typed(&entity, &fence)
             .await
             .expect("typed hydration"),
-        ReclaimedHydrationOutcome::AlreadyPresent
+        ReclaimedHydrationOutcome::MissingDurable
     );
     assert!(registry
         .release_reclaimed_claim(&entity, &fence)
@@ -3919,6 +3919,7 @@ struct GatedGetSessionPersistence {
     armed: std::sync::atomic::AtomicBool,
     reached: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
+    fail_get_once: std::sync::atomic::AtomicBool,
     corrupt: std::sync::atomic::AtomicBool,
     quarantined: std::sync::atomic::AtomicBool,
 }
@@ -3931,6 +3932,7 @@ impl GatedGetSessionPersistence {
             armed: std::sync::atomic::AtomicBool::new(false),
             reached: tokio::sync::Notify::new(),
             proceed: tokio::sync::Notify::new(),
+            fail_get_once: std::sync::atomic::AtomicBool::new(false),
             corrupt: std::sync::atomic::AtomicBool::new(false),
             quarantined: std::sync::atomic::AtomicBool::new(false),
         }
@@ -3953,6 +3955,14 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         Option<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        if self
+            .fail_get_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "injected transient get failure".to_string(),
+            ));
+        }
         if self.corrupt.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(super::super::persistence::SmPersistenceError::Corrupt {
                 stream_id: stream_id.clone(),
@@ -4106,6 +4116,70 @@ async fn hydrate_reclaimed_quarantines_corrupt_persistence_before_terminal_outco
         .await
         .expect("read after quarantine")
         .is_none());
+}
+
+#[tokio::test]
+async fn transient_reclaimed_hydration_is_retained_and_retried() {
+    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new("unused"));
+    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let me = crate::ownership::NodeIdentity::local();
+    let stream_id = "stream-transient-hydration";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    storage
+        .inner
+        .upsert_session(super::super::persistence::PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new(stream_id),
+            user_id: "retry@example.com".to_string(),
+            jid: make_test_jid(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            max_resume_time: Some(300),
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: Duration::from_secs(300),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        })
+        .await
+        .expect("seed durable session");
+    let epoch = claim_store
+        .acquire(&entity, &me)
+        .await
+        .expect("seed exact claim");
+    let fence = super::super::persistence::SmClaimFence::new(me.clone(), epoch);
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(claim_store, crate::ownership::SharedNodeIdentity::new(me));
+    storage
+        .fail_get_once
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        registry
+            .hydrate_reclaimed_typed(&entity, &fence)
+            .await
+            .expect("first hydration"),
+        super::ReclaimedHydrationOutcome::TransientFailure
+    );
+    assert_eq!(registry.pending_reclaimed_hydration_count(), 1);
+
+    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert!(registry
+        .peek_session(stream_id)
+        .await
+        .expect("peek hydrated session")
+        .is_some());
 }
 
 #[tokio::test]

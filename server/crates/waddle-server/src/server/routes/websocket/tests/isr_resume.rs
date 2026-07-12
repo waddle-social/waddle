@@ -152,6 +152,55 @@ fn seeded_detached_session_for_persistence(stream_id: &str, jid: &FullJid) -> De
     }
 }
 
+#[tokio::test]
+async fn isr_identity_rotation_forgets_local_session_and_releases_old_exact_claim() {
+    let identity_handle = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "old-incarnation"));
+    let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(claim_store.clone(), identity_handle.clone()),
+    );
+    let stream_id = "isr-rotated-owner";
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    registry
+        .store_session(seeded_detached_session(stream_id, &jid))
+        .await
+        .expect("store detached session");
+    assert!(
+        registry
+            .claim_session(stream_id)
+            .await
+            .expect("claim detached ISR session")
+            .is_some(),
+        "identity rotation occurs after ISR has moved the session into claimed state"
+    );
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::SmSession,
+        stream_id,
+    );
+    identity_handle.set(NodeIdentity::new("sm-node", "new-incarnation"));
+    registry
+        .reconcile_claim_after_epoch_lookup_failure(stream_id)
+        .await
+        .expect("retire rotated claim");
+
+    assert!(
+        registry
+            .live_session_ids()
+            .expect("live session inventory")
+            .is_empty(),
+        "the old-incarnation session must not remain locally resumable"
+    );
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup after cleanup")
+            .is_none(),
+        "the captured old-incarnation claim must be released exactly"
+    );
+}
+
 // ---- Issuance: <isr-enable/> on <enable/> -----------------------------
 
 #[tokio::test]

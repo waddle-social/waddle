@@ -59,6 +59,15 @@ const STALE_NODE_WATCHDOG_CANDIDATE_LIMIT: usize = 64;
 #[cfg(feature = "clustering")]
 const ORPHANED_ROOM_CANDIDATE_LIMIT: usize = 64;
 
+/// Bounded retained work for SM claims won by the orphan reaper. Capacity is
+/// reserved before the steal CAS so queue pressure can never create an
+/// owned-but-untracked claim.
+#[cfg(feature = "clustering")]
+const ORPHAN_SM_HYDRATION_QUEUE_CAPACITY: usize = 128;
+
+#[cfg(feature = "clustering")]
+const ORPHAN_SM_HYDRATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -130,6 +139,18 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .retry_pending_reclaimed_hydrations(64)
+                .await;
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .retry_pending_claim_releases(64)
+                .await;
             let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
                 .deps
                 .protocol
@@ -480,6 +501,240 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
 /// overridable, the same way every sibling cluster timer already is, so the
 /// multi-process harness's kill-one hydration capstone does not have to
 /// wait out the full 120s production default in real wall-clock time.
+#[cfg(feature = "clustering")]
+#[derive(Clone)]
+struct SmHydrationWork {
+    entity: waddle_xmpp::ownership::Entity,
+    fence: waddle_xmpp::stream_management::persistence::SmClaimFence,
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Clone)]
+struct SmHydrationWorkers {
+    tx: tokio::sync::mpsc::Sender<SmHydrationWork>,
+    pending: Arc<std::sync::Mutex<std::collections::HashMap<String, Option<SmHydrationWork>>>>,
+}
+
+#[cfg(feature = "clustering")]
+impl SmHydrationWorkers {
+    fn reserve(&self, entity: &waddle_xmpp::ownership::Entity) -> bool {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.contains_key(&entity.id) || pending.len() >= ORPHAN_SM_HYDRATION_QUEUE_CAPACITY {
+            return false;
+        }
+        pending.insert(entity.id.clone(), None);
+        true
+    }
+
+    fn cancel_reservation(&self, entity: &waddle_xmpp::ownership::Entity) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&entity.id);
+    }
+
+    fn enqueue_reserved(
+        &self,
+        entity: waddle_xmpp::ownership::Entity,
+        fence: waddle_xmpp::stream_management::persistence::SmClaimFence,
+    ) {
+        let work = SmHydrationWork { entity, fence };
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(work.entity.id.clone(), Some(work.clone()));
+        match self.tx.try_send(work) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(work).await;
+                });
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                // Retained in `pending`; the supervisor snapshots and
+                // redrives it when replacing the stopped worker.
+            }
+        }
+    }
+
+    fn pending(&self) -> Vec<SmHydrationWork> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter_map(Clone::clone)
+            .collect()
+    }
+}
+
+#[cfg(feature = "clustering")]
+struct SmHydrationSupervisor {
+    workers: SmHydrationWorkers,
+    cancel: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "clustering")]
+impl SmHydrationSupervisor {
+    fn new(
+        registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+        parent_cancel: &tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let cancel = parent_cancel.child_token();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(ORPHAN_SM_HYDRATION_QUEUE_CAPACITY);
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let workers = SmHydrationWorkers {
+            tx,
+            pending: pending.clone(),
+        };
+        let worker_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let mut queue = std::collections::VecDeque::new();
+            loop {
+                if queue.is_empty() {
+                    tokio::select! {
+                        _ = worker_cancel.cancelled() => break,
+                        work = rx.recv() => match work {
+                            Some(work) => queue.push_back(work),
+                            None => break,
+                        },
+                    }
+                }
+                while let Ok(work) = rx.try_recv() {
+                    queue.push_back(work);
+                }
+                let Some(work) = queue.pop_front() else {
+                    continue;
+                };
+                let result = tokio::select! {
+                    _ = worker_cancel.cancelled() => break,
+                    result = tokio::time::timeout(
+                        ORPHAN_SM_HYDRATION_ATTEMPT_TIMEOUT,
+                        registry.hydrate_reclaimed_typed(&work.entity, &work.fence),
+                    ) => result,
+                };
+                let complete = match result {
+                    Ok(Ok(
+                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::Hydrated
+                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::AlreadyPresent
+                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::LostClaim,
+                    )) => true,
+                    Ok(Ok(
+                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
+                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
+                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
+                    )) => tokio::time::timeout(
+                        ORPHAN_SM_HYDRATION_ATTEMPT_TIMEOUT,
+                        registry.release_reclaimed_claim(&work.entity, &work.fence),
+                    )
+                    .await
+                    .is_ok_and(|result| result.is_ok()),
+                    Ok(Ok(
+                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::TransientFailure,
+                    ))
+                    | Ok(Err(_))
+                    | Err(_) => false,
+                };
+                if complete {
+                    pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&work.entity.id);
+                } else {
+                    queue.push_back(work);
+                    tokio::select! {
+                        _ = worker_cancel.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        });
+        Self {
+            workers,
+            cancel,
+            task,
+        }
+    }
+
+    fn is_healthy(&self) -> bool {
+        !self.task.is_finished()
+    }
+
+    async fn restarted(
+        self,
+        registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+        parent_cancel: &tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let retained = self.workers.pending();
+        self.shutdown().await;
+        let next = Self::new(registry, parent_cancel);
+        for work in retained {
+            if next.workers.reserve(&work.entity) {
+                next.workers.enqueue_reserved(work.entity, work.fence);
+            }
+        }
+        next
+    }
+
+    async fn shutdown(self) {
+        self.cancel.cancel();
+        if let Err(error) = self.task.await {
+            error!(%error, "SM hydration worker failed during shutdown");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test]
+async fn sm_hydration_worker_releases_missing_durable_claim() {
+    use waddle_xmpp::ownership::{ClaimStore as _, Entity, EntityType, InProcessClaimStore};
+
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let identity = waddle_xmpp::ownership::NodeIdentity::new("reaper", "incarnation");
+    let entity = Entity::new(EntityType::SmSession, "missing-worker-session");
+    let epoch = claim_store
+        .acquire(&entity, &identity)
+        .await
+        .expect("seed exact claim");
+    let registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_claim_store(
+            claim_store.clone(),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(identity.clone()),
+        ),
+    );
+    let stop = tokio_util::sync::CancellationToken::new();
+    let supervisor = SmHydrationSupervisor::new(registry, &stop);
+    assert!(supervisor.workers.reserve(&entity));
+    supervisor.workers.enqueue_reserved(
+        entity.clone(),
+        waddle_xmpp::stream_management::persistence::SmClaimFence::new(identity, epoch),
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let released = claim_store
+                .current_claim(&entity)
+                .await
+                .expect("claim lookup")
+                .is_none();
+            let pending = supervisor
+                .workers
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty();
+            if released && pending {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker must terminally release missing durable claim");
+    supervisor.shutdown().await;
+}
+
 pub(crate) fn spawn_orphan_reaper_janitor(
     websocket_state: &Arc<WebSocketState>,
     interval: std::time::Duration,
@@ -497,8 +752,10 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             return;
         };
         let room_registry = websocket_state.deps.protocol.room_registry.clone();
+        let sm_registry = websocket_state.deps.protocol.sm_session_registry.clone();
         tokio::spawn(async move {
             let registry_watch = spawn_room_registry_lifetime_watch(room_registry, stop.clone());
+            let mut hydration_supervisor = SmHydrationSupervisor::new(sm_registry.clone(), &stop);
             let mut ticker = tokio::time::interval(interval);
             // Skip the first (immediate) tick, mirroring the other janitors
             // — no need to sweep before the node-lease loop has even
@@ -512,8 +769,14 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                 let Some(state) = weak_state.upgrade() else {
                     break;
                 };
-                run_orphan_reaper_sweep(&state).await;
+                if !hydration_supervisor.is_healthy() {
+                    hydration_supervisor = hydration_supervisor
+                        .restarted(sm_registry.clone(), &stop)
+                        .await;
+                }
+                run_orphan_reaper_sweep(&state, Some(&hydration_supervisor.workers)).await;
             }
+            hydration_supervisor.shutdown().await;
             let _ = registry_watch.await;
         });
     }
@@ -589,8 +852,11 @@ async fn orphan_reaper_self_lease_is_fresh(
 /// just reclaimed, without needing this function to duplicate the
 /// codec/expiry logic `hydrate_reclaimed` already owns.
 #[cfg(feature = "clustering")]
-async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
-    use waddle_xmpp::ownership::{ClaimError, Entity};
+async fn run_orphan_reaper_sweep(
+    state: &Arc<WebSocketState>,
+    hydration_workers: Option<&SmHydrationWorkers>,
+) {
+    use waddle_xmpp::ownership::ClaimError;
 
     let clustering = &state.deps.app_state.clustering_claims;
     let Some((_claim_store, identity_handle)) = clustering.claim_pair() else {
@@ -701,10 +967,7 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         }
     };
 
-    let mut reclaimed: Vec<(
-        Entity,
-        waddle_xmpp::stream_management::persistence::SmClaimFence,
-    )> = Vec::new();
+    let mut stolen = 0usize;
     for candidate in candidates {
         if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-candidate")
             .await
@@ -735,24 +998,62 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         {
             return;
         }
+        if hydration_workers.is_some_and(|workers| !workers.reserve(&candidate.entity)) {
+            debug!(
+                entity_id = %candidate.entity.id,
+                "orphan reaper: SM hydration queue is full; leaving claim with stale owner for a later sweep"
+            );
+            continue;
+        }
         match node_lease
             .steal_orphaned_sm_session_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
             .await
         {
-            Ok(new_epoch) => reclaimed.push((
-                candidate.entity,
-                waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+            Ok(new_epoch) => {
+                stolen += 1;
+                let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
                     me.clone(),
                     new_epoch,
-                ),
-            )),
+                );
+                if let Some(workers) = hydration_workers {
+                    workers.enqueue_reserved(candidate.entity, fence);
+                } else {
+                    match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .hydrate_reclaimed_typed(&candidate.entity, &fence)
+                        .await
+                    {
+                        Ok(
+                            waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
+                            | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
+                            | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
+                        ) => {
+                            let _ = state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .release_reclaimed_claim(&candidate.entity, &fence)
+                                .await;
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
+                }
+            }
             Err(ClaimError::Conflict) => {
+                if let Some(workers) = hydration_workers {
+                    workers.cancel_reservation(&candidate.entity);
+                }
                 // Another node (or this same node's own re-registration
                 // reacquisition step, ADR-0017 Phase 3 plan deviation #19)
                 // already reclaimed it, or the "dead" owner actually
                 // renewed concurrently — safe, no-op.
             }
             Err(error) => {
+                if let Some(workers) = hydration_workers {
+                    workers.cancel_reservation(&candidate.entity);
+                }
                 warn!(
                     entity_id = %candidate.entity.id,
                     %error,
@@ -761,32 +1062,11 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
             }
         }
     }
-    if !reclaimed.is_empty() {
-        let stolen = reclaimed.len();
+    if stolen > 0 {
         info!(
             stolen,
             "orphan reaper: reclaimed orphaned SM-session claims"
         );
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .hydrate_reclaimed(&reclaimed)
-            .await
-        {
-            Ok(hydrated) => {
-                info!(
-                    stolen,
-                    hydrated, "orphan reaper: targeted hydration of reclaimed claims complete"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    %error,
-                    "orphan reaper: hydrate_reclaimed (post-steal targeted hydrate) failed"
-                );
-            }
-        }
     }
 
     let room_registry =
@@ -1301,7 +1581,7 @@ mod orphan_reaper_sweep_tests {
             .expect("acquire claim under dead owner");
         seed_persisted_session_as_owner(&db, &dead_owner, stream_id).await;
 
-        run_orphan_reaper_sweep(&state).await;
+        run_orphan_reaper_sweep(&state, None).await;
 
         assert!(
             expired_flag(&db, &dead_owner.node_id).await,
@@ -1339,8 +1619,8 @@ mod orphan_reaper_sweep_tests {
 
         let state_a = Arc::clone(&state);
         let state_b = Arc::clone(&state);
-        let task_a = tokio::spawn(async move { run_orphan_reaper_sweep(&state_a).await });
-        let task_b = tokio::spawn(async move { run_orphan_reaper_sweep(&state_b).await });
+        let task_a = tokio::spawn(async move { run_orphan_reaper_sweep(&state_a, None).await });
+        let task_b = tokio::spawn(async move { run_orphan_reaper_sweep(&state_b, None).await });
         let (result_a, result_b) = tokio::join!(task_a, task_b);
         result_a.expect("sweep task a must not panic");
         result_b.expect("sweep task b must not panic");
@@ -1404,7 +1684,7 @@ mod orphan_reaper_sweep_tests {
             .expect("acquire claim under dead owner 3");
         seed_persisted_session_as_owner(&db, &dead_owner_3, stream_id_3).await;
 
-        run_orphan_reaper_sweep(&state).await;
+        run_orphan_reaper_sweep(&state, None).await;
 
         assert!(
             claim_store
