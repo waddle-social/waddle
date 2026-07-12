@@ -496,18 +496,19 @@ async fn delete_session_aborts_before_any_write_once_the_claim_is_stolen() {
     );
 }
 
-/// A claim row may be deleted and recreated at epoch zero. The epoch alone,
-/// even paired with a stable node id, therefore cannot distinguish process
-/// incarnations. Every fenced persistence transaction must bind node_epoch.
+/// Recreating a claim under the same stable node id but a new process
+/// incarnation must not let an old exact fence mutate the replacement's
+/// durable state. Every fenced persistence transaction binds both the
+/// monotonic claim generation and `node_epoch`.
 #[tokio::test]
-async fn quarantine_rejects_same_node_id_new_incarnation_after_epoch_aba() {
+async fn quarantine_rejects_same_node_id_new_incarnation_after_claim_recreation() {
     let Some(f) = fixture().await else { return };
     let stream_id = SmSessionId::new("stream-incarnation-aba");
     let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
     f.fenced
         .upsert_session(fixture_session(stream_id.as_str()))
         .await
-        .expect("old incarnation establishes epoch-zero claim and durable row");
+        .expect("old incarnation establishes a claim and durable row");
 
     let old_epoch = f
         .claims
@@ -516,7 +517,6 @@ async fn quarantine_rejects_same_node_id_new_incarnation_after_epoch_aba() {
         .expect("read old claim")
         .expect("old claim exists")
         .claim_epoch;
-    assert_eq!(old_epoch, ClaimEpoch(0));
     assert_eq!(
         f.claims
             .release_exact(&entity, &f.identity, old_epoch)
@@ -535,8 +535,11 @@ async fn quarantine_rejects_same_node_id_new_incarnation_after_epoch_aba() {
         .claims
         .acquire(&entity, &replacement)
         .await
-        .expect("replacement recreates claim at epoch zero");
-    assert_eq!(replacement_epoch, old_epoch, "exercise claim-epoch ABA");
+        .expect("replacement recreates claim with a fresh generation");
+    assert!(
+        replacement_epoch > old_epoch,
+        "claim recreation must allocate a monotonic generation"
+    );
 
     let old_fence = SmClaimFence::new(f.identity.clone(), old_epoch);
     f.shared_identity.rotate(replacement.clone()).await;
