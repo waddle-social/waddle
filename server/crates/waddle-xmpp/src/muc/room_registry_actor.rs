@@ -488,6 +488,13 @@ impl RoomRegistryActor {
         actor_ref: ActorRef<RoomActor>,
         claim_fence: super::RoomClaimFenceContext,
     ) {
+        // A timed-out release may not have committed, so a later demand can
+        // self-reacquire and publish this identical owner+epoch fence. Once
+        // the fence backs a live actor it is no longer a terminal-release
+        // responsibility; leaving it queued would let a stale retry delete
+        // the live claim. Cancel only the exact match so ABA-distinct
+        // generations for this room remain independently retryable.
+        self.clear_pending_room_release(&room_jid, &claim_fence);
         if let Some(store) = &self.durable_store {
             store.record_claim_fence(&room_jid, claim_fence.clone());
         }
@@ -1090,6 +1097,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     if let Some(store) = &self.durable_store {
                         store.record_claim_fence(&msg.room_jid, claim_fence.clone());
                     }
+                    self.clear_pending_room_release(&msg.room_jid, &claim_fence);
                     self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
                     return ReclaimedRoomOutcome::AdoptedLocal;
                 }

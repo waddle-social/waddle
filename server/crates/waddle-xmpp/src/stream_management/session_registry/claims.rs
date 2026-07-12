@@ -80,6 +80,18 @@ impl InMemorySmSessionRegistry {
         let claimed = self.claimed_sessions.read().ok()?;
         let mut out: Vec<String> = sessions.keys().cloned().collect();
         out.extend(claimed.keys().cloned());
+        out.sort();
+        out.dedup();
+        Some(out)
+    }
+
+    /// Snapshot every SM claim this process must still account for during
+    /// ownership reconciliation. Unlike [`Self::live_session_ids`], this
+    /// includes terminal exact-release responsibilities: they are not
+    /// resumable sessions, but their release may not have committed yet and
+    /// the local node must not forget that possible ownership.
+    pub fn locally_owned_claim_ids(&self) -> Option<Vec<String>> {
+        let mut out = self.live_session_ids()?;
         let pending = self.pending_claim_releases.read().ok()?;
         out.extend(pending.iter().map(|(stream_id, _)| stream_id.clone()));
         out.sort();

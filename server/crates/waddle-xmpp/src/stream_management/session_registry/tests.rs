@@ -269,6 +269,17 @@ async fn terminal_release_retry_clears_retained_exact_fence() {
         .await
         .expect("take session");
     assert_eq!(registry.pending_claim_release_count(), 1);
+    assert!(
+        registry.live_session_ids().expect("live session snapshot").is_empty(),
+        "a terminal exact-release retry is not a resumable session and must not shield pending-delivery claims"
+    );
+    assert_eq!(
+        registry
+            .locally_owned_claim_ids()
+            .expect("local claim snapshot"),
+        vec![stream_id.to_string()],
+        "ownership reconciliation still accounts for the ambiguous exact release"
+    );
 
     store
         .hang_release

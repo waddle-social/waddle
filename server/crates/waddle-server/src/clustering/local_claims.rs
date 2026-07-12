@@ -83,7 +83,7 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             return Vec::new();
         };
         registry
-            .live_session_ids()
+            .locally_owned_claim_ids()
             .unwrap_or_default()
             .into_iter()
             .map(|stream_id| Entity::new(EntityType::SmSession, stream_id))
@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owned_reflects_the_wired_registry_live_session_ids() {
+    async fn owned_reflects_the_wired_registry_claim_inventory() {
         let local_claims = SmSessionLocalClaims::new();
         let registry = Arc::new(InMemorySmSessionRegistry::new());
         registry

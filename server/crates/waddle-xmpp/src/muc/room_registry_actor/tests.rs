@@ -2365,6 +2365,79 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn publishing_reacquired_exact_fence_cancels_matching_terminal_release() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(crate::ownership::InProcessClaimStore::new());
+        let identity = this_identity();
+        let jid = test_room_jid("reacquired-release-cancel");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .expect("seed self-owned claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), identity.clone(), epoch);
+        let aba_distinct_fence = RoomClaimFenceContext::new(
+            entity.clone(),
+            foreign_identity(),
+            ClaimEpoch(epoch.0.saturating_add(1)),
+        );
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(identity.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: fence.clone(),
+            })
+            .await
+            .expect("remember ambiguous release");
+        registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: aba_distinct_fence,
+            })
+            .await
+            .expect("remember ABA-distinct release");
+
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("publish actor under reacquired fence");
+
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("pending release backlog")
+                .depth,
+            1,
+            "publishing cancels only the exact live fence, not another ABA generation"
+        );
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 8 })
+                .await
+                .expect("retry backlog"),
+            1
+        );
+        assert!(claim_store
+            .fence(&entity, &identity, epoch)
+            .await
+            .expect("live claim fence"));
+    }
+
+    #[tokio::test]
     async fn pending_reclaimed_generations_survive_claim_epoch_aba() {
         let registry = spawn_registry().await;
         let jid = test_room_jid("reclaimed-aba");
