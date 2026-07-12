@@ -716,12 +716,20 @@ async fn resume_retransmit_race_against_the_same_new_node_dedups_without_double_
     };
     let (bare, full) = alice_jid();
     let (registry_a, _identity_a) = node_registry(&db, node_identity(), None).await;
-    let (registry_b, _identity_b) = node_registry(&db, node_identity(), None).await;
+    let (registry_b, identity_b) = node_registry(&db, node_identity(), None).await;
 
     registry_a
         .store_session(detached_session("stream-retransmit", &full))
         .await
         .expect("node A stores the detached session");
+
+    let entity = Entity::new(EntityType::SmSession, "stream-retransmit".to_string());
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+    let before = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current_claim before resume race")
+        .expect("detached session has an ownership claim");
 
     // Two concurrent attempts on the SAME registry_b — modeling a client
     // that retransmits `<resume/>` (or opens a second connection) against
@@ -764,18 +772,22 @@ async fn resume_retransmit_race_against_the_same_new_node_dedups_without_double_
         "no stray claimable copy should survive the dedup'd retransmit race"
     );
 
-    // The claim epoch advanced by exactly one steal, not two.
-    let entity = Entity::new(EntityType::SmSession, "stream-retransmit".to_string());
-    let claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+    // The single winner replaced node A's claim with a fresh monotonic
+    // generation owned by node B. Generations are globally allocated, so
+    // neither their initial value nor adjacency is deterministic.
     let after = claim_store
         .current_claim(&entity)
         .await
         .expect("current_claim")
         .expect("claim still exists (held by the winner via claimed_sessions)");
+    assert!(
+        after.claim_epoch > before.claim_epoch,
+        "the winning steal_for_resume must allocate a newer claim generation"
+    );
     assert_eq!(
-        after.claim_epoch,
-        waddle_xmpp::ownership::ClaimEpoch(1),
-        "exactly one steal_for_resume CAS committed, not two"
+        after.owner,
+        identity_b.current(),
+        "the sole successful resume CAS must leave node B as the exact owner"
     );
 }
 
