@@ -70,8 +70,13 @@ pub struct RoomRegistryActor {
         HashMap<(BareJid, super::RoomClaimFenceContext), PendingReclaimedState>,
     pending_reclaimed_reservations: HashSet<BareJid>,
     /// Ordinary terminal removals whose exact claim release was uncertain.
-    /// One newest fence per room is sufficient: if a later epoch exists, the
-    /// older epoch can no longer own the single claim row.
+    /// Multiple owner+epoch generations for one room are intentional. A
+    /// timed-out release may have deleted the row, after which another owner
+    /// can recreate it with a reset epoch; numeric epoch ordering therefore
+    /// cannot identify a newest generation across delete/recreate ABA.
+    /// Retaining every exact fence lets out-of-order retries prove each
+    /// responsibility independently, while the global bound prevents churn
+    /// from growing this inventory without limit.
     pending_room_releases:
         HashMap<(BareJid, super::RoomClaimFenceContext), PendingRoomReleaseState>,
     pending_retry_order: u64,

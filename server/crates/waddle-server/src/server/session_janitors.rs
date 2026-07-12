@@ -692,11 +692,28 @@ impl OrphanReaperWorkers {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.clone(), Some(work.clone()));
-        if self.hydration_tx.try_send(work).is_err() {
-            crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
-            return false;
+        match self.hydration_tx.try_send(work) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                let mut pending = self
+                    .hydration_pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                pending.remove(&key);
+                crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
+                crate::clustering::metrics::record_orphan_work_queue_depth(
+                    "sm_hydration",
+                    pending.len(),
+                );
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                // The supervisor snapshots this map when it replaces a dead
+                // worker. Retain the exact work so restart can requeue it.
+                crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
+                false
+            }
         }
-        true
     }
 
     fn release_key(work: &ExactReleaseWork) -> String {
@@ -748,12 +765,30 @@ impl OrphanReaperWorkers {
             return false;
         }
         pending.insert(key.clone(), work.clone());
-        if self.release_tx.try_send(work).is_err() {
-            crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
-            return false;
+        match self.release_tx.try_send(work) {
+            Ok(()) => {
+                crate::clustering::metrics::record_orphan_work_queue_depth(
+                    "room_release",
+                    pending.len(),
+                );
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                pending.remove(&key);
+                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+                crate::clustering::metrics::record_orphan_work_queue_depth(
+                    "room_release",
+                    pending.len(),
+                );
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                // A closed receiver means the supervisor must restart the
+                // worker. Keep this exact fence in its restart inventory.
+                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+                false
+            }
         }
-        crate::clustering::metrics::record_orphan_work_queue_depth("room_release", pending.len());
-        true
     }
 
     fn pending_hydrations(&self) -> Vec<SmHydrationWork> {
@@ -1568,6 +1603,148 @@ fn hydration_reservations_do_not_overcommit_a_127_of_128_queue() {
         })
         .count();
     assert_eq!(reserved, 1);
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[test]
+fn full_hydration_channel_rolls_back_pending_reservation() {
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let (hydration_tx, _hydration_rx) = tokio::sync::mpsc::channel(1);
+    let (release_tx, _release_rx) = tokio::sync::mpsc::channel(1);
+    let existing = SmHydrationWork {
+        entity: Entity::new(EntityType::SmSession, "existing"),
+        fence: SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(1)),
+    };
+    hydration_tx
+        .try_send(existing.clone())
+        .expect("prefill hydration channel");
+    let workers = OrphanReaperWorkers {
+        hydration_tx,
+        release_tx,
+        hydration_pending: Arc::new(std::sync::Mutex::new(
+            [("existing".to_string(), Some(existing))].into(),
+        )),
+        release_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        sm_cursor: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let candidate = Entity::new(EntityType::SmSession, "candidate");
+
+    assert!(!workers.enqueue_hydration(
+        candidate.clone(),
+        SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
+    ));
+    assert!(!workers
+        .hydration_pending
+        .lock()
+        .expect("hydration pending")
+        .contains_key(&candidate.id));
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[test]
+fn closed_hydration_channel_retains_restart_inventory() {
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let (hydration_tx, hydration_rx) = tokio::sync::mpsc::channel(1);
+    drop(hydration_rx);
+    let (release_tx, _release_rx) = tokio::sync::mpsc::channel(1);
+    let workers = OrphanReaperWorkers {
+        hydration_tx,
+        release_tx,
+        hydration_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        release_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        sm_cursor: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let candidate = Entity::new(EntityType::SmSession, "candidate");
+
+    assert!(!workers.enqueue_hydration(
+        candidate.clone(),
+        SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
+    ));
+    assert!(workers
+        .hydration_pending
+        .lock()
+        .expect("hydration pending")
+        .contains_key(&candidate.id));
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[test]
+fn full_release_channel_rolls_back_pending_work() {
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    };
+
+    let (hydration_tx, _hydration_rx) = tokio::sync::mpsc::channel(1);
+    let (release_tx, _release_rx) = tokio::sync::mpsc::channel(1);
+    let owner = NodeIdentity::new("node", "incarnation");
+    let existing = ExactReleaseWork {
+        claim_store: Arc::new(InProcessClaimStore::new()),
+        entity: Entity::new(EntityType::RoomActor, "existing@muc.example.com"),
+        owner: owner.clone(),
+        epoch: ClaimEpoch(1),
+    };
+    release_tx
+        .try_send(existing.clone())
+        .expect("prefill release channel");
+    let existing_key = OrphanReaperWorkers::release_key(&existing);
+    let workers = OrphanReaperWorkers {
+        hydration_tx,
+        release_tx,
+        hydration_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        release_pending: Arc::new(std::sync::Mutex::new([(existing_key, existing)].into())),
+        sm_cursor: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let candidate = ExactReleaseWork {
+        claim_store: Arc::new(InProcessClaimStore::new()),
+        entity: Entity::new(EntityType::RoomActor, "candidate@muc.example.com"),
+        owner,
+        epoch: ClaimEpoch(2),
+    };
+    let candidate_key = OrphanReaperWorkers::release_key(&candidate);
+
+    assert!(!workers.enqueue_release(candidate));
+    assert!(!workers
+        .release_pending
+        .lock()
+        .expect("release pending")
+        .contains_key(&candidate_key));
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[test]
+fn closed_release_channel_retains_restart_inventory() {
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    };
+
+    let (hydration_tx, _hydration_rx) = tokio::sync::mpsc::channel(1);
+    let (release_tx, release_rx) = tokio::sync::mpsc::channel(1);
+    drop(release_rx);
+    let workers = OrphanReaperWorkers {
+        hydration_tx,
+        release_tx,
+        hydration_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        release_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        sm_cursor: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let candidate = ExactReleaseWork {
+        claim_store: Arc::new(InProcessClaimStore::new()),
+        entity: Entity::new(EntityType::RoomActor, "candidate@muc.example.com"),
+        owner: NodeIdentity::new("node", "incarnation"),
+        epoch: ClaimEpoch(2),
+    };
+    let candidate_key = OrphanReaperWorkers::release_key(&candidate);
+
+    assert!(!workers.enqueue_release(candidate));
+    assert!(workers
+        .release_pending
+        .lock()
+        .expect("release pending")
+        .contains_key(&candidate_key));
 }
 
 #[cfg(all(test, feature = "clustering"))]

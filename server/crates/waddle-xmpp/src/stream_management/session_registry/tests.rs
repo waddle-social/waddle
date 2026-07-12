@@ -102,6 +102,8 @@ struct HangingReleaseClaimStore {
     hang_release: std::sync::atomic::AtomicBool,
     hang_ensure: std::sync::atomic::AtomicBool,
     commit_then_hang_ensure_once: std::sync::atomic::AtomicBool,
+    poison_fence_cache_after_ensure:
+        std::sync::Mutex<Option<std::sync::Weak<InMemorySmSessionRegistry>>>,
 }
 
 #[async_trait::async_trait]
@@ -133,7 +135,20 @@ impl crate::ownership::ClaimStore for HangingReleaseClaimStore {
         if self.hang_ensure.load(std::sync::atomic::Ordering::SeqCst) {
             return std::future::pending().await;
         }
-        self.inner.ensure_claimed(entity, me).await
+        let result = self.inner.ensure_claimed(entity, me).await;
+        let registry = self
+            .poison_fence_cache_after_ensure
+            .lock()
+            .expect("poison injection lock")
+            .take()
+            .and_then(|registry| registry.upgrade());
+        if let Some(registry) = registry {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _fences = registry.claim_fences.write().expect("claim fences");
+                panic!("inject claim-fence publication failure");
+            }));
+        }
+        result
     }
 
     async fn steal_stale(
@@ -207,6 +222,7 @@ async fn hung_claim_release_is_bounded_and_retains_exact_fence() {
             hang_release: std::sync::atomic::AtomicBool::new(true),
             hang_ensure: std::sync::atomic::AtomicBool::new(false),
             commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+            poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
         }),
         crate::ownership::SharedNodeIdentity::new(me),
     );
@@ -239,6 +255,7 @@ async fn terminal_release_retry_clears_retained_exact_fence() {
         hang_release: std::sync::atomic::AtomicBool::new(true),
         hang_ensure: std::sync::atomic::AtomicBool::new(false),
         commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
     });
     let registry = InMemorySmSessionRegistry::new()
         .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
@@ -288,6 +305,7 @@ async fn hung_enable_claim_is_bounded_and_not_recorded() {
             hang_release: std::sync::atomic::AtomicBool::new(false),
             hang_ensure: std::sync::atomic::AtomicBool::new(true),
             commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+            poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
         }),
         crate::ownership::SharedNodeIdentity::new(me),
     );
@@ -307,6 +325,7 @@ async fn enable_claim_commit_before_timeout_is_reconciled_and_released() {
         hang_release: std::sync::atomic::AtomicBool::new(false),
         hang_ensure: std::sync::atomic::AtomicBool::new(false),
         commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
     });
     let registry = InMemorySmSessionRegistry::new()
         .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
@@ -331,6 +350,57 @@ async fn enable_claim_commit_before_timeout_is_reconciled_and_released() {
         .is_empty());
     assert_eq!(registry.pending_claim_release_count(), 0);
     assert_eq!(registry.claim_fence_capacity_used(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn enable_claim_publication_failure_retains_ambiguous_exact_release() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(true),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me)),
+    );
+    *store
+        .poison_fence_cache_after_ensure
+        .lock()
+        .expect("poison injection lock") = Some(std::sync::Arc::downgrade(&registry));
+    let stream_id = "publication-failure";
+
+    assert!(!registry.ensure_session_claim(stream_id).await);
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        1,
+        "an ambiguous compensating release remains an exact retry responsibility"
+    );
+
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup")
+            .is_some()
+    );
+
+    store
+        .hang_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 1);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup after retry")
+            .is_none()
+    );
 }
 
 #[test]

@@ -135,9 +135,10 @@ impl InMemorySmSessionRegistry {
                     pending.remove(&(stream_id.to_string(), identity.clone()));
                 }
                 let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-                if self.try_record_claim_fence(stream_id, fence.clone()) {
-                    self.release_claim_store_entry_under(stream_id, fence).await;
+                if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                    self.cancel_claim_fence_reservation(stream_id);
                 }
+                self.release_claim_store_entry_under(stream_id, fence).await;
             }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Conflict)) => {
                 if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
@@ -455,21 +456,19 @@ impl InMemorySmSessionRegistry {
         {
             Ok(Ok(epoch)) if self.node_identity.current() == identity => {
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
-                if !self.try_record_claim_fence(stream_id, fence) {
-                    let _ = tokio::time::timeout(
-                        CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                        self.claim_store.release_exact(&entity, &identity, epoch),
-                    )
-                    .await;
+                if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                    self.cancel_claim_fence_reservation(stream_id);
+                    self.release_claim_store_entry_under(stream_id, fence).await;
                     return false;
                 }
                 true
             }
             Ok(Ok(epoch)) => {
                 let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-                if self.try_record_claim_fence(stream_id, fence.clone()) {
-                    self.release_claim_store_entry_under(stream_id, fence).await;
+                if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                    self.cancel_claim_fence_reservation(stream_id);
                 }
+                self.release_claim_store_entry_under(stream_id, fence).await;
                 false
             }
             Ok(Err(error)) => {
@@ -729,13 +728,15 @@ impl InMemorySmSessionRegistry {
             Ok(Ok(epoch)) => {
                 if self.node_identity.current() != identity {
                     let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-                    if self.try_record_claim_fence(stream_id, fence.clone()) {
-                        self.release_claim_store_entry_under(stream_id, fence).await;
+                    if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                        self.cancel_claim_fence_reservation(stream_id);
                     }
+                    self.release_claim_store_entry_under(stream_id, fence).await;
                     return;
                 }
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
                 if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                    self.cancel_claim_fence_reservation(stream_id);
                     self.release_claim_store_entry_under(stream_id, fence).await;
                 }
             }
