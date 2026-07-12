@@ -52,6 +52,7 @@ async fn handle_xmpp_frame_impl(
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
+        pending_sm_enable_commit,
         state_machine,
         stream_open_sent,
         registry_owner,
@@ -79,6 +80,7 @@ async fn handle_xmpp_frame_impl(
                 suppress_sm_record_next_batch,
                 roster_interested,
                 blocklist_interested,
+                pending_sm_enable_commit,
             };
             return handle_sm_stanza(sm, state, ctx).await;
         }
@@ -189,6 +191,7 @@ async fn handle_xmpp_frame_impl(
                 suppress_sm_record_next_batch,
                 roster_interested,
                 blocklist_interested,
+                pending_sm_enable_commit,
             };
             let responses =
                 handle_isr_resume_authenticate(mechanism, initial_response, resume, state, ctx)

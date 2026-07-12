@@ -67,6 +67,17 @@ impl InMemorySmSessionRegistry {
     /// synchronous so a cancellation guard can call it from `Drop` when the
     /// WebSocket task disappears before enabled state is published.
     pub fn defer_unpublished_enabled_claim_release(&self, stream_id: &str) -> bool {
+        self.defer_enabled_claim_release(stream_id)
+    }
+
+    /// Move a claim from a connection that lost its same-full-JID registry
+    /// slot into exact terminal cleanup. The replacement owns routing and
+    /// cleanup for the JID, but never owns this connection's distinct SM id.
+    pub fn defer_superseded_enabled_claim_release(&self, stream_id: &str) -> bool {
+        self.defer_enabled_claim_release(stream_id)
+    }
+
+    fn defer_enabled_claim_release(&self, stream_id: &str) -> bool {
         let fence = self
             .claim_fences
             .read()

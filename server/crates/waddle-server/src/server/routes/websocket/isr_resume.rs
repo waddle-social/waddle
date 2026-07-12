@@ -117,6 +117,7 @@ pub(super) async fn handle_isr_resume_authenticate(
         suppress_sm_record_next_batch,
         roster_interested,
         blocklist_interested,
+        pending_sm_enable_commit: _,
     } = ctx;
 
     // Q8's gate: ISR is only wired when clustering.enabled && Postgres —

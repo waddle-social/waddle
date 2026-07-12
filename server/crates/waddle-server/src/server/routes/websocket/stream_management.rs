@@ -9,6 +9,64 @@ struct SmEnableClaimGuard {
     armed: bool,
 }
 
+/// Typed post-write effect for `<enable/>`. The resumable claim is acquired
+/// before the response is built, but neither local SM state nor connection-
+/// registry publication occurs until the transport confirms that the
+/// `<enabled/>` frame was written.
+pub(super) struct SmEnableCommit {
+    claim_guard: Option<SmEnableClaimGuard>,
+    stream_id: String,
+    resume: bool,
+    max: u32,
+}
+
+impl SmEnableCommit {
+    fn new(
+        claim_guard: Option<SmEnableClaimGuard>,
+        stream_id: String,
+        resume: bool,
+        max: u32,
+    ) -> Self {
+        Self {
+            claim_guard,
+            stream_id,
+            resume,
+            max,
+        }
+    }
+
+    pub(super) fn publish(
+        mut self,
+        state: &WebSocketState,
+        sm_state: &mut StreamManagementState,
+        bound_jid: Option<&jid::FullJid>,
+        registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        let (Some(jid), Some(owner)) = (bound_jid, registry_owner) else {
+            return;
+        };
+        if !state
+            .deps
+            .protocol
+            .connection_registry
+            .set_sm_stream_id_if_owner(
+                jid,
+                owner,
+                Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                    self.stream_id.clone(),
+                )),
+            )
+        {
+            return;
+        }
+        sm_state.enable(self.stream_id.clone(), self.resume, Some(self.max));
+        if let Some(guard) = self.claim_guard.as_mut() {
+            guard.disarm();
+        }
+        info!(stream_id = %self.stream_id, resume = self.resume, max = self.max, "SM enabled");
+    }
+}
+
 impl SmEnableClaimGuard {
     fn new(
         registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
@@ -38,6 +96,26 @@ impl Drop for SmEnableClaimGuard {
                 "SM enable cancelled before publication but exact claim cleanup could not be inventoried"
             );
         }
+    }
+}
+
+pub(super) fn defer_superseded_sm_claim(state: &WebSocketState, sm_state: &StreamManagementState) {
+    if !sm_state.is_resumable() {
+        return;
+    }
+    let Some(stream_id) = sm_state.stream_id.as_deref() else {
+        return;
+    };
+    if !state
+        .deps
+        .protocol
+        .sm_session_registry
+        .defer_superseded_enabled_claim_release(stream_id)
+    {
+        warn!(
+            stream_id,
+            "Superseded SM connection could not inventory its exact terminal claim"
+        );
     }
 }
 
@@ -160,6 +238,7 @@ pub(super) struct SmCtx<'a> {
     pub(super) suppress_sm_record_next_batch: &'a mut bool,
     pub(super) roster_interested: &'a mut bool,
     pub(super) blocklist_interested: &'a mut bool,
+    pub(super) pending_sm_enable_commit: &'a mut Option<SmEnableCommit>,
 }
 
 /// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
@@ -172,7 +251,16 @@ pub(super) async fn handle_sm_stanza(
     use waddle_xmpp::stream_management::SmAck;
 
     match sm {
-        SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase).await,
+        SmStanza::Enable(enable) => {
+            handle_sm_enable(
+                enable,
+                state,
+                ctx.sm_state,
+                ctx.phase,
+                ctx.pending_sm_enable_commit,
+            )
+            .await
+        }
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
@@ -300,6 +388,7 @@ async fn handle_sm_enable(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
     phase: &ConnectionPhase,
+    pending_commit: &mut Option<SmEnableCommit>,
 ) -> Vec<String> {
     use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
 
@@ -348,7 +437,7 @@ async fn handle_sm_enable(
     if !claimed {
         return vec![SmFailed::with_condition("resource-constraint").to_xml()];
     }
-    let mut claim_guard = enable.resume.then(|| {
+    let claim_guard = enable.resume.then(|| {
         SmEnableClaimGuard::new(
             state.deps.protocol.sm_session_registry.clone(),
             stream_id.clone(),
@@ -417,28 +506,20 @@ async fn handle_sm_enable(
         }
     };
 
-    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
-    if let Some(jid) = phase.bound_jid() {
-        state.deps.protocol.connection_registry.set_sm_stream_id(
-            jid,
-            Some(waddle_xmpp::pending_delivery::SmSessionId::new(
-                stream_id.clone(),
-            )),
-        );
-    }
-    if let Some(guard) = claim_guard.as_mut() {
-        guard.disarm();
-    }
-
-    info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
     let mut enabled = if enable.resume {
-        SmEnabled::with_resume(stream_id, max)
+        SmEnabled::with_resume(stream_id.clone(), max)
     } else {
-        SmEnabled::new(stream_id)
+        SmEnabled::new(stream_id.clone())
     };
     if let Some(token) = isr_token {
         enabled = enabled.with_isr_token(token);
     }
+    *pending_commit = Some(SmEnableCommit::new(
+        claim_guard,
+        stream_id,
+        enable.resume,
+        max,
+    ));
     vec![enabled.to_xml()]
 }
 
@@ -575,6 +656,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         suppress_sm_record_next_batch,
         roster_interested,
         blocklist_interested,
+        pending_sm_enable_commit: _,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a

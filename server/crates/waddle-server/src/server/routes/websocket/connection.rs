@@ -583,6 +583,18 @@ async fn handle_xmpp_websocket(
     // newcomer owns — the same reason the cleanup block below
     // short-circuits.
     if !superseded {
+        if let (Some(jid), Some(owner)) = (conn.phase.bound_jid(), conn.registry_owner.as_ref()) {
+            superseded = state
+                .deps
+                .protocol
+                .connection_registry
+                .entry_if_owner(jid, owner)
+                .is_none();
+        }
+    }
+    if superseded {
+        super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
+    } else {
         process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
         drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
     }
@@ -770,7 +782,9 @@ async fn handle_inbound_text(
     )
     .await
     {
-        BatchWriteOutcome::Continue => {}
+        BatchWriteOutcome::Continue => {
+            conn.publish_pending_sm_enable(state.as_ref());
+        }
         BatchWriteOutcome::TransportClosed => return false,
     }
 

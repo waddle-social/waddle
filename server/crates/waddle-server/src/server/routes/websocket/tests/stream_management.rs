@@ -32,6 +32,21 @@ struct HangingEnsureClaimStore {
     inner: waddle_xmpp::ownership::InProcessClaimStore,
 }
 
+fn register_sm_publish_owner(
+    state: &super::super::state::WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+) {
+    let (tx, _rx) = mpsc::channel(1);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+}
+
 #[async_trait::async_trait]
 impl waddle_xmpp::ownership::ClaimStore for HangingEnsureClaimStore {
     async fn ensure_schema(&self) -> Result<(), waddle_xmpp::ownership::ClaimError> {
@@ -808,7 +823,8 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    conn.phase = ConnectionPhase::ready(jid, false);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
 
     let responses = handle_xmpp_frame(
         "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
@@ -822,6 +838,11 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
     assert_eq!(el.name(), "enabled");
     assert_eq!(el.attr("resume"), Some("true"));
     assert!(el.attr("id").filter(|s| !s.is_empty()).is_some());
+    assert!(
+        !conn.sm_state.enabled,
+        "SM must remain unpublished until the <enabled/> write succeeds"
+    );
+    conn.publish_pending_sm_enable(state.as_ref());
     assert!(conn.sm_state.enabled);
     assert!(conn.sm_state.is_resumable());
 
@@ -861,11 +882,164 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
 }
 
 #[tokio::test]
+async fn resumable_enable_cancelled_before_write_never_publishes_and_releases_exact_claim() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/cancelled-enable".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    assert!(!conn.sm_state.enabled);
+    assert!(conn.pending_sm_enable_commit.is_some());
+
+    drop(conn);
+
+    let registry = &state.deps.protocol.sm_session_registry;
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+    assert!(
+        !registry
+            .locally_owned_claim_ids()
+            .expect("local ownership inventory")
+            .contains(&stream_id),
+        "an unpublished previd must not retain a resumable claim"
+    );
+}
+
+#[tokio::test]
+async fn replaced_connection_cannot_publish_or_strand_its_post_write_enable_claim() {
+    let state = create_test_websocket_state().await;
+    let mut old_conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/replaced-enable".parse().expect("jid");
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut old_conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(
+        enabled.attr("id").expect("stream id").to_string(),
+    );
+
+    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+    let _replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+
+    old_conn.publish_pending_sm_enable(state.as_ref());
+
+    assert!(!old_conn.sm_state.enabled);
+    assert!(old_conn.pending_sm_enable_commit.is_none());
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .expect("replacement entry")
+            .sm_stream_id()
+            .is_none(),
+        "stale publication must not stamp the replacement entry"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .sm_stream_owner(&stream_id)
+            .is_none(),
+        "stale publication must not create a reverse-index alias"
+    );
+    let registry = &state.deps.protocol.sm_session_registry;
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+}
+
+#[tokio::test]
+async fn replacement_after_enable_publication_terminalizes_only_the_old_stream_claim() {
+    let state = create_test_websocket_state().await;
+    let mut old_conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/replaced-after-enable"
+        .parse()
+        .expect("jid");
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut old_conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let old_stream_id = enabled.attr("id").expect("stream id").to_string();
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    assert!(old_conn.sm_state.enabled);
+
+    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    let replacement_stream =
+        waddle_xmpp::pending_delivery::SmSessionId::new("replacement-owned-stream".to_string());
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream.clone()),));
+
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut old_conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .expect("replacement entry")
+            .sm_stream_id(),
+        Some(replacement_stream),
+        "old-stream cleanup must not alter the replacement entry"
+    );
+    let registry = &state.deps.protocol.sm_session_registry;
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert!(registry
+        .locally_owned_claim_ids()
+        .expect("ownership inventory")
+        .contains(&old_stream_id));
+    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+}
+
+#[tokio::test]
 async fn non_resumable_sm_enable_does_not_create_cluster_claim() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/non-resumable".parse().expect("jid");
-    conn.phase = ConnectionPhase::ready(jid, false);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
 
     let responses = handle_xmpp_frame(
         "<enable xmlns='urn:xmpp:sm:3' resume='false'/>",
@@ -879,6 +1053,7 @@ async fn non_resumable_sm_enable_does_not_create_cluster_claim() {
     assert_eq!(enabled.name(), "enabled");
     assert_eq!(enabled.attr("resume"), None);
     let stream_id = enabled.attr("id").expect("SM id");
+    conn.publish_pending_sm_enable(state.as_ref());
     assert!(conn.sm_state.enabled);
     assert!(!conn.sm_state.is_resumable());
     assert!(
@@ -902,6 +1077,7 @@ async fn enable_sm_for_live_ack_tests(
     jid: &FullJid,
 ) -> String {
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state, conn, jid);
     let responses = handle_xmpp_frame(
         "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
         "example.com",
@@ -911,6 +1087,7 @@ async fn enable_sm_for_live_ack_tests(
     .await;
     let enabled = Element::from_str(&responses[0]).expect("enabled xml");
     assert_eq!(enabled.name(), "enabled");
+    conn.publish_pending_sm_enable(state);
     enabled.attr("id").expect("stream id").to_string()
 }
 
