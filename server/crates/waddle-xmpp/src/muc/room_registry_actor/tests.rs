@@ -1217,6 +1217,8 @@ mod ownership_claims_tests {
         release_delay_ms: AtomicU64,
         fence_delay_ms: AtomicU64,
         ensure_delay_ms: AtomicU64,
+        ensure_post_commit_delay_ms: AtomicU64,
+        steal_post_commit_delay_ms: AtomicU64,
     }
 
     impl DeadOwnerClaimStore {
@@ -1230,7 +1232,15 @@ mod ownership_claims_tests {
                 release_delay_ms: AtomicU64::new(0),
                 fence_delay_ms: AtomicU64::new(0),
                 ensure_delay_ms: AtomicU64::new(0),
+                ensure_post_commit_delay_ms: AtomicU64::new(0),
+                steal_post_commit_delay_ms: AtomicU64::new(0),
             }
+        }
+
+        fn empty() -> Self {
+            let mut store = Self::seeded(this_identity(), ClaimEpoch(0));
+            *store.state.get_mut().expect("lock") = None;
+            store
         }
 
         fn fail_fence_on_call(&self, call: usize) {
@@ -1257,6 +1267,20 @@ mod ownership_claims_tests {
 
         fn set_ensure_delay(&self, delay: std::time::Duration) {
             self.ensure_delay_ms.store(
+                u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
+        }
+
+        fn set_ensure_post_commit_delay(&self, delay: std::time::Duration) {
+            self.ensure_post_commit_delay_ms.store(
+                u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
+        }
+
+        fn set_steal_post_commit_delay(&self, delay: std::time::Duration) {
+            self.steal_post_commit_delay_ms.store(
                 u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 Ordering::SeqCst,
             );
@@ -1292,11 +1316,18 @@ mod ownership_claims_tests {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
             let existing = self.state.lock().expect("lock").clone();
-            match existing {
+            let result = match existing {
                 None => self.acquire(entity, me).await,
                 Some((owner, epoch)) if owner == *me => Ok(epoch),
                 Some(_) => Err(ClaimError::AlreadyClaimed),
+            };
+            if result.is_ok() {
+                let delay_ms = self.ensure_post_commit_delay_ms.load(Ordering::SeqCst);
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
             }
+            result
         }
 
         async fn steal_stale(
@@ -1307,15 +1338,24 @@ mod ownership_claims_tests {
             me: &NodeIdentity,
         ) -> Result<ClaimEpoch, ClaimError> {
             self.steal_calls.fetch_add(1, Ordering::SeqCst);
-            let mut state = self.state.lock().expect("lock");
-            match &*state {
-                Some((_, epoch)) if *epoch == observed => {
-                    let new_epoch = ClaimEpoch(epoch.0 + 1);
-                    *state = Some((me.clone(), new_epoch));
-                    Ok(new_epoch)
+            let result = {
+                let mut state = self.state.lock().expect("lock");
+                match &*state {
+                    Some((_, epoch)) if *epoch == observed => {
+                        let new_epoch = ClaimEpoch(epoch.0 + 1);
+                        *state = Some((me.clone(), new_epoch));
+                        Ok(new_epoch)
+                    }
+                    _ => Err(ClaimError::Conflict),
                 }
-                _ => Err(ClaimError::Conflict),
+            };
+            if result.is_ok() {
+                let delay_ms = self.steal_post_commit_delay_ms.load(Ordering::SeqCst);
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
             }
+            result
         }
 
         async fn steal_for_resume(
@@ -2149,6 +2189,125 @@ mod ownership_claims_tests {
             registry.ask(RoomCount).await.expect("registry responsive"),
             0
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_acquire_commit_before_timeout_is_retained_and_exactly_released() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(DeadOwnerClaimStore::empty());
+        claim_store.set_ensure_post_commit_delay(std::time::Duration::from_secs(60));
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("fresh-commit-before-timeout");
+        let registry_for_create = registry.clone();
+        let jid_for_create = jid.clone();
+        let create = tokio::spawn(async move {
+            registry_for_create
+                .ask(GetOrCreateRoom {
+                    room_jid: jid_for_create,
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(ROOM_OWNERSHIP_CALL_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            create.await.expect("join create"),
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipUnavailable(_)
+            ))
+        ));
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("pending acquisition")
+                .depth,
+            1
+        );
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 8 })
+                .await
+                .expect("reconcile acquisition"),
+            1
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_owner_steal_commit_before_timeout_is_retained_and_exactly_released() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(
+            foreign_identity(),
+            ClaimEpoch(70),
+        ));
+        claim_store.set_steal_post_commit_delay(std::time::Duration::from_secs(60));
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("steal-commit-before-timeout");
+        let registry_for_create = registry.clone();
+        let jid_for_create = jid.clone();
+        let create = tokio::spawn(async move {
+            registry_for_create
+                .ask(GetOrCreateRoom {
+                    room_jid: jid_for_create,
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(ROOM_OWNERSHIP_CALL_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            create.await.expect("join create"),
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipUnavailable(_)
+            ))
+        ));
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("pending acquisition")
+                .depth,
+            1
+        );
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 8 })
+                .await
+                .expect("reconcile acquisition"),
+            1
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_none());
     }
 
     #[tokio::test]
