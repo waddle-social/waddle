@@ -505,6 +505,155 @@ async fn dropped_isr_enable_commit_revokes_the_committed_provisional_token() {
 }
 
 #[tokio::test]
+async fn written_isr_enable_that_loses_publication_revokes_on_terminal_cleanup() {
+    let claim_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "incarnation"));
+    let sm_session_registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(claim_store.clone(), node_identity.clone()),
+    );
+    let revoked = Arc::new(tokio::sync::Notify::new());
+    let isr_token_store = Arc::new(ControlledPersistIsrTokenStore {
+        inner: waddle_xmpp::isr::InMemoryIsrTokenStore::new(),
+        hang_once: std::sync::atomic::AtomicBool::new(false),
+        error_once: std::sync::atomic::AtomicBool::new(false),
+        revoked: Some(revoked.clone()),
+    });
+    let state = create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(claim_store),
+            node_identity: Some(node_identity.clone()),
+            isr_token_store: Some(isr_token_store.clone()),
+            ..ClusteringHandles::default()
+        },
+        sm_session_registry,
+    )
+    .await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/publication-race".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        &format!(
+            "<enable xmlns='urn:xmpp:sm:3' resume='true'>\
+                <isr-enable xmlns='{ISR_NS}' mechanism='PLAIN'/>\
+             </enable>"
+        ),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    let token = enabled
+        .get_child("isr-enabled", ISR_NS)
+        .and_then(|element| element.attr("token"))
+        .expect("issued ISR token")
+        .to_string();
+
+    let (replacement_tx, _replacement_rx) = tokio::sync::mpsc::channel(1);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid, replacement_tx);
+    conn.publish_pending_sm_enable(state.as_ref());
+    assert!(
+        conn.sm_state.enabled,
+        "written XEP-0198 state remains committed"
+    );
+    assert!(conn.unpublished_isr_cleanup.is_some());
+
+    let revoke_completed = revoked.notified();
+    let (_outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(1);
+    assert_eq!(
+        super::super::cleanup::cleanup_connection_shutdown(
+            state.as_ref(),
+            &mut outbound_rx,
+            &mut conn,
+            false,
+        )
+        .await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), revoke_completed)
+        .await
+        .expect("terminal cleanup revokes unpublished ISR credential");
+
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        node_identity.current(),
+        waddle_xmpp::ownership::ClaimEpoch(0),
+    );
+    assert_eq!(
+        isr_token_store
+            .consume(&stream_id, token.as_bytes(), ISR_PINNED_MECHANISM, &fence)
+            .await
+            .expect("consume after terminal cleanup"),
+        waddle_xmpp::isr::IsrConsumeOutcome::NoSuchToken
+    );
+}
+
+#[tokio::test]
+async fn isr_is_not_advertised_or_issued_for_unsecured_configured_transport() {
+    let claim_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "incarnation"));
+    let sm_session_registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(claim_store.clone(), node_identity.clone()),
+    );
+    let isr_token_store: Arc<dyn IsrTokenStore> =
+        Arc::new(waddle_xmpp::isr::InMemoryIsrTokenStore::new());
+    let mut state = create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(claim_store),
+            node_identity: Some(node_identity),
+            isr_token_store: Some(isr_token_store),
+            ..ClusteringHandles::default()
+        },
+        sm_session_registry,
+    )
+    .await;
+    Arc::get_mut(&mut state)
+        .expect("fixture state uniquely owned")
+        .deps
+        .transport_security = super::super::state::TransportSecurity::Unsecured;
+    assert!(!state.deps.isr_available());
+
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/insecure".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_isr_publish_owner(state.as_ref(), &mut conn, &jid);
+    let open_responses = handle_xmpp_frame(
+        "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='example.com' version='1.0'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let features = Element::from_str(&open_responses[1]).expect("stream features xml");
+    assert!(!features
+        .children()
+        .any(|child| child.name() == "isr" && child.ns() == ISR_NS));
+    let responses = handle_xmpp_frame(
+        &format!(
+            "<enable xmlns='urn:xmpp:sm:3' resume='true'>\
+                <isr-enable xmlns='{ISR_NS}' mechanism='PLAIN'/>\
+             </enable>"
+        ),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    assert!(enabled.get_child("isr-enabled", ISR_NS).is_none());
+}
+
+#[tokio::test]
 async fn isr_enable_is_silently_ignored_without_clustering() {
     // No clustering/Postgres wired at all — the plain default fixture.
     let state = create_test_websocket_state().await;

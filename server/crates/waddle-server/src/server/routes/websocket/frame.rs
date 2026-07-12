@@ -111,12 +111,7 @@ async fn handle_xmpp_frame_impl(
         InboundFrame::Open => {
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_xml(domain);
-            let isr_available = state
-                .deps
-                .app_state
-                .clustering_claims
-                .isr_token_store()
-                .is_some();
+            let isr_available = state.deps.isr_available();
             let features_element = build_stream_features_for_phase(phase, isr_available);
             *stream_open_sent = true;
             vec![open_element, features_element]
@@ -360,46 +355,6 @@ pub(super) fn settle_inbound_dispatch(
     }
 }
 
-#[cfg(test)]
-mod inbound_dispatch_tests {
-    use super::*;
-
-    fn enabled_sm() -> waddle_xmpp::stream_management::StreamManagementState {
-        let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
-        state.enable("dispatch-test".to_string(), true, Some(300));
-        state
-    }
-
-    #[test]
-    fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
-        let mut state = enabled_sm();
-        let mut completion =
-            crate::server::routes::interpret::SmInboundCompletionTracker::default();
-        let sequence = completion.reserve(&state);
-
-        settle_inbound_dispatch(
-            InboundDisposition::Handled,
-            false,
-            Some(sequence),
-            &mut completion,
-            &mut state,
-        );
-
-        assert_eq!(state.get_inbound_count(), 1);
-
-        let deferred = completion.reserve(&state);
-        settle_inbound_dispatch(
-            InboundDisposition::Handled,
-            true,
-            Some(deferred),
-            &mut completion,
-            &mut state,
-        );
-        assert_eq!(state.get_inbound_count(), 1);
-        assert!(completion.has_pending());
-    }
-}
-
 #[cfg(feature = "clustering")]
 async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
@@ -583,5 +538,45 @@ mod tests {
                 )
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod inbound_dispatch_tests {
+    use super::*;
+
+    fn enabled_sm() -> waddle_xmpp::stream_management::StreamManagementState {
+        let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
+        state.enable("dispatch-test".to_string(), true, Some(300));
+        state
+    }
+
+    #[test]
+    fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
+        let mut state = enabled_sm();
+        let mut completion =
+            crate::server::routes::interpret::SmInboundCompletionTracker::default();
+        let sequence = completion.reserve(&state);
+
+        settle_inbound_dispatch(
+            InboundDisposition::Handled,
+            false,
+            Some(sequence),
+            &mut completion,
+            &mut state,
+        );
+
+        assert_eq!(state.get_inbound_count(), 1);
+
+        let deferred = completion.reserve(&state);
+        settle_inbound_dispatch(
+            InboundDisposition::Handled,
+            true,
+            Some(deferred),
+            &mut completion,
+            &mut state,
+        );
+        assert_eq!(state.get_inbound_count(), 1);
+        assert!(completion.has_pending());
     }
 }

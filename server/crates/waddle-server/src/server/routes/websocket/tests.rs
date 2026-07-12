@@ -351,7 +351,10 @@ async fn create_test_websocket_state_with_extension_manager(
     let runner = MigrationRunner::global();
     runner.run(db_pool.global()).await.expect("migrations");
 
-    let server_config = ServerConfig::test_homeserver();
+    let mut server_config = ServerConfig::test_homeserver();
+    // XEP-0397 fixtures exercise token advertisement/issuance and therefore
+    // model the TLS-secured production endpoint required by the XEP.
+    server_config.base_url = "https://example.com".to_string();
     let mut app_state_built = AppState::new(Arc::new(db_pool));
     if let Some(clustering) = clustering_override {
         app_state_built.clustering_claims = clustering;
@@ -437,6 +440,9 @@ async fn create_test_websocket_state_with_extension_manager(
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
+                transport_security: super::state::TransportSecurity::from_base_url(
+                    &server_config.base_url,
+                ),
                 service_domains: XmppServiceDomains {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),

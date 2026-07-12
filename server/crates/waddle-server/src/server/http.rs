@@ -718,6 +718,9 @@ async fn create_websocket_state(
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),
+            transport_security: routes::websocket::TransportSecurity::from_base_url(
+                &server_config.base_url,
+            ),
             service_domains,
             protocol: ProtocolServices {
                 connection_registry,

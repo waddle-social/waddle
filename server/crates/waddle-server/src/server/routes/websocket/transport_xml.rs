@@ -271,7 +271,7 @@ pub(super) fn build_conflict_stream_error() -> String {
 
 /// `isr_available` (ADR-0017 Phase 3 Slice 8, Q8): whether XEP-0397 ISR is
 /// advertised — true only when `clustering.enabled && Postgres`
-/// (`ClusteringHandles::isr_token_store().is_some()` is the single source
+/// (`WebSocketDeps::isr_available()` is the single source
 /// of truth for this; see that method's doc comment). Corrected premise
 /// (FIX 8): before this slice ISR was advertised UNCONDITIONALLY and
 /// non-conformantly — the wrong namespace (`urn:xmpp:isr:0`) and a bare

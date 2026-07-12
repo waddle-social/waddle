@@ -267,6 +267,17 @@ impl IsrRevocationQueue {
         runtime.spawn(async move { queue.run_worker().await });
     }
 
+    fn schedule_worker_restart(&self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let queue = self.clone();
+        runtime.spawn(async move {
+            tokio::time::sleep(REVOCATION_RETRY_DELAY).await;
+            queue.start_worker();
+        });
+    }
+
     async fn run_worker(self) {
         let mut guard = IsrRevocationWorkerGuard {
             queue: self.clone(),
@@ -351,13 +362,22 @@ impl Drop for IsrRevocationWorkerGuard {
         if !self.armed {
             return;
         }
-        if let Ok(mut state) = self.queue.inner.state.lock() {
+        let retained_active = if let Ok(mut state) = self.queue.inner.state.lock() {
             state.worker_running = false;
             for entry in &mut state.entries {
                 if entry.state == IsrRevocationState::InFlight {
                     entry.state = IsrRevocationState::Active;
                 }
             }
+            state
+                .entries
+                .iter()
+                .any(|entry| entry.state == IsrRevocationState::Active)
+        } else {
+            false
+        };
+        if retained_active {
+            self.queue.schedule_worker_restart();
         }
     }
 }
@@ -549,6 +569,63 @@ mod tests {
         revoked: tokio::sync::Notify,
     }
 
+    struct PanicFirstRevokeStore {
+        inner: InMemoryIsrTokenStore,
+        attempts: std::sync::atomic::AtomicUsize,
+        revoked: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl IsrTokenStore for PanicFirstRevokeStore {
+        async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn persist_issued(
+            &self,
+            sm_id: &str,
+            issued: &IssuedIsrToken,
+        ) -> Result<(), IsrTokenStoreError> {
+            self.inner.persist_issued(sm_id, issued).await
+        }
+
+        async fn revoke_if_current(
+            &self,
+            sm_id: &str,
+            issued: &IssuedIsrToken,
+        ) -> Result<bool, IsrTokenStoreError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                panic!("injected first revoke panic");
+            }
+            let revoked = self.inner.revoke_if_current(sm_id, issued).await?;
+            self.revoked.notify_one();
+            Ok(revoked)
+        }
+
+        async fn consume(
+            &self,
+            sm_id: &str,
+            presented_token: &[u8],
+            mechanism: &str,
+            fence: &SmClaimFence,
+        ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
+            self.inner
+                .consume(sm_id, presented_token, mechanism, fence)
+                .await
+        }
+
+        async fn sweep_expired(
+            &self,
+            max_age: std::time::Duration,
+        ) -> Result<u64, IsrTokenStoreError> {
+            self.inner.sweep_expired(max_age).await
+        }
+    }
+
     #[async_trait]
     impl IsrTokenStore for FailFirstRevokeStore {
         async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
@@ -730,6 +807,34 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), revoked)
             .await
             .expect("second revoke succeeds after first failure");
+
+        assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn revocation_queue_restarts_after_worker_panic() {
+        let store = Arc::new(PanicFirstRevokeStore {
+            inner: InMemoryIsrTokenStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            revoked: tokio::sync::Notify::new(),
+        });
+        let issued = IssuedIsrToken::new("PLAIN");
+        store
+            .persist_issued("sm-panic", &issued)
+            .await
+            .expect("persist provisional token");
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+        let reservation = queue
+            .reserve("sm-panic".to_string(), dyn_store, issued)
+            .expect("reserve cleanup capacity");
+        let revoked = store.revoked.notified();
+
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(1), revoked)
+            .await
+            .expect("replacement worker revokes after predecessor panic");
 
         assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);

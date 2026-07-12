@@ -42,7 +42,7 @@ impl SmEnableCommit {
         sm_state: &mut StreamManagementState,
         bound_jid: Option<&jid::FullJid>,
         registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    ) {
+    ) -> Option<waddle_xmpp::isr::IsrRevocationReservation> {
         let registry_published = match (bound_jid, registry_owner) {
             (Some(jid), Some(owner)) => state
                 .deps
@@ -63,9 +63,10 @@ impl SmEnableCommit {
         // same-JID replacement may reject only the shared registry alias,
         // never roll back the state the peer has already observed.
         sm_state.enable(self.stream_id.clone(), self.resume, Some(self.max));
-        if let Some(guard) = self.claim_guard.as_mut() {
-            guard.disarm();
-        }
+        let unpublished_isr_cleanup = self
+            .claim_guard
+            .take()
+            .and_then(|guard| guard.commit(registry_published));
         if !registry_published {
             debug!(
                 stream_id = %self.stream_id,
@@ -73,6 +74,7 @@ impl SmEnableCommit {
             );
         }
         info!(stream_id = %self.stream_id, resume = self.resume, max = self.max, "SM enabled");
+        unpublished_isr_cleanup
     }
 }
 
@@ -102,10 +104,19 @@ impl SmEnableClaimGuard {
         true
     }
 
-    fn disarm(&mut self) {
+    fn commit(
+        mut self,
+        registry_published: bool,
+    ) -> Option<waddle_xmpp::isr::IsrRevocationReservation> {
         self.armed = false;
-        if let Some(reservation) = self.provisional_isr_token.take() {
-            reservation.disarm();
+        let reservation = self.provisional_isr_token.take();
+        if registry_published {
+            if let Some(reservation) = reservation {
+                reservation.disarm();
+            }
+            None
+        } else {
+            reservation
         }
     }
 }
@@ -591,7 +602,12 @@ async fn handle_sm_enable(
     // (gated) advertisement, or without `resume='true'`, simply doesn't
     // get a token, exactly as if the server had never announced the
     // capability.
-    let isr_token = if !enable.resume {
+    let isr_token = if !state.deps.transport_security.is_tls() {
+        if enable.isr_enable_mechanism.is_some() {
+            debug!(stream_id = %stream_id, "ISR enable requested on a non-TLS endpoint; ignoring");
+        }
+        None
+    } else if !enable.resume {
         if enable.isr_enable_mechanism.is_some() {
             debug!(
                 stream_id = %stream_id,
