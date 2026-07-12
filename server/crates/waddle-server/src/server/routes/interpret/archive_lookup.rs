@@ -9,7 +9,7 @@ pub(super) fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
     WaddleId::new(value).expect("static room Waddle scope is non-empty")
 }
 
-/// Resolve a typed [`MessageRef`] against `archive`'s personal MAM
+/// Resolve a typed [`MessageRef`] against the explicitly selected MAM
 /// archive and project the storage row into the typed protocol
 /// [`ProtocolArchivedMessage`] shape the
 /// [`waddle_xmpp::protocol::handlers::rich_target_validation::RichTargetValidationHandler`]
@@ -24,6 +24,7 @@ pub(super) fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
 pub(super) async fn lookup_archived_message(
     deps: &Deps<'_>,
     archive: &jid::BareJid,
+    archive_kind: waddle_xmpp::mam::MamArchiveKind,
     reference: &MessageRef,
 ) -> Option<Box<ProtocolArchivedMessage>> {
     let Some(mam_storage) = deps.mam_storage else {
@@ -45,29 +46,13 @@ pub(super) async fn lookup_archived_message(
                 .await
         }
         MessageRef::OriginId { sender, origin_id } => {
-            // No origin-id-only accessor on `MamStorage` today, so we
-            // narrow with `MamQuery.with = sender` (storage-level
-            // sender filter) and pick the first row whose `origin_id`
-            // *or wire `id` attribute* (`stanza_id` column) matches
-            // the requested value. The fall-through to the wire id
-            // mirrors the legacy `lookup_correction_target_message`
-            // behaviour — many clients (and the CUE e2e scenarios)
-            // omit the explicit `<origin-id/>` payload and rely on
-            // the message's `id` attribute as the correction
-            // target. Sender-bound matching keeps the
-            // OR-collision protection from #229 PR8: only rows sent
-            // by the original author can satisfy the correction.
-            let query = waddle_xmpp::mam::MamQuery {
-                with: Some(jid::Jid::from(sender.clone())),
-                ..Default::default()
-            };
-            match mam_storage.query_messages(archive, &query).await {
-                Ok(result) => Ok(result.messages.into_iter().find(|row| {
-                    row_matches_origin_id(row, sender, origin_id.as_str())
-                        || row_matches_wire_id(row, sender, origin_id.as_str())
-                })),
-                Err(e) => Err(e),
-            }
+            // Use the backend's bounded sender-owned lookup. It matches the
+            // explicit origin-id first shape and the legacy wire `id`
+            // fallback without applying XEP-0313 `with=owner` self-chat
+            // semantics or scanning sequential MAM pages.
+            mam_storage
+                .get_message_by_sender_and_origin_id(archive, archive_kind, sender, origin_id)
+                .await
         }
     };
     match lookup {
@@ -82,38 +67,6 @@ pub(super) async fn lookup_archived_message(
             None
         }
     }
-}
-
-/// Verify a storage row genuinely matches the typed
-/// [`MessageRef::OriginId`] key — `origin_id` field equality plus
-/// `sender` (`from`) equality via parsed [`jid::BareJid`] comparison.
-/// String equality on `from` would mishandle case-folded localparts
-/// or full-JID-vs-bare-JID strings; the typed compare normalizes both.
-pub(super) fn row_matches_origin_id(
-    row: &MamArchivedMessage,
-    expected_sender: &jid::BareJid,
-    expected_origin_id: &str,
-) -> bool {
-    if row.origin_id.as_ref().map(|o| o.id.as_str()) != Some(expected_origin_id) {
-        return false;
-    }
-    row.from.to_bare() == *expected_sender
-}
-
-/// Fallback match for the legacy XEP-0308 correction-target shape
-/// where the message carries no explicit `<origin-id/>` payload —
-/// matches the row's wire `id` attribute (the `stanza_id` storage
-/// column) to the correction's `replaces_id`. Same sender-bound
-/// scoping as [`row_matches_origin_id`].
-pub(super) fn row_matches_wire_id(
-    row: &MamArchivedMessage,
-    expected_sender: &jid::BareJid,
-    expected_wire_id: &str,
-) -> bool {
-    if row.stanza_id.as_ref().map(|s| s.id.as_str()) != Some(expected_wire_id) {
-        return false;
-    }
-    row.from.to_bare() == *expected_sender
 }
 
 /// Project a storage [`MamArchivedMessage`] row into the protocol-side

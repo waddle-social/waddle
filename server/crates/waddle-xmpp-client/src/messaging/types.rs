@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use std::fmt;
 use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
@@ -300,12 +300,11 @@ pub struct InboundMessage {
 /// XEP-0490 §3 displayed entry as surfaced from a PEP event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsDisplayedEntry {
-    /// PEP item id = bare JID of the chat (DM contact or MUC room).
-    pub chat_id: BareJid,
+    /// PEP item id = chat JID: bare for DMs/rooms, full occupant for MUC PMs.
+    pub chat_id: Jid,
     /// XEP-0359 id of the displayed message.
     pub stanza_id: StanzaId,
-    /// JID that injected the stanza-id (the MUC room for group
-    /// chats; the user's own server for 1:1 chats).
+    /// Resource-less assigning entity from the XEP-0359 `by` attribute.
     pub stanza_id_by: BareJid,
 }
 

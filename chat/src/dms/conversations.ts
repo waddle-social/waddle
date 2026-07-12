@@ -1,6 +1,13 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
-import type { BrowserXmppClient, DmConversation, InboxEntry, LiveDmMessage, PresenceUpdateEvent } from "@/lib/xmpp-client";
+import type {
+  BrowserXmppClient,
+  DmConversation,
+  DmConversationScope,
+  InboxEntry,
+  LiveDmMessage,
+  PresenceUpdateEvent,
+} from "@/lib/xmpp-client";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
 
 function peerUsername(peerJid: string): string {
@@ -60,6 +67,12 @@ export function useDirectMessageConversations(
     conversations.value.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount), 0)
   );
   const selfBareJid = computed(() => barePeerJid(session.value?.jid ?? ""));
+  const activeConversationScope = computed<DmConversationScope | null>(() => {
+    const active = activePeerJid.value;
+    if (!active) return null;
+    const conversation = conversations.value.find((candidate) => candidate.peerJid === active);
+    return conversation?.mucPm ? "muc-occupant" : "account";
+  });
 
   let inboxRequestId = 0;
   const pendingMarkRead = new Set<string>();
@@ -98,21 +111,25 @@ export function useDirectMessageConversations(
       const raw = window.sessionStorage.getItem(key);
       if (!raw) return;
       const parsed = JSON.parse(raw) as { conversations?: DmConversation[]; activePeerJid?: string | null };
-      conversations.value = sortByRecent((parsed.conversations ?? []).map((c) => ({
-        ...c,
-        // #1256: MUC-PM conversations are keyed by the FULL occupant JID —
-        // bare-folding on restore would re-key them to the room bare JID
-        // (a reply from that row would broadcast to the room). The
-        // resource heuristic backstops the flag: normal DM rows are
-        // always persisted bare, so a resource-carrying key IS an
-        // occupant conversation even in a blob written without the flag.
-        peerJid: c.mucPm || c.peerJid.includes("/") ? c.peerJid : barePeerJid(c.peerJid),
-        peerUsername: c.peerUsername || (c.mucPm ? mucPmDisplayName(c.peerJid) : peerUsername(c.peerJid)),
-        unreadCount: c.unreadCount ?? 0,
-        // Clear any idle age from an older persisted blob — it starts empty and
-        // only repopulates from live presence updates.
-        presenceIdleSince: undefined,
-      })));
+      conversations.value = sortByRecent((parsed.conversations ?? []).map((c) => {
+        const mucPm = c.mucPm === true || c.peerJid.includes("/");
+        return {
+          ...c,
+          // #1256: MUC-PM conversations are keyed by the FULL occupant JID —
+          // bare-folding on restore would re-key them to the room bare JID
+          // (a reply from that row would broadcast to the room). The
+          // resource heuristic backstops the flag: normal DM rows are
+          // always persisted bare, so a resource-carrying key IS an
+          // occupant conversation even in a blob written without the flag.
+          peerJid: mucPm ? c.peerJid : barePeerJid(c.peerJid),
+          peerUsername: c.peerUsername || (mucPm ? mucPmDisplayName(c.peerJid) : peerUsername(c.peerJid)),
+          ...(mucPm ? { mucPm: true, mucPmRoomJid: c.mucPmRoomJid ?? barePeerJid(c.peerJid) } : {}),
+          unreadCount: c.unreadCount ?? 0,
+          // Clear any idle age from an older persisted blob — it starts empty and
+          // only repopulates from live presence updates.
+          presenceIdleSince: undefined,
+        };
+      }));
       const restoredActive = parsed.activePeerJid ?? null;
       activePeerJid.value = restoredActive
         ? (conversations.value.some((c) => c.peerJid === restoredActive.trim())
@@ -478,6 +495,7 @@ export function useDirectMessageConversations(
   return {
     conversations,
     activePeerJid,
+    activeConversationScope,
     hasUnread,
     totalUnreadCount,
     openDm,

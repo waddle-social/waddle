@@ -58,16 +58,16 @@ pub struct WaddleCallThreadAnchor {
 /// XEP-0490 §3 displayed-marker entry surfaced to Swift. Mirrors
 /// `waddle_xmpp_client::messaging::MdsDisplayedEntry` 1:1 — the
 /// FFI does not collapse or rename fields so the Swift consumer
-/// can correlate `chat_id` (PEP item id = bare JID of the chat)
+/// can correlate `chat_id` (PEP item id = the exact chat JID)
 /// with its locally-tracked conversation list directly.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleMdsDisplayedEntry {
-    /// PEP item id = bare JID of the chat (DM contact or MUC room).
+    /// PEP item id = bare for DMs/rooms, full occupant for MUC PMs.
     pub chat_id: String,
     /// XEP-0359 id of the displayed message.
     pub stanza_id: String,
-    /// JID that injected the stanza-id (the MUC room for group
-    /// chats; the user's own server for 1:1 chats).
+    /// Resource-less room or account-server authority from the XEP-0359 `by`
+    /// attribute, as required by XEP-0490.
     pub stanza_id_by: String,
 }
 

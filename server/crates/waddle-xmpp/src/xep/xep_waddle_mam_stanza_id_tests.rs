@@ -32,7 +32,7 @@ use waddle_xmpp_core::mam::{
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::MessageType;
 
-use crate::mam::{build_result_messages, InMemoryMamStorage, MamStorage};
+use crate::mam::{build_result_messages, InMemoryMamStorage, MamArchiveKind, MamStorage};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -140,6 +140,7 @@ async fn stanza_id_filter_returns_only_matching_message() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("uuid-m1")],
                 ..Default::default()
@@ -180,6 +181,7 @@ async fn stanza_id_filter_matches_wire_message_id_for_dm_pin_hydration() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("shared-wire-id")],
                 ..Default::default()
@@ -227,6 +229,7 @@ async fn stanza_id_filter_with_no_match_returns_empty_not_error() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("sid-missing")],
                 ..Default::default()
@@ -320,6 +323,7 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
     let result = store
         .query_messages(
             &archive,
+            MamArchiveKind::Room,
             &MamQuery {
                 stanza_ids: vec![filter_id("archive-rich-1")],
                 ..Default::default()

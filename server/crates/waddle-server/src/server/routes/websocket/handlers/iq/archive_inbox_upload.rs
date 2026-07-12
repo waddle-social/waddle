@@ -156,7 +156,15 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             .deps
             .protocol
             .mam_storage
-            .query_messages(&target_bare, &query)
+            .query_messages(
+                &target_bare,
+                if is_personal {
+                    waddle_xmpp::mam::MamArchiveKind::Personal
+                } else {
+                    waddle_xmpp::mam::MamArchiveKind::Room
+                },
+                &query,
+            )
             .await
         {
             Ok(result) => result,

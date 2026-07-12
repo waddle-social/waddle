@@ -2363,12 +2363,12 @@ public func FfiConverterTypeWaddleMamPage_lower(_ value: WaddleMamPage) -> RustB
  * XEP-0490 §3 displayed-marker entry surfaced to Swift. Mirrors
  * `waddle_xmpp_client::messaging::MdsDisplayedEntry` 1:1 — the
  * FFI does not collapse or rename fields so the Swift consumer
- * can correlate `chat_id` (PEP item id = bare JID of the chat)
+ * can correlate `chat_id` (PEP item id = the exact chat JID)
  * with its locally-tracked conversation list directly.
  */
 public struct WaddleMdsDisplayedEntry: Equatable, Hashable {
     /**
-     * PEP item id = bare JID of the chat (DM contact or MUC room).
+     * PEP item id = bare for DMs/rooms, full occupant for MUC PMs.
      */
     public var chatId: String
     /**
@@ -2376,8 +2376,8 @@ public struct WaddleMdsDisplayedEntry: Equatable, Hashable {
      */
     public var stanzaId: String
     /**
-     * JID that injected the stanza-id (the MUC room for group
-     * chats; the user's own server for 1:1 chats).
+     * Resource-less room or account-server authority from the XEP-0359 `by`
+     * attribute, as required by XEP-0490.
      */
     public var stanzaIdBy: String
 
@@ -2385,14 +2385,14 @@ public struct WaddleMdsDisplayedEntry: Equatable, Hashable {
     // declare one manually.
     public init(
         /**
-         * PEP item id = bare JID of the chat (DM contact or MUC room).
+         * PEP item id = bare for DMs/rooms, full occupant for MUC PMs.
          */chatId: String,
         /**
          * XEP-0359 id of the displayed message.
          */stanzaId: String,
         /**
-         * JID that injected the stanza-id (the MUC room for group
-         * chats; the user's own server for 1:1 chats).
+         * Resource-less room or account-server authority from the XEP-0359 `by`
+         * attribute, as required by XEP-0490.
          */stanzaIdBy: String) {
         self.chatId = chatId
         self.stanzaId = stanzaId

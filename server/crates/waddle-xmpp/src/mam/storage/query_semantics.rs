@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use jid::BareJid;
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 
+use super::MamArchiveKind;
+
 pub(super) fn uses_backward_pagination(query: &MamQuery) -> bool {
     // XEP-0059 §2.5: an empty <before/> element requests the last page of
     // results. We treat any present `before_id` — including `Some("")` — as a
@@ -102,6 +104,33 @@ pub(super) fn jid_matches_with_filter(
     } else {
         &archived.to_bare() == with_bare
     }
+}
+
+/// XEP-0313 §4.3.1 `with` predicate for an archived message.
+///
+/// In a personal archive, a query for the owner's own bare JID is the
+/// self-chat special case:
+/// both endpoints must be bare-equivalent to the archive owner. Room
+/// archives and all other queries keep ordinary sender-or-recipient
+/// semantics.
+pub(super) fn message_matches_with_filter(
+    archive_jid: &BareJid,
+    archive_kind: MamArchiveKind,
+    from: &jid::Jid,
+    to: &jid::Jid,
+    with: &jid::Jid,
+) -> bool {
+    let with_bare = with.to_bare();
+    if archive_kind == MamArchiveKind::Personal
+        && with.resource().is_none()
+        && &with_bare == archive_jid
+    {
+        return &from.to_bare() == archive_jid && &to.to_bare() == archive_jid;
+    }
+
+    let with_has_resource = with.resource().is_some();
+    jid_matches_with_filter(from, &with_bare, with_has_resource, with)
+        || jid_matches_with_filter(to, &with_bare, with_has_resource, with)
 }
 
 pub(super) fn matches_thread_filter(message: &ArchivedMessage, thread_id: &str) -> bool {

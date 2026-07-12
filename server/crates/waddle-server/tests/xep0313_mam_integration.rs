@@ -6,7 +6,9 @@ use waddle_ws_test_support as ws_common;
 
 use jid::Jid;
 use tokio::sync::Mutex;
-use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};
+use waddle_xmpp::mam::{
+    ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, MamStorageError, SqlxMamStorage,
+};
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use xmpp_parsers::message::MessageType;
 use xmpp_parsers::minidom::Element;
@@ -696,7 +698,7 @@ async fn xep_0313_full_jid_from_round_trips_through_mam_without_resource_truncat
     storage.store_message(&archive, &row).await.expect("store");
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -746,7 +748,7 @@ async fn xep_0313_bare_jid_to_round_trips_through_mam() {
     storage.store_message(&archive, &row).await.expect("store");
 
     let result = storage
-        .query_messages(&archive, &MamQuery::default())
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -788,7 +790,9 @@ async fn xep_0313_decode_rejects_unparseable_from_jid_row() {
         .await
         .expect("raw insert");
 
-    let result = storage.query_messages(&archive, &MamQuery::default()).await;
+    let result = storage
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
+        .await;
     match result {
         Err(MamStorageError::Serialization(message)) => {
             assert!(
@@ -837,7 +841,9 @@ async fn xep_0313_decode_rejects_unknown_message_type_row() {
         .await
         .expect("raw insert");
 
-    let result = storage.query_messages(&archive, &MamQuery::default()).await;
+    let result = storage
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
+        .await;
     match result {
         Err(MamStorageError::Serialization(message)) => {
             assert!(
@@ -935,7 +941,7 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
         ..MamQuery::default()
     };
     let bare_result = storage
-        .query_messages(&archive, &bare_with_query)
+        .query_messages(&archive, MamArchiveKind::Room, &bare_with_query)
         .await
         .expect("query bare with");
     assert_eq!(
@@ -957,7 +963,7 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
         ..MamQuery::default()
     };
     let full_result = storage
-        .query_messages(&archive, &full_with_query)
+        .query_messages(&archive, MamArchiveKind::Room, &full_with_query)
         .await
         .expect("query full with");
     assert!(
@@ -977,7 +983,7 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
         ..MamQuery::default()
     };
     let exact_result = storage
-        .query_messages(&archive, &exact_full_with_query)
+        .query_messages(&archive, MamArchiveKind::Room, &exact_full_with_query)
         .await
         .expect("query exact full with");
     assert_eq!(

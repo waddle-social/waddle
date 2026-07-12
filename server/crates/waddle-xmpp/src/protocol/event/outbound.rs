@@ -5,6 +5,7 @@ use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
+use crate::mam::MamArchiveKind;
 use crate::muc::PinChangeRequest;
 use crate::Stanza;
 
@@ -400,11 +401,12 @@ pub enum OutboundEvent {
     /// XEP-0425 moderation, XEP-0461 reply). Result arrives as
     /// [`InboundEvent::ArchivedMessageLoaded`].
     ///
-    /// `archive` is the bare JID whose MAM is queried (the user's bare
-    /// JID for 1:1 messages, the room JID for groupchat).
+    /// `archive` is the bare JID whose MAM is queried. `archive_kind`
+    /// carries the protocol context that a bare JID alone cannot encode.
     LookupArchivedMessage {
         id: CallbackId,
         archive: BareJid,
+        archive_kind: MamArchiveKind,
         reference: MessageRef,
     },
 

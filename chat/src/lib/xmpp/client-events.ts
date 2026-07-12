@@ -48,7 +48,7 @@ export type ClientEventMap = Record<string, ReadonlyArray<unknown>>;
  * callback parameter without importing this name.
  */
 export interface MdsDisplayedEntry {
-  /** PEP item id = bare JID of the chat (DM contact or MUC room). */
+  /** PEP item id: bare for DMs/rooms, full occupant for MUC PMs. */
   chatId: string;
   /** XEP-0359 id of the latest displayed message. */
   stanzaId: string;

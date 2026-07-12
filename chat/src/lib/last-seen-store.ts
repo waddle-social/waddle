@@ -9,20 +9,21 @@ export function roomKey(channelId: string): string {
   return `${PREFIX}.room.${channelId}`;
 }
 
-export function dmKey(peerBareJid: string): string {
-  return `${PREFIX}.dm.${peerBareJid}`;
+export function dmKey(peerConversationJid: string): string {
+  return `${PREFIX}.dm.${peerConversationJid}`;
 }
 
 /**
  * Key used by XEP-0490 MDS to persist the latest displayed stanza-id
  * received from another device of the same account. The chat id is
- * the bare JID of the chat (DM contact or MUC room) per XEP-0490 §3.
+ * bare for a DM contact or room, and full occupant JID for a MUC PM,
+ * per XEP-0490 §3.
  * The local readers that own the "new messages" divider for the
  * corresponding conversation can look up this key in addition to
  * their conversation-scoped key.
  */
-export function mdsChatKey(chatBareJid: string): string {
-  return `${PREFIX}.mds.${chatBareJid}`;
+export function mdsChatKey(chatJid: string): string {
+  return `${PREFIX}.mds.${chatJid}`;
 }
 
 export type MdsDisplayedState = {

@@ -1,5 +1,5 @@
 import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, DmConversationScope } from "@/lib/xmpp-client";
 
 // XEP-0085 chat-state notifications for the DM side. Mirrors
 // useChannelChatStates with the same debounce machine, scoped to the
@@ -8,13 +8,14 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 type UseDmChatStatesDeps = {
   xmppClient: Ref<BrowserXmppClient | null>;
   activePeerJid: Ref<string | null>;
+  conversationScope?: (peerJid: string) => DmConversationScope;
 };
 
 const TYPING_EXPIRY_MS = 5000;
 const COMPOSING_PAUSE_MS = 3000;
 
 export function useDmChatStates(deps: UseDmChatStatesDeps) {
-  const { xmppClient, activePeerJid } = deps;
+  const { xmppClient, activePeerJid, conversationScope } = deps;
 
   const typingUsers = ref<string[]>([]);
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -67,15 +68,16 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     if (!client || !peerJid) return;
+    const scope = conversationScope?.(peerJid) ?? "account";
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      void client.sendDmChatState(peerJid, "composing", thread).catch(() => undefined);
+      void client.sendDmChatState(peerJid, "composing", thread, scope).catch(() => undefined);
     }
     if (composingTimeout) clearTimeout(composingTimeout);
     composingTimeout = setTimeout(() => {
       if (xmppClient.value !== client || activePeerJid.value !== peerJid) return;
       lastChatState = "paused";
-      void client.sendDmChatState(peerJid, "paused", thread).catch(() => undefined);
+      void client.sendDmChatState(peerJid, "paused", thread, scope).catch(() => undefined);
     }, COMPOSING_PAUSE_MS);
   }
 

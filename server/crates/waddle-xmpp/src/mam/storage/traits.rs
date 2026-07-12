@@ -1,11 +1,23 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::muc::RoomClaimFenceContext;
 
 use super::MamStorageError;
+
+/// The XEP-0313 archive context that defines query semantics.
+///
+/// A bare JID alone cannot distinguish a personal archive from a room
+/// archive. Callers must supply the protocol context explicitly so the
+/// owner-self `with` rule is never inferred from domain naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MamArchiveKind {
+    Personal,
+    Room,
+}
 
 /// Trait for MAM message storage backends.
 ///
@@ -76,10 +88,15 @@ pub trait MamStorage: Send + Sync {
     /// - For MUC archives: the room bare JID
     /// - For personal archives: the user's bare JID
     ///
+    /// `archive_kind` is mandatory because XEP-0313 §4.3.1 gives
+    /// owner-equivalent `with` queries special semantics only for personal
+    /// archives. The JID itself is not sufficient to infer that context.
+    ///
     /// Supports filtering by time range, sender, and RSM pagination.
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
+        archive_kind: MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError>;
 
@@ -118,6 +135,19 @@ pub trait MamStorage: Send + Sync {
         &self,
         archive_jid: &BareJid,
         message_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError>;
+
+    /// Resolve a sender-owned origin id, falling back to the same sender's
+    /// wire stanza id for legacy XEP-0308 clients that omit `<origin-id/>`.
+    /// Backends must perform this as one bounded lookup rather than paging an
+    /// archive. Personal archives compare the sender by bare account JID;
+    /// room archives compare the exact full occupant JID.
+    async fn get_message_by_sender_and_origin_id(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: MamArchiveKind,
+        sender: &Jid,
+        origin_id: &OriginId,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Get a message by server archive id or stanza id, excluding client origin-id.

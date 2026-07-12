@@ -91,7 +91,7 @@ describe("offline outbound queue replay", () => {
       kind: "dm",
       id: "dm-preview-replay",
       createdAt: new Date().toISOString(),
-      peerJid: "bob@example.com",
+      peerJid: " Bob@Example.COM/desktop ",
       body: "read https://example.com/article",
     });
 
@@ -120,7 +120,7 @@ describe("offline outbound queue replay", () => {
 
     await client.sendDirectMessage("bob@example.com", "first", { id: "dm-1" });
     await client.sendDirectMessage("bob@example.com", "second", { id: "dm-2" });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id)).toEqual([
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
       "dm-1",
       "dm-2",
     ]);
@@ -166,7 +166,7 @@ describe("offline outbound queue replay", () => {
     // Post-fix: persisted queue entries linger until XEP-0198
     // `message:acked` confirms the server received them.
     expect(
-      listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id),
+      listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id),
     ).toEqual(["dm-1", "dm-2"]);
 
     // A second flush in the same session must NOT re-send: both entries
@@ -179,11 +179,11 @@ describe("offline outbound queue replay", () => {
     // persisted queue; dm-2 is still pending.
     xmpp.emit("message:acked", { id: "dm-1" });
     expect(
-      listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id),
+      listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id),
     ).toEqual(["dm-2"]);
 
     xmpp.emit("message:acked", { id: "dm-2" });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("replays queued room messages in order after the room rejoins", async () => {
@@ -251,6 +251,32 @@ describe("offline outbound queue replay", () => {
 });
 
 describe("offline outbound queue hydration", () => {
+  test("ambiguous resource-bearing legacy rows fail closed for every DM scope", () => {
+    localStorage.setItem(
+      "waddle.chat.outbound-queue.alice@example.com",
+      JSON.stringify([
+        {
+          kind: "dm",
+          id: "legacy-unscoped-occupant",
+          createdAt: new Date().toISOString(),
+          peerJid: "room@conference.example/alice",
+          body: "ambiguous",
+        },
+      ]),
+    );
+
+    expect(
+      listQueuedDmMessages("alice@example.com", "room@conference.example", "account"),
+    ).toEqual([]);
+    expect(
+      listQueuedDmMessages(
+        "alice@example.com",
+        "room@conference.example/alice",
+        "muc-occupant",
+      ),
+    ).toEqual([]);
+  });
+
   test("room timelines restore queued messages from localStorage", async () => {
     const roomJid = roomBareJidFor(session(), "c1");
     enqueueQueuedMessage("alice@example.com", {
@@ -296,7 +322,7 @@ describe("offline outbound queue hydration", () => {
       // See `room timelines restore queued messages from localStorage` —
       // the queue store now prunes entries older than 7 days.
       createdAt: new Date().toISOString(),
-      peerJid: "bob@example.com",
+      peerJid: " Bob@Example.COM/desktop ",
       body: "hello from storage",
     });
 
@@ -320,5 +346,43 @@ describe("offline outbound queue hydration", () => {
       body: "hello from storage",
       deliveryStatus: "queued",
     });
+  });
+
+  test("MUC-PM timelines restore only the full occupant's queued messages", async () => {
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "queued-muc-pm-alice",
+      createdAt: new Date().toISOString(),
+      peerJid: " Room@Conference.Example/alice ",
+      mucPm: true,
+      body: "private hello",
+    });
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "queued-muc-pm-bob",
+      createdAt: new Date().toISOString(),
+      peerJid: "room@conference.example/bob",
+      mucPm: true,
+      body: "other occupant",
+    });
+
+    const actionError = ref("");
+    const messaging = useDirectMessages(
+      ref(session()),
+      ref(null),
+      ref("room@conference.example/alice"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+      ref("muc-occupant"),
+    );
+
+    await messaging.loadMessages("room@conference.example/alice");
+
+    expect(messaging.messages.value.map((message) => message.id)).toEqual([
+      "queued-muc-pm-alice",
+    ]);
   });
 });

@@ -342,7 +342,11 @@ async fn xep_0313_archive_direct_persists_to_mam_storage() {
     let _outcome = interpret(events, &deps).await;
 
     let stored = mam
-        .query_messages(&archive_jid, &Default::default())
+        .query_messages(
+            &archive_jid,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query");
     assert_eq!(
@@ -712,11 +716,19 @@ async fn xep_0313_archive_direct_writes_one_entry_per_event() {
     let _outcome = interpret(events, &deps).await;
 
     let alice_archive = mam
-        .query_messages(&alice, &Default::default())
+        .query_messages(
+            &alice,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query alice");
     let bob_archive = mam
-        .query_messages(&bob, &Default::default())
+        .query_messages(
+            &bob,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -753,6 +765,7 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
         async fn query_messages(
             &self,
             _: &jid::BareJid,
+            _: waddle_xmpp::mam::MamArchiveKind,
             _: &MamQuery,
         ) -> Result<MamResult, MamStorageError> {
             Ok(MamResult {
@@ -784,6 +797,15 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
             &self,
             _: &jid::BareJid,
             _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            Ok(None)
+        }
+        async fn get_message_by_sender_and_origin_id(
+            &self,
+            _: &jid::BareJid,
+            _: waddle_xmpp::mam::MamArchiveKind,
+            _: &jid::Jid,
+            _: &waddle_xmpp_core::xep0359::OriginId,
         ) -> Result<Option<ArchivedMessage>, MamStorageError> {
             Ok(None)
         }
@@ -944,6 +966,7 @@ async fn xep_0424_lookup_archived_message_by_stanza_id_feeds_archived_loaded_bac
     let events = vec![OutboundEvent::LookupArchivedMessage {
         id: CallbackId(7),
         archive: archive_jid.clone(),
+        archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::StanzaId {
             stanza_id: StanzaId::new("canon-A1", jid::Jid::from(archive_jid.clone())),
         },
@@ -984,6 +1007,7 @@ async fn xep_0424_lookup_archived_message_not_found_feeds_none_back() {
     let events = vec![OutboundEvent::LookupArchivedMessage {
         id: CallbackId(11),
         archive: archive_jid.clone(),
+        archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::StanzaId {
             stanza_id: StanzaId::new("never-stamped", jid::Jid::from(archive_jid)),
         },
@@ -1071,8 +1095,9 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
     let events = vec![OutboundEvent::LookupArchivedMessage {
         id: CallbackId(21),
         archive: archive_jid.clone(),
+        archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::OriginId {
-            sender: alice_bare.clone(),
+            sender: alice_bare.clone().into(),
             origin_id: OriginId::new("collision"),
         },
     }];
@@ -1090,6 +1115,334 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
             );
         }
         other => panic!("expected alice-authored row, got {other:?}"),
+    }
+}
+
+async fn assert_origin_lookup_finds_targets_beyond_default_page(mam: Arc<dyn MamStorage>) {
+    use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind};
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    struct SeedRow<'a> {
+        id: String,
+        offset: i64,
+        from: &'a str,
+        to: &'a str,
+        origin_id: String,
+        body: String,
+    }
+
+    async fn store_row(mam: &dyn MamStorage, archive: &jid::BareJid, seed: SeedRow<'_>) {
+        let row = ArchivedMessage {
+            id: seed.id,
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000 + seed.offset, 0)
+                .expect("fixture timestamp"),
+            from: seed.from.parse().expect("from JID"),
+            to: seed.to.parse().expect("to JID"),
+            body: Some(seed.body),
+            origin_id: Some(OriginId::new(seed.origin_id)),
+            ..ArchivedMessage::for_test(
+                seed.from.parse().expect("from JID"),
+                seed.to.parse().expect("to JID"),
+            )
+        };
+        mam.store_message(archive, &row)
+            .await
+            .expect("seed MAM row");
+    }
+
+    let registry = ConnectionRegistry::new();
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+    // Place a cross-sender collision and enough ordinary rows ahead of the
+    // target to prove lookup is sender-indexed rather than bounded by the
+    // default MAM page.
+    let owner_archive: jid::BareJid = "owner@example.com".parse().expect("owner archive");
+    store_row(
+        mam.as_ref(),
+        &owner_archive,
+        SeedRow {
+            id: "owner-000".to_string(),
+            offset: 0,
+            from: "mallory@example.com",
+            to: "owner@example.com",
+            origin_id: "owner-target".to_string(),
+            body: "collision decoy".to_string(),
+        },
+    )
+    .await;
+    for index in 1..=100 {
+        store_row(
+            mam.as_ref(),
+            &owner_archive,
+            SeedRow {
+                id: format!("owner-{index:03}"),
+                offset: index,
+                from: "owner@example.com",
+                to: "peer@example.com",
+                origin_id: format!("owner-decoy-{index}"),
+                body: format!("owner decoy {index}"),
+            },
+        )
+        .await;
+    }
+    store_row(
+        mam.as_ref(),
+        &owner_archive,
+        SeedRow {
+            id: "owner-101".to_string(),
+            offset: 101,
+            from: "owner@example.com",
+            to: "peer@example.com",
+            origin_id: "owner-target".to_string(),
+            body: "owner page two target".to_string(),
+        },
+    )
+    .await;
+
+    let owner_result = super::archive_lookup::lookup_archived_message(
+        &deps,
+        &owner_archive,
+        MamArchiveKind::Personal,
+        &MessageRef::OriginId {
+            sender: owner_archive.clone().into(),
+            origin_id: OriginId::new("owner-target"),
+        },
+    )
+    .await
+    .expect("owner target beyond default page boundary");
+    assert_eq!(
+        owner_result.message.bodies.get("").map(String::as_str),
+        Some("owner page two target")
+    );
+
+    // Recipient-side decoys with the same origin id must not hide a later row
+    // actually authored by the requested sender.
+    let peer_archive: jid::BareJid = "archive@example.com".parse().expect("peer archive");
+    for index in 0..=100 {
+        store_row(
+            mam.as_ref(),
+            &peer_archive,
+            SeedRow {
+                id: format!("peer-{index:03}"),
+                offset: index,
+                from: "archive@example.com",
+                to: "sender@example.com",
+                origin_id: if index == 0 {
+                    "peer-target".to_string()
+                } else {
+                    format!("peer-decoy-{index}")
+                },
+                body: format!("peer decoy {index}"),
+            },
+        )
+        .await;
+    }
+    store_row(
+        mam.as_ref(),
+        &peer_archive,
+        SeedRow {
+            id: "peer-101".to_string(),
+            offset: 101,
+            from: "sender@example.com/mobile",
+            to: "archive@example.com",
+            origin_id: "peer-target".to_string(),
+            body: "sender page two target".to_string(),
+        },
+    )
+    .await;
+    let sender: jid::BareJid = "sender@example.com".parse().expect("sender");
+    let peer_result = super::archive_lookup::lookup_archived_message(
+        &deps,
+        &peer_archive,
+        MamArchiveKind::Personal,
+        &MessageRef::OriginId {
+            sender: sender.into(),
+            origin_id: OriginId::new("peer-target"),
+        },
+    )
+    .await
+    .expect("sender target beyond default page boundary");
+    assert_eq!(
+        peer_result.message.bodies.get("").map(String::as_str),
+        Some("sender page two target")
+    );
+}
+
+#[tokio::test]
+async fn origin_lookup_finds_targets_beyond_default_page_in_memory() {
+    assert_origin_lookup_finds_targets_beyond_default_page(Arc::new(
+        waddle_xmpp::mam::InMemoryMamStorage::new(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn origin_lookup_finds_targets_beyond_default_page_in_sqlite() {
+    let storage = waddle_xmpp::mam::SqlxMamStorage::open_in_memory()
+        .await
+        .expect("SQLite MAM storage");
+    assert_origin_lookup_finds_targets_beyond_default_page(Arc::new(storage)).await;
+}
+
+#[tokio::test]
+async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
+    use async_trait::async_trait;
+    use waddle_xmpp::mam::{
+        ArchivedMessage, ArchivedTombstone, MamArchiveKind, MamQuery, MamResult, MamStorageError,
+    };
+    use waddle_xmpp::protocol::event::CallbackId;
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    struct KindProbeMam {
+        row: ArchivedMessage,
+    }
+
+    #[async_trait]
+    impl MamStorage for KindProbeMam {
+        async fn store_message(
+            &self,
+            _: &jid::BareJid,
+            _: &ArchivedMessage,
+        ) -> Result<String, MamStorageError> {
+            unreachable!("lookup regression never stores")
+        }
+
+        async fn query_messages(
+            &self,
+            _: &jid::BareJid,
+            archive_kind: MamArchiveKind,
+            _: &MamQuery,
+        ) -> Result<MamResult, MamStorageError> {
+            assert_eq!(
+                archive_kind,
+                MamArchiveKind::Room,
+                "event archive kind must reach MamStorage"
+            );
+            Ok(MamResult {
+                messages: vec![self.row.clone()],
+                complete: true,
+                first_id: Some(self.row.id.clone()),
+                last_id: Some(self.row.id.clone()),
+                count: Some(1),
+            })
+        }
+
+        async fn get_message(&self, _: &str) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            Ok(None)
+        }
+
+        async fn replace_with_tombstone(
+            &self,
+            _: &str,
+            _: ArchivedTombstone,
+        ) -> Result<bool, MamStorageError> {
+            Ok(false)
+        }
+
+        async fn get_message_by_stanza_id(
+            &self,
+            _: &jid::BareJid,
+            _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            Ok(None)
+        }
+
+        async fn get_message_by_message_id(
+            &self,
+            _: &jid::BareJid,
+            _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            Ok(None)
+        }
+
+        async fn get_message_by_sender_and_origin_id(
+            &self,
+            _: &jid::BareJid,
+            archive_kind: MamArchiveKind,
+            _: &jid::Jid,
+            _: &OriginId,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            assert_eq!(
+                archive_kind,
+                MamArchiveKind::Room,
+                "event archive kind must reach MamStorage"
+            );
+            Ok(Some(self.row.clone()))
+        }
+
+        async fn get_message_by_archive_or_stanza_id(
+            &self,
+            _: &jid::BareJid,
+            _: &str,
+        ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+            Ok(None)
+        }
+
+        async fn count_messages(&self, _: &jid::BareJid) -> Result<u32, MamStorageError> {
+            Ok(0)
+        }
+
+        async fn delete_before(
+            &self,
+            _: &jid::BareJid,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, MamStorageError> {
+            Ok(0)
+        }
+    }
+
+    let registry = ConnectionRegistry::new();
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+
+    let room: jid::BareJid = "room@conference.example".parse().expect("room bare");
+    let row = ArchivedMessage {
+        id: "room-row-1".to_string(),
+        timestamp: chrono::Utc::now(),
+        from: "room@conference.example/alice"
+            .parse()
+            .expect("occupant jid"),
+        to: "bob@example.com".parse().expect("recipient jid"),
+        body: Some("room message".to_string()),
+        stanza_id: None,
+        thread: None,
+        reply: None,
+        origin_id: Some(OriginId::new("room-origin-1")),
+        message_type: XmppMessageType::Groupchat,
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: None,
+    };
+    let mam: Arc<dyn MamStorage> = Arc::new(KindProbeMam { row });
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+    let outcome = interpret(
+        vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(22),
+            archive: room.clone(),
+            archive_kind: MamArchiveKind::Room,
+            reference: MessageRef::OriginId {
+                sender: "room@conference.example/alice"
+                    .parse()
+                    .expect("occupant JID"),
+                origin_id: OriginId::new("room-origin-1"),
+            },
+        }],
+        &deps,
+    )
+    .await;
+
+    match outcome.feedback.into_iter().next().expect("feedback") {
+        InboundEvent::ArchivedMessageLoaded {
+            id: CallbackId(22),
+            result: Some(archived),
+        } => assert_eq!(
+            archived.message.bodies.get("").map(String::as_str),
+            Some("room message"),
+        ),
+        other => panic!("room archive kind must reach storage lookup, got {other:?}"),
     }
 }
 
@@ -1135,8 +1488,9 @@ async fn xep_0359_lookup_archived_message_by_origin_id_rejects_cross_sender_coll
     let events = vec![OutboundEvent::LookupArchivedMessage {
         id: CallbackId(31),
         archive: archive_jid,
+        archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::OriginId {
-            sender: charlie_bare,
+            sender: charlie_bare.into(),
             origin_id: OriginId::new("oid-1"),
         },
     }];
@@ -1196,6 +1550,7 @@ async fn xep_0359_lookup_archived_message_strict_stanza_id_ignores_origin_id_col
     let events = vec![OutboundEvent::LookupArchivedMessage {
         id: CallbackId(41),
         archive: archive_jid.clone(),
+        archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::StanzaId {
             stanza_id: StanzaId::new("queried-id", jid::Jid::from(archive_jid)),
         },
@@ -1263,6 +1618,7 @@ async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
     let events = vec![OutboundEvent::LookupArchivedMessage {
         id: CallbackId(13),
         archive: archive_jid.clone(),
+        archive_kind: waddle_xmpp::mam::MamArchiveKind::Personal,
         reference: MessageRef::StanzaId {
             stanza_id: StanzaId::new("tomb-1", jid::Jid::from(archive_jid)),
         },
@@ -1846,7 +2202,11 @@ async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_cl
     // though the sole live target's channel was dead.
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -1938,11 +2298,15 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
     assert!(drain_inbound(&mut low_rx).is_empty());
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     assert_eq!(
-        mam.query_messages(&bob_bare, &Default::default())
-            .await
-            .expect("query bob")
-            .messages
-            .len(),
+        mam.query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default()
+        )
+        .await
+        .expect("query bob")
+        .messages
+        .len(),
         1,
         "no message loss: the first DM is persisted to the recipient's MAM"
     );
@@ -2405,7 +2769,11 @@ async fn offline_recipient_pass_persists_archive_for_bare_jid_target() {
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -2487,7 +2855,11 @@ async fn route_to_connection_at_max_recursion_depth_drops_without_persistence() 
 
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob, &Default::default())
+        .query_messages(
+            &bob,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert!(
@@ -2570,7 +2942,11 @@ async fn offline_recipient_pass_blocklist_loaded_from_storage_blocks_filtered_me
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert!(
@@ -2626,7 +3002,11 @@ async fn offline_recipient_pass_blocklist_storage_error_skips_recipient_persiste
 
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob, &Default::default())
+        .query_messages(
+            &bob,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert!(
@@ -2707,7 +3087,11 @@ async fn xep_0359_offline_recipient_pass_emits_recipient_archive_with_recipient_
     // alice's MAM has 1 entry; <stanza-id by='alice@example.com'>
     // present.
     let alice_archive = mam
-        .query_messages(&alice_bare, &Default::default())
+        .query_messages(
+            &alice_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query alice");
     assert_eq!(
@@ -2729,7 +3113,11 @@ async fn xep_0359_offline_recipient_pass_emits_recipient_archive_with_recipient_
     // bob's MAM has 1 entry; <stanza-id by='bob@example.com'>
     // present (recipient-side stamp by the headless pass).
     let bob_archive = mam
-        .query_messages(&bob, &Default::default())
+        .query_messages(
+            &bob,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -2797,7 +3185,11 @@ async fn offline_recipient_pass_skipped_for_remote_domain() {
 
     let bob_remote: jid::BareJid = "bob@other.example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_remote, &Default::default())
+        .query_messages(
+            &bob_remote,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert!(
@@ -3423,7 +3815,11 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob archive");
     assert_eq!(
@@ -3505,7 +3901,11 @@ async fn route_full_jid_dm_offline_resource_falls_back_to_other_live_resource() 
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -3543,7 +3943,11 @@ async fn route_full_jid_dm_no_resources_stores_offline() {
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -3626,7 +4030,11 @@ async fn route_full_jid_dm_to_detached_resource_runs_recipient_pipeline() {
     // XEP-0313 §6.1: the recipient archive captured the message.
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -3718,7 +4126,11 @@ async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
 
     let typo_bare: jid::BareJid = "typo@example.com".parse().expect("bare");
     let typo_archive = mam
-        .query_messages(&typo_bare, &Default::default())
+        .query_messages(
+            &typo_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query typo");
     assert!(
@@ -3788,7 +4200,11 @@ async fn route_bare_jid_message_to_existing_oidc_user_persists_offline() {
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -3888,7 +4304,11 @@ async fn route_to_connection_bare_jid_all_negative_priority_goes_offline() {
     );
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -4008,7 +4428,11 @@ async fn route_bare_jid_dm_to_detached_only_recipient_runs_recipient_pipeline() 
 
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert_eq!(
@@ -4092,7 +4516,11 @@ async fn route_bare_jid_dm_from_blocked_sender_to_detached_only_recipient_is_fil
     );
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let bob_archive = mam
-        .query_messages(&bob_bare, &Default::default())
+        .query_messages(
+            &bob_bare,
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
         .await
         .expect("query bob");
     assert!(
