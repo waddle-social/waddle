@@ -364,6 +364,55 @@ async fn enable_claim_commit_before_timeout_is_reconciled_and_released() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn detach_claim_commit_before_timeout_is_reconciled_and_retained() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let persistence = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(persistence.clone())
+        .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "detach-commit-before-timeout";
+
+    registry
+        .store_session(realistic_test_session(stream_id))
+        .await
+        .expect("store detached session");
+
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup")
+            .is_some()
+    );
+    assert!(registry
+        .claim_fences
+        .read()
+        .expect("claim fences")
+        .contains_key(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(persistence
+        .get_session(&crate::pending_delivery::SmSessionId::new(stream_id))
+        .await
+        .expect("durable snapshot lookup")
+        .is_some());
+}
+
+#[tokio::test(start_paused = true)]
 async fn enable_claim_publication_failure_retains_ambiguous_exact_release() {
     let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
     let store = std::sync::Arc::new(HangingReleaseClaimStore {

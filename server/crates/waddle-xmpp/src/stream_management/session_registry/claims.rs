@@ -3,7 +3,10 @@ use tracing::debug;
 
 use crate::ownership::{ClaimError, Entity, EntityType};
 
-use super::core::{InMemorySmSessionRegistry, CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT};
+use super::core::{
+    InMemorySmSessionRegistry, PendingClaimAcquisitionDisposition,
+    CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+};
 use super::{DetachedSession, SmClaimCompletion, SmRegistryError};
 
 /// The `ClaimStore` entity naming an SM session's ownership claim (element
@@ -108,8 +111,8 @@ impl InMemorySmSessionRegistry {
             .read()
             .map(|pending| pending.iter().take(limit).cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        for (stream_id, identity) in uncertain {
-            self.reconcile_uncertain_claim_acquisition(&stream_id, identity)
+        for (stream_id, identity, disposition) in uncertain {
+            self.reconcile_uncertain_claim_acquisition(&stream_id, identity, disposition)
                 .await;
         }
         let pending = {
@@ -134,6 +137,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         identity: crate::ownership::NodeIdentity,
+        disposition: PendingClaimAcquisitionDisposition,
     ) {
         let entity = sm_session_entity(stream_id);
         match tokio::time::timeout(
@@ -143,24 +147,47 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => {
-                if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                    pending.remove(&(stream_id.to_string(), identity.clone()));
-                }
-                let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-                if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                let pending_key = (stream_id.to_string(), identity.clone(), disposition);
+                let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
+                let recorded = self.try_record_claim_fence(stream_id, fence.clone());
+                if !recorded {
                     self.cancel_claim_fence_reservation(stream_id);
                 }
-                self.release_claim_store_entry_under(stream_id, fence).await;
+                match disposition {
+                    PendingClaimAcquisitionDisposition::ReleaseRejectedEnable => {
+                        if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
+                            pending.remove(&pending_key);
+                        }
+                        self.release_claim_store_entry_under(stream_id, fence).await;
+                    }
+                    PendingClaimAcquisitionDisposition::RetainDetachedSession
+                        if recorded && self.node_identity.current() == identity =>
+                    {
+                        if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
+                            pending.remove(&pending_key);
+                        }
+                    }
+                    PendingClaimAcquisitionDisposition::RetainDetachedSession => {
+                        if self.node_identity.current() != identity {
+                            if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
+                                pending.remove(&pending_key);
+                            }
+                            self.release_claim_store_entry_under(stream_id, fence).await;
+                        } else if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
+                            pending.insert(pending_key);
+                        }
+                    }
+                }
             }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Conflict)) => {
                 if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                    pending.remove(&(stream_id.to_string(), identity));
+                    pending.remove(&(stream_id.to_string(), identity, disposition));
                 }
                 self.cancel_claim_fence_reservation(stream_id);
             }
             Ok(Err(_)) | Err(_) => {
                 if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                    pending.insert((stream_id.to_string(), identity));
+                    pending.insert((stream_id.to_string(), identity, disposition));
                 }
             }
         }
@@ -495,10 +522,18 @@ impl InMemorySmSessionRegistry {
             Err(_) => {
                 tracing::warn!(stream_id = %stream_id, "handle_sm_enable: ClaimStore ensure_claimed timed out");
                 if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                    pending.insert((stream_id.to_string(), identity.clone()));
+                    pending.insert((
+                        stream_id.to_string(),
+                        identity.clone(),
+                        PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+                    ));
                 }
-                self.reconcile_uncertain_claim_acquisition(stream_id, identity)
-                    .await;
+                self.reconcile_uncertain_claim_acquisition(
+                    stream_id,
+                    identity,
+                    PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+                )
+                .await;
                 false
             }
         }
@@ -772,10 +807,18 @@ impl InMemorySmSessionRegistry {
                 );
                 if acquisition_reserved {
                     if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                        pending.insert((stream_id.to_string(), identity.clone()));
+                        pending.insert((
+                            stream_id.to_string(),
+                            identity.clone(),
+                            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+                        ));
                     }
-                    self.reconcile_uncertain_claim_acquisition(stream_id, identity)
-                        .await;
+                    self.reconcile_uncertain_claim_acquisition(
+                        stream_id,
+                        identity,
+                        PendingClaimAcquisitionDisposition::RetainDetachedSession,
+                    )
+                    .await;
                 }
             }
         }

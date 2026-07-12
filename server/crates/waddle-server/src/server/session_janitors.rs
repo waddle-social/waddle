@@ -632,6 +632,27 @@ struct ExactReleaseWork {
 }
 
 #[cfg(feature = "clustering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkEnqueueOutcome {
+    Enqueued,
+    AlreadyTracked,
+    /// Receiver exited, but the exact work remains in the supervisor's
+    /// restart inventory and will be requeued by the replacement worker.
+    RetainedForRestart,
+    Rejected,
+}
+
+#[cfg(feature = "clustering")]
+impl WorkEnqueueOutcome {
+    const fn is_accepted(self) -> bool {
+        matches!(
+            self,
+            Self::Enqueued | Self::AlreadyTracked | Self::RetainedForRestart
+        )
+    }
+}
+
+#[cfg(feature = "clustering")]
 #[derive(Clone)]
 struct OrphanReaperWorkers {
     hydration_tx: tokio::sync::mpsc::Sender<SmHydrationWork>,
@@ -685,7 +706,7 @@ impl OrphanReaperWorkers {
         &self,
         entity: waddle_xmpp::ownership::Entity,
         fence: waddle_xmpp::stream_management::persistence::SmClaimFence,
-    ) -> bool {
+    ) -> WorkEnqueueOutcome {
         let work = SmHydrationWork { entity, fence };
         let key = Self::hydration_key(&work);
         self.hydration_pending
@@ -693,7 +714,7 @@ impl OrphanReaperWorkers {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.clone(), Some(work.clone()));
         match self.hydration_tx.try_send(work) {
-            Ok(()) => true,
+            Ok(()) => WorkEnqueueOutcome::Enqueued,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 let mut pending = self
                     .hydration_pending
@@ -705,13 +726,13 @@ impl OrphanReaperWorkers {
                     "sm_hydration",
                     pending.len(),
                 );
-                false
+                WorkEnqueueOutcome::Rejected
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // The supervisor snapshots this map when it replaces a dead
                 // worker. Retain the exact work so restart can requeue it.
                 crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
-                false
+                WorkEnqueueOutcome::RetainedForRestart
             }
         }
     }
@@ -735,7 +756,7 @@ impl OrphanReaperWorkers {
         &self,
         entity: waddle_xmpp::ownership::Entity,
         fence: waddle_xmpp::stream_management::persistence::SmClaimFence,
-    ) -> bool {
+    ) -> WorkEnqueueOutcome {
         let work = SmHydrationWork { entity, fence };
         if self
             .hydration_pending
@@ -743,26 +764,26 @@ impl OrphanReaperWorkers {
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(&Self::hydration_key(&work))
         {
-            return true;
+            return WorkEnqueueOutcome::AlreadyTracked;
         }
         if !self.reserve_hydration(&work.entity) {
-            return false;
+            return WorkEnqueueOutcome::Rejected;
         }
         self.enqueue_reserved_hydration(work.entity, work.fence)
     }
 
-    fn enqueue_release(&self, work: ExactReleaseWork) -> bool {
+    fn enqueue_release(&self, work: ExactReleaseWork) -> WorkEnqueueOutcome {
         let key = Self::release_key(&work);
         let mut pending = self
             .release_pending
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if pending.contains_key(&key) {
-            return true;
+            return WorkEnqueueOutcome::AlreadyTracked;
         }
         if pending.len() >= ORPHAN_WORK_QUEUE_CAPACITY {
             crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
-            return false;
+            return WorkEnqueueOutcome::Rejected;
         }
         pending.insert(key.clone(), work.clone());
         match self.release_tx.try_send(work) {
@@ -771,7 +792,7 @@ impl OrphanReaperWorkers {
                     "room_release",
                     pending.len(),
                 );
-                true
+                WorkEnqueueOutcome::Enqueued
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 pending.remove(&key);
@@ -780,13 +801,13 @@ impl OrphanReaperWorkers {
                     "room_release",
                     pending.len(),
                 );
-                false
+                WorkEnqueueOutcome::Rejected
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // A closed receiver means the supervisor must restart the
                 // worker. Keep this exact fence in its restart inventory.
                 crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
-                false
+                WorkEnqueueOutcome::RetainedForRestart
             }
         }
     }
@@ -1042,12 +1063,16 @@ impl OrphanReaperSupervisor {
         let next = Self::new(registry, parent_cancel);
         next.workers.set_sm_cursor(sm_cursor);
         for work in hydration {
-            if !next.workers.enqueue_hydration(work.entity, work.fence) {
+            if !next
+                .workers
+                .enqueue_hydration(work.entity, work.fence)
+                .is_accepted()
+            {
                 error!("orphan reaper: failed to requeue hydration after worker restart");
             }
         }
         for work in releases {
-            if !next.workers.enqueue_release(work) {
+            if !next.workers.enqueue_release(work).is_accepted() {
                 error!("orphan reaper: failed to requeue exact release after worker restart");
             }
         }
@@ -1137,8 +1162,14 @@ async fn register_reclaimed_epoch_or_cleanup(
                 owner: context.me.clone(),
                 epoch: claim_epoch,
             });
-            if !queued {
-                warn!(room = %room_jid, "orphan reaper: exact cleanup queue saturated after steal; claim remains fenced until node expiry");
+            match queued {
+                WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
+                WorkEnqueueOutcome::RetainedForRestart => {
+                    warn!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart")
+                }
+                WorkEnqueueOutcome::Rejected => {
+                    warn!(room = %room_jid, "orphan reaper: exact cleanup queue saturated after steal; claim remains fenced until node expiry")
+                }
             }
             ReclaimedRegistration::CleanupScheduled
         }
@@ -1150,8 +1181,14 @@ async fn register_reclaimed_epoch_or_cleanup(
                 owner: context.me.clone(),
                 epoch: claim_epoch,
             });
-            if !queued {
-                warn!(room = %room_jid, "orphan reaper: exact cleanup queue saturated after steal; claim remains fenced until node expiry");
+            match queued {
+                WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
+                WorkEnqueueOutcome::RetainedForRestart => {
+                    warn!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart")
+                }
+                WorkEnqueueOutcome::Rejected => {
+                    warn!(room = %room_jid, "orphan reaper: exact cleanup queue saturated after steal; claim remains fenced until node expiry")
+                }
             }
             ReclaimedRegistration::CleanupScheduled
         }
@@ -1420,21 +1457,27 @@ async fn hung_sm_hydration_does_not_block_completed_room_lane() {
         .expect("detached hydration should reach the deliberately hung SM read");
     assert!(room_lane_completed);
     for index in 1..ORPHAN_WORK_QUEUE_CAPACITY {
-        assert!(supervisor.workers.enqueue_hydration(
-            Entity::new(EntityType::SmSession, format!("queued-{index}")),
-            waddle_xmpp::stream_management::persistence::SmClaimFence::new(
-                me.clone(),
-                waddle_xmpp::ownership::ClaimEpoch(index as i64),
-            ),
-        ));
+        assert!(supervisor
+            .workers
+            .enqueue_hydration(
+                Entity::new(EntityType::SmSession, format!("queued-{index}")),
+                waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                    me.clone(),
+                    waddle_xmpp::ownership::ClaimEpoch(index as i64),
+                ),
+            )
+            .is_accepted());
     }
-    assert!(!supervisor.workers.enqueue_hydration(
-        Entity::new(EntityType::SmSession, "queue-overflow"),
-        waddle_xmpp::stream_management::persistence::SmClaimFence::new(
-            me,
-            waddle_xmpp::ownership::ClaimEpoch(999),
+    assert_eq!(
+        supervisor.workers.enqueue_hydration(
+            Entity::new(EntityType::SmSession, "queue-overflow"),
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                me,
+                waddle_xmpp::ownership::ClaimEpoch(999),
+            ),
         ),
-    ));
+        WorkEnqueueOutcome::Rejected
+    );
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
         .await
@@ -1465,10 +1508,13 @@ async fn sm_rotation_before_hydration_worker_releases_the_exact_old_fence() {
     let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
 
     identity.set(new_owner);
-    assert!(supervisor.workers.enqueue_hydration(
-        entity.clone(),
-        waddle_xmpp::stream_management::persistence::SmClaimFence::new(old_owner, epoch),
-    ));
+    assert!(supervisor
+        .workers
+        .enqueue_hydration(
+            entity.clone(),
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(old_owner, epoch),
+        )
+        .is_accepted());
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -1515,10 +1561,13 @@ async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
-    assert!(supervisor.workers.enqueue_hydration(
-        entity.clone(),
-        waddle_xmpp::stream_management::persistence::SmClaimFence::new(old_owner, epoch),
-    ));
+    assert!(supervisor
+        .workers
+        .enqueue_hydration(
+            entity.clone(),
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(old_owner, epoch),
+        )
+        .is_accepted());
 
     storage.read_started.notified().await;
     identity.set(new_owner);
@@ -1631,10 +1680,13 @@ fn full_hydration_channel_rolls_back_pending_reservation() {
     };
     let candidate = Entity::new(EntityType::SmSession, "candidate");
 
-    assert!(!workers.enqueue_hydration(
-        candidate.clone(),
-        SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
-    ));
+    assert_eq!(
+        workers.enqueue_hydration(
+            candidate.clone(),
+            SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
+        ),
+        WorkEnqueueOutcome::Rejected
+    );
     assert!(!workers
         .hydration_pending
         .lock()
@@ -1660,10 +1712,13 @@ fn closed_hydration_channel_retains_restart_inventory() {
     };
     let candidate = Entity::new(EntityType::SmSession, "candidate");
 
-    assert!(!workers.enqueue_hydration(
-        candidate.clone(),
-        SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
-    ));
+    assert_eq!(
+        workers.enqueue_hydration(
+            candidate.clone(),
+            SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
+        ),
+        WorkEnqueueOutcome::RetainedForRestart
+    );
     assert!(workers
         .hydration_pending
         .lock()
@@ -1706,7 +1761,10 @@ fn full_release_channel_rolls_back_pending_work() {
     };
     let candidate_key = OrphanReaperWorkers::release_key(&candidate);
 
-    assert!(!workers.enqueue_release(candidate));
+    assert_eq!(
+        workers.enqueue_release(candidate),
+        WorkEnqueueOutcome::Rejected
+    );
     assert!(!workers
         .release_pending
         .lock()
@@ -1739,7 +1797,10 @@ fn closed_release_channel_retains_restart_inventory() {
     };
     let candidate_key = OrphanReaperWorkers::release_key(&candidate);
 
-    assert!(!workers.enqueue_release(candidate));
+    assert_eq!(
+        workers.enqueue_release(candidate),
+        WorkEnqueueOutcome::RetainedForRestart
+    );
     assert!(workers
         .release_pending
         .lock()
@@ -2312,14 +2373,16 @@ async fn run_orphan_reaper_sweep_with_workers(
         {
             Ok(new_epoch) => {
                 stolen += 1;
-                if !workers.enqueue_reserved_hydration(
+                match workers.enqueue_reserved_hydration(
                     candidate.entity,
                     waddle_xmpp::stream_management::persistence::SmClaimFence::new(
                         me.clone(),
                         new_epoch,
                     ),
                 ) {
-                    warn!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry");
+                    WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
+                    WorkEnqueueOutcome::RetainedForRestart => warn!("orphan reaper: hydration worker stopped after steal; responsibility retained for supervisor restart"),
+                    WorkEnqueueOutcome::Rejected => warn!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry"),
                 }
             }
             Err(ClaimError::Conflict) => {
@@ -2646,9 +2709,13 @@ mod orphan_reaper_sweep_tests {
                 ),
         );
         let muc_store = Arc::new(
-            PostgresMucRoomStore::open(db.clone(), tokio_util::sync::CancellationToken::new())
-                .await
-                .expect("open fenced MUC durable store"),
+            PostgresMucRoomStore::open(
+                db.clone(),
+                tokio_util::sync::CancellationToken::new(),
+                sweeper_identity_handle.clone(),
+            )
+            .await
+            .expect("open fenced MUC durable store"),
         );
         {
             let conn = db.guard().await.expect("guard");

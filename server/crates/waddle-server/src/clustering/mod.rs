@@ -703,9 +703,13 @@ pub async fn start_if_enabled(
         // `open_for_cluster_mode` already enforce at startup for their own
         // durability stores.
         let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(
-            crate::muc_durable::PostgresMucRoomStore::open(db.clone(), clustering_stop.clone())
-                .await
-                .map_err(ClusteringError::MucDurableStoreInit)?,
+            crate::muc_durable::PostgresMucRoomStore::open(
+                db.clone(),
+                clustering_stop.clone(),
+                live_identity.clone(),
+            )
+            .await
+            .map_err(ClusteringError::MucDurableStoreInit)?,
         );
         // ADR-0017 Phase 3 Slice 8: the Postgres ISR token store. Built here
         // for the same reason `muc_durable_store` is — it only needs `db`,

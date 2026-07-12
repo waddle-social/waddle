@@ -14,6 +14,12 @@ use super::persistence_codec::{
 };
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum PendingClaimAcquisitionDisposition {
+    ReleaseRejectedEnable,
+    RetainDetachedSession,
+}
+
 const STREAM_LOCK_SHARDS: usize = 256;
 
 /// Bound on any `ClaimStore` acquire/`ensure_claimed` call made while this
@@ -106,10 +112,12 @@ pub struct InMemorySmSessionRegistry {
     /// from both maps but is not releasable until its durable delete commits.
     pub(super) pending_claim_releases:
         RwLock<HashSet<(String, super::super::persistence::SmClaimFence)>>,
-    /// Enable-time acquisitions whose timeout made commit status ambiguous.
-    /// Retains the typed stream entity and exact node incarnation until a
-    /// bounded idempotent `ensure_claimed` retry recovers the epoch.
-    pub(super) pending_claim_acquisitions: RwLock<HashSet<(String, NodeIdentity)>>,
+    /// Acquisitions whose timeout made commit status ambiguous. The typed
+    /// disposition distinguishes rejected enable admission (recover then
+    /// release) from detach after durable snapshot publication (recover and
+    /// retain ownership).
+    pub(super) pending_claim_acquisitions:
+        RwLock<HashSet<(String, NodeIdentity, PendingClaimAcquisitionDisposition)>>,
     /// Capacity reserved before an acquisition whose exact epoch is not yet
     /// known. A reservation survives an ambiguous timeout and is consumed
     /// only when reconciliation either records the resulting fence or proves

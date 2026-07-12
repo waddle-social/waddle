@@ -61,7 +61,7 @@ use waddle_xmpp::muc::{
     DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomConfig,
     SubjectState,
 };
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, SharedNodeIdentity};
 use waddle_xmpp::{Affiliation, XmppError};
 
 use crate::clustering::relay::RelayHandle;
@@ -113,6 +113,10 @@ fn affiliation_from_db_str(value: &str) -> Option<Affiliation> {
 /// code-research correction.
 pub struct PostgresMucRoomStore {
     db: Database,
+    /// Live process incarnation. Cached room fences remain immutable; every
+    /// use must still match this handle so a self-fenced old incarnation
+    /// cannot write merely because its old claim row remains in Postgres.
+    node_identity: SharedNodeIdentity,
     /// This node's clustering-scope cancellation token, threaded into the
     /// `RelayHandle` [`Self::notify_previous_owner_demoted`] constructs
     /// per-call (mirroring `resume_asker::SwarmRemoteResumeAsker`'s
@@ -136,9 +140,14 @@ impl PostgresMucRoomStore {
     /// store, never a second, independently-resolved database (the fencing
     /// `SELECT ... FOR SHARE` this impl issues targets `clustering_claims`,
     /// which lives there).
-    pub async fn open(db: Database, stop_token: CancellationToken) -> Result<Self, XmppError> {
+    pub async fn open(
+        db: Database,
+        stop_token: CancellationToken,
+        node_identity: SharedNodeIdentity,
+    ) -> Result<Self, XmppError> {
         let store = Self {
             db,
+            node_identity,
             stop_token,
             claim_fences: DashMap::new(),
         };
@@ -188,7 +197,8 @@ impl PostgresMucRoomStore {
     }
 
     fn fence_for(&self, room_jid: &BareJid) -> Result<RoomClaimFenceContext, XmppError> {
-        self.claim_fences
+        let fence = self
+            .claim_fences
             .get(room_jid)
             .map(|entry| entry.clone())
             .ok_or_else(|| {
@@ -196,7 +206,14 @@ impl PostgresMucRoomStore {
                     "no claim epoch recorded for room {room_jid}; durable write skipped \
                  (the room registry must call record_claim_fence before any write)"
                 ))
-            })
+            })?;
+        if self.node_identity.current() != fence.owner {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, &fence);
+            return Err(XmppError::internal(format!(
+                "durable write for room {room_jid} aborted: cached claim belongs to a stale node incarnation"
+            )));
+        }
+        Ok(fence)
     }
 
     /// Take the fencing lock inside `tx` — the exact `SELECT ... FOR SHARE`
@@ -209,6 +226,12 @@ impl PostgresMucRoomStore {
         room_jid: &BareJid,
         fence: &RoomClaimFenceContext,
     ) -> Result<(), XmppError> {
+        if self.node_identity.current() != fence.owner {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Err(XmppError::internal(format!(
+                "durable write for room {room_jid} aborted: claim fence belongs to a stale node incarnation"
+            )));
+        }
         let key = room_entity_key(room_jid);
         let mut rows = tx
             .query(
@@ -223,7 +246,7 @@ impl PostgresMucRoomStore {
             .await
             .map_err(db_err)?;
         let held = rows.next().await.map_err(db_err)?.is_some();
-        if held {
+        if held && self.node_identity.current() == fence.owner {
             Ok(())
         } else {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
@@ -489,7 +512,13 @@ impl MucDurableStore for PostgresMucRoomStore {
                 )
                 .await
                 .map_err(db_err)?;
-            Ok(rows.next().await.map_err(db_err)?.is_some())
+            let held = rows.next().await.map_err(db_err)?.is_some();
+            if held && self.node_identity.current() == fence.owner {
+                Ok(true)
+            } else {
+                remove_room_claim_fence_if(&self.claim_fences, room_jid, &fence);
+                Ok(false)
+            }
         })
     }
 
@@ -499,7 +528,7 @@ impl MucDurableStore for PostgresMucRoomStore {
     /// `groupchat_archive.rs`'s MAM fenced write can bind the identical
     /// typed context rather than re-deriving it from a second mechanism.
     fn current_claim_fence(&self, room_jid: &BareJid) -> Option<RoomClaimFenceContext> {
-        self.claim_fences.get(room_jid).map(|entry| entry.clone())
+        self.fence_for(room_jid).ok()
     }
 
     fn notify_previous_owner_demoted<'a>(
@@ -562,6 +591,36 @@ mod tests {
             .expect("valid test room JID")
     }
 
+    #[tokio::test]
+    async fn identity_rotation_invalidates_cached_room_fence_before_database_access() {
+        let original = node_identity();
+        let live_identity = SharedNodeIdentity::new(original.clone());
+        let db = Database::from_config(
+            "muc-identity-rotation-test",
+            &DatabaseConfig::new(DatabaseDriver::Sqlite, "sqlite::memory:"),
+        )
+        .await
+        .expect("open in-memory database");
+        let store = PostgresMucRoomStore {
+            db,
+            node_identity: live_identity.clone(),
+            stop_token: CancellationToken::new(),
+            claim_fences: DashMap::new(),
+        };
+        let jid = room_jid("identity-rotation");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        store.record_claim_fence(
+            &jid,
+            RoomClaimFenceContext::new(entity, original, ClaimEpoch(7)),
+        );
+        assert!(store.current_claim_fence(&jid).is_some());
+
+        live_identity.set(node_identity());
+
+        assert!(store.current_claim_fence(&jid).is_none());
+        assert!(store.claim_fences.get(&jid).is_none());
+    }
+
     /// Open a clean `PostgresMucRoomStore` alongside a `PostgresClaimStore`
     /// sharing the same `Database`/tables, wiping every row this module's
     /// tests touch first. `None` (test skipped) when
@@ -587,9 +646,13 @@ mod tests {
             .await
             .expect("ensure claim schema");
         let me = node_identity();
-        let store = PostgresMucRoomStore::open(db.clone(), CancellationToken::new())
-            .await
-            .expect("open muc durable store");
+        let store = PostgresMucRoomStore::open(
+            db.clone(),
+            CancellationToken::new(),
+            SharedNodeIdentity::new(me.clone()),
+        )
+        .await
+        .expect("open muc durable store");
         let conn = db.guard().await.expect("guard");
         conn.execute("DELETE FROM clustering_claims", ())
             .await
