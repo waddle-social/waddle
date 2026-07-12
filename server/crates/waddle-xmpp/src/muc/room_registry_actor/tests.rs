@@ -2615,6 +2615,84 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn pending_release_with_dead_map_entry_is_shutdown_sealable() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("pending-dead-entry");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        assert!(registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: room_claim_fence(&jid, ClaimEpoch(77)),
+            })
+            .await
+            .expect("remember exact pending responsibility"));
+        actor.kill();
+        actor.wait_for_shutdown().await;
+
+        assert!(registry
+            .ask(IsPendingRoomReleaseOnly { room_jid: jid })
+            .await
+            .expect("dead-entry pending-only query"));
+    }
+
+    #[tokio::test]
+    async fn dead_actor_redrives_oldest_release_when_backlog_is_full() {
+        let registry = spawn_registry().await;
+        let target = test_room_jid("dead-under-saturation");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: target.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create target")
+            .actor_ref;
+        actor.kill();
+        actor.wait_for_shutdown().await;
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let jid = test_room_jid(&format!("dead-progress-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: jid.clone(),
+                    claim_fence: room_claim_fence(&jid, ClaimEpoch(index as i64 + 100)),
+                })
+                .await
+                .expect("fill backlog"));
+        }
+
+        assert!(matches!(
+            registry
+                .ask(GetRoom {
+                    room_jid: target.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if *room == target
+        ));
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("backlog after opportunistic redrive")
+                .depth,
+            MAX_PENDING_ROOM_RELEASES - 1,
+            "one stale exact release is confirmed NotOwned, freeing capacity so the dead actor can retire"
+        );
+        assert_eq!(registry.ask(RoomCount).await.expect("room count"), 0);
+    }
+
+    #[tokio::test]
     async fn stale_pending_messages_cannot_regress_or_clear_a_newer_epoch() {
         let registry = spawn_registry().await;
         let current_epoch = ClaimEpoch(61);

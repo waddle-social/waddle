@@ -1124,15 +1124,15 @@ fn reclaimed_cleanup_registration(
             ReclaimedRegistration::CleanupScheduled
         }
         WorkEnqueueOutcome::RetainedForRestart => {
-            warn!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart");
+            debug!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart");
             ReclaimedRegistration::CleanupScheduled
         }
         WorkEnqueueOutcome::RetainedForRedrive => {
-            warn!(room = %room_jid, "orphan reaper: exact cleanup channel full; responsibility retained for active redrive");
+            debug!(room = %room_jid, "orphan reaper: exact cleanup channel full; responsibility retained for active redrive");
             ReclaimedRegistration::CleanupScheduled
         }
         WorkEnqueueOutcome::Rejected => {
-            warn!(room = %room_jid, "orphan reaper: exact cleanup inventory saturated after steal; durable claim remains fenced for recovery after node expiry");
+            debug!(room = %room_jid, "orphan reaper: exact cleanup inventory saturated after steal; durable claim remains fenced for recovery after node expiry");
             ReclaimedRegistration::CleanupDeferredToNodeExpiry
         }
     }
@@ -2434,9 +2434,9 @@ async fn run_orphan_reaper_sweep_with_workers(
                     ),
                 ) {
                     WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
-                    WorkEnqueueOutcome::RetainedForRestart => warn!("orphan reaper: hydration worker stopped after steal; responsibility retained for supervisor restart"),
-                    WorkEnqueueOutcome::RetainedForRedrive => warn!("orphan reaper: hydration channel full after steal; responsibility retained for active redrive"),
-                    WorkEnqueueOutcome::Rejected => warn!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry"),
+                    WorkEnqueueOutcome::RetainedForRestart => debug!("orphan reaper: hydration worker stopped after steal; responsibility retained for supervisor restart"),
+                    WorkEnqueueOutcome::RetainedForRedrive => debug!("orphan reaper: hydration channel full after steal; responsibility retained for active redrive"),
+                    WorkEnqueueOutcome::Rejected => debug!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry"),
                 }
             }
             Err(ClaimError::Conflict) => {

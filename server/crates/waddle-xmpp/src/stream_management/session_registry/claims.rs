@@ -112,6 +112,23 @@ impl InMemorySmSessionRegistry {
             .map(|pending| pending.iter().take(limit).cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         for (stream_id, identity, disposition) in uncertain {
+            // Rejected-enable reconciliation is a terminal release retry.
+            // The same stream id may have become detached/claimed through a
+            // later successful local path while the original acquisition was
+            // uncertain. Serialize with that stream and fail closed on map
+            // uncertainty so the retry never releases a now-live claim.
+            if disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable {
+                let Ok(stream_lock) = self.stream_lock(&stream_id) else {
+                    continue;
+                };
+                let _stream_guard = stream_lock.lock().await;
+                if self.stream_is_live_or_uncertain(&stream_id) {
+                    continue;
+                }
+                self.reconcile_uncertain_claim_acquisition(&stream_id, identity, disposition)
+                    .await;
+                continue;
+            }
             self.reconcile_uncertain_claim_acquisition(&stream_id, identity, disposition)
                 .await;
         }
@@ -133,15 +150,7 @@ impl InMemorySmSessionRegistry {
                 continue;
             };
             let _stream_guard = stream_lock.lock().await;
-            let live_again = match (self.sessions.read(), self.claimed_sessions.read()) {
-                (Ok(sessions), Ok(claimed)) => {
-                    sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
-                }
-                // A poisoned live-state lock is uncertainty. Never release a
-                // claim on the basis of an incomplete/failed local probe.
-                _ => true,
-            };
-            if live_again {
+            if self.stream_is_live_or_uncertain(&stream_id) {
                 continue;
             }
             attempted += 1;
@@ -149,6 +158,17 @@ impl InMemorySmSessionRegistry {
                 .await;
         }
         attempted
+    }
+
+    fn stream_is_live_or_uncertain(&self, stream_id: &str) -> bool {
+        match (self.sessions.read(), self.claimed_sessions.read()) {
+            (Ok(sessions), Ok(claimed)) => {
+                sessions.contains_key(stream_id) || claimed.contains_key(stream_id)
+            }
+            // A poisoned live-state lock is uncertainty. Never release a
+            // claim on the basis of an incomplete/failed local probe.
+            _ => true,
+        }
     }
 
     async fn reconcile_uncertain_claim_acquisition(

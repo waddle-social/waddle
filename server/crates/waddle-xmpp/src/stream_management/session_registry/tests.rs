@@ -332,6 +332,55 @@ async fn terminal_release_retry_skips_stream_that_became_live_again() {
         .is_some());
 }
 
+#[tokio::test(start_paused = true)]
+async fn rejected_enable_reconciliation_skips_stream_that_became_live_again() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(true),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "rejected-enable-became-live";
+
+    assert!(!registry.ensure_session_claim(stream_id).await);
+    assert_eq!(
+        registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisition")
+            .len(),
+        1
+    );
+    store
+        .hang_ensure
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("same id becomes a live detached session");
+
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+    assert!(registry
+        .peek_session(stream_id)
+        .await
+        .expect("live session probe")
+        .is_some());
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup")
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn shutdown_drained_session_is_not_a_terminal_release_retry() {
     let registry = InMemorySmSessionRegistry::new();

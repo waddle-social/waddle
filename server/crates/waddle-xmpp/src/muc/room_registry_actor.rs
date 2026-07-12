@@ -209,6 +209,19 @@ impl RoomRegistryActor {
             .remove(&(room_jid.clone(), claim_fence.clone()));
     }
 
+    async fn retry_oldest_pending_room_release(&mut self) -> bool {
+        let Some((room_jid, claim_fence)) = self
+            .pending_room_releases
+            .iter()
+            .min_by_key(|(_, state)| state.retry_order)
+            .map(|((room_jid, claim_fence), _)| (room_jid.clone(), claim_fence.clone()))
+        else {
+            return false;
+        };
+        self.release_room_claim(&room_jid, &claim_fence).await;
+        true
+    }
+
     /// Attach a durable membership source so every spawned `RoomActor`
     /// hydrates its durable-recipient set before serving snapshots (#1135).
     #[must_use]
@@ -536,8 +549,16 @@ impl RoomRegistryActor {
             }
             let claim_fence = entry.claim_fence.clone();
             if !self.has_pending_release_capacity(room_jid, &claim_fence) {
-                warn!(room = %room_jid, "Cannot retire dead RoomActor: exact-release retry backlog is full");
-                return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
+                // Saturation must not make a dead map entry immortal. Give
+                // the oldest exact responsibility one bounded retry; a
+                // successful/NotOwned result frees the slot needed to retire
+                // this actor, while persistent backend failure remains
+                // bounded and simply defers this dead entry to a later call.
+                self.retry_oldest_pending_room_release().await;
+                if !self.has_pending_release_capacity(room_jid, &claim_fence) {
+                    debug!(room = %room_jid, "Cannot retire dead RoomActor yet: exact-release retry backlog remains full after bounded redrive");
+                    return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
+                }
             }
             self.rooms.remove(room_jid);
             self.poisoned_rooms.insert(room_jid.clone());
@@ -715,7 +736,9 @@ impl kameo::message::Message<IsPendingRoomReleaseOnly> for RoomRegistryActor {
         msg: IsPendingRoomReleaseOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        !self.rooms.contains_key(&msg.room_jid)
+        self.rooms
+            .get(&msg.room_jid)
+            .is_none_or(|entry| !entry.actor_ref.is_alive())
             && self
                 .pending_room_releases
                 .keys()
