@@ -107,6 +107,16 @@ async fn live_stealer(db: &Database) -> NodeIdentity {
     stealer
 }
 
+async fn current_claim_epoch(fixture: &Fixture, entity: &Entity) -> ClaimEpoch {
+    fixture
+        .claims
+        .current_claim(entity)
+        .await
+        .expect("claim lookup")
+        .expect("fenced write established a claim")
+        .claim_epoch
+}
+
 struct Fixture {
     fenced: PostgresFencedSmPersistence,
     /// A second `ClaimStore` handle onto the same underlying Postgres
@@ -456,15 +466,16 @@ async fn delete_session_aborts_before_any_write_once_the_claim_is_stolen() {
     f.fenced
         .upsert_session(fixture_session("stream-stolen"))
         .await
-        .expect("upsert_session establishes the claim at epoch 0");
+        .expect("upsert_session establishes the claim");
 
     // Make the current owner's node row stale, then steal the entity to a
-    // different node — the fenced impl's cached epoch (0) is now invalid.
+    // different node — the fenced impl's cached generation is now invalid.
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-stolen".to_string());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
     f.claims
-        .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
+        .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer)
         .await
         .expect("steal succeeds against a stale owner");
 
@@ -606,13 +617,14 @@ async fn record_promotion_failure_aborts_before_any_write_once_the_claim_is_stol
     f.fenced
         .upsert_session(fixture_session("stream-promo-stolen"))
         .await
-        .expect("upsert_session establishes the claim at epoch 0");
+        .expect("upsert_session establishes the claim");
 
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-promo-stolen".to_string());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
     f.claims
-        .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
+        .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer)
         .await
         .expect("steal succeeds against a stale owner");
 
@@ -727,12 +739,13 @@ async fn concurrent_steal_vs_delete_session_never_produces_torn_state() {
     seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-race".to_string());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
 
     let delete_result = f.fenced.delete_session(&stream_id);
     let steal_result =
         f.claims
-            .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer);
+            .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer);
     let (delete_outcome, _steal_outcome) = tokio::join!(delete_result, steal_result);
 
     // Whichever statement's transaction actually committed first, the
@@ -783,7 +796,7 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
     f.fenced
         .upsert_session(fixture_session("stream-atomic-stolen"))
         .await
-        .expect("upsert_session establishes the claim at epoch 0");
+        .expect("upsert_session establishes the claim");
     f.fenced
         .append_unacked(fixture_unacked("stream-atomic-stolen", 1))
         .await
@@ -791,9 +804,10 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
 
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-stolen".to_string());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
     f.claims
-        .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer)
+        .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer)
         .await
         .expect("steal succeeds against a stale owner");
 
@@ -850,6 +864,7 @@ async fn concurrent_steal_vs_store_session_atomic_never_produces_torn_state() {
     seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-race".to_string());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
 
     let mut new_session = fixture_session("stream-atomic-race");
@@ -859,7 +874,7 @@ async fn concurrent_steal_vs_store_session_atomic_never_produces_torn_state() {
     let store_result = f.fenced.store_session_atomic(new_session, new_unacked);
     let steal_result =
         f.claims
-            .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer);
+            .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer);
     let (store_outcome, _steal_outcome) = tokio::join!(store_result, steal_result);
 
     let loaded = f
@@ -911,12 +926,13 @@ async fn concurrent_steal_vs_record_promotion_failure_never_produces_torn_state(
     seed_node(&f.claims_db, &f.identity, true).await;
 
     let entity = Entity::new(EntityType::SmSession, "stream-promo-race".to_string());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
     let stealer = live_stealer(&f.claims_db).await;
 
     let promo_result = f.fenced.record_promotion_failure(&stream_id);
     let steal_result =
         f.claims
-            .steal_stale(&entity, ClaimEpoch(0), StalePredicate::OwnerStale, &stealer);
+            .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer);
     let (promo_outcome, _steal_outcome) = tokio::join!(promo_result, steal_result);
 
     let conn = f.claims_db.guard().await.expect("guard");
