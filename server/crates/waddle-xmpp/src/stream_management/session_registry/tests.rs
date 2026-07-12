@@ -262,6 +262,82 @@ async fn hung_claim_release_is_bounded_and_retains_exact_fence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn claim_session_commit_before_timeout_retains_acquisition_for_reconciliation() {
+    use crate::ownership::ClaimStore as _;
+
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(me.clone()),
+    );
+    let stream_id = "claim-commit-before-timeout";
+    registry
+        .sessions
+        .write()
+        .expect("sessions")
+        .insert(stream_id.to_string(), make_test_session(stream_id));
+
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect_err("the bounded attempt must report its ambiguous timeout");
+
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert_eq!(
+        store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .expect("the test double committed before hanging")
+            .owner,
+        me
+    );
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .iter()
+        .any(|(id, _, disposition)| id == stream_id
+            && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession));
+
+    registry.retry_pending_claim_releases(1).await;
+    assert!(registry
+        .claim_fences
+        .read()
+        .expect("claim fences")
+        .contains_key(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+}
+
+#[test]
+fn reclaimed_claim_admission_is_bounded_before_the_ownership_cas() {
+    let registry = InMemorySmSessionRegistry::with_capacity(1);
+    let first =
+        crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "bounded-reclaim-1");
+    let second =
+        crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "bounded-reclaim-2");
+
+    assert!(registry.reserve_reclaimed_claim_capacity(&first));
+    assert!(!registry.reserve_reclaimed_claim_capacity(&second));
+    registry.cancel_reclaimed_claim_capacity(&first);
+    assert!(registry.reserve_reclaimed_claim_capacity(&second));
+}
+
+#[tokio::test(start_paused = true)]
 async fn terminal_release_retry_clears_retained_exact_fence() {
     let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
     let store = std::sync::Arc::new(HangingReleaseClaimStore {
@@ -4157,9 +4233,10 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
         .await
         .expect("seed exact claim");
     let fence = super::super::persistence::SmClaimFence::new(me.clone(), epoch);
-    let registry = InMemorySmSessionRegistry::new()
+    let registry = InMemorySmSessionRegistry::with_capacity(1)
         .with_persistence(storage.clone())
         .with_claim_store(claim_store, crate::ownership::SharedNodeIdentity::new(me));
+    assert!(registry.reserve_reclaimed_claim_capacity(&entity));
     storage
         .fail_get_once
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4172,6 +4249,12 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
         super::ReclaimedHydrationOutcome::TransientFailure
     );
     assert_eq!(registry.pending_reclaimed_hydration_count(), 1);
+    let another =
+        crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "another-reclaim");
+    assert!(
+        !registry.reserve_reclaimed_claim_capacity(&another),
+        "transient hydration must retain and consume the sole bounded ownership slot"
+    );
 
     assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
     assert_eq!(registry.pending_reclaimed_hydration_count(), 0);

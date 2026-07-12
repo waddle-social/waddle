@@ -126,6 +126,12 @@ pub struct InMemorySmSessionRegistry {
     /// every future orphan scan.
     pub(super) pending_reclaimed_hydrations:
         RwLock<HashMap<(String, super::super::persistence::SmClaimFence), Entity>>,
+    /// Ownership-changing calls whose timeout made the committed result
+    /// unknown before an epoch could be returned. The attempted owner is
+    /// enough to reconcile them without replaying a one-shot CAS: a later
+    /// `current_claim` either supplies the exact epoch now owned by that
+    /// incarnation or proves that this attempt did not remain authoritative.
+    pub(super) pending_reclaimed_claim_lookups: RwLock<HashMap<(String, NodeIdentity), Entity>>,
     /// Capacity reserved before an acquisition whose exact epoch is not yet
     /// known. A reservation survives an ambiguous timeout and is consumed
     /// only when reconciliation either records the resulting fence or proves
@@ -167,6 +173,41 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Reserve bounded local responsibility before an external caller
+    /// performs an ownership-changing CAS for a reclaimed SM session.
+    /// The reservation is consumed when the exact returned fence is
+    /// published, or cancelled when the CAS is known not to have won.
+    pub fn reserve_reclaimed_claim_capacity(&self, entity: &Entity) -> bool {
+        entity.entity_type == EntityType::SmSession && self.reserve_claim_fence_capacity(&entity.id)
+    }
+
+    pub fn cancel_reclaimed_claim_capacity(&self, entity: &Entity) {
+        self.cancel_claim_fence_reservation(&entity.id);
+    }
+
+    /// Retain a timed-out ownership mutation without replaying it. The
+    /// registry later uses a read-only `current_claim` to discover the exact
+    /// epoch iff this attempted owner actually won.
+    pub fn defer_uncertain_reclaimed_claim(&self, entity: &Entity, owner: &NodeIdentity) {
+        if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
+            pending.insert((entity.id.clone(), owner.clone()), entity.clone());
+        }
+    }
+
+    /// Drop retry bookkeeping only when a caller has taken over terminal
+    /// exact release for this fence (the cross-node resume repair path).
+    pub(super) fn transfer_reclaimed_claim_to_exact_release(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+    ) {
+        self.clear_pending_reclaimed_hydration(entity, fence);
+        if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
+            pending.remove(&(entity.id.clone(), fence.owner().clone()));
+        }
+        self.cancel_claim_fence_reservation(&entity.id);
+    }
+
     pub(super) fn reserve_claim_fence_capacity(&self, stream_id: &str) -> bool {
         self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions)
     }
@@ -458,6 +499,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
+            pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
             remote_resume: None,
         }
@@ -478,6 +520,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
+            pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
             remote_resume: None,
         }
@@ -833,6 +876,9 @@ impl InMemorySmSessionRegistry {
         ) {
             self.clear_pending_reclaimed_hydration(entity, caller_fence);
         }
+        if outcome == ReclaimedHydrationOutcome::LostClaim {
+            self.cancel_claim_fence_reservation(&entity.id);
+        }
         Ok(outcome)
     }
 
@@ -1128,18 +1174,62 @@ impl InMemorySmSessionRegistry {
     /// future scan — owns retry until hydration succeeds, ownership is
     /// disproved, or terminal cleanup completes.
     pub async fn retry_pending_reclaimed_hydrations(&self, limit: usize) -> usize {
+        let lookups = self
+            .pending_reclaimed_claim_lookups
+            .read()
+            .map(|pending| {
+                pending
+                    .iter()
+                    .take(limit)
+                    .map(|((_, owner), entity)| (entity.clone(), owner.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut attempted = 0;
+        for (entity, owner) in lookups {
+            attempted += 1;
+            let snapshot = match tokio::time::timeout(
+                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                self.claim_store.current_claim(&entity),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => snapshot,
+                Ok(Err(_)) | Err(_) => continue,
+            };
+            if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.owner == owner) {
+                if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
+                    pending.remove(&(entity.id.clone(), owner.clone()));
+                }
+                let fence =
+                    super::super::persistence::SmClaimFence::new(owner, snapshot.claim_epoch);
+                if let Ok(
+                    ReclaimedHydrationOutcome::MissingDurable
+                    | ReclaimedHydrationOutcome::PoisonReleased
+                    | ReclaimedHydrationOutcome::StaleIdentity,
+                ) = self.hydrate_reclaimed_typed(&entity, &fence).await
+                {
+                    let _ = self.release_reclaimed_claim(&entity, &fence).await;
+                }
+            } else {
+                if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
+                    pending.remove(&(entity.id.clone(), owner));
+                }
+                self.cancel_claim_fence_reservation(&entity.id);
+            }
+        }
+        let remaining = limit.saturating_sub(attempted);
         let pending = self
             .pending_reclaimed_hydrations
             .read()
             .map(|pending| {
                 pending
                     .iter()
-                    .take(limit)
+                    .take(remaining)
                     .map(|((_, fence), entity)| (entity.clone(), fence.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut attempted = 0;
         for (entity, fence) in pending {
             attempted += 1;
             match self.hydrate_reclaimed_typed(&entity, &fence).await {

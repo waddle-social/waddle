@@ -370,12 +370,6 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         let Some(room_jid) = Self::room_jid(entity) else {
             return true;
         };
-        // A pending-release-only JID has no mailbox barrier left to run, but
-        // the generic drain can release only the CURRENT node identity via
-        // epoch-blind `release_many`. Admit it only when every retained exact
-        // fence belongs to that identity. An older-incarnation fence is
-        // deliberately abandoned (truthfully counted by the drain) for stale
-        // node recovery rather than falsely reported released.
         if registry
             .is_current_identity_pending_room_release_only(room_jid.clone())
             .await

@@ -94,9 +94,10 @@
 //!   write: the CAS (or, for the FIX C branch, a plain `ensure_claimed`)
 //!   followed by `hydrate_reclaimed` and `claim_session`. It is called
 //!   un-raced, un-timeout-dropped — every internal step still carries its
-//!   own bound (a hung Postgres call must not hang this forever), but a
-//!   bound expiring is handled as a typed failure that feeds FIX B's
-//!   repair, never as a reason to abandon the future mid-sequence.
+//!   own bound (a hung Postgres call must not hang this forever). A bound
+//!   expiring before an ownership epoch is returned retains a bounded,
+//!   read-only `current_claim` reconciliation item; a post-win bound feeds
+//!   FIX B's exact repair. Neither path replays the one-shot CAS.
 //! - **FIX B — post-win repair**: once the CAS (or FIX C's direct acquire)
 //!   has won, any subsequent `hydrate_reclaimed`/`claim_session` failure —
 //!   error or bound expiry — triggers
@@ -568,11 +569,9 @@ impl InMemorySmSessionRegistry {
     /// once. A loss is an immediate, clean `NotFound` — never retried
     /// (module doc's "one-shot CAS" discipline). A timeout here means the
     /// outcome is genuinely unknown (the CAS may have committed
-    /// server-side with the reply lost to `FINISH_STEAL_TIMEOUT`) —
-    /// surfaced as an internal error rather than guessed at, and never
-    /// retried (retrying would risk a second CAS attempt against an
-    /// already-stale `observed_epoch`, exactly what the one-shot
-    /// discipline forbids). On a win, hands off to
+    /// server-side with the reply lost to `FINISH_STEAL_TIMEOUT`) — it is
+    /// retained for a later read-only owner/epoch lookup, never replayed
+    /// against the already-consumed `observed_epoch`. On a win, hands off to
     /// [`Self::complete_local_claim`] — from this point FIX B's repair
     /// covers every subsequent failure.
     async fn finish_steal(
@@ -583,6 +582,11 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
+        if !self.reserve_reclaimed_claim_capacity(entity) {
+            return Err(SmRegistryError::Internal(
+                "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
+            ));
+        }
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
             self.claim_store
@@ -594,16 +598,22 @@ impl InMemorySmSessionRegistry {
                 self.complete_local_claim(entity, me, new_epoch, stream_id)
                     .await
             }
-            Ok(Err(ClaimError::Conflict)) => Ok(CrossNodeResumeOutcome::NotFound),
-            Ok(Err(other)) => Err(SmRegistryError::Internal(format!(
-                "attempt_cross_node_resume: steal_for_resume failed: {other}"
-            ))),
-            Err(_timeout) => Err(SmRegistryError::Internal(
-                "attempt_cross_node_resume: steal_for_resume timed out; outcome unknown \
-                 (never retried — the one-shot CAS discipline forbids a second attempt \
-                 against a possibly-already-consumed observed epoch)"
-                    .to_string(),
-            )),
+            Ok(Err(ClaimError::Conflict)) => {
+                self.cancel_reclaimed_claim_capacity(entity);
+                Ok(CrossNodeResumeOutcome::NotFound)
+            }
+            Ok(Err(other)) => {
+                self.cancel_reclaimed_claim_capacity(entity);
+                Err(SmRegistryError::Internal(format!(
+                    "attempt_cross_node_resume: steal_for_resume failed: {other}"
+                )))
+            }
+            Err(_timeout) => {
+                self.defer_uncertain_reclaimed_claim(entity, &me);
+                Err(SmRegistryError::Internal(
+                    "attempt_cross_node_resume: steal_for_resume timed out; outcome retained for non-replaying reconciliation".to_string(),
+                ))
+            }
         }
     }
 
@@ -633,6 +643,11 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
+        if !self.reserve_reclaimed_claim_capacity(entity) {
+            return Err(SmRegistryError::Internal(
+                "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
+            ));
+        }
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
             self.claim_store.ensure_claimed(entity, &me),
@@ -644,16 +659,21 @@ impl InMemorySmSessionRegistry {
                     .await
             }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Draining)) => {
+                self.cancel_reclaimed_claim_capacity(entity);
                 Ok(CrossNodeResumeOutcome::NotFound)
             }
-            Ok(Err(other)) => Err(SmRegistryError::Internal(format!(
-                "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed failed: {other}"
-            ))),
-            Err(_timeout) => Err(SmRegistryError::Internal(
-                "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed timed out; \
-                 outcome unknown (never retried, same one-shot discipline as the steal path)"
-                    .to_string(),
-            )),
+            Ok(Err(other)) => {
+                self.cancel_reclaimed_claim_capacity(entity);
+                Err(SmRegistryError::Internal(format!(
+                    "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed failed: {other}"
+                )))
+            }
+            Err(_timeout) => {
+                self.defer_uncertain_reclaimed_claim(entity, &me);
+                Err(SmRegistryError::Internal(
+                    "attempt_cross_node_resume: direct acquire timed out; outcome retained for non-replaying reconciliation".to_string(),
+                ))
+            }
         }
     }
 
@@ -781,6 +801,7 @@ impl InMemorySmSessionRegistry {
         reason: String,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         self.forget_claim_locally(stream_id).await;
+        self.transfer_reclaimed_claim_to_exact_release(entity, fence);
 
         for attempt in 1..=REPAIR_RELEASE_MAX_ATTEMPTS {
             match tokio::time::timeout(
@@ -1489,6 +1510,168 @@ mod tests {
     /// does not already own.
     struct DrainingClaimStore {
         inner: InProcessClaimStore,
+    }
+
+    struct CommitThenHangClaimStore {
+        inner: InProcessClaimStore,
+        hang_ensure_once: std::sync::atomic::AtomicBool,
+        hang_steal_once: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl ClaimStore for CommitThenHangClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            let epoch = self.inner.ensure_claimed(entity, me).await?;
+            if self
+                .hang_ensure_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return std::future::pending().await;
+            }
+            Ok(epoch)
+        }
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: crate::ownership::StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: crate::ownership::ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            let epoch = self
+                .inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await?;
+            if self
+                .hang_steal_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return std::future::pending().await;
+            }
+            Ok(epoch)
+        }
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<crate::ownership::ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+        async fn release_many(
+            &self,
+            entities: &[Entity],
+            me: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_acquire_commit_before_timeout_is_reconciled_without_replay() {
+        let store = Arc::new(CommitThenHangClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+            hang_steal_once: std::sync::atomic::AtomicBool::new(false),
+        });
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session("direct-timeout", &jid))
+            .await
+            .expect("persist");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                store,
+                SharedNodeIdentity::new(NodeIdentity::new("new-node", "incarnation")),
+            );
+
+        registry
+            .attempt_cross_node_resume("direct-timeout", &jid.to_bare(), Duration::from_secs(2))
+            .await
+            .expect_err("the first call times out after the committed acquire");
+        assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key("direct-timeout"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_steal_commit_before_timeout_is_reconciled_without_replay() {
+        let store = Arc::new(CommitThenHangClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+            hang_steal_once: std::sync::atomic::AtomicBool::new(true),
+        });
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session("steal-timeout", &jid))
+            .await
+            .expect("persist");
+        let entity = Entity::new(EntityType::SmSession, "steal-timeout");
+        store
+            .acquire(&entity, &NodeIdentity::new("old-node", "incarnation"))
+            .await
+            .expect("old claim");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                store,
+                SharedNodeIdentity::new(NodeIdentity::new("new-node", "incarnation")),
+            );
+
+        registry
+            .attempt_cross_node_resume("steal-timeout", &jid.to_bare(), Duration::from_secs(2))
+            .await
+            .expect_err("the first call times out after the committed steal");
+        assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key("steal-timeout"));
     }
 
     #[async_trait::async_trait]

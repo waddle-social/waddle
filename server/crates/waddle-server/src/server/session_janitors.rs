@@ -496,15 +496,6 @@ pub(crate) fn spawn_orphan_reaper_janitor(
     #[cfg(feature = "clustering")]
     {
         let weak_state = Arc::downgrade(websocket_state);
-        let Some(stop) = websocket_state
-            .deps
-            .app_state
-            .clustering_claims
-            .stop_token
-            .clone()
-        else {
-            return;
-        };
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             // Skip the first (immediate) tick, mirroring the other janitors
@@ -512,10 +503,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             // registered this node.
             ticker.tick().await;
             loop {
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    _ = ticker.tick() => {}
-                }
+                ticker.tick().await;
                 let Some(state) = weak_state.upgrade() else {
                     break;
                 };
@@ -698,9 +686,22 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
 
     let mut stolen = 0usize;
     for candidate in candidates {
+        if !state
+            .deps
+            .protocol
+            .sm_session_registry
+            .reserve_reclaimed_claim_capacity(&candidate.entity)
+        {
+            break;
+        }
         if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-candidate")
             .await
         {
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .cancel_reclaimed_claim_capacity(&candidate.entity);
             return;
         }
         // Element 9's ordering requirement: commit the expire CAS on the
@@ -713,6 +714,11 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
                 %error,
                 "orphan reaper: expire on the dead owner's row failed; retrying next sweep"
             );
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .cancel_reclaimed_claim_capacity(&candidate.entity);
             continue;
         }
         // ADR-0017 Phase 3 Slice 10: a placement heuristic only — never
@@ -725,6 +731,11 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-steal")
             .await
         {
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .cancel_reclaimed_claim_capacity(&candidate.entity);
             return;
         }
         match node_lease
@@ -737,35 +748,42 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
                     me.clone(),
                     new_epoch,
                 );
-                match state
+                if let Ok(
+                    waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
+                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
+                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
+                ) = state
                     .deps
                     .protocol
                     .sm_session_registry
                     .hydrate_reclaimed_typed(&candidate.entity, &fence)
                     .await
                 {
-                    Ok(
-                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
-                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
-                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
-                    ) => {
-                        let _ = state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .release_reclaimed_claim(&candidate.entity, &fence)
-                            .await;
-                    }
-                    Ok(_) | Err(_) => {}
+                    let _ = state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .release_reclaimed_claim(&candidate.entity, &fence)
+                        .await;
                 }
             }
             Err(ClaimError::Conflict) => {
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .cancel_reclaimed_claim_capacity(&candidate.entity);
                 // Another node (or this same node's own re-registration
                 // reacquisition step, ADR-0017 Phase 3 plan deviation #19)
                 // already reclaimed it, or the "dead" owner actually
                 // renewed concurrently — safe, no-op.
             }
             Err(error) => {
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .cancel_reclaimed_claim_capacity(&candidate.entity);
                 warn!(
                     entity_id = %candidate.entity.id,
                     %error,

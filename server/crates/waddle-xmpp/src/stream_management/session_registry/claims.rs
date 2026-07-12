@@ -15,23 +15,26 @@ fn sm_session_entity(stream_id: &str) -> Entity {
     Entity::new(EntityType::SmSession, stream_id.to_string())
 }
 
-struct PendingEnableAcquisitionGuard<'a> {
+struct PendingAcquisitionGuard<'a> {
     registry: &'a InMemorySmSessionRegistry,
     stream_id: String,
     identity: crate::ownership::NodeIdentity,
+    disposition: PendingClaimAcquisitionDisposition,
     armed: bool,
 }
 
-impl<'a> PendingEnableAcquisitionGuard<'a> {
+impl<'a> PendingAcquisitionGuard<'a> {
     fn new(
         registry: &'a InMemorySmSessionRegistry,
         stream_id: &str,
         identity: crate::ownership::NodeIdentity,
+        disposition: PendingClaimAcquisitionDisposition,
     ) -> Self {
         Self {
             registry,
             stream_id: stream_id.to_string(),
             identity,
+            disposition,
             armed: true,
         }
     }
@@ -41,7 +44,7 @@ impl<'a> PendingEnableAcquisitionGuard<'a> {
     }
 }
 
-impl Drop for PendingEnableAcquisitionGuard<'_> {
+impl Drop for PendingAcquisitionGuard<'_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -50,12 +53,12 @@ impl Drop for PendingEnableAcquisitionGuard<'_> {
             pending.insert((
                 self.stream_id.clone(),
                 self.identity.clone(),
-                PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+                self.disposition,
             ));
         } else {
             tracing::warn!(
                 stream_id = %self.stream_id,
-                "cancelled SM enable acquisition could not retain ambiguous claim responsibility"
+                "cancelled SM claim acquisition could not retain ambiguous claim responsibility"
             );
         }
     }
@@ -163,6 +166,18 @@ impl InMemorySmSessionRegistry {
         let mut out = self.live_session_ids()?;
         let pending = self.pending_claim_releases.read().ok()?;
         out.extend(pending.iter().map(|(stream_id, _)| stream_id.clone()));
+        let pending_hydration = self.pending_reclaimed_hydrations.read().ok()?;
+        out.extend(
+            pending_hydration
+                .keys()
+                .map(|(stream_id, _)| stream_id.clone()),
+        );
+        let pending_lookups = self.pending_reclaimed_claim_lookups.read().ok()?;
+        out.extend(
+            pending_lookups
+                .keys()
+                .map(|(stream_id, _)| stream_id.clone()),
+        );
         out.sort();
         out.dedup();
         Some(out)
@@ -842,8 +857,12 @@ impl InMemorySmSessionRegistry {
         }
         let entity = sm_session_entity(stream_id);
         let identity = self.node_identity.current();
-        let mut acquisition_guard =
-            PendingEnableAcquisitionGuard::new(self, stream_id, identity.clone());
+        let mut acquisition_guard = PendingAcquisitionGuard::new(
+            self,
+            stream_id,
+            identity.clone(),
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        );
         let claimed = match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
             self.claim_store.ensure_claimed(&entity, &identity),
@@ -961,6 +980,17 @@ impl InMemorySmSessionRegistry {
         // here (`ensure_claimed` only self-reacquires for an exact
         // node/epoch match).
         let identity = self.node_identity.current();
+        if !self.reserve_claim_fence_capacity(stream_id) {
+            return Err(SmRegistryError::Internal(
+                "claim_session: exact ownership capacity exhausted".to_string(),
+            ));
+        }
+        let mut acquisition_guard = PendingAcquisitionGuard::new(
+            self,
+            stream_id,
+            identity.clone(),
+            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+        );
         // FIX 5: bounded — this call runs under `stream_id`'s shard lock
         // (`_stream_guard`, held since the peek above), and that lock is
         // shared by every other stream id hashing to the same shard (see
@@ -975,8 +1005,14 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => epoch,
-            Ok(Err(ClaimError::AlreadyClaimed)) => return Ok(None),
+            Ok(Err(ClaimError::AlreadyClaimed)) => {
+                acquisition_guard.disarm();
+                self.cancel_claim_fence_reservation(stream_id);
+                return Ok(None);
+            }
             Ok(Err(other)) => {
+                acquisition_guard.disarm();
+                self.cancel_claim_fence_reservation(stream_id);
                 return Err(SmRegistryError::Internal(format!(
                     "claim_session: ClaimStore ensure_claimed failed for an entity this \
                      registry believed was unclaimed: {other}"
@@ -991,6 +1027,7 @@ impl InMemorySmSessionRegistry {
                 )));
             }
         };
+        acquisition_guard.disarm();
 
         if self.node_identity.current() != identity {
             self.release_claim_store_entry_under(
