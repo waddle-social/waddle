@@ -88,13 +88,15 @@ impl EntityType {
 
 /// Wire length bound on [`Entity::id`] (ADR-0017 Phase 3 Slice 7 FIX 9,
 /// council-adjudicated). Mirrors
-/// [`crate::pending_delivery::SM_SESSION_ID_MAX_LEN`]'s exact rationale one
+/// [`crate::pending_delivery::SM_SESSION_ID_MAX_LEN`]'s defensive rationale one
 /// type over: `Entity` now travels wire-typed on the MUC Demote relay ask
 /// (deviation 60), which is NOT a stanza and so never passes through the
 /// bounded XML stanza codec — without a field-level bound of its own, a
 /// malicious (or buggy) allowlisted peer could ship a multi-MB `id`.
-/// Production ids are bare JIDs or room JIDs, far under this cap.
-pub const ENTITY_ID_MAX_LEN: usize = 128;
+/// RFC 7622 section 3.1 permits 1023 octets in each bare-JID part, plus
+/// the `@` separator, so the bound must admit every valid 2047-octet bare
+/// JID used for `UserActor` and `RoomActor` ownership.
+pub const ENTITY_ID_MAX_LEN: usize = 2047;
 
 /// [`Entity::id`] exceeded [`ENTITY_ID_MAX_LEN`] at deserialization.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -109,11 +111,10 @@ pub struct EntityIdTooLong {
 /// `Serialize`/`Deserialize` (ADR-0017 Phase 3 Slice 7) so this type can
 /// travel wire-typed on the MUC Demote relay ask. `Deserialize` is
 /// hand-written (below), not derived, so it can enforce [`ENTITY_ID_MAX_LEN`]
-/// on the `id` field — mirroring [`crate::pending_delivery::SmSessionId`]'s
-/// identical hand-written bound exactly, one type over (FIX 9). [`Self::new`]
-/// itself stays unvalidated, for the same reason `SmSessionId::new` does: every
-/// production caller mints ids far under the cap, and the wire boundary is
-/// where an untrusted length actually arrives.
+/// on the `id` field — applying [`crate::pending_delivery::SmSessionId`]'s
+/// same boundary defense one type over (FIX 9). [`Self::new`]
+/// itself stays unvalidated, for the same reason `SmSessionId::new` does: the
+/// wire boundary is where an untrusted length actually arrives.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Entity {
     pub entity_type: EntityType,

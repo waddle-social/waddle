@@ -1,3 +1,4 @@
+use super::core::PendingClaimAcquisitionDisposition;
 use super::*;
 use std::time::{Duration, Instant};
 
@@ -364,6 +365,15 @@ async fn rejected_enable_reconciliation_skips_stream_that_became_live_again() {
         .expect("same id becomes a live detached session");
 
     assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+    assert!(
+        registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisition")
+            .is_empty(),
+        "the live session lifecycle supersedes the rejected-enable retry"
+    );
+    assert!(!registry.has_claim_fence_reservation(stream_id));
     assert!(registry
         .peek_session(stream_id)
         .await
@@ -379,6 +389,260 @@ async fn rejected_enable_reconciliation_skips_stream_that_became_live_again() {
             .expect("claim lookup")
             .is_some()
     );
+
+    registry
+        .take_session(stream_id)
+        .await
+        .expect("take live session")
+        .expect("live session existed");
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup after live lifecycle ends")
+            .is_none()
+    );
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup after later janitor pass")
+            .is_none(),
+        "a superseded rejected-enable retry must never manufacture a fresh claim"
+    );
+}
+
+#[tokio::test]
+async fn live_stream_releases_timed_out_old_identity_without_adopting_its_fence() {
+    use crate::ownership::ClaimStore as _;
+
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let current = crate::ownership::NodeIdentity::new("sm-node", "new-incarnation");
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let stream_id = "old-enable-claim-new-live-session";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    store.acquire(&entity, &old).await.expect("old claim");
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(current),
+    );
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    registry
+        .pending_claim_acquisitions
+        .write()
+        .expect("pending acquisitions")
+        .insert((
+            stream_id.to_string(),
+            old.clone(),
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        ));
+    registry
+        .sessions
+        .write()
+        .expect("sessions")
+        .insert(stream_id.to_string(), make_test_session(stream_id));
+
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+    assert!(
+        !registry
+            .claim_fences
+            .read()
+            .expect("claim fences")
+            .contains_key(stream_id),
+        "an advisory old-incarnation snapshot must never authorize the new live lifecycle"
+    );
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup")
+        .is_none());
+    assert_eq!(registry.pending_claim_release_count(), 0);
+}
+
+#[tokio::test]
+async fn old_claim_cleanup_waits_for_shared_detach_reservation_to_resolve() {
+    use crate::ownership::ClaimStore as _;
+
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let current = crate::ownership::NodeIdentity::new("sm-node", "new-incarnation");
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let stream_id = "shared-pending-acquisition-reservation";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    store.acquire(&entity, &old).await.expect("old claim");
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(current.clone()),
+    );
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    {
+        let mut pending = registry
+            .pending_claim_acquisitions
+            .write()
+            .expect("pending acquisitions");
+        pending.insert((
+            stream_id.to_string(),
+            old.clone(),
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        ));
+        pending.insert((
+            stream_id.to_string(),
+            current.clone(),
+            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+        ));
+    }
+    registry
+        .sessions
+        .write()
+        .expect("sessions")
+        .insert(stream_id.to_string(), make_test_session(stream_id));
+
+    assert!(
+        registry
+            .reconcile_rejected_enable_while_live(stream_id, &old)
+            .await
+    );
+    let pending = registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions");
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|(id, _, disposition)| {
+        id == stream_id && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
+    }));
+    drop(pending);
+    assert!(
+        registry.has_claim_fence_reservation(stream_id),
+        "old-claim cleanup must not consume the detach reconciliation's reservation"
+    );
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("old claim lookup")
+        .is_some());
+
+    registry
+        .reconcile_uncertain_claim_acquisition(
+            stream_id,
+            current,
+            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+        )
+        .await;
+    let pending = registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions");
+    assert_eq!(pending.len(), 1);
+    assert!(pending.iter().any(|(id, _, disposition)| {
+        id == stream_id && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
+    }));
+    drop(pending);
+    assert!(
+        registry.has_claim_fence_reservation(stream_id),
+        "a conflicting detach reconciliation must leave the slot to the remaining rejected-enable cleanup"
+    );
+    assert!(
+        registry
+            .reconcile_rejected_enable_while_live(stream_id, &old)
+            .await
+    );
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup after terminal conversion")
+        .is_none());
+    assert!(!registry
+        .claim_fences
+        .read()
+        .expect("claim fences")
+        .contains_key(stream_id));
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_old_identity_release_retries_while_replacement_stream_is_live() {
+    use crate::ownership::ClaimStore as _;
+
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let current = crate::ownership::NodeIdentity::new("sm-node", "new-incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(true),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let stream_id = "retry-old-terminal-fence-while-live";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    store.acquire(&entity, &old).await.expect("old claim");
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(current),
+    );
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    registry
+        .pending_claim_acquisitions
+        .write()
+        .expect("pending acquisitions")
+        .insert((
+            stream_id.to_string(),
+            old.clone(),
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        ));
+    registry
+        .sessions
+        .write()
+        .expect("sessions")
+        .insert(stream_id.to_string(), make_test_session(stream_id));
+
+    assert!(
+        registry
+            .reconcile_rejected_enable_while_live(stream_id, &old)
+            .await
+    );
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert!(!registry
+        .claim_fences
+        .read()
+        .expect("claim fences")
+        .contains_key(stream_id));
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("old claim lookup")
+        .is_some());
+
+    store
+        .hang_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 1);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup after retry")
+        .is_none());
+    assert!(registry
+        .sessions
+        .read()
+        .expect("sessions")
+        .contains_key(stream_id));
 }
 
 #[tokio::test(start_paused = true)]

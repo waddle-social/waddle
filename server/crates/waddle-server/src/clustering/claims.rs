@@ -198,12 +198,16 @@ mod entity_key_tests {
 
     #[test]
     fn decode_entity_round_trips_entity_key_including_ids_with_colons() {
-        let cases = [
+        let long_valid_room: jid::BareJid = format!("{}@muc.example.com", "a".repeat(129))
+            .parse()
+            .expect("valid room JID longer than the old 128-byte wire bound");
+        let cases = vec![
             Entity::new(EntityType::UserActor, "42"),
             Entity::new(EntityType::RoomActor, "room_actor:42"),
             Entity::new(EntityType::SmSession, "sm_session:sm_session:x"),
             Entity::new(EntityType::UserActor, ""),
             Entity::new(EntityType::RoomActor, ":"),
+            Entity::new(EntityType::RoomActor, long_valid_room.to_string()),
         ];
         for entity in cases {
             let encoded = entity_key(&entity);
@@ -3868,6 +3872,39 @@ mod tests {
                 .await,
             Err(ClaimError::Conflict)
         ));
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_preserves_valid_room_jids_longer_than_128_bytes() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let dead_owner = node_identity();
+        seed_node(&store.db, &dead_owner, true).await;
+        let long_room_jid: jid::BareJid = format!("{}@muc.example.com", "a".repeat(129))
+            .parse()
+            .expect("valid long room JID");
+        let entity = room_entity(long_room_jid.as_str());
+        store
+            .acquire(&entity, &dead_owner)
+            .await
+            .expect("long room claim");
+
+        let candidates = store
+            .list_orphaned_room_actor_claims(1)
+            .await
+            .expect("orphan scan");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].entity, entity);
+        assert!(
+            store
+                .current_claim(&entity)
+                .await
+                .expect("claim lookup")
+                .is_some(),
+            "a valid long room claim must be returned for adoption, not quarantined"
+        );
     }
 
     #[tokio::test]

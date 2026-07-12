@@ -273,6 +273,50 @@ impl InMemorySmSessionRegistry {
         true
     }
 
+    /// Convert a reserved acquisition slot into terminal exact-release
+    /// responsibility without publishing the supplied fence as authority for
+    /// live-session persistence. This is used when a claim belongs to an old
+    /// node incarnation while a newer, claimless lifecycle occupies the same
+    /// stream id.
+    pub(super) fn try_record_terminal_claim_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+            self.claim_fence_reservations.write(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+        ) else {
+            return false;
+        };
+        if pending.contains(&(stream_id.to_string(), fence.clone())) {
+            reservations.remove(stream_id);
+            if fences.get(stream_id) == Some(&fence) {
+                fences.remove(stream_id);
+            }
+            return true;
+        }
+        let reserved = reservations.remove(stream_id);
+        let converts_active = fences.get(stream_id) == Some(&fence);
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+            .count();
+        let occupied = pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len());
+        if !reserved && !converts_active && occupied >= self.max_sessions {
+            return false;
+        }
+        if converts_active {
+            fences.remove(stream_id);
+        }
+        pending.insert((stream_id.to_string(), fence));
+        true
+    }
+
     /// Create a new in-memory registry with default settings.
     pub fn new() -> Self {
         Self {

@@ -122,7 +122,10 @@ impl InMemorySmSessionRegistry {
                     continue;
                 };
                 let _stream_guard = stream_lock.lock().await;
-                if self.stream_is_live_or_uncertain(&stream_id) {
+                if self
+                    .reconcile_rejected_enable_while_live(&stream_id, &identity)
+                    .await
+                {
                     continue;
                 }
                 self.reconcile_uncertain_claim_acquisition(&stream_id, identity, disposition)
@@ -150,8 +153,21 @@ impl InMemorySmSessionRegistry {
                 continue;
             };
             let _stream_guard = stream_lock.lock().await;
-            if self.stream_is_live_or_uncertain(&stream_id) {
-                continue;
+            match self.stream_liveness(&stream_id) {
+                None => continue,
+                Some(true) => {
+                    let Ok(active) = self.claim_fences.read() else {
+                        continue;
+                    };
+                    if active.get(&stream_id) == Some(&fence) {
+                        // This fence still authorizes the live lifecycle.
+                        continue;
+                    }
+                    // A different/absent active fence means this is terminal
+                    // exact cleanup. Its owner+epoch CAS is safe to retry
+                    // while the replacement lifecycle remains live.
+                }
+                Some(false) => {}
             }
             attempted += 1;
             self.release_claim_store_entry_under(&stream_id, fence)
@@ -160,18 +176,117 @@ impl InMemorySmSessionRegistry {
         attempted
     }
 
-    pub(super) fn stream_is_live_or_uncertain(&self, stream_id: &str) -> bool {
+    fn stream_liveness(&self, stream_id: &str) -> Option<bool> {
         match (self.sessions.read(), self.claimed_sessions.read()) {
             (Ok(sessions), Ok(claimed)) => {
-                sessions.contains_key(stream_id) || claimed.contains_key(stream_id)
+                Some(sessions.contains_key(stream_id) || claimed.contains_key(stream_id))
             }
-            // A poisoned live-state lock is uncertainty. Never release a
-            // claim on the basis of an incomplete/failed local probe.
-            _ => true,
+            _ => None,
         }
     }
 
-    async fn reconcile_uncertain_claim_acquisition(
+    pub(super) fn stream_is_live_or_uncertain(&self, stream_id: &str) -> bool {
+        // A poisoned live-state lock is uncertainty. Never release a claim
+        // on the basis of an incomplete/failed local probe.
+        self.stream_liveness(stream_id).unwrap_or(true)
+    }
+
+    /// Retire a rejected-enable acquisition only after a bounded,
+    /// non-creating lookup accounts for its possible committed claim. A live
+    /// detached session is not proof by itself: detach-time acquisition is
+    /// best effort and may have failed under a newer node identity.
+    ///
+    /// Returns `true` when the stream is live or its liveness is uncertain,
+    /// so the caller must not run the terminal `ensure_claimed` path.
+    pub(super) async fn reconcile_rejected_enable_while_live(
+        &self,
+        stream_id: &str,
+        pending_identity: &crate::ownership::NodeIdentity,
+    ) -> bool {
+        match self.stream_liveness(stream_id) {
+            Some(false) => return false,
+            None => return true,
+            Some(true) => {}
+        }
+
+        // One reservation cannot cover both a possibly-new generation from
+        // detach reconciliation and terminal cleanup of the rejected-enable
+        // generation. Let the live detach resolve first; a later sweep can
+        // then spend the slot on terminal conversion without undercounting.
+        let detach_still_uncertain = match self.pending_claim_acquisitions.read() {
+            Ok(pending) => pending.iter().any(|(id, _, disposition)| {
+                id == stream_id
+                    && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
+            }),
+            Err(_) => return true,
+        };
+        if detach_still_uncertain {
+            return true;
+        }
+
+        let entity = sm_session_entity(stream_id);
+        let snapshot = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.current_claim(&entity),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(_)) | Err(_) => return true,
+        };
+
+        if let Some(snapshot) = snapshot {
+            if snapshot.owner == *pending_identity {
+                let fence = super::super::persistence::SmClaimFence::new(
+                    snapshot.owner,
+                    snapshot.claim_epoch,
+                );
+                if *pending_identity == self.node_identity.current() {
+                    if !self.try_record_claim_fence(stream_id, fence) {
+                        return true;
+                    }
+                } else {
+                    // An old incarnation's snapshot is not authority for the
+                    // current live lifecycle. Preserve it only as terminal
+                    // exact-release responsibility, then attempt that release
+                    // without ever publishing the old fence for live writes.
+                    if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                        return true;
+                    }
+                    self.release_claim_store_entry_under(stream_id, fence).await;
+                }
+            }
+        }
+
+        self.remove_pending_claim_acquisition(
+            stream_id,
+            pending_identity,
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        );
+        true
+    }
+
+    fn remove_pending_claim_acquisition(
+        &self,
+        stream_id: &str,
+        identity: &crate::ownership::NodeIdentity,
+        disposition: PendingClaimAcquisitionDisposition,
+    ) {
+        let no_remaining_for_stream = {
+            let Ok(mut pending) = self.pending_claim_acquisitions.write() else {
+                return;
+            };
+            if !pending.remove(&(stream_id.to_string(), identity.clone(), disposition)) {
+                return;
+            }
+            !pending.iter().any(|(id, _, _)| id == stream_id)
+        };
+        if no_remaining_for_stream {
+            self.cancel_claim_fence_reservation(stream_id);
+        }
+    }
+
+    pub(super) async fn reconcile_uncertain_claim_acquisition(
         &self,
         stream_id: &str,
         identity: crate::ownership::NodeIdentity,
@@ -218,10 +333,7 @@ impl InMemorySmSessionRegistry {
                 }
             }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Conflict)) => {
-                if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                    pending.remove(&(stream_id.to_string(), identity, disposition));
-                }
-                self.cancel_claim_fence_reservation(stream_id);
+                self.remove_pending_claim_acquisition(stream_id, &identity, disposition);
             }
             Ok(Err(_)) | Err(_) => {
                 if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
