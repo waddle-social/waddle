@@ -19,6 +19,23 @@ impl kameo::message::Message<RememberOrdinaryReleaseForTest> for RoomRegistryAct
     }
 }
 
+struct ReservePendingAcquisitionForTest {
+    room_jid: BareJid,
+    owner: NodeIdentity,
+}
+
+impl kameo::message::Message<ReservePendingAcquisitionForTest> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: ReservePendingAcquisitionForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reserve_pending_room_acquisition(&msg.room_jid, &msg.owner)
+    }
+}
+
 fn test_room_jid(name: &str) -> BareJid {
     format!("{}@muc.example.com", name)
         .parse()
@@ -2306,12 +2323,28 @@ mod ownership_claims_tests {
                 .depth,
             1
         );
+        claim_store.fail_next_release();
+        tokio::time::advance(PENDING_ROOM_RETRY_DELAY).await;
+        tokio::task::yield_now().await;
         assert_eq!(
             registry
-                .ask(RetryPendingRoomReleases { limit: 8 })
+                .ask(GetPendingRoomReleaseBacklog)
                 .await
-                .expect("reconcile acquisition"),
-            1
+                .expect("failed release remains scheduled")
+                .depth,
+            1,
+            "a failed exact release must transfer responsibility without losing the retry loop"
+        );
+        tokio::time::advance(PENDING_ROOM_RETRY_DELAY).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("automatic acquisition reconciliation")
+                .depth,
+            0,
+            "the actor must redrive transferred release responsibility without an external janitor"
         );
         assert!(claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
@@ -2817,6 +2850,74 @@ mod ownership_claims_tests {
                 .expect("bounded backlog")
                 .depth,
             MAX_PENDING_ROOM_RELEASES
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_acquisitions_cannot_starve_release_retries() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let owner = this_identity();
+        for index in 0..PENDING_ROOM_RETRY_BATCH {
+            let jid = test_room_jid(&format!("fair-acquisition-{index}"));
+            claim_store
+                .acquire(&Entity::new(EntityType::RoomActor, jid.to_string()), &owner)
+                .await
+                .expect("seed current-owner claim");
+            assert!(registry
+                .ask(ReservePendingAcquisitionForTest {
+                    room_jid: jid,
+                    owner: owner.clone(),
+                })
+                .await
+                .expect("reserve acquisition"));
+        }
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(owner),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire seeded claim store");
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let jid = test_room_jid(&format!("fair-release-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: jid.clone(),
+                    claim_fence: room_claim_fence(&jid, ClaimEpoch(index as i64)),
+                })
+                .await
+                .expect("fill release backlog"));
+        }
+
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases {
+                    limit: PENDING_ROOM_RETRY_BATCH,
+                })
+                .await
+                .expect("defer blocked acquisitions"),
+            PENDING_ROOM_RETRY_BATCH
+        );
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases {
+                    limit: PENDING_ROOM_RETRY_BATCH,
+                })
+                .await
+                .expect("release retry gets a fair turn"),
+            PENDING_ROOM_RETRY_BATCH
+        );
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("backlog after fair release batch")
+                .depth,
+            MAX_PENDING_ROOM_RELEASES,
+            "the second batch must clear releases instead of selecting the same blocked acquisitions forever"
         );
     }
 
