@@ -4,7 +4,7 @@ use jid::{BareJid, Jid};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgRow;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Postgres, QueryBuilder, Row, Sqlite};
+use sqlx::{Postgres, QueryBuilder, Row, Sqlite, Transaction};
 use tracing::{debug, warn};
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
@@ -164,13 +164,12 @@ pub(super) async fn store_message(
 /// standalone pre-fan-out check and this write can never land a phantom
 /// archived row under a claim this node no longer holds.
 ///
-/// The origin-id dedup pre-check (idempotency for retried sends) runs
-/// against the plain pool, exactly as [`store_message`] already does it —
-/// it only ever reads already-committed rows, so it needs no transactional
-/// isolation from this write; only the fencing-check-then-insert pair needs
-/// one-transaction atomicity, which this function provides. Postgres-only:
-/// fencing is never enabled for a SQLite backend (clustering is
-/// Postgres-only per ADR-0017 element 1 — see
+/// Origin-id deduplication runs only after the claim check and inside the
+/// same transaction. An idempotent retry is still an ownership-sensitive
+/// archive operation: returning an existing row to a deposed actor would
+/// otherwise authorize its subsequent fan-out without proving the room
+/// claim. Postgres-only: fencing is never enabled for a SQLite backend
+/// (clustering is Postgres-only per ADR-0017 element 1 — see
 /// `SqlxMamStorage::with_cluster_fencing`), so the non-Postgres arm here is
 /// defensive only.
 pub(super) async fn store_message_fenced(
@@ -188,18 +187,6 @@ pub(super) async fn store_message_fenced(
         .origin_id
         .as_ref()
         .map(|_| origin_dedup_fingerprint(message));
-
-    if let Some(existing_archive_id) = find_existing_origin_id_match(
-        backend,
-        archive_jid,
-        message,
-        rich_payload.as_deref(),
-        origin_dedup_fingerprint.as_deref(),
-    )
-    .await?
-    {
-        return Ok(existing_archive_id);
-    }
 
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
@@ -226,22 +213,7 @@ pub(super) async fn store_message_fenced(
     // `insert_fenced` already establish — the first statement inside this
     // transaction, on the SAME connection as the write it guards. A failed
     // check rolls back BEFORE any write.
-    let entity_key = format!(
-        "{}:{}",
-        fence.entity.entity_type.as_db_str(),
-        fence.entity.id
-    );
-    let held = sqlx::query(
-        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND node_epoch = $3 AND claim_epoch = $4 FOR SHARE",
-    )
-    .bind(&entity_key)
-    .bind(&fence.owner.node_id)
-    .bind(&fence.owner.node_epoch)
-    .bind(fence.epoch.0)
-    .fetch_optional(&mut *tx)
-    .await?
-    .is_some();
-    if !held {
+    if !claim_fence_is_held(&mut tx, fence).await? {
         // Roll back explicitly rather than relying on drop — the fencing
         // failure is the expected, correctness-critical path here, not an
         // error worth masking behind an implicit rollback-on-drop.
@@ -249,6 +221,18 @@ pub(super) async fn store_message_fenced(
         return Err(MamStorageError::NotOwner {
             entity: fence.entity.clone(),
         });
+    }
+    if let Some(existing_archive_id) = find_existing_origin_id_match_postgres_tx(
+        &mut tx,
+        archive_jid,
+        message,
+        rich_payload.as_deref(),
+        origin_dedup_fingerprint.as_deref(),
+    )
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(existing_archive_id);
     }
 
     let mut query = QueryBuilder::<Postgres>::new(
@@ -282,15 +266,27 @@ pub(super) async fn store_message_fenced(
     });
     if let Err(error) = query.build().execute(&mut *tx).await {
         let _ = tx.rollback().await;
-        if let Some(existing_archive_id) = find_existing_origin_id_match(
-            backend,
+        // A concurrent origin-id insert can still win after our pre-check.
+        // Re-prove ownership in a fresh transaction before accepting its
+        // row as the idempotent result; never fall back to a pool-level
+        // dedup read that could bypass fencing after a claim transfer.
+        let mut dedup_tx = pool.begin().await?;
+        if !claim_fence_is_held(&mut dedup_tx, fence).await? {
+            let _ = dedup_tx.rollback().await;
+            return Err(MamStorageError::NotOwner {
+                entity: fence.entity.clone(),
+            });
+        }
+        let existing_archive_id = find_existing_origin_id_match_postgres_tx(
+            &mut dedup_tx,
             archive_jid,
             message,
             rich_payload.as_deref(),
             origin_dedup_fingerprint.as_deref(),
         )
-        .await?
-        {
+        .await?;
+        dedup_tx.commit().await?;
+        if let Some(existing_archive_id) = existing_archive_id {
             return Ok(existing_archive_id);
         }
         return Err(error.into());
@@ -299,6 +295,61 @@ pub(super) async fn store_message_fenced(
 
     debug!(archive_id = %archive_id, "Message stored in MAM archive (fenced)");
     Ok(archive_id)
+}
+
+async fn claim_fence_is_held(
+    tx: &mut Transaction<'_, Postgres>,
+    fence: &RoomClaimFenceContext,
+) -> Result<bool, MamStorageError> {
+    let entity_key = format!(
+        "{}:{}",
+        fence.entity.entity_type.as_db_str(),
+        fence.entity.id
+    );
+    Ok(sqlx::query(
+        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND node_epoch = $3 AND claim_epoch = $4 FOR SHARE",
+    )
+    .bind(&entity_key)
+    .bind(&fence.owner.node_id)
+    .bind(&fence.owner.node_epoch)
+    .bind(fence.epoch.0)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some())
+}
+
+async fn find_existing_origin_id_match_postgres_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+    incoming_rich_payload: Option<&str>,
+    origin_dedup_fingerprint: Option<&str>,
+) -> Result<Option<String>, MamStorageError> {
+    let Some(origin_id) = message.origin_id.as_ref() else {
+        return Ok(None);
+    };
+    let archive_jid_str = archive_jid.to_string();
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT id, from_jid, to_jid, body, thread_id, parent_thread_id, \
+         reply_to_id, reply_to_jid, message_type, rich_payload, nickname_generation \
+         FROM mam_messages WHERE room_jid = ",
+    );
+    push_origin_dedup_filter(
+        &mut builder,
+        archive_jid_str.as_str(),
+        origin_id.as_str(),
+        origin_dedup_fingerprint,
+    );
+    let rows: Vec<PgRow> = builder.build().fetch_all(&mut **tx).await?;
+    for row in rows {
+        let Some(existing) = OriginDedupRow::from_postgres(&row) else {
+            continue;
+        };
+        if existing.matches(message, incoming_rich_payload) {
+            return Ok(Some(existing.id));
+        }
+    }
+    Ok(None)
 }
 
 async fn find_existing_origin_id_match(
