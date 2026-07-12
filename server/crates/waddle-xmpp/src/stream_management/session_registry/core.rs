@@ -160,6 +160,19 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
 
 impl InMemorySmSessionRegistry {
     pub(super) fn reserve_claim_fence_capacity(&self, stream_id: &str) -> bool {
+        self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions)
+    }
+
+    /// Reserve the exact-fence slot needed by a live detach. Capacity
+    /// eviction briefly needs both the displaced session's fence (until its
+    /// caller confirms promotion) and the replacement session's fence. Keep
+    /// one explicitly bounded turnover slot for that transition; subsequent
+    /// detaches reject until the displaced responsibility is drained.
+    pub(super) fn reserve_detach_claim_fence_capacity(&self, stream_id: &str) -> bool {
+        self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions.saturating_add(1))
+    }
+
+    fn reserve_claim_fence_capacity_up_to(&self, stream_id: &str, capacity: usize) -> bool {
         let (Ok(mut reservations), Ok(pending), Ok(fences)) = (
             self.claim_fence_reservations.write(),
             self.pending_claim_releases.read(),
@@ -188,7 +201,7 @@ impl InMemorySmSessionRegistry {
             .len()
             .saturating_add(current_not_pending)
             .saturating_add(reservations.len());
-        if occupied >= self.max_sessions {
+        if occupied >= capacity {
             return false;
         }
         reservations.insert(stream_id.to_string());

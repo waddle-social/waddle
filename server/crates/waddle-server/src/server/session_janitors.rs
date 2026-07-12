@@ -639,6 +639,9 @@ enum WorkEnqueueOutcome {
     /// Receiver exited, but the exact work remains in the supervisor's
     /// restart inventory and will be requeued by the replacement worker.
     RetainedForRestart,
+    /// The bounded channel was full. The exact work remains in the pending
+    /// inventory and a bounded background sender is actively redriving it.
+    RetainedForRedrive,
     Rejected,
 }
 
@@ -647,7 +650,10 @@ impl WorkEnqueueOutcome {
     const fn is_accepted(self) -> bool {
         matches!(
             self,
-            Self::Enqueued | Self::AlreadyTracked | Self::RetainedForRestart
+            Self::Enqueued
+                | Self::AlreadyTracked
+                | Self::RetainedForRestart
+                | Self::RetainedForRedrive
         )
     }
 }
@@ -715,18 +721,13 @@ impl OrphanReaperWorkers {
             .insert(key.clone(), Some(work.clone()));
         match self.hydration_tx.try_send(work) {
             Ok(()) => WorkEnqueueOutcome::Enqueued,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                let mut pending = self
-                    .hydration_pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                pending.remove(&key);
+            Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
                 crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
-                crate::clustering::metrics::record_orphan_work_queue_depth(
-                    "sm_hydration",
-                    pending.len(),
-                );
-                WorkEnqueueOutcome::Rejected
+                let tx = self.hydration_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(work).await;
+                });
+                WorkEnqueueOutcome::RetainedForRedrive
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // The supervisor snapshots this map when it replaces a dead
@@ -794,14 +795,13 @@ impl OrphanReaperWorkers {
                 );
                 WorkEnqueueOutcome::Enqueued
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                pending.remove(&key);
+            Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
                 crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
-                crate::clustering::metrics::record_orphan_work_queue_depth(
-                    "room_release",
-                    pending.len(),
-                );
-                WorkEnqueueOutcome::Rejected
+                let tx = self.release_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(work).await;
+                });
+                WorkEnqueueOutcome::RetainedForRedrive
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // A closed receiver means the supervisor must restart the
@@ -1102,6 +1102,7 @@ enum ReclaimedRegistration {
     Released,
     LostRace,
     CleanupScheduled,
+    CleanupDeferredToNodeExpiry,
 }
 
 #[cfg(feature = "clustering")]
@@ -1111,6 +1112,30 @@ struct ReclaimedRegistrationContext<'a> {
     claim_store: &'a Arc<dyn waddle_xmpp::ownership::ClaimStore>,
     previous_owner: &'a waddle_xmpp::ownership::NodeIdentity,
     me: &'a waddle_xmpp::ownership::NodeIdentity,
+}
+
+#[cfg(feature = "clustering")]
+fn reclaimed_cleanup_registration(
+    room_jid: &jid::BareJid,
+    outcome: WorkEnqueueOutcome,
+) -> ReclaimedRegistration {
+    match outcome {
+        WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {
+            ReclaimedRegistration::CleanupScheduled
+        }
+        WorkEnqueueOutcome::RetainedForRestart => {
+            warn!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart");
+            ReclaimedRegistration::CleanupScheduled
+        }
+        WorkEnqueueOutcome::RetainedForRedrive => {
+            warn!(room = %room_jid, "orphan reaper: exact cleanup channel full; responsibility retained for active redrive");
+            ReclaimedRegistration::CleanupScheduled
+        }
+        WorkEnqueueOutcome::Rejected => {
+            warn!(room = %room_jid, "orphan reaper: exact cleanup inventory saturated after steal; durable claim remains fenced for recovery after node expiry");
+            ReclaimedRegistration::CleanupDeferredToNodeExpiry
+        }
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -1162,16 +1187,7 @@ async fn register_reclaimed_epoch_or_cleanup(
                 owner: context.me.clone(),
                 epoch: claim_epoch,
             });
-            match queued {
-                WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
-                WorkEnqueueOutcome::RetainedForRestart => {
-                    warn!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart")
-                }
-                WorkEnqueueOutcome::Rejected => {
-                    warn!(room = %room_jid, "orphan reaper: exact cleanup queue saturated after steal; claim remains fenced until node expiry")
-                }
-            }
-            ReclaimedRegistration::CleanupScheduled
+            reclaimed_cleanup_registration(room_jid, queued)
         }
         Err(_) => {
             debug!(room = %room_jid, "orphan reaper: exact cleanup after pending-registration failure timed out");
@@ -1181,16 +1197,7 @@ async fn register_reclaimed_epoch_or_cleanup(
                 owner: context.me.clone(),
                 epoch: claim_epoch,
             });
-            match queued {
-                WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
-                WorkEnqueueOutcome::RetainedForRestart => {
-                    warn!(room = %room_jid, "orphan reaper: exact cleanup worker stopped; responsibility retained for supervisor restart")
-                }
-                WorkEnqueueOutcome::Rejected => {
-                    warn!(room = %room_jid, "orphan reaper: exact cleanup queue saturated after steal; claim remains fenced until node expiry")
-                }
-            }
-            ReclaimedRegistration::CleanupScheduled
+            reclaimed_cleanup_registration(room_jid, queued)
         }
     }
 }
@@ -1656,11 +1663,25 @@ fn hydration_reservations_do_not_overcommit_a_127_of_128_queue() {
 
 #[cfg(all(test, feature = "clustering"))]
 #[test]
-fn full_hydration_channel_rolls_back_pending_reservation() {
+fn rejected_cleanup_is_never_reported_as_scheduled() {
+    let room_jid: jid::BareJid = "saturated@muc.example.com".parse().expect("room JID");
+    assert_eq!(
+        reclaimed_cleanup_registration(&room_jid, WorkEnqueueOutcome::Rejected),
+        ReclaimedRegistration::CleanupDeferredToNodeExpiry
+    );
+    assert_eq!(
+        reclaimed_cleanup_registration(&room_jid, WorkEnqueueOutcome::RetainedForRedrive),
+        ReclaimedRegistration::CleanupScheduled
+    );
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test]
+async fn full_hydration_channel_retains_and_redrives_pending_work() {
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
     use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
-    let (hydration_tx, _hydration_rx) = tokio::sync::mpsc::channel(1);
+    let (hydration_tx, mut hydration_rx) = tokio::sync::mpsc::channel(1);
     let (release_tx, _release_rx) = tokio::sync::mpsc::channel(1);
     let existing = SmHydrationWork {
         entity: Entity::new(EntityType::SmSession, "existing"),
@@ -1685,13 +1706,31 @@ fn full_hydration_channel_rolls_back_pending_reservation() {
             candidate.clone(),
             SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(2)),
         ),
-        WorkEnqueueOutcome::Rejected
+        WorkEnqueueOutcome::RetainedForRedrive
     );
-    assert!(!workers
+    assert!(workers
         .hydration_pending
         .lock()
         .expect("hydration pending")
         .contains_key(&candidate.id));
+    assert_eq!(
+        hydration_rx
+            .recv()
+            .await
+            .expect("existing hydration")
+            .entity
+            .id,
+        "existing"
+    );
+    assert_eq!(
+        hydration_rx
+            .recv()
+            .await
+            .expect("redriven hydration")
+            .entity
+            .id,
+        candidate.id
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -1727,14 +1766,14 @@ fn closed_hydration_channel_retains_restart_inventory() {
 }
 
 #[cfg(all(test, feature = "clustering"))]
-#[test]
-fn full_release_channel_rolls_back_pending_work() {
+#[tokio::test]
+async fn full_release_channel_retains_and_redrives_pending_work() {
     use waddle_xmpp::ownership::{
         ClaimEpoch, Entity, EntityType, InProcessClaimStore, NodeIdentity,
     };
 
     let (hydration_tx, _hydration_rx) = tokio::sync::mpsc::channel(1);
-    let (release_tx, _release_rx) = tokio::sync::mpsc::channel(1);
+    let (release_tx, mut release_rx) = tokio::sync::mpsc::channel(1);
     let owner = NodeIdentity::new("node", "incarnation");
     let existing = ExactReleaseWork {
         claim_store: Arc::new(InProcessClaimStore::new()),
@@ -1750,7 +1789,9 @@ fn full_release_channel_rolls_back_pending_work() {
         hydration_tx,
         release_tx,
         hydration_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        release_pending: Arc::new(std::sync::Mutex::new([(existing_key, existing)].into())),
+        release_pending: Arc::new(std::sync::Mutex::new(
+            [(existing_key.clone(), existing)].into(),
+        )),
         sm_cursor: Arc::new(std::sync::Mutex::new(None)),
     };
     let candidate = ExactReleaseWork {
@@ -1763,13 +1804,21 @@ fn full_release_channel_rolls_back_pending_work() {
 
     assert_eq!(
         workers.enqueue_release(candidate),
-        WorkEnqueueOutcome::Rejected
+        WorkEnqueueOutcome::RetainedForRedrive
     );
-    assert!(!workers
+    assert!(workers
         .release_pending
         .lock()
         .expect("release pending")
         .contains_key(&candidate_key));
+    assert_eq!(
+        OrphanReaperWorkers::release_key(&release_rx.recv().await.expect("existing release")),
+        existing_key
+    );
+    assert_eq!(
+        OrphanReaperWorkers::release_key(&release_rx.recv().await.expect("redriven release")),
+        candidate_key
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -2154,6 +2203,10 @@ async fn run_orphan_reaper_sweep_with_workers(
                         room_failed += 1;
                         continue;
                     }
+                    ReclaimedRegistration::CleanupDeferredToNodeExpiry => {
+                        room_failed += 1;
+                        continue;
+                    }
                 }
                 let reconciliation = room_registry
                     .reconcile_reclaimed_room(
@@ -2382,6 +2435,7 @@ async fn run_orphan_reaper_sweep_with_workers(
                 ) {
                     WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
                     WorkEnqueueOutcome::RetainedForRestart => warn!("orphan reaper: hydration worker stopped after steal; responsibility retained for supervisor restart"),
+                    WorkEnqueueOutcome::RetainedForRedrive => warn!("orphan reaper: hydration channel full after steal; responsibility retained for active redrive"),
                     WorkEnqueueOutcome::Rejected => warn!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry"),
                 }
             }

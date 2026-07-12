@@ -394,10 +394,32 @@ async fn detach_claim_commit_before_timeout_is_reconciled_and_retained() {
             .expect("claim lookup")
             .is_some()
     );
-    assert!(registry
+    assert!(!registry
         .claim_fences
         .read()
         .expect("claim fences")
+        .contains_key(stream_id));
+    assert_eq!(
+        registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions")
+            .len(),
+        1,
+        "detach records uncertainty without a second ClaimStore call under the shard lock"
+    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(persistence
+        .get_session(&crate::pending_delivery::SmSessionId::new(stream_id))
+        .await
+        .expect("durable snapshot lookup")
+        .is_some());
+
+    assert_eq!(registry.retry_pending_claim_releases(8).await, 0);
+    assert!(registry
+        .claim_fences
+        .read()
+        .expect("claim fences after janitor reconciliation")
         .contains_key(stream_id));
     assert!(registry
         .pending_claim_acquisitions
@@ -405,11 +427,63 @@ async fn detach_claim_commit_before_timeout_is_reconciled_and_retained() {
         .expect("pending acquisitions")
         .is_empty());
     assert_eq!(registry.pending_claim_release_count(), 0);
+}
+
+#[tokio::test]
+async fn detach_capacity_rejection_precedes_memory_durable_and_claim_publication() {
+    let owner = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let persistence = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::with_capacity(1)
+        .with_persistence(persistence.clone())
+        .with_claim_store(
+            claim_store.clone(),
+            crate::ownership::SharedNodeIdentity::new(owner.clone()),
+        );
+    {
+        let mut pending = registry
+            .pending_claim_releases
+            .write()
+            .expect("pending releases");
+        pending.insert((
+            "existing-cleanup-1".to_string(),
+            super::super::persistence::SmClaimFence::new(
+                owner.clone(),
+                crate::ownership::ClaimEpoch(1),
+            ),
+        ));
+        pending.insert((
+            "existing-cleanup-2".to_string(),
+            super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(2)),
+        ));
+    }
+    let stream_id = "capacity-rejected-detach";
+
+    assert!(registry
+        .store_session(realistic_test_session(stream_id))
+        .await
+        .is_err());
+    let session_id = crate::pending_delivery::SmSessionId::new(stream_id);
     assert!(persistence
-        .get_session(&crate::pending_delivery::SmSessionId::new(stream_id))
+        .get_session(&session_id)
         .await
         .expect("durable snapshot lookup")
-        .is_some());
+        .is_none());
+    assert!(registry
+        .peek_session(stream_id)
+        .await
+        .expect("in-memory session lookup")
+        .is_none());
+    assert!(crate::ownership::ClaimStore::current_claim(
+        claim_store.as_ref(),
+        &crate::ownership::Entity::new(
+            crate::ownership::EntityType::SmSession,
+            stream_id.to_string(),
+        ),
+    )
+    .await
+    .expect("claim lookup")
+    .is_none());
 }
 
 #[tokio::test(start_paused = true)]

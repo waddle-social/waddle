@@ -750,10 +750,6 @@ impl InMemorySmSessionRegistry {
     /// `warn` so a persistently failing acquire (e.g. a genuinely wedged
     /// `ClaimStore` backend) is visible.
     pub(super) async fn acquire_claim_store_entry_for_detach(&self, stream_id: &str) {
-        if !self.reserve_claim_fence_capacity(stream_id) {
-            tracing::warn!(stream_id = %stream_id, "store_session: exact-release backlog capacity exhausted");
-            return;
-        }
         let acquisition_reserved = self.has_claim_fence_reservation(stream_id);
         let entity = sm_session_entity(stream_id);
         let identity = self.node_identity.current();
@@ -813,12 +809,10 @@ impl InMemorySmSessionRegistry {
                             PendingClaimAcquisitionDisposition::RetainDetachedSession,
                         ));
                     }
-                    self.reconcile_uncertain_claim_acquisition(
-                        stream_id,
-                        identity,
-                        PendingClaimAcquisitionDisposition::RetainDetachedSession,
-                    )
-                    .await;
+                    // Do not issue a second ClaimStore call while the caller
+                    // holds this stream's shard lock. The bounded SM janitor
+                    // owns reconciliation after `store_session` returns and
+                    // releases the shard.
                 }
             }
         }
