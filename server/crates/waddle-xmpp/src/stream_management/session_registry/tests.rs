@@ -511,15 +511,17 @@ async fn old_claim_cleanup_waits_for_shared_detach_reservation_to_resolve() {
             .reconcile_rejected_enable_while_live(stream_id, &old)
             .await
     );
-    let pending = registry
-        .pending_claim_acquisitions
-        .read()
-        .expect("pending acquisitions");
-    assert_eq!(pending.len(), 2);
-    assert!(pending.iter().any(|(id, _, disposition)| {
-        id == stream_id && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
-    }));
-    drop(pending);
+    {
+        let pending = registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions");
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|(id, _, disposition)| {
+            id == stream_id
+                && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
+        }));
+    }
     assert!(
         registry.has_claim_fence_reservation(stream_id),
         "old-claim cleanup must not consume the detach reconciliation's reservation"
@@ -537,15 +539,17 @@ async fn old_claim_cleanup_waits_for_shared_detach_reservation_to_resolve() {
             PendingClaimAcquisitionDisposition::RetainDetachedSession,
         )
         .await;
-    let pending = registry
-        .pending_claim_acquisitions
-        .read()
-        .expect("pending acquisitions");
-    assert_eq!(pending.len(), 1);
-    assert!(pending.iter().any(|(id, _, disposition)| {
-        id == stream_id && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
-    }));
-    drop(pending);
+    {
+        let pending = registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions");
+        assert_eq!(pending.len(), 1);
+        assert!(pending.iter().any(|(id, _, disposition)| {
+            id == stream_id
+                && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
+        }));
+    }
     assert!(
         registry.has_claim_fence_reservation(stream_id),
         "a conflicting detach reconciliation must leave the slot to the remaining rejected-enable cleanup"
