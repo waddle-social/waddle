@@ -269,33 +269,48 @@ pub(super) async fn handle_isr_resume_authenticate(
     // `sm_persistence_fenced::claim_epoch_for` uses to learn the epoch
     // value it just granted, not a second, independent acquire attempt.
     let entity = Entity::new(EntityType::SmSession, resume.previd.clone());
-    let epoch = match claim_store
-        .ensure_claimed(&entity, &node_identity.current())
-        .await
-    {
+    let identity = node_identity.current();
+    let epoch = match claim_store.ensure_claimed(&entity, &identity).await {
         Ok(epoch) => epoch,
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "ISR resume failed: could not confirm claim epoch");
-            if let Err(release_error) = state
+            if let Err(cleanup_error) = state
                 .deps
                 .protocol
                 .sm_session_registry
-                .release_claim(&resume.previd)
+                .reconcile_claim_after_epoch_lookup_failure(&resume.previd)
                 .await
             {
-                warn!(stream_id = %resume.previd, error = %release_error, "Failed to release ISR resume claim after epoch failure");
+                warn!(stream_id = %resume.previd, %cleanup_error, "Failed to reconcile ISR claim after epoch failure");
             }
             return vec![sasl2_failure("temporary-auth-failure")];
         }
     };
+    let claim_fence =
+        waddle_xmpp::stream_management::persistence::SmClaimFence::new(identity.clone(), epoch);
+    if node_identity.current() != identity {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .abandon_claim_after_identity_rotation(&resume.previd, &claim_fence)
+            .await
+        {
+            warn!(
+                stream_id = %resume.previd,
+                %error,
+                "Failed to retire ISR claim after node identity rotation; exact cleanup retained"
+            );
+        }
+        return vec![sasl2_failure("temporary-auth-failure")];
+    }
 
     let rotated_token = match isr_token_store
         .consume(
             &resume.previd,
             presented_token.as_bytes(),
             ISR_PINNED_MECHANISM,
-            &node_identity.current(),
-            epoch,
+            &claim_fence,
         )
         .await
     {

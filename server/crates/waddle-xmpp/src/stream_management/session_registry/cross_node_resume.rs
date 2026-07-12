@@ -118,7 +118,8 @@ use jid::BareJid;
 use tokio::time::Instant;
 
 use crate::ownership::{
-    verify_resume_identity, ClaimEpoch, ClaimError, Entity, EntityType, ResumeIdentityProof,
+    verify_resume_identity, ClaimEpoch, ClaimError, Entity, EntityType, NodeIdentity,
+    ResumeIdentityProof,
 };
 use crate::stream_management::persistence::PersistedSession;
 
@@ -590,7 +591,7 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(new_epoch)) => {
-                self.complete_local_claim(entity, new_epoch, stream_id)
+                self.complete_local_claim(entity, me, new_epoch, stream_id)
                     .await
             }
             Ok(Err(ClaimError::Conflict)) => Ok(CrossNodeResumeOutcome::NotFound),
@@ -638,7 +639,10 @@ impl InMemorySmSessionRegistry {
         )
         .await
         {
-            Ok(Ok(epoch)) => self.complete_local_claim(entity, epoch, stream_id).await,
+            Ok(Ok(epoch)) => {
+                self.complete_local_claim(entity, me, epoch, stream_id)
+                    .await
+            }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Draining)) => {
                 Ok(CrossNodeResumeOutcome::NotFound)
             }
@@ -662,12 +666,14 @@ impl InMemorySmSessionRegistry {
     async fn complete_local_claim(
         &self,
         entity: &Entity,
+        owner: NodeIdentity,
         epoch: ClaimEpoch,
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
+        let fence = super::super::persistence::SmClaimFence::new(owner, epoch);
         let hydrated = match tokio::time::timeout(
             FINISH_HYDRATE_TIMEOUT,
-            self.hydrate_reclaimed(&[(entity.clone(), epoch)]),
+            self.hydrate_reclaimed(&[(entity.clone(), fence.clone())]),
         )
         .await
         {
@@ -676,7 +682,7 @@ impl InMemorySmSessionRegistry {
                 return self
                     .repair_failed_local_claim(
                         entity,
-                        epoch,
+                        &fence,
                         stream_id,
                         format!("hydrate_reclaimed errored: {error}"),
                     )
@@ -686,7 +692,7 @@ impl InMemorySmSessionRegistry {
                 return self
                     .repair_failed_local_claim(
                         entity,
-                        epoch,
+                        &fence,
                         stream_id,
                         format!("hydrate_reclaimed timed out after {FINISH_HYDRATE_TIMEOUT:?}"),
                     )
@@ -704,7 +710,7 @@ impl InMemorySmSessionRegistry {
             return self
                 .repair_failed_local_claim(
                     entity,
-                    epoch,
+                    &fence,
                     stream_id,
                     "hydrate_reclaimed hydrated nothing (already-present race, missing \
                      durable row, or a storage read failure — see its own debug logs)"
@@ -726,7 +732,7 @@ impl InMemorySmSessionRegistry {
             Ok(Err(error)) => {
                 self.repair_failed_local_claim(
                     entity,
-                    epoch,
+                    &fence,
                     stream_id,
                     format!("claim_session errored post-hydrate: {error}"),
                 )
@@ -735,7 +741,7 @@ impl InMemorySmSessionRegistry {
             Err(_timeout) => {
                 self.repair_failed_local_claim(
                     entity,
-                    epoch,
+                    &fence,
                     stream_id,
                     format!("claim_session timed out after {FINISH_CLAIM_TIMEOUT:?} post-hydrate"),
                 )
@@ -770,17 +776,17 @@ impl InMemorySmSessionRegistry {
     async fn repair_failed_local_claim(
         &self,
         entity: &Entity,
-        epoch: ClaimEpoch,
+        fence: &super::super::persistence::SmClaimFence,
         stream_id: &str,
         reason: String,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         self.forget_claim_locally(stream_id).await;
 
-        let me = self.node_identity.current();
         for attempt in 1..=REPAIR_RELEASE_MAX_ATTEMPTS {
             match tokio::time::timeout(
                 REPAIR_RELEASE_TIMEOUT,
-                self.claim_store.release(entity, &me, epoch),
+                self.claim_store
+                    .release(entity, fence.owner(), fence.epoch()),
             )
             .await
             {

@@ -15,6 +15,30 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         let jid = session.jid.clone();
         let stream_lock = self.stream_lock(&stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        {
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if claimed.contains_key(&stream_id) {
+                debug!(
+                    stream_id = %stream_id,
+                    "store_session skipped: resume claim in flight owns this stream"
+                );
+                return Ok(Vec::new());
+            }
+        }
+        // Reserve exact-fence/reconciliation capacity before publishing the
+        // detached session in memory or durable storage. Once either snapshot
+        // exists, a successful or ambiguous backend claim must have bounded
+        // local ownership bookkeeping; rejecting after publication would
+        // strand an unrecorded live-node claim.
+        if !self.reserve_detach_claim_fence_capacity(&stream_id) {
+            return Err(SmRegistryError::Internal(
+                "store_session: exact claim-fence capacity exhausted before detach publication"
+                    .to_string(),
+            ));
+        }
         // Scope the RwLock guards in a block so they're definitively
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
@@ -24,7 +48,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // queues (issue #1097) — previously they were silently
         // dropped and their durable rows mirror-deleted.
         let mut displaced: Vec<DetachedSession> = Vec::new();
-        let count = {
+        let state_result = (|| -> Result<usize, SmRegistryError> {
             let mut sessions = self
                 .sessions
                 .write()
@@ -45,13 +69,6 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             // handoff ends in complete_claim (durably erased) or
             // release_claim (session returned to the detached pool),
             // both of which supersede this stale copy.
-            if claimed.contains_key(&stream_id) {
-                debug!(
-                    stream_id = %stream_id,
-                    "store_session skipped: resume claim in flight owns this stream"
-                );
-                return Ok(displaced);
-            }
             // Capture jid-collision evictions in `sessions` before
             // retain mutates; same for `claimed`.
             for (id, existing) in sessions.iter() {
@@ -104,7 +121,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             }
 
             sessions.insert(stream_id.clone(), session.clone());
-            sessions.len()
+            Ok(sessions.len())
+        })();
+        let count = match state_result {
+            Ok(count) => count,
+            Err(error) => {
+                self.cancel_claim_fence_reservation(&stream_id);
+                return Err(error);
+            }
         };
         // Durable rows for displaced sessions are deliberately NOT
         // deleted here. They follow the drain_expired/confirm_drained
@@ -142,6 +166,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // calls re-inserting each other's displaced sessions would
         // otherwise deadlock.
         if let Err(error) = self.persist_detached_session_snapshot(&session).await {
+            self.cancel_claim_fence_reservation(&stream_id);
             for displaced_session in displaced {
                 if displaced_session.stream_id == stream_id {
                     // Already (re)inserted above as the new session's

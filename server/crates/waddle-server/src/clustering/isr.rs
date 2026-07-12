@@ -76,7 +76,7 @@ use subtle::ConstantTimeEq;
 use waddle_xmpp::isr::{
     generate_isr_token, IsrConsumeOutcome, IsrTokenStore, IsrTokenStoreError, IssuedIsrToken,
 };
-use waddle_xmpp::ownership::{ClaimEpoch, EntityType, NodeIdentity};
+use waddle_xmpp::ownership::EntityType;
 
 use crate::db::{Database, DatabaseError};
 
@@ -161,8 +161,7 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         sm_id: &str,
         presented_token: &[u8],
         mechanism: &str,
-        me: &NodeIdentity,
-        mine: ClaimEpoch,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
         let mut tx = self.db.begin().await.map_err(db_err)?;
 
@@ -172,8 +171,13 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         let key = sm_session_entity_key(sm_id);
         let mut fence_rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![key, me.node_id.clone(), mine.0],
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    key,
+                    fence.owner().node_id.clone(),
+                    fence.owner().node_epoch.clone(),
+                    fence.epoch().0,
+                ],
             )
             .await
             .map_err(db_err)?;
@@ -342,13 +346,18 @@ mod tests {
     use super::*;
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver};
-    use waddle_xmpp::ownership::{ClaimStore, Entity};
+    use waddle_xmpp::ownership::{ClaimEpoch, ClaimStore, Entity, NodeIdentity};
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
     fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
         )
+    }
+
+    fn fence(owner: &NodeIdentity, epoch: ClaimEpoch) -> SmClaimFence {
+        SmClaimFence::new(owner.clone(), epoch)
     }
 
     async fn test_db() -> Option<Database> {
@@ -398,7 +407,7 @@ mod tests {
 
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
         let outcome = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         let IsrConsumeOutcome::Matched { rotated } = outcome else {
@@ -408,7 +417,7 @@ mod tests {
 
         // Single-use: the OLD token fails now, even under the same fence.
         let replay = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         assert_eq!(replay, IsrConsumeOutcome::Mismatched);
@@ -428,7 +437,7 @@ mod tests {
 
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
         let outcome = store
-            .consume(&sm_id, b"not-the-token", "PLAIN", &me, epoch)
+            .consume(&sm_id, b"not-the-token", "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
@@ -438,7 +447,7 @@ mod tests {
         // from the genuine `Mismatched` above), proving unconditional
         // destruction happened.
         let second = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         assert_eq!(second, IsrConsumeOutcome::NoSuchToken);
@@ -463,7 +472,7 @@ mod tests {
         let epoch = claim_sm_session(&db, &sm_id, &me).await;
 
         let outcome = store
-            .consume(&sm_id, b"anything", "PLAIN", &me, epoch)
+            .consume(&sm_id, b"anything", "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::NoSuchToken);
@@ -473,7 +482,7 @@ mod tests {
         // branch never wrote anything that could poison a later issuance.
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
         let second = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         assert!(matches!(second, IsrConsumeOutcome::Matched { .. }));
@@ -546,7 +555,7 @@ mod tests {
         let fresh_epoch = claim_sm_session(&db, &fresh_sm_id, &me).await;
         let stale_epoch = claim_sm_session(&db, &stale_sm_id, &me).await;
         let stale_outcome = store
-            .consume(&stale_sm_id, b"anything", "PLAIN", &me, stale_epoch)
+            .consume(&stale_sm_id, b"anything", "PLAIN", &fence(&me, stale_epoch))
             .await
             .expect("consume stale");
         assert_eq!(stale_outcome, IsrConsumeOutcome::NoSuchToken);
@@ -555,8 +564,7 @@ mod tests {
                 &fresh_sm_id,
                 b"wrong-token-but-row-must-exist",
                 "PLAIN",
-                &me,
-                fresh_epoch,
+                &fence(&me, fresh_epoch),
             )
             .await
             .expect("consume fresh");
@@ -583,16 +591,67 @@ mod tests {
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
         let wrong_epoch = ClaimEpoch(epoch.0 + 1);
         let outcome = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, wrong_epoch)
+            .consume(
+                &sm_id,
+                issued.token.as_bytes(),
+                "PLAIN",
+                &fence(&me, wrong_epoch),
+            )
             .await;
         assert!(matches!(outcome, Err(IsrTokenStoreError::NotOwner)));
 
         // Fencing failure must not have touched the token row.
         let still_valid = store
-            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(&sm_id, issued.token.as_bytes(), "PLAIN", &fence(&me, epoch))
             .await
             .expect("consume");
         assert!(matches!(still_valid, IsrConsumeOutcome::Matched { .. }));
+    }
+
+    #[tokio::test]
+    async fn consume_fails_fencing_when_node_incarnation_changes_at_the_same_claim_epoch() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure isr schema");
+        let old = node_identity();
+        let replacement = NodeIdentity::new(old.node_id.clone(), uuid::Uuid::new_v4().to_string());
+        let sm_id = format!("sm-incarnation-{}", uuid::Uuid::new_v4());
+        let epoch = claim_sm_session(&db, &sm_id, &old).await;
+        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
+        let entity_key = sm_session_entity_key(&sm_id);
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "UPDATE clustering_claims SET node_epoch = ? WHERE entity = ?",
+                crate::db_params![replacement.node_epoch.clone(), entity_key],
+            )
+            .await
+            .expect("rotate claim owner incarnation without changing numeric epoch");
+
+        let stale = store
+            .consume(
+                &sm_id,
+                issued.token.as_bytes(),
+                "PLAIN",
+                &fence(&old, epoch),
+            )
+            .await;
+        assert!(matches!(stale, Err(IsrTokenStoreError::NotOwner)));
+
+        let current = store
+            .consume(
+                &sm_id,
+                issued.token.as_bytes(),
+                "PLAIN",
+                &fence(&replacement, epoch),
+            )
+            .await
+            .expect("current incarnation consume");
+        assert!(matches!(current, IsrConsumeOutcome::Matched { .. }));
     }
 
     /// Council-adjudicated FIX 1: strengthens the pre-existing exactly-once
@@ -671,8 +730,7 @@ mod tests {
                     &sm_id_loser,
                     token_loser.as_bytes(),
                     "PLAIN",
-                    &me_loser,
-                    epoch,
+                    &fence(&me_loser, epoch),
                 )
                 .await
         });
@@ -728,7 +786,12 @@ mod tests {
         // (correctly no-op) attempt — a subsequent consume with it still
         // succeeds.
         let survives = store
-            .consume(&sm_id, rotated_token.as_bytes(), "PLAIN", &me, epoch)
+            .consume(
+                &sm_id,
+                rotated_token.as_bytes(),
+                "PLAIN",
+                &fence(&me, epoch),
+            )
             .await
             .expect("consume with the winner's rotated token");
         assert!(

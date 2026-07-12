@@ -701,7 +701,10 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
         }
     };
 
-    let mut reclaimed: Vec<(Entity, waddle_xmpp::ownership::ClaimEpoch)> = Vec::new();
+    let mut reclaimed: Vec<(
+        Entity,
+        waddle_xmpp::stream_management::persistence::SmClaimFence,
+    )> = Vec::new();
     for candidate in candidates {
         if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-candidate")
             .await
@@ -736,7 +739,13 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
             .steal_orphaned_sm_session_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
             .await
         {
-            Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
+            Ok(new_epoch) => reclaimed.push((
+                candidate.entity,
+                waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                    me.clone(),
+                    new_epoch,
+                ),
+            )),
             Err(ClaimError::Conflict) => {
                 // Another node (or this same node's own re-registration
                 // reacquisition step, ADR-0017 Phase 3 plan deviation #19)

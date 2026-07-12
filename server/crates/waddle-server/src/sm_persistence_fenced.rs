@@ -31,7 +31,8 @@
 //!
 //! Every method that writes `sm_sessions`/`sm_unacked` on behalf of an
 //! SM-session entity runs its own `SELECT 1 FROM clustering_claims WHERE
-//! entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE` — the exact
+//! entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR
+//! SHARE` — the exact
 //! fencing-transaction SQL shape ADR-0017 Phase 3 Slice 1 locks — as the
 //! first statement inside the *same* [`crate::db::Transaction`] as the
 //! write(s) it guards, all on the **main pool**
@@ -50,15 +51,15 @@
 //! `waddle-xmpp`-hosted `ClaimStore` trait without an illegal reverse
 //! dependency — so this impl issues the fencing SQL inline, itself, and
 //! uses [`waddle_xmpp::ownership::ClaimStore`] purely as a side channel
-//! for the epoch **value**: [`PostgresFencedSmPersistence`] holds an
+//! for the immutable owner/epoch fence: [`PostgresFencedSmPersistence`] holds an
 //! `Arc<dyn ClaimStore>` and a per-stream-id cache
-//! (`claim_epochs: DashMap<SmSessionId, Arc<tokio::sync::OnceCell<ClaimEpoch>>>`),
+//! (`claim_fences: DashMap<SmSessionId, Arc<tokio::sync::OnceCell<SmClaimFence>>>`),
 //! populated lazily — the first fenced write for a stream-id this process
 //! instance has not yet seen ensures a claim once and caches the resulting
-//! epoch; every subsequent fenced write for that stream-id reuses the
-//! cached value. A failed fencing check invalidates the cache entry (the
-//! epoch is no longer valid), so a later retry re-acquires instead of
-//! spinning against a known-stale epoch forever.
+//! exact process identity together with its epoch; every subsequent fenced
+//! write for that stream-id reuses the inseparable pair. A failed fencing
+//! check or identity rotation invalidates the cache entry, so a later retry
+//! re-acquires instead of pairing a stale epoch with a new incarnation.
 //!
 //! ## FIX 1 — `ensure_claimed` + per-key single-flight (council-adjudicated)
 //!
@@ -73,9 +74,9 @@
 //! `acquire`-per-write-attempt design would hit:
 //!
 //! - **Concurrent first writes for the same not-yet-claimed stream_id**:
-//!   two tasks both calling [`Self::claim_epoch_for`] for a fresh
-//!   `stream_id` fetch (or insert) the same `Arc<OnceCell<ClaimEpoch>>`
-//!   from `claim_epochs` (`DashMap::entry`, briefly locking only that
+//!   two tasks both calling [`Self::claim_fence_for`] for a fresh
+//!   `stream_id` fetch (or insert) the same `Arc<OnceCell<SmClaimFence>>`
+//!   from `claim_fences` (`DashMap::entry`, briefly locking only that
 //!   shard — no lock held across the subsequent `.await`), then both call
 //!   `OnceCell::get_or_try_init` on it: exactly one of them actually runs
 //!   the `ensure_claimed` future; the other awaits that same attempt's
@@ -94,11 +95,11 @@
 //!   26).
 //!
 //! `OnceCell::get_or_try_init` leaves the cell uninitialized on error, so a
-//! later, separate call to [`Self::claim_epoch_for`] retries fresh (a
+//! later, separate call to [`Self::claim_fence_for`] retries fresh (a
 //! failed attempt is never permanently cached) — this is orthogonal to
 //! `assert_fenced`'s own invalidation, which removes an *already-populated*
-//! cell from `claim_epochs` entirely once a live fencing check reveals the
-//! cached epoch is stale, forcing the next call to build a brand-new cell.
+//! cell from `claim_fences` entirely once a live fencing check reveals the
+//! cached fence is stale, forcing the next call to build a brand-new cell.
 //!
 //! **Slice 5 debt (a), closed**: cells whose init failed (foreign owner)
 //! were already never inserted (the `OnceCell` stays uninitialized), and
@@ -123,24 +124,41 @@
 //! self-reacquire path once that same node's own restore/reaper pass claims
 //! it — see those modules' doc comments for the full lifecycle.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::OnceCell;
-use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity,
-};
+use waddle_xmpp::ownership::{ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+    PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
+    SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
 use crate::sm_persistence::codec::{
     decode_session, decode_unacked, serialize_presence_payloads, serialize_stanza, show_wire_str,
 };
+
+const STALE_CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn remove_sm_claim_cell_if(
+    claim_fences: &DashMap<SmSessionId, Arc<OnceCell<SmClaimFence>>>,
+    stream_id: &SmSessionId,
+    expected_cell: &Arc<OnceCell<SmClaimFence>>,
+) {
+    claim_fences.remove_if(stream_id, |_, current| Arc::ptr_eq(current, expected_cell));
+}
+
+fn remove_sm_claim_fence_if(
+    claim_fences: &DashMap<SmSessionId, Arc<OnceCell<SmClaimFence>>>,
+    stream_id: &SmSessionId,
+    expected: &SmClaimFence,
+) {
+    claim_fences.remove_if(stream_id, |_, cell| cell.get() == Some(expected));
+}
 
 /// FIX 3: map a [`ClaimError`] to the [`SmPersistenceError`] this trait's
 /// callers expect. Only a genuine ownership loss —
@@ -213,16 +231,28 @@ pub struct PostgresFencedSmPersistence {
     db: Database,
     claim_store: Arc<dyn ClaimStore>,
     node_identity: SharedNodeIdentity,
-    /// Per-stream-id single-flight cached claim epoch — see the module
+    /// Per-stream-id single-flight cached immutable claim fence — see the module
     /// doc's "Epoch side channel" / FIX 1 sections. Each cell resolves at
     /// most once to a real epoch; a failed resolution leaves the cell
     /// empty (retried fresh on the next call), and `assert_fenced` removes
     /// an already-populated, now-stale cell from the map entirely so a
     /// later call builds a brand-new one.
-    claim_epochs: Arc<DashMap<SmSessionId, Arc<OnceCell<ClaimEpoch>>>>,
+    claim_fences: Arc<DashMap<SmSessionId, Arc<OnceCell<SmClaimFence>>>>,
 }
 
 impl PostgresFencedSmPersistence {
+    fn remove_claim_cell_if(
+        &self,
+        stream_id: &SmSessionId,
+        expected_cell: &Arc<OnceCell<SmClaimFence>>,
+    ) {
+        remove_sm_claim_cell_if(&self.claim_fences, stream_id, expected_cell);
+    }
+
+    fn remove_claim_fence_if(&self, stream_id: &SmSessionId, expected: &SmClaimFence) {
+        remove_sm_claim_fence_if(&self.claim_fences, stream_id, expected);
+    }
+
     /// Open against an already-opened Postgres [`Database`] handle.
     ///
     /// FIX 4: this constructor no longer opens its own, independent pool
@@ -256,7 +286,7 @@ impl PostgresFencedSmPersistence {
             db,
             claim_store,
             node_identity,
-            claim_epochs: Arc::new(DashMap::new()),
+            claim_fences: Arc::new(DashMap::new()),
         };
         storage.ensure_schema().await?;
         tracing::info!(
@@ -361,20 +391,19 @@ impl PostgresFencedSmPersistence {
         Ok(())
     }
 
-    /// The claim epoch this process currently believes it holds for
-    /// `stream_id`, ensuring a claim on first use (see the module doc's
-    /// "Epoch side channel" / FIX 1 sections for the full single-flight
-    /// design and its known interim gap).
-    async fn claim_epoch_for(
+    /// The immutable owner/epoch fence this process holds for `stream_id`,
+    /// ensuring a claim on first use. The identity captured by the successful
+    /// ensure is never replaced with a later `SharedNodeIdentity` value.
+    async fn claim_fence_for(
         &self,
         stream_id: &SmSessionId,
-    ) -> Result<ClaimEpoch, SmPersistenceError> {
+    ) -> Result<SmClaimFence, SmPersistenceError> {
         // FIX 1: fetch-or-insert this stream_id's single-flight cell.
         // `DashMap::entry` briefly locks only the shard for this key; the
         // `Arc` clone below is used after that guard has already dropped,
         // so no lock is held across the `.await` that follows.
         let cell = self
-            .claim_epochs
+            .claim_fences
             .entry(stream_id.clone())
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone();
@@ -390,11 +419,56 @@ impl PostgresFencedSmPersistence {
         // A failed attempt leaves the cell uninitialized, so a later,
         // separate call retries fresh rather than being poisoned forever.
         let result = cell
-            .get_or_try_init(|| self.claim_store.ensure_claimed(&entity, &identity))
+            .get_or_try_init(|| async {
+                let epoch = self.claim_store.ensure_claimed(&entity, &identity).await?;
+                Ok::<_, ClaimError>(SmClaimFence::new(identity.clone(), epoch))
+            })
             .await;
 
         match result {
-            Ok(epoch) => Ok(*epoch),
+            Ok(fence) if self.node_identity.current() == *fence.owner() => Ok(fence.clone()),
+            Ok(fence) => {
+                // `ensure_claimed` may have committed under the previous
+                // incarnation immediately before self-fence rotation. Keep
+                // the resolved cell as exact retry inventory until that old
+                // owner+epoch is confirmed gone; otherwise a current-
+                // identity retry conflicts with our own stranded claim.
+                match tokio::time::timeout(
+                    STALE_CLAIM_RELEASE_TIMEOUT,
+                    self.claim_store
+                        .release_exact(&entity, fence.owner(), fence.epoch()),
+                )
+                .await
+                {
+                    Ok(Ok(
+                        waddle_xmpp::ownership::ExactReleaseOutcome::Released
+                        | waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned,
+                    )) => {
+                        self.remove_claim_cell_if(stream_id, &cell);
+                        Err(SmPersistenceError::NotOwner { entity })
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            stream_id = %stream_id,
+                            %error,
+                            "PostgresFencedSmPersistence: stale-incarnation exact claim cleanup \
+                             failed; retaining the immutable fence for retry"
+                        );
+                        Err(claim_error_to_sm_persistence_error(error, entity))
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            stream_id = %stream_id,
+                            timeout = ?STALE_CLAIM_RELEASE_TIMEOUT,
+                            "PostgresFencedSmPersistence: stale-incarnation exact claim cleanup \
+                             timed out; retaining the immutable fence for retry"
+                        );
+                        Err(SmPersistenceError::Other(
+                            "stale-incarnation exact claim cleanup timed out".to_string(),
+                        ))
+                    }
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     stream_id = %stream_id,
@@ -408,8 +482,8 @@ impl PostgresFencedSmPersistence {
     }
 
     /// Take the ADR-0017 element-4 fencing lock inside `tx` — the
-    /// caller's own [`Database::begin`] transaction — for `stream_id` at
-    /// `epoch`. Returns `Ok(())` if this node still holds the claim (the
+    /// caller's own [`Database::begin`] transaction — for `stream_id` at the
+    /// exact immutable owner/epoch pair. Returns `Ok(())` if this node still holds the claim (the
     /// `FOR SHARE` SELECT observed a row); returns
     /// [`SmPersistenceError::NotOwner`] and invalidates the cached epoch
     /// otherwise. Callers must not perform any write before this returns
@@ -419,14 +493,24 @@ impl PostgresFencedSmPersistence {
         &self,
         tx: &mut Transaction<'_>,
         stream_id: &SmSessionId,
-        epoch: ClaimEpoch,
+        fence: &SmClaimFence,
     ) -> Result<(), SmPersistenceError> {
-        let identity = self.node_identity.current();
+        if self.node_identity.current() != *fence.owner() {
+            self.remove_claim_fence_if(stream_id, fence);
+            return Err(SmPersistenceError::NotOwner {
+                entity: sm_session_entity(stream_id),
+            });
+        }
         let key = sm_session_entity_key(stream_id);
         let mut rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![key, identity.node_id.clone(), epoch.0],
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    key,
+                    fence.owner().node_id.clone(),
+                    fence.owner().node_epoch.clone(),
+                    fence.epoch().0,
+                ],
             )
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -435,10 +519,10 @@ impl PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
             .is_some();
-        if held {
+        if held && self.node_identity.current() == *fence.owner() {
             Ok(())
         } else {
-            self.claim_epochs.remove(stream_id);
+            self.remove_claim_fence_if(stream_id, fence);
             Err(SmPersistenceError::NotOwner {
                 entity: sm_session_entity(stream_id),
             })
@@ -465,7 +549,7 @@ impl PostgresFencedSmPersistence {
 impl SmPersistenceStorage for PostgresFencedSmPersistence {
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let stream_id = session.stream_id.clone();
-        let epoch = self.claim_epoch_for(&stream_id).await?;
+        let fence = self.claim_fence_for(&stream_id).await?;
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
@@ -476,7 +560,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, &stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, &stream_id, &fence).await?;
 
         // Divergence (a): ignore `session.detached_at`; stamp Postgres
         // `now()` in SQL instead (both the fresh-insert VALUES and the
@@ -562,20 +646,25 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            Ok(Some(decode_session(&row)?))
+            Ok(Some(decode_session(&row).map_err(|error| {
+                SmPersistenceError::Corrupt {
+                    stream_id: stream_id.clone(),
+                    detail: error.to_string(),
+                }
+            })?))
         } else {
             Ok(None)
         }
     }
 
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
-        let epoch = self.claim_epoch_for(stream_id).await?;
+        let fence = self.claim_fence_for(stream_id).await?;
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, stream_id, &fence).await?;
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
@@ -595,7 +684,38 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         tx.commit()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.claim_epochs.remove(stream_id);
+        self.remove_claim_fence_if(stream_id, &fence);
+        Ok(())
+    }
+
+    async fn quarantine_session(
+        &self,
+        stream_id: &SmSessionId,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        self.assert_fenced(&mut tx, stream_id, expected_fence)
+            .await?;
+        tx.execute(
+            "DELETE FROM sm_unacked WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        self.remove_claim_fence_if(stream_id, expected_fence);
         Ok(())
     }
 
@@ -604,7 +724,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         stanza: PersistedUnackedStanza,
     ) -> Result<(), SmPersistenceError> {
         let stream_id = stanza.stream_id.clone();
-        let epoch = self.claim_epoch_for(&stream_id).await?;
+        let fence = self.claim_fence_for(&stream_id).await?;
         let xml = serialize_stanza(&stanza.stanza)?;
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
 
@@ -613,7 +733,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, &stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, &stream_id, &fence).await?;
         tx.execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
              VALUES (?, ?, ?, ?)",
@@ -637,13 +757,13 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         stream_id: &SmSessionId,
         up_to_sequence: u32,
     ) -> Result<u64, SmPersistenceError> {
-        let epoch = self.claim_epoch_for(stream_id).await?;
+        let fence = self.claim_fence_for(stream_id).await?;
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, stream_id, &fence).await?;
         let removed = tx
             .execute(
                 "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence <= ?",
@@ -662,13 +782,13 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         stream_id: &SmSessionId,
         sequences: &[u32],
     ) -> Result<u64, SmPersistenceError> {
-        let epoch = self.claim_epoch_for(stream_id).await?;
+        let fence = self.claim_fence_for(stream_id).await?;
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, stream_id, &fence).await?;
         let mut removed = 0u64;
         for sequence in sequences {
             removed += tx
@@ -707,7 +827,12 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            out.push(decode_unacked(&row)?);
+            out.push(
+                decode_unacked(&row).map_err(|error| SmPersistenceError::Corrupt {
+                    stream_id: stream_id.clone(),
+                    detail: error.to_string(),
+                })?,
+            );
         }
         Ok(out)
     }
@@ -783,7 +908,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
         let stream_id = session.stream_id.clone();
-        let epoch = self.claim_epoch_for(&stream_id).await?;
+        let fence = self.claim_fence_for(&stream_id).await?;
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
@@ -794,7 +919,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, &stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, &stream_id, &fence).await?;
 
         // Drop any pre-existing unacked rows first (see the portable
         // impl's identical comment on this statement's ordering
@@ -886,13 +1011,13 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         &self,
         stream_id: &SmSessionId,
     ) -> Result<u32, SmPersistenceError> {
-        let epoch = self.claim_epoch_for(stream_id).await?;
+        let fence = self.claim_fence_for(stream_id).await?;
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.assert_fenced(&mut tx, stream_id, epoch).await?;
+        self.assert_fenced(&mut tx, stream_id, &fence).await?;
         let mut rows = tx
             .query(
                 "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \
@@ -935,8 +1060,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     /// fenced write for that stream_id (a fresh detach + claim, or a
     /// different node's claim if this one no longer holds it) re-derives
     /// its epoch from a clean cell instead of a stale one.
-    fn evict_claim_cache(&self, stream_id: &SmSessionId) {
-        self.claim_epochs.remove(stream_id);
+    fn evict_claim_cache(&self, stream_id: &SmSessionId, expected_fence: &SmClaimFence) {
+        self.remove_claim_fence_if(stream_id, expected_fence);
     }
 }
 

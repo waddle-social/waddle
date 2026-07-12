@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -6,14 +6,19 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::ownership::{
-    ClaimEpoch, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
-    SharedNodeIdentity,
+    ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
 
 use super::persistence_codec::{
     detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
 };
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum PendingClaimAcquisitionDisposition {
+    ReleaseRejectedEnable,
+    RetainDetachedSession,
+}
 
 const STREAM_LOCK_SHARDS: usize = 256;
 
@@ -91,18 +96,33 @@ pub struct InMemorySmSessionRegistry {
     /// Slice 5) instead wires in the SAME live, updatable handle
     /// `self_fence::run_node_lease` refreshes on every re-registration
     /// (mirroring `PostgresFencedSmPersistence`'s identical Slice 4
-    /// follow-up plumbing fix) — every call site reads `.current()` at the
-    /// moment it actually needs the identity rather than caching a
-    /// snapshot, so a self-fence/re-registration mid-process-lifetime is
-    /// observed immediately rather than silently binding claim CAS calls to
-    /// a stale, superseded `node_epoch` forever.
+    /// follow-up plumbing fix). New acquisitions read `.current()` once;
+    /// owned work then carries that immutable owner together with its epoch,
+    /// so a later self-fence cannot silently rebind an old claim to the new
+    /// node incarnation.
     pub(super) node_identity: SharedNodeIdentity,
-    /// Tracks the epoch this registry last observed for each currently
+    /// Tracks the immutable owner+epoch fence this registry last observed for each currently
     /// claimed SM-session entity, so `release_claim`/`complete_claim` can
     /// hand the right epoch back to `claim_store.release`. Purely local
     /// bookkeeping — the `ClaimStore` implementation itself is the
     /// authority on what epoch is actually current.
-    pub(super) claim_epochs: RwLock<HashMap<String, ClaimEpoch>>,
+    pub(super) claim_fences: RwLock<HashMap<String, super::super::persistence::SmClaimFence>>,
+    /// Exact terminal releases whose backend outcome was not confirmed.
+    /// Separate from `claim_fences`: a session drained for promotion is absent
+    /// from both maps but is not releasable until its durable delete commits.
+    pub(super) pending_claim_releases:
+        RwLock<HashSet<(String, super::super::persistence::SmClaimFence)>>,
+    /// Acquisitions whose timeout made commit status ambiguous. The typed
+    /// disposition distinguishes rejected enable admission (recover then
+    /// release) from detach after durable snapshot publication (recover and
+    /// retain ownership).
+    pub(super) pending_claim_acquisitions:
+        RwLock<HashSet<(String, NodeIdentity, PendingClaimAcquisitionDisposition)>>,
+    /// Capacity reserved before an acquisition whose exact epoch is not yet
+    /// known. A reservation survives an ambiguous timeout and is consumed
+    /// only when reconciliation either records the resulting fence or proves
+    /// that this node did not acquire the claim.
+    pub(super) claim_fence_reservations: RwLock<HashSet<String>>,
     /// ADR-0017 Phase 3 Slice 6: the cross-node "ask the live owner to
     /// detach" bridge for the XEP-0198 resume path's live-handshake branch.
     /// `None` for single-node/non-clustering deployments (the cross-node
@@ -139,6 +159,282 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
 }
 
 impl InMemorySmSessionRegistry {
+    pub(super) fn reserve_claim_fence_capacity(&self, stream_id: &str) -> bool {
+        self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions)
+    }
+
+    /// Reserve the exact-fence slot needed by a live detach. Capacity
+    /// eviction briefly needs both the displaced session's fence (until its
+    /// caller confirms promotion) and the replacement session's fence. Keep
+    /// one explicitly bounded turnover slot for that transition; subsequent
+    /// detaches reject until the displaced responsibility is drained.
+    pub(super) fn reserve_detach_claim_fence_capacity(&self, stream_id: &str) -> bool {
+        self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions.saturating_add(1))
+    }
+
+    fn reserve_claim_fence_capacity_up_to(&self, stream_id: &str, capacity: usize) -> bool {
+        let (Ok(mut reservations), Ok(pending), Ok(fences)) = (
+            self.claim_fence_reservations.write(),
+            self.pending_claim_releases.read(),
+            self.claim_fences.read(),
+        ) else {
+            return false;
+        };
+        if let Some(fence) = fences.get(stream_id) {
+            // A confirmed-current fence makes ensure_claimed idempotent and
+            // cannot create another generation. A fence whose terminal
+            // release timed out is different: the release may have committed,
+            // so the next ensure can mint a new generation and must reserve a
+            // second exact-fence slot before touching the backend.
+            if !pending.contains(&(stream_id.to_string(), fence.clone())) {
+                return true;
+            }
+        }
+        if reservations.contains(stream_id) {
+            return true;
+        }
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, fence)| !pending.contains(&(id.to_string(), (*fence).clone())))
+            .count();
+        let occupied = pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len());
+        if occupied >= capacity {
+            return false;
+        }
+        reservations.insert(stream_id.to_string());
+        true
+    }
+
+    pub(super) fn cancel_claim_fence_reservation(&self, stream_id: &str) {
+        if let Ok(mut reservations) = self.claim_fence_reservations.write() {
+            reservations.remove(stream_id);
+        }
+    }
+
+    pub(super) fn has_claim_fence_reservation(&self, stream_id: &str) -> bool {
+        self.claim_fence_reservations
+            .read()
+            .is_ok_and(|reservations| reservations.contains(stream_id))
+    }
+
+    #[cfg(test)]
+    pub(super) fn claim_fence_capacity_used(&self) -> usize {
+        let (Ok(reservations), Ok(pending), Ok(fences)) = (
+            self.claim_fence_reservations.read(),
+            self.pending_claim_releases.read(),
+            self.claim_fences.read(),
+        ) else {
+            return self.max_sessions;
+        };
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, fence)| !pending.contains(&(id.to_string(), (*fence).clone())))
+            .count();
+        pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len())
+    }
+
+    pub(super) fn try_record_claim_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+            self.claim_fence_reservations.write(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+        ) else {
+            return false;
+        };
+        if fences.get(stream_id) == Some(&fence) {
+            reservations.remove(stream_id);
+            return true;
+        }
+        let reserved = reservations.remove(stream_id);
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+            .count();
+        let occupied = pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len());
+        if !reserved && occupied >= self.max_sessions {
+            return false;
+        }
+        if let Some(previous) = fences.insert(stream_id.to_string(), fence) {
+            pending.insert((stream_id.to_string(), previous));
+        }
+        true
+    }
+
+    /// Convert a reserved acquisition slot into terminal exact-release
+    /// responsibility without publishing the supplied fence as authority for
+    /// live-session persistence. This is used when a claim belongs to an old
+    /// node incarnation while a newer, claimless lifecycle occupies the same
+    /// stream id.
+    pub(super) fn try_record_terminal_claim_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+            self.claim_fence_reservations.write(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+        ) else {
+            return false;
+        };
+        if pending.contains(&(stream_id.to_string(), fence.clone())) {
+            reservations.remove(stream_id);
+            if fences.get(stream_id) == Some(&fence) {
+                fences.remove(stream_id);
+            }
+            return true;
+        }
+        let reserved = reservations.remove(stream_id);
+        let converts_active = fences.get(stream_id) == Some(&fence);
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+            .count();
+        let occupied = pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len());
+        if !reserved && !converts_active && occupied >= self.max_sessions {
+            return false;
+        }
+        if converts_active {
+            fences.remove(stream_id);
+        }
+        pending.insert((stream_id.to_string(), fence));
+        true
+    }
+
+    /// Retain exact cleanup while local liveness cannot be read. Unlike a
+    /// terminal conversion, this keeps a matching active fence in place: a
+    /// poisoned session-map lock is not evidence that the lifecycle ended.
+    /// Adding a fence already represented by the active map consumes no new
+    /// capacity; an externally reclaimed fence must fit the normal bound.
+    pub(super) fn try_record_uncertain_release_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let (Ok(reservations), Ok(mut pending), Ok(fences)) = (
+            self.claim_fence_reservations.read(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.read(),
+        ) else {
+            return false;
+        };
+        let key = (stream_id.to_string(), fence.clone());
+        if pending.contains(&key) {
+            return true;
+        }
+        let represented_exact = fences.get(stream_id) == Some(&fence);
+        let represented_other = fences.contains_key(stream_id)
+            || pending.iter().any(|(id, _)| id == stream_id)
+            || reservations.contains(stream_id);
+        if represented_other && !represented_exact {
+            // Direction cannot be inferred from numeric epochs across node
+            // incarnations. Only the verified-hydration path may replace a
+            // same-stream generation.
+            return false;
+        }
+        let current_not_pending = fences
+            .iter()
+            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+            .count();
+        let occupied = pending
+            .len()
+            .saturating_add(current_not_pending)
+            .saturating_add(reservations.len());
+        if !represented_exact && occupied >= self.max_sessions {
+            return false;
+        }
+        pending.insert(key);
+        true
+    }
+
+    /// Publish a reclaimed fence only after `ensure_claimed` proved that it
+    /// is the backend's current owner+epoch. That proof makes replacement of
+    /// every older same-stream generation directional and lets the new fence
+    /// consume an existing reservation without growing bounded inventory.
+    pub(super) fn try_record_verified_reclaimed_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        let mut superseded = Vec::new();
+        let recorded = {
+            let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+                self.claim_fence_reservations.write(),
+                self.pending_claim_releases.write(),
+                self.claim_fences.write(),
+            ) else {
+                return false;
+            };
+            let represented = reservations.remove(stream_id)
+                || fences.contains_key(stream_id)
+                || pending.iter().any(|(id, _)| id == stream_id);
+            let current_not_pending = fences
+                .iter()
+                .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
+                .count();
+            let occupied = pending
+                .len()
+                .saturating_add(current_not_pending)
+                .saturating_add(reservations.len());
+            if !represented && occupied >= self.max_sessions {
+                return false;
+            }
+            if let Some(old) = fences.remove(stream_id) {
+                if old != fence {
+                    superseded.push(old);
+                }
+            }
+            pending.retain(|(id, old)| {
+                if id == stream_id {
+                    if old != &fence {
+                        superseded.push(old.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            fences.insert(stream_id.to_string(), fence.clone());
+            true
+        };
+        if recorded {
+            if let Ok(mut acquisitions) = self.pending_claim_acquisitions.write() {
+                acquisitions.retain(|(id, _, _)| id != stream_id);
+            }
+            if let Some(storage) = &self.persistence {
+                let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+                superseded.sort_by(|left, right| {
+                    left.owner()
+                        .node_id
+                        .cmp(&right.owner().node_id)
+                        .then_with(|| left.owner().node_epoch.cmp(&right.owner().node_epoch))
+                        .then_with(|| left.epoch().cmp(&right.epoch()))
+                });
+                superseded.dedup();
+                for old in superseded {
+                    storage.evict_claim_cache(&session_id, &old);
+                }
+            }
+        }
+        recorded
+    }
+
     /// Create a new in-memory registry with default settings.
     pub fn new() -> Self {
         Self {
@@ -150,7 +446,10 @@ impl InMemorySmSessionRegistry {
             persistence: None,
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
-            claim_epochs: RwLock::new(HashMap::new()),
+            claim_fences: RwLock::new(HashMap::new()),
+            pending_claim_releases: RwLock::new(HashSet::new()),
+            pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            claim_fence_reservations: RwLock::new(HashSet::new()),
             remote_resume: None,
         }
     }
@@ -166,7 +465,10 @@ impl InMemorySmSessionRegistry {
             persistence: None,
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
-            claim_epochs: RwLock::new(HashMap::new()),
+            claim_fences: RwLock::new(HashMap::new()),
+            pending_claim_releases: RwLock::new(HashSet::new()),
+            pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            claim_fence_reservations: RwLock::new(HashSet::new()),
             remote_resume: None,
         }
     }
@@ -388,12 +690,23 @@ impl InMemorySmSessionRegistry {
                     // now-unused claim rather than leak it, so a future
                     // pass (or the orphan reaper, once this identity is
                     // stale) can act on the row again.
-                    self.release_claim_store_entry_under(persisted.stream_id.as_str(), epoch)
-                        .await;
+                    self.release_claim_store_entry_under(
+                        persisted.stream_id.as_str(),
+                        super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
+                    )
+                    .await;
                     bad_rows += 1;
                     continue;
                 }
             };
+            if self.node_identity.current() != identity {
+                self.release_claim_store_entry_under(
+                    persisted.stream_id.as_str(),
+                    super::super::persistence::SmClaimFence::new(identity, epoch),
+                )
+                .await;
+                continue;
+            }
             // FIX 2: per-row stream-shard-lock discipline (see this
             // method's doc comment) — take this row's own shard lock and
             // re-check both maps immediately before inserting, rather than
@@ -425,8 +738,11 @@ impl InMemorySmSessionRegistry {
                     .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                 sessions.insert(stream_id.clone(), session);
             }
-            if let Ok(mut claim_epochs) = self.claim_epochs.write() {
-                claim_epochs.insert(stream_id, epoch);
+            if let Ok(mut claim_fences) = self.claim_fences.write() {
+                claim_fences.insert(
+                    stream_id,
+                    super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
+                );
             }
             hydrated += 1;
         }
@@ -484,137 +800,364 @@ impl InMemorySmSessionRegistry {
     /// by steps 1-4 are not counted and do not produce an `Err`, mirroring
     /// `restore_from_persistence`'s best-effort, skip-and-continue
     /// semantics for individual rows.
-    pub async fn hydrate_reclaimed(
+    pub async fn hydrate_reclaimed_typed(
         &self,
-        entities: &[(Entity, ClaimEpoch)],
-    ) -> Result<usize, SmRegistryError> {
-        let Some(storage) = &self.persistence else {
-            return Ok(0);
+        entity: &Entity,
+        caller_fence: &super::super::persistence::SmClaimFence,
+    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+        if entity.entity_type != EntityType::SmSession {
+            return Ok(ReclaimedHydrationOutcome::LostClaim);
+        }
+        if self.node_identity.current() != *caller_fence.owner() {
+            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+        }
+        let stream_id = entity.id.clone();
+        let stream_lock = self.stream_lock(&stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+
+        let present = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
         };
-        let mut hydrated = 0usize;
-        for (entity, _caller_epoch) in entities {
-            if entity.entity_type != EntityType::SmSession {
-                debug!(
-                    entity = %entity,
-                    "hydrate_reclaimed: skipping a non-SmSession entity"
-                );
-                continue;
-            }
-            let stream_id = entity.id.clone();
-            let stream_lock = self.stream_lock(&stream_id)?;
-            let _stream_guard = stream_lock.lock().await;
-
-            let present = {
-                let sessions = self
-                    .sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                let claimed = self
-                    .claimed_sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
-            };
-            if present {
-                debug!(
-                    stream_id = %stream_id,
-                    "hydrate_reclaimed: already present in-memory (live session, or already \
-                     hydrated by an overlapping sweep); skipping"
-                );
-                continue;
-            }
-
-            // FIX 5: bounded — see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s
-            // doc comment. On timeout or a lost self-reacquire, skip this
-            // entity for this pass rather than insert a session this node
-            // can no longer prove it owns; the entity remains eligible for
-            // a future sweep.
-            let identity = self.node_identity.current();
-            let epoch = match tokio::time::timeout(
+        if present {
+            let exact_fence = self
+                .claim_fences
+                .read()
+                .ok()
+                .and_then(|fences| fences.get(&stream_id).cloned())
+                .as_ref()
+                == Some(caller_fence);
+            match tokio::time::timeout(
                 CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                self.claim_store.ensure_claimed(entity, &identity),
+                self.claim_store
+                    .fence(entity, caller_fence.owner(), caller_fence.epoch()),
             )
             .await
             {
-                Ok(Ok(epoch)) => epoch,
-                Ok(Err(error)) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: ClaimStore ensure_claimed self-reacquire failed \
-                         (claim lost again since the caller's steal_stale); skipping"
-                    );
-                    continue;
-                }
-                Err(_timeout) => {
-                    tracing::warn!(
-                        stream_id = %stream_id,
-                        timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                        "hydrate_reclaimed: ClaimStore ensure_claimed timed out while holding \
-                         this stream's shard lock; skipping this entity for this pass"
-                    );
-                    continue;
-                }
-            };
-
-            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
-            let persisted = match storage.get_session(&session_id).await {
-                Ok(Some(row)) => row,
-                Ok(None) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        "hydrate_reclaimed: no durable row (already promoted/deleted by a \
-                         concurrent sweep); skipping"
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: get_session failed; skipping this entity for this pass"
-                    );
-                    continue;
-                }
-            };
-            let unacked = match storage.list_unacked(&session_id).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: list_unacked failed; skipping this entity for this pass"
-                    );
-                    continue;
-                }
-            };
-            let session = match persisted_to_detached(&persisted, &unacked) {
-                Ok(session) => session,
-                Err(error) => {
-                    debug!(
-                        stream_id = %stream_id,
-                        %error,
-                        "hydrate_reclaimed: row decode failed (poison pill); skipping"
-                    );
-                    self.release_claim_store_entry_under(&stream_id, epoch)
-                        .await;
-                    continue;
-                }
-            };
+                Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
+                Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
+                Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
+                Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
+            }
+            if !exact_fence
+                && !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone())
             {
-                let mut sessions = self
-                    .sessions
-                    .write()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.insert(stream_id.clone(), session);
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
-            if let Ok(mut claim_epochs) = self.claim_epochs.write() {
-                claim_epochs.insert(stream_id, epoch);
+            debug!(
+                stream_id = %stream_id,
+                "hydrate_reclaimed: already present in-memory (live session, or already \
+                 hydrated by an overlapping sweep); skipping"
+            );
+            return Ok(ReclaimedHydrationOutcome::AlreadyPresent);
+        }
+
+        // FIX 5: bounded — see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s
+        // doc comment. On timeout or a lost self-reacquire, skip this
+        // entity for this pass rather than insert a session this node
+        // can no longer prove it owns; the entity remains eligible for
+        // a future sweep.
+        let epoch = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store
+                .ensure_claimed(entity, caller_fence.owner()),
+        )
+        .await
+        {
+            Ok(Ok(epoch)) => epoch,
+            Ok(Err(error)) => {
+                debug!(
+                    stream_id = %stream_id,
+                    %error,
+                    "hydrate_reclaimed: ClaimStore ensure_claimed self-reacquire failed \
+                     (claim lost again since the caller's steal_stale); skipping"
+                );
+                return Ok(ReclaimedHydrationOutcome::LostClaim);
             }
-            hydrated += 1;
+            Err(_timeout) => {
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                    "hydrate_reclaimed: ClaimStore ensure_claimed timed out while holding \
+                     this stream's shard lock; skipping this entity for this pass"
+                );
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+            }
+        };
+        if epoch != caller_fence.epoch() {
+            debug!(
+                stream_id = %stream_id,
+                expected_epoch = caller_fence.epoch().0,
+                actual_epoch = epoch.0,
+                "hydrate_reclaimed: caller work belongs to a superseded claim epoch"
+            );
+            return Ok(ReclaimedHydrationOutcome::LostClaim);
+        }
+        if !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone()) {
+            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+        }
+        let Some(storage) = &self.persistence else {
+            return Ok(ReclaimedHydrationOutcome::MissingDurable);
+        };
+
+        let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+        let persisted = match storage.get_session(&session_id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                debug!(
+                    stream_id = %stream_id,
+                    "hydrate_reclaimed: no durable row (already promoted/deleted by a \
+                     concurrent sweep); skipping"
+                );
+                return Ok(ReclaimedHydrationOutcome::MissingDurable);
+            }
+            Err(super::super::persistence::SmPersistenceError::Corrupt {
+                stream_id: corrupt_stream,
+                detail,
+            }) if corrupt_stream == session_id => {
+                debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable session row");
+                return self
+                    .quarantine_reclaimed_poison(
+                        storage.as_ref(),
+                        entity,
+                        caller_fence,
+                        &session_id,
+                    )
+                    .await;
+            }
+            Err(error) => {
+                debug!(
+                    stream_id = %stream_id,
+                    %error,
+                    "hydrate_reclaimed: get_session failed; skipping this entity for this pass"
+                );
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+            }
+        };
+        let unacked = match storage.list_unacked(&session_id).await {
+            Ok(rows) => rows,
+            Err(super::super::persistence::SmPersistenceError::Corrupt {
+                stream_id: corrupt_stream,
+                detail,
+            }) if corrupt_stream == session_id => {
+                debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable unacked row");
+                return self
+                    .quarantine_reclaimed_poison(
+                        storage.as_ref(),
+                        entity,
+                        caller_fence,
+                        &session_id,
+                    )
+                    .await;
+            }
+            Err(error) => {
+                debug!(
+                    stream_id = %stream_id,
+                    %error,
+                    "hydrate_reclaimed: list_unacked failed; skipping this entity for this pass"
+                );
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+            }
+        };
+        let session = match persisted_to_detached(&persisted, &unacked) {
+            Ok(session) => session,
+            Err(error) => {
+                debug!(
+                    stream_id = %stream_id,
+                    %error,
+                    "hydrate_reclaimed: row decode failed (poison pill); skipping"
+                );
+                return self
+                    .quarantine_reclaimed_poison(
+                        storage.as_ref(),
+                        entity,
+                        caller_fence,
+                        &session_id,
+                    )
+                    .await;
+            }
+        };
+        // Every persistence read above is an await point. Re-prove both the
+        // node incarnation and exact claim epoch immediately before the
+        // synchronous in-memory publication.
+        if self.node_identity.current() != *caller_fence.owner() {
+            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+        }
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store
+                .fence(entity, caller_fence.owner(), caller_fence.epoch()),
+        )
+        .await
+        {
+            Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
+            Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
+            Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
+            Ok(Err(error)) => {
+                debug!(stream_id = %stream_id, %error, "hydrate_reclaimed: final exact fence failed");
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+            }
+            Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
+        }
+        {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.insert(stream_id.clone(), session);
+        }
+        if let Ok(mut claim_fences) = self.claim_fences.write() {
+            claim_fences.insert(stream_id, caller_fence.clone());
+        }
+        Ok(ReclaimedHydrationOutcome::Hydrated)
+    }
+
+    async fn quarantine_reclaimed_poison(
+        &self,
+        storage: &dyn super::super::persistence::SmPersistenceStorage,
+        entity: &Entity,
+        caller_fence: &super::super::persistence::SmClaimFence,
+        session_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+        if self.node_identity.current() != *caller_fence.owner() {
+            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+        }
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store
+                .fence(entity, caller_fence.owner(), caller_fence.epoch()),
+        )
+        .await
+        {
+            Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
+            Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
+            Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
+            Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
+        }
+        // The clustered implementation binds `caller_fence` into the same
+        // transaction that removes both durable tables. Thus stale work can
+        // neither quarantine a newer epoch nor report terminal success
+        // before the poison state is actually gone.
+        match storage.quarantine_session(session_id, caller_fence).await {
+            Ok(()) => Ok(ReclaimedHydrationOutcome::PoisonReleased),
+            Err(super::super::persistence::SmPersistenceError::NotOwner { .. }) => {
+                Ok(ReclaimedHydrationOutcome::LostClaim)
+            }
+            Err(error) => {
+                debug!(
+                    stream_id = %session_id,
+                    %error,
+                    "hydrate_reclaimed: poison quarantine failed; retaining exact claim for retry"
+                );
+                Ok(ReclaimedHydrationOutcome::TransientFailure)
+            }
+        }
+    }
+
+    pub async fn hydrate_reclaimed(
+        &self,
+        entities: &[(Entity, super::super::persistence::SmClaimFence)],
+    ) -> Result<usize, SmRegistryError> {
+        let mut hydrated = 0usize;
+        for (entity, fence) in entities {
+            if self.hydrate_reclaimed_typed(entity, fence).await?
+                == ReclaimedHydrationOutcome::Hydrated
+            {
+                hydrated += 1;
+            }
         }
         Ok(hydrated)
     }
+
+    pub async fn release_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+    ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
+        let stream_lock = self.stream_lock(&entity.id)?;
+        let _stream_guard = stream_lock.lock().await;
+        match self.stream_liveness(&entity.id) {
+            Some(true) => {
+                // Responsibility transferred back to the live local session.
+                // Never let terminal cleanup release its claim.
+                return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+            }
+            None => {
+                if !self.try_record_uncertain_release_fence(&entity.id, fence.clone()) {
+                    return Err(SmRegistryError::Internal(
+                        "release_reclaimed_claim: local liveness is uncertain and exact retry capacity is exhausted".to_string(),
+                    ));
+                }
+                // Retain the exact fence locally as well as reporting a
+                // retryable failure. This covers both the supervised worker
+                // and one-shot self-fence callers.
+                return Err(SmRegistryError::Internal(
+                    "release_reclaimed_claim: local session liveness is uncertain; exact cleanup retained".to_string(),
+                ));
+            }
+            Some(false) => {}
+        }
+        if !self.reserve_claim_fence_capacity(&entity.id) {
+            return Err(SmRegistryError::Internal(
+                "release_reclaimed_claim: exact-release retry capacity exhausted".to_string(),
+            ));
+        }
+        if !self.try_record_claim_fence(&entity.id, fence.clone()) {
+            self.cancel_claim_fence_reservation(&entity.id);
+            return Err(SmRegistryError::Internal(
+                "release_reclaimed_claim: failed to retain exact claim fence".to_string(),
+            ));
+        }
+        let outcome = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store
+                .release_exact(entity, fence.owner(), fence.epoch()),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) | Err(_) => {
+                if let Ok(mut pending) = self.pending_claim_releases.write() {
+                    pending.insert((entity.id.clone(), fence.clone()));
+                }
+                return Err(SmRegistryError::Internal(
+                    "release_reclaimed_claim: exact release failed and was retained for retry"
+                        .to_string(),
+                ));
+            }
+        };
+        if let Ok(mut fences) = self.claim_fences.write() {
+            if fences.get(&entity.id) == Some(fence) {
+                fences.remove(&entity.id);
+            }
+        }
+        if let Ok(mut pending) = self.pending_claim_releases.write() {
+            pending.remove(&(entity.id.clone(), fence.clone()));
+        }
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
+            storage.evict_claim_cache(&session_id, fence);
+        }
+        Ok(outcome)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimedHydrationOutcome {
+    Hydrated,
+    AlreadyPresent,
+    MissingDurable,
+    LostClaim,
+    StaleIdentity,
+    TransientFailure,
+    PoisonReleased,
 }
 
 impl InMemorySmSessionRegistry {
