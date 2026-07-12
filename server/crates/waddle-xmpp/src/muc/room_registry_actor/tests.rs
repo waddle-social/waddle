@@ -1051,19 +1051,20 @@ mod ownership_claims_tests {
 
     /// The deposed-node eviction path (fenced fan-out check observed a
     /// steal) evicts the LOCAL actor only — the room lives on under
-    /// its new owner, so `DestroyRoomReason::LocalEviction` MUST NOT
+    /// its new owner, so `DestroyRoomReason::DeposedEviction` MUST NOT
     /// wipe the durable rows. Without the split, a same-node re-claim
     /// racing the queued eviction could pass the write fence and wipe
     /// a legitimately re-claimed room's config/subject/ban list.
     #[tokio::test]
-    async fn local_eviction_does_not_delete_durable_room_state() {
+    async fn deposed_eviction_bypasses_release_backlog_without_deleting_durable_state() {
         let registry = spawn_registry().await;
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
         let durable_store = Arc::new(RecordingDurableStore::default());
+        let identity = SharedNodeIdentity::new(this_identity());
         registry
             .ask(WireClusteringClaims {
                 claim_store: Arc::clone(&claim_store),
-                node_identity: SharedNodeIdentity::new(this_identity()),
+                node_identity: identity.clone(),
                 durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
                 rollout_backoff: None,
             })
@@ -1081,17 +1082,51 @@ mod ownership_claims_tests {
             .await
             .expect("get_or_create_room");
 
-        registry
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let pending_jid = test_room_jid(&format!("deposed-backlog-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: pending_jid.clone(),
+                    claim_fence: room_claim_fence(&pending_jid, ClaimEpoch(index as i64)),
+                })
+                .await
+                .expect("fill exact-release backlog"));
+        }
+        identity.rotate(foreign_identity()).await;
+
+        assert_eq!(
+            registry
             .ask(DestroyRoom {
                 room_jid: jid.clone(),
-                reason: DestroyRoomReason::LocalEviction,
+                reason: DestroyRoomReason::DeposedEviction,
             })
             .await
-            .expect("evict");
+            .expect("evict"),
+            DestroyRoomOutcome::Destroyed,
+            "a serve-fence-proven deposed actor must be evicted even when local release capacity is full"
+        );
 
         assert!(
             durable_store.deleted_rooms.lock().expect("lock").is_empty(),
-            "a local eviction must never delete the room's durable state"
+            "a deposed eviction must never delete the room's durable state"
+        );
+        assert_eq!(registry.ask(RoomCount).await.expect("room count"), 0);
+        assert!(
+            claim_store
+                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+                .await
+                .expect("claim lookup")
+                .is_none(),
+            "deposed eviction must still attempt exact release for identity-rotation cases"
+        );
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("bounded backlog")
+                .depth,
+            MAX_PENDING_ROOM_RELEASES,
+            "deposed eviction must never grow the saturated retry inventory"
         );
     }
 
@@ -2578,7 +2613,7 @@ mod ownership_claims_tests {
             registry
                 .ask(DestroyRoom {
                     room_jid: jid.clone(),
-                    reason: DestroyRoomReason::LocalEviction,
+                    reason: DestroyRoomReason::Destroy,
                 })
                 .await
                 .expect("destroy"),

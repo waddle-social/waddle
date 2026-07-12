@@ -1663,15 +1663,15 @@ pub enum DestroyRoomReason {
     /// ceases to exist, so its durable rows (config, subject,
     /// affiliations incl. bans) are deleted with it.
     Destroy,
-    /// This node merely lost the room (fenced ownership check saw a
-    /// steal): evict the LOCAL actor only. The room lives on under its
-    /// new owner — its durable rows MUST survive. Without this split,
-    /// a same-node re-claim racing the queued eviction could pass the
-    /// write fence and wipe a legitimately re-claimed room's state.
-    LocalEviction,
+    /// A write-adjacent fence proved this process can no longer serve the
+    /// room, either because the database claim moved or the local node
+    /// identity rotated. Bypass release-backlog admission so the deposed
+    /// actor cannot remain registered, preserve durable state, and still
+    /// attempt exact release of the old fence.
+    DeposedEviction,
 }
 
-/// Outcome of a [`DestroyRoom`] ask. Split three ways because callers
+/// Outcome of a [`DestroyRoom`] ask. Split four ways because callers
 /// must distinguish "the room simply was not registered" (fine for
 /// admin deletion of a dormant room) from "the fenced durable wipe
 /// failed and the room was deliberately kept alive for a retry"
@@ -1706,7 +1706,8 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         msg: DestroyRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.rooms.contains_key(&msg.room_jid)
+        if msg.reason != DestroyRoomReason::DeposedEviction
+            && self.rooms.contains_key(&msg.room_jid)
             && !self
                 .has_pending_release_capacity(&msg.room_jid, &self.rooms[&msg.room_jid].claim_fence)
         {
@@ -1725,7 +1726,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         // owner's rows). A failed delete FAILS the destroy: the entry
         // is restored and `false` returned, so a caller never
         // acknowledges a destruction whose durable state survived.
-        // `LocalEviction` (deposed-node teardown) never wipes — the
+        // `DeposedEviction` never wipes — the
         // room lives on under its new owner.
         if (removed_room || removed_poison) && msg.reason == DestroyRoomReason::Destroy {
             if let Some(store) = &self.durable_store {

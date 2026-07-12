@@ -31,7 +31,8 @@ use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
-    CreateRoom, DestroyRoom, DestroyRoomReason, GetOrCreateRoom, GetRoom, ListRooms,
+    CreateRoom, DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom, GetRoom,
+    ListRooms, RetryPendingRoomReleases,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
@@ -514,6 +515,47 @@ fn unavailable(text: impl Into<String>) -> AdminErr {
     Box::new(CommandResult::Error(XmppError::service_unavailable(Some(
         text.into(),
     ))))
+}
+
+async fn destroy_room_for_rollback(
+    state: &AppState,
+    room_jid: &BareJid,
+    rollback_context: &str,
+) -> Result<(), AdminErr> {
+    let mut outcome = state
+        .room_registry
+        .ask(DestroyRoom {
+            room_jid: room_jid.clone(),
+            reason: DestroyRoomReason::Destroy,
+        })
+        .await
+        .map_err(send_err("room_registry ask DestroyRoom during rollback"))?;
+    if outcome == DestroyRoomOutcome::ReleaseBacklogFull {
+        state
+            .room_registry
+            .ask(RetryPendingRoomReleases { limit: 1 })
+            .await
+            .map_err(send_err(
+                "room_registry ask RetryPendingRoomReleases during rollback",
+            ))?;
+        outcome = state
+            .room_registry
+            .ask(DestroyRoom {
+                room_jid: room_jid.clone(),
+                reason: DestroyRoomReason::Destroy,
+            })
+            .await
+            .map_err(send_err("room_registry retry DestroyRoom during rollback"))?;
+    }
+    match outcome {
+        DestroyRoomOutcome::Destroyed | DestroyRoomOutcome::NotRegistered => Ok(()),
+        DestroyRoomOutcome::DurableWipeFailed => Err(internal_err(format!(
+            "{rollback_context}: durable room-state wipe failed for {room_jid}; rollback is incomplete"
+        ))),
+        DestroyRoomOutcome::ReleaseBacklogFull => Err(internal_err(format!(
+            "{rollback_context}: exact-release retry backlog is still full for {room_jid} after bounded redrive; room remains registered and rollback must be retried"
+        ))),
+    }
 }
 
 async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
@@ -1871,13 +1913,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
 
     if let Err(error) = upsert_channel_catalog(state, &localpart, &config, args.channel_type).await
     {
-        let _ = state
-            .room_registry
-            .ask(DestroyRoom {
-                room_jid: channel_jid.clone(),
-                reason: DestroyRoomReason::Destroy,
-            })
-            .await;
+        destroy_room_for_rollback(state, &channel_jid, "channel catalog creation failed").await?;
         return Err(error);
     }
 
@@ -1899,13 +1935,12 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
             Ok(created) => created,
             Err(error) => {
                 let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart).await;
-                let _ = state
-                    .room_registry
-                    .ask(DestroyRoom {
-                        room_jid: channel_jid.clone(),
-                        reason: DestroyRoomReason::Destroy,
-                    })
-                    .await;
+                destroy_room_for_rollback(
+                    state,
+                    &channel_jid,
+                    "channel-space bookmark creation failed",
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -1944,13 +1979,12 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                         let _ =
                             delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart)
                                 .await;
-                        let _ = state
-                            .room_registry
-                            .ask(DestroyRoom {
-                                room_jid: channel_jid.clone(),
-                                reason: DestroyRoomReason::Destroy,
-                            })
-                            .await;
+                        destroy_room_for_rollback(
+                            state,
+                            &channel_jid,
+                            "channel-space link creation failed",
+                        )
+                        .await?;
                     }
                     Err(retract_error) => {
                         if parent_tuple_created {
@@ -2016,13 +2050,7 @@ async fn run_group_dm_create(
         .map_err(send_err("room_registry ask CreateRoom"))?;
 
     if let Err(error) = upsert_group_dm_catalog(state, &localpart, &config).await {
-        let _ = state
-            .room_registry
-            .ask(DestroyRoom {
-                room_jid: room_jid.clone(),
-                reason: DestroyRoomReason::Destroy,
-            })
-            .await;
+        destroy_room_for_rollback(state, &room_jid, "group-DM catalog creation failed").await?;
         return Err(error);
     }
 
@@ -2033,7 +2061,7 @@ async fn run_group_dm_create(
     let mut persisted_members: Vec<BareJid> = Vec::with_capacity(members.len());
     for member_jid in members {
         if let Err(error) = persist_group_dm_member_tuple(state, &localpart, &member_jid).await {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await?;
             return Err(Box::new(CommandResult::Error(error)));
         }
         persisted_members.push(member_jid.clone());
@@ -2044,13 +2072,13 @@ async fn run_group_dm_create(
             })
             .await
         {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await?;
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
         if let Err(error) =
             publish_group_dm_bookmark(state, &member_jid, &room_jid, Some(&args.name)).await
         {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await?;
             return Err(error);
         }
     }
@@ -2760,19 +2788,13 @@ async fn rollback_group_dm_create(
     group_dm_id: &str,
     room_jid: &BareJid,
     persisted_members: &[BareJid],
-) {
+) -> Result<(), AdminErr> {
     for persisted_member in persisted_members {
         let _ = retract_group_dm_bookmark(state, persisted_member, room_jid).await;
         let _ = delete_group_dm_member_tuple(state, group_dm_id, persisted_member).await;
     }
     let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), group_dm_id).await;
-    let _ = state
-        .room_registry
-        .ask(DestroyRoom {
-            room_jid: room_jid.clone(),
-            reason: DestroyRoomReason::Destroy,
-        })
-        .await;
+    destroy_room_for_rollback(state, room_jid, "group-DM creation failed").await
 }
 
 pub(crate) async fn persist_group_dm_member_tuple(
