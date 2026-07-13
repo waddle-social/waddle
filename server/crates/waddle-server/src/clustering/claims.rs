@@ -65,6 +65,7 @@ use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, NodeIdentity, ResumeIdentityProof,
     StalePredicate,
 };
+use waddle_xmpp::pending_delivery::SmSessionId;
 
 use crate::db::{Database, DatabaseError};
 
@@ -154,12 +155,25 @@ fn entity_key(entity: &Entity) -> String {
 fn decode_entity(encoded: &str, entity_type: EntityType) -> Option<Entity> {
     let prefix = format!("{}:", entity_type.as_db_str());
     let id = encoded.strip_prefix(&prefix)?;
+    if id.len() > waddle_xmpp::ownership::ENTITY_ID_MAX_LEN {
+        return None;
+    }
     Some(Entity::new(entity_type, id))
+}
+
+/// Decode a persisted SM claim and enforce the SM protocol boundary's
+/// narrower wire limit. [`Entity`] deliberately permits longer ids for room
+/// JIDs and other entity kinds, so `decode_entity` alone cannot establish
+/// that a database value is a valid [`SmSessionId`].
+fn decode_sm_session_entity(encoded: &str) -> Option<Entity> {
+    let entity = decode_entity(encoded, EntityType::SmSession)?;
+    SmSessionId::try_from_wire(entity.id.clone()).ok()?;
+    Some(entity)
 }
 
 #[cfg(test)]
 mod entity_key_tests {
-    use super::entity_key;
+    use super::{decode_sm_session_entity, entity_key};
     use waddle_xmpp::ownership::{Entity, EntityType};
 
     /// Pure unit test (no Postgres required): `entity_key` must be
@@ -195,12 +209,16 @@ mod entity_key_tests {
 
     #[test]
     fn decode_entity_round_trips_entity_key_including_ids_with_colons() {
-        let cases = [
+        let long_valid_room: jid::BareJid = format!("{}@muc.example.com", "a".repeat(129))
+            .parse()
+            .expect("valid room JID longer than the old 128-byte wire bound");
+        let cases = vec![
             Entity::new(EntityType::UserActor, "42"),
             Entity::new(EntityType::RoomActor, "room_actor:42"),
             Entity::new(EntityType::SmSession, "sm_session:sm_session:x"),
             Entity::new(EntityType::UserActor, ""),
             Entity::new(EntityType::RoomActor, ":"),
+            Entity::new(EntityType::RoomActor, long_valid_room.to_string()),
         ];
         for entity in cases {
             let encoded = entity_key(&entity);
@@ -225,6 +243,21 @@ mod entity_key_tests {
             None
         );
     }
+
+    #[test]
+    fn sm_session_decode_enforces_the_sm_specific_wire_bound() {
+        let valid = Entity::new(
+            EntityType::SmSession,
+            "s".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN),
+        );
+        assert_eq!(decode_sm_session_entity(&entity_key(&valid)), Some(valid));
+
+        let overlong = Entity::new(
+            EntityType::SmSession,
+            "s".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1),
+        );
+        assert_eq!(decode_sm_session_entity(&entity_key(&overlong)), None);
+    }
 }
 
 /// Postgres implementation of `ClaimStore`, backing `UserActor`/`RoomActor`/
@@ -233,9 +266,163 @@ pub struct PostgresClaimStore {
     db: Database,
 }
 
+struct OrphanedSmClaimCleanup {
+    encoded: String,
+    owner: NodeIdentity,
+    claim_epoch: ClaimEpoch,
+    durable_stream_id: Option<String>,
+    malformed: bool,
+}
+
 impl PostgresClaimStore {
     pub fn new(db: Database) -> Self {
         Self { db }
+    }
+
+    async fn load_sm_orphan_reaper_cursor(&self) -> Result<Option<SmOrphanScanCursor>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                "SELECT cursor_entity FROM clustering_orphan_reaper_cursors WHERE lane = ?",
+                crate::db_params![EntityType::SmSession.as_db_str().to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => row
+                .get::<Option<String>>(0)
+                .map(|cursor| cursor.map(SmOrphanScanCursor::from_raw))
+                .map_err(db_err),
+            None => Ok(None),
+        }
+    }
+
+    async fn load_room_orphan_reaper_cursor(
+        &self,
+    ) -> Result<Option<RoomOrphanScanCursor>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                "SELECT cursor_entity FROM clustering_orphan_reaper_cursors WHERE lane = ?",
+                crate::db_params![EntityType::RoomActor.as_db_str().to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => row
+                .get::<Option<String>>(0)
+                .map(|cursor| cursor.map(RoomOrphanScanCursor::from_raw))
+                .map_err(db_err),
+            None => Ok(None),
+        }
+    }
+
+    /// Remove one exact stale SM claim discovered by the advisory orphan
+    /// scan. A claim classified as claim-only is deleted only if its durable
+    /// row is still absent in this transaction. That current-state predicate
+    /// closes the scan/delete window in which a paused owner can finish a
+    /// fenced detach write before this DELETE obtains the claim-row lock.
+    async fn cleanup_orphaned_sm_claim(
+        &self,
+        cleanup: OrphanedSmClaimCleanup,
+    ) -> Result<bool, ClaimError> {
+        let mut tx = self.db.begin().await.map_err(db_err)?;
+        // Serialize with every fenced SM writer before evaluating durable-row
+        // absence. Under Postgres READ COMMITTED, putting `NOT EXISTS` in the
+        // same DELETE that waits on a writer's `FOR SHARE` lock is not enough:
+        // that statement's snapshot can predate the writer's commit. Taking
+        // the exact claim lock in this first statement makes the DELETE below
+        // start with a fresh statement snapshot after any in-flight writer has
+        // committed or rolled back.
+        let mut locked = tx
+            .query(
+                r#"
+                /* orphan_sm_cleanup_exact_lock */
+                SELECT 1 FROM clustering_claims
+                WHERE entity = ? AND entity_type = ? AND node_id = ? AND node_epoch = ?
+                  AND claim_epoch = ?
+                FOR UPDATE
+                "#,
+                crate::db_params![
+                    cleanup.encoded.clone(),
+                    EntityType::SmSession.as_db_str().to_string(),
+                    cleanup.owner.node_id.clone(),
+                    cleanup.owner.node_epoch.clone(),
+                    cleanup.claim_epoch.0,
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let exact_claim_locked = locked.next().await.map_err(db_err)?.is_some();
+        drop(locked);
+        if !exact_claim_locked {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(false);
+        }
+        let params = crate::db_params![
+            cleanup.encoded.clone(),
+            EntityType::SmSession.as_db_str().to_string(),
+            cleanup.owner.node_id,
+            cleanup.owner.node_epoch,
+            cleanup.claim_epoch.0,
+        ];
+        let affected = if cleanup.durable_stream_id.is_some() {
+            tx.execute(
+                r#"
+                DELETE FROM clustering_claims
+                WHERE entity = ? AND entity_type = ? AND node_id = ? AND node_epoch = ?
+                  AND claim_epoch = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes n
+                    WHERE n.node_id = clustering_claims.node_id
+                      AND NOT n.expired
+                      AND n.node_epoch = clustering_claims.node_epoch
+                  )
+                "#,
+                params,
+            )
+            .await
+            .map_err(db_err)?
+        } else {
+            tx.execute(
+                r#"
+                DELETE FROM clustering_claims
+                WHERE entity = ? AND entity_type = ? AND node_id = ? AND node_epoch = ?
+                  AND claim_epoch = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM clustering_nodes n
+                    WHERE n.node_id = clustering_claims.node_id
+                      AND NOT n.expired
+                      AND n.node_epoch = clustering_claims.node_epoch
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM sm_sessions s
+                    WHERE clustering_claims.entity = ('sm_session:' || s.stream_id)
+                  )
+                "#,
+                params,
+            )
+            .await
+            .map_err(db_err)?
+        };
+        if affected == 1 {
+            if let Some(stream_id) = cleanup.durable_stream_id {
+                tx.execute(
+                    "DELETE FROM sm_unacked WHERE stream_id = ?",
+                    crate::db_params![stream_id.clone()],
+                )
+                .await
+                .map_err(db_err)?;
+                tx.execute(
+                    "DELETE FROM sm_sessions WHERE stream_id = ?",
+                    crate::db_params![stream_id],
+                )
+                .await
+                .map_err(db_err)?;
+            }
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(affected == 1 && cleanup.malformed)
     }
 }
 
@@ -364,6 +551,48 @@ impl ClaimStore for PostgresClaimStore {
         )
         .await
         .map_err(db_err)?;
+        conn.execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS clustering_claims_owner_type_entity
+                ON clustering_claims (node_id, node_epoch, entity_type, entity)
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        // Supports bounded per-entity-type orphan scans without walking the
+        // much larger mixed claim table (SM sessions dominate in modeled
+        // deployments). `entity` also satisfies the room scan's stable
+        // ordering before its LIMIT.
+        conn.execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS clustering_claims_entity_type_entity
+                ON clustering_claims (entity_type, entity)
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS clustering_orphan_reaper_cursors (
+                lane          TEXT PRIMARY KEY,
+                cursor_entity TEXT
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        for lane in [EntityType::SmSession, EntityType::RoomActor] {
+            conn.execute(
+                "INSERT INTO clustering_orphan_reaper_cursors (lane) VALUES (?) \
+                 ON CONFLICT (lane) DO NOTHING",
+                crate::db_params![lane.as_db_str().to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        }
         // ADR-0017 Phase 3 Slice 3: steal-intents unwedge/owner-veto path
         // (element 4's "Unwedge" text, quoted verbatim in the phase plan).
         // `UNIQUE (entity, reporter_node)` + the upsert in
@@ -402,6 +631,9 @@ impl ClaimStore for PostgresClaimStore {
     }
 
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // Acquire CAS (element 4): a fresh claim only inserts; a
         // still-live claim on the same entity leaves the row untouched and
@@ -488,6 +720,9 @@ impl ClaimStore for PostgresClaimStore {
         entity: &Entity,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         // FIX 1: try the real CAS first — the common, uncontended case (a
         // brand-new entity, or a genuine conflict with another node) needs
         // nothing beyond `acquire` itself.
@@ -557,6 +792,9 @@ impl ClaimStore for PostgresClaimStore {
         staleness: StalePredicate,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         // FIX 5: an exhaustive `match`, not an `if let ... else` fallthrough
         // — so the compiler forces this function to be revisited the
         // moment a third `StalePredicate` variant is added, rather than
@@ -778,6 +1016,9 @@ impl ClaimStore for PostgresClaimStore {
         _witness: ResumeIdentityProof,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // Consent/epoch-only steal CAS (element 4's third variant): no
         // staleness predicate at all — authorized exclusively by the
@@ -859,6 +1100,55 @@ impl ClaimStore for PostgresClaimStore {
         }
     }
 
+    async fn current_claim_after_pending_writes(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, ClaimError> {
+        // Terminal orphan recovery can arrive here after its caller dropped
+        // a steal future. Locking the claim row makes this SELECT wait behind
+        // that detached UPDATE, so the returned version is post-commit (or
+        // post-rollback) rather than the unlocked pre-CAS snapshot. A stale
+        // room steal only updates an existing row, so the absent-row gap does
+        // not need predicate/range locking.
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                r#"
+                /* terminal_claim_reconciliation_lock */
+                SELECT
+                    c.node_id,
+                    c.node_epoch,
+                    c.claim_epoch,
+                    EXISTS (
+                        SELECT 1 FROM clustering_nodes n
+                        WHERE n.node_id = c.node_id
+                          AND NOT n.expired
+                          AND n.node_epoch = c.node_epoch
+                    ) AS owner_lease_fresh
+                FROM clustering_claims c
+                WHERE c.entity = ?
+                FOR UPDATE
+                "#,
+                crate::db_params![entity_key(entity)],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => {
+                let node_id: String = row.get(0).map_err(db_err)?;
+                let node_epoch: String = row.get(1).map_err(db_err)?;
+                let claim_epoch: i64 = row.get(2).map_err(db_err)?;
+                let owner_lease_fresh: bool = row.get(3).map_err(db_err)?;
+                Ok(Some(waddle_xmpp::ownership::ClaimSnapshot {
+                    owner: NodeIdentity::new(node_id, node_epoch),
+                    claim_epoch: ClaimEpoch(claim_epoch),
+                    owner_lease_fresh,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn fence(
         &self,
         entity: &Entity,
@@ -874,9 +1164,14 @@ impl ClaimStore for PostgresClaimStore {
             .query(
                 r#"
                 SELECT 1 FROM clustering_claims
-                WHERE entity = ? AND node_id = ? AND claim_epoch = ?
+                WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
                 "#,
-                crate::db_params![entity_key(entity), me.node_id.clone(), mine.0],
+                crate::db_params![
+                    entity_key(entity),
+                    me.node_id.clone(),
+                    me.node_epoch.clone(),
+                    mine.0,
+                ],
             )
             .await
             .map_err(db_err)?;
@@ -890,33 +1185,20 @@ impl ClaimStore for PostgresClaimStore {
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError> {
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        // Epoch-gated release: best-effort. A claim already stolen out
-        // from under `me` (0 rows affected) is a no-op, not an error —
-        // graceful drain releases whatever it still owns and does not
-        // treat a lost race as a failure.
-        let affected = conn
-            .execute(
-                r#"
+        conn.execute(
+            r#"
                 DELETE FROM clustering_claims
                 WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
                 "#,
-                crate::db_params![
-                    entity_key(entity),
-                    me.node_id.clone(),
-                    me.node_epoch.clone(),
-                    mine.0,
-                ],
-            )
-            .await
-            .map_err(db_err)?;
-        if affected == 0 {
-            tracing::debug!(
-                entity = %entity.id,
-                node_id = %me.node_id,
-                claim_epoch = mine.0,
-                "release: claim already gone (stolen or already released)"
-            );
-        }
+            crate::db_params![
+                entity_key(entity),
+                me.node_id.clone(),
+                me.node_epoch.clone(),
+                mine.0,
+            ],
+        )
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 
@@ -1232,10 +1514,9 @@ pub trait NodeLeaseStore: Send + Sync {
     /// candidate list only; the reaper's subsequent `expire` +
     /// `ClaimStore::steal_stale(OwnerStale)` calls are the actual
     /// authority, exactly like every other candidate-then-CAS pattern in
-    /// this store). Scoped to `sm_session` only: `UserActor`/`RoomActor`
-    /// claim acquisition is out of this slice's scope (see
-    /// `clustering::local_claims`'s module doc), so there is nothing of
-    /// either other type to scan for yet.
+    /// this store). Scoped to `sm_session` only because RoomActor recovery
+    /// has its own bounded scan/adoption path below, while UserActor claims
+    /// remain demand-created and carry no durable actor state to hydrate.
     ///
     /// A row whose `entity` key does not decode cleanly against its own
     /// `entity_type` column (the same data-integrity anomaly
@@ -1245,6 +1526,58 @@ pub trait NodeLeaseStore: Send + Sync {
     async fn list_orphaned_sm_session_claims(
         &self,
     ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError>;
+
+    /// Ordered, bounded cursor page used by the periodic orphan reaper. The
+    /// default keeps test/dummy stores source-compatible; durable stores
+    /// should override this so the bound is enforced by the query itself.
+    async fn list_orphaned_sm_session_claims_page(
+        &self,
+        after: Option<SmOrphanScanCursor>,
+        limit: usize,
+    ) -> Result<OrphanedSmSessionClaimPage, ClaimError> {
+        let mut candidates = self.list_orphaned_sm_session_claims().await?;
+        candidates.sort_by_key(|candidate| entity_key(&candidate.entity));
+        if let Some(after) = after.as_ref() {
+            candidates.retain(|candidate| {
+                entity_key(&candidate.entity).as_str() > after.raw_key.as_str()
+            });
+        }
+        let has_more = candidates.len() > limit;
+        candidates.truncate(limit);
+        let next_cursor = candidates
+            .last()
+            .map(|candidate| SmOrphanScanCursor::from_raw(entity_key(&candidate.entity)));
+        Ok(OrphanedSmSessionClaimPage {
+            candidates,
+            next_cursor,
+            has_more,
+            quarantined: 0,
+        })
+    }
+
+    /// Persist one lane-typed advisory cursor after a complete page. The
+    /// update enum carries its lane even when resetting to `None`, making
+    /// cross-lane cursor writes unrepresentable at this public boundary.
+    async fn persist_orphan_reaper_cursor(
+        &self,
+        _update: OrphanReaperCursorUpdate,
+    ) -> Result<(), ClaimError> {
+        Ok(())
+    }
+
+    /// Bounded inline-recovery scan for one identity this process has just
+    /// superseded. Production stores override with an owner-indexed query;
+    /// the default keeps fakes source-compatible.
+    async fn list_orphaned_sm_session_claims_for_owner(
+        &self,
+        owner: &NodeIdentity,
+        limit: usize,
+    ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError> {
+        let mut candidates = self.list_orphaned_sm_session_claims().await?;
+        candidates.retain(|candidate| candidate.owner == *owner);
+        candidates.truncate(limit);
+        Ok(candidates)
+    }
 
     /// Reaper-only stale-owner steal for detached SM-session claims. Unlike
     /// [`ClaimStore::steal_stale`]'s generic owner-stale CAS, this binds the
@@ -1261,9 +1594,26 @@ pub trait NodeLeaseStore: Send + Sync {
         Err(ClaimError::Conflict)
     }
 
+    /// Inline counterpart used immediately after re-registration. Durable
+    /// Postgres stores override this to bind the fresh stealer's heartbeat
+    /// into the CAS; fakes delegate to their supplied claim store.
+    async fn steal_own_expired_sm_session_claim(
+        &self,
+        claim_store: &dyn ClaimStore,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        me: &NodeIdentity,
+        _lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        claim_store
+            .steal_stale(entity, observed, StalePredicate::OwnerStale, me)
+            .await
+    }
+
     /// Bounded advisory scan for `RoomActor` claims whose recorded owner
-    /// lease is committed-stale. The subsequent epoch-fenced steal is the
-    /// authority; this candidate list is read-only.
+    /// lease is committed-stale. The returned snapshot never authorizes a
+    /// takeover: callers must still expire the owner and win
+    /// [`Self::steal_orphaned_room_actor_claim`]'s epoch-fenced CAS.
     async fn list_orphaned_room_actor_claims(
         &self,
         _limit: usize,
@@ -1271,8 +1621,19 @@ pub trait NodeLeaseStore: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Reaper-only stale-owner steal for a `RoomActor`, bound to both the
-    /// observed claim epoch and the sweeping node's fresh lease.
+    /// Raw-key cursor page for RoomActor recovery. Durable stores override
+    /// this so live-owner and malformed rows still consume the fixed scan
+    /// budget instead of forcing an unbounded predicate scan before LIMIT.
+    async fn list_orphaned_room_actor_claims_page(
+        &self,
+        after: Option<RoomOrphanScanCursor>,
+        limit: usize,
+    ) -> Result<OrphanedRoomActorClaimPage, ClaimError>;
+
+    /// Reaper-only stale-owner steal for a `RoomActor`. The production
+    /// implementation binds both the observed claim epoch and the sweeping
+    /// node's own fresh, non-draining lease into one statement, so neither a
+    /// renewed owner nor a stale sweeper can win a candidate-scan race.
     async fn steal_orphaned_room_actor_claim(
         &self,
         _entity: &Entity,
@@ -1308,10 +1669,86 @@ pub struct OrphanedSmSessionClaim {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedSmSessionClaimPage {
+    pub candidates: Vec<OrphanedSmSessionClaim>,
+    pub next_cursor: Option<SmOrphanScanCursor>,
+    pub has_more: bool,
+    pub quarantined: usize,
+}
+
+/// Opaque ordering checkpoint for the raw `sm_session` claim-key lane.
+///
+/// The private value intentionally remains the database key rather than a
+/// parsed `SmSessionId`: malformed keys must still advance the integrity
+/// scan so one poison row cannot pin every later claim forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmOrphanScanCursor {
+    raw_key: String,
+}
+
+impl SmOrphanScanCursor {
+    pub(crate) fn from_raw(raw_key: String) -> Self {
+        Self { raw_key }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_raw(&self) -> &str {
+        &self.raw_key
+    }
+}
+
+/// A bounded-scan candidate for proactive `RoomActor` reconciliation.
+/// Its fields are only an observation; the reaper's subsequent CAS is the
+/// authority over whether the claim can move.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanedRoomActorClaim {
     pub entity: Entity,
     pub epoch: ClaimEpoch,
     pub owner: NodeIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedRoomActorClaimPage {
+    pub candidates: Vec<OrphanedRoomActorClaim>,
+    pub next_cursor: Option<RoomOrphanScanCursor>,
+    pub has_more: bool,
+    pub quarantined: usize,
+}
+
+/// Opaque ordering checkpoint for the raw `room_actor` claim-key lane.
+/// The raw key is private because this is a storage cursor, not a room JID;
+/// malformed keys must remain representable for forward progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomOrphanScanCursor {
+    raw_key: String,
+}
+
+impl RoomOrphanScanCursor {
+    pub(crate) fn from_raw(raw_key: String) -> Self {
+        Self { raw_key }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_raw(&self) -> &str {
+        &self.raw_key
+    }
+}
+
+/// Lane-safe durable cursor write. `None` is a typed reset for exactly one
+/// lane rather than an untyped `(EntityType, Option<String>)` pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrphanReaperCursorUpdate {
+    SmSession(Option<SmOrphanScanCursor>),
+    RoomActor(Option<RoomOrphanScanCursor>),
+}
+
+impl OrphanReaperCursorUpdate {
+    fn into_db_parts(self) -> (EntityType, Option<String>) {
+        match self {
+            Self::SmSession(cursor) => (EntityType::SmSession, cursor.map(|cursor| cursor.raw_key)),
+            Self::RoomActor(cursor) => (EntityType::RoomActor, cursor.map(|cursor| cursor.raw_key)),
+        }
+    }
 }
 
 async fn register_node(
@@ -1702,7 +2139,7 @@ impl NodeLeaseStore for PostgresClaimStore {
                 r#"
                 WITH fenced AS (
                     SELECT 1 FROM clustering_claims
-                    WHERE entity = ? AND node_id = ? AND claim_epoch = ?
+                    WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
                     FOR SHARE
                 )
                 DELETE FROM clustering_steal_intents
@@ -1712,6 +2149,7 @@ impl NodeLeaseStore for PostgresClaimStore {
                 crate::db_params![
                     entity_key(entity),
                     me.node_id.clone(),
+                    me.node_epoch.clone(),
                     mine.0,
                     entity_key(entity),
                 ],
@@ -1772,11 +2210,11 @@ impl NodeLeaseStore for PostgresClaimStore {
             let node_id: String = row.get(1).map_err(db_err)?;
             let node_epoch: String = row.get(2).map_err(db_err)?;
             let claim_epoch: i64 = row.get(3).map_err(db_err)?;
-            let Some(entity) = decode_entity(&encoded, EntityType::SmSession) else {
+            let Some(entity) = decode_sm_session_entity(&encoded) else {
                 tracing::warn!(
                     encoded_entity = %encoded,
-                    "list_orphaned_sm_session_claims: row's entity key does not decode \
-                     against the sm_session tag; skipping (data-integrity anomaly)"
+                    "list_orphaned_sm_session_claims: row's entity key is not a valid \
+                     bounded SM-session id; skipping (data-integrity anomaly)"
                 );
                 continue;
             };
@@ -1787,6 +2225,207 @@ impl NodeLeaseStore for PostgresClaimStore {
             });
         }
         Ok(out)
+    }
+
+    async fn list_orphaned_sm_session_claims_page(
+        &self,
+        after: Option<SmOrphanScanCursor>,
+        limit: usize,
+    ) -> Result<OrphanedSmSessionClaimPage, ClaimError> {
+        if limit == 0 {
+            return Ok(OrphanedSmSessionClaimPage {
+                candidates: Vec::new(),
+                next_cursor: after,
+                has_more: false,
+                quarantined: 0,
+            });
+        }
+        let scan_limit = limit.saturating_add(1);
+        let cursor = match after {
+            Some(cursor) => cursor.raw_key,
+            None => self
+                .load_sm_orphan_reaper_cursor()
+                .await?
+                .map(|cursor| cursor.raw_key)
+                .unwrap_or_default(),
+        };
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                r#"
+                WITH raw_claims AS (
+                    SELECT entity, node_id, node_epoch, claim_epoch
+                    FROM clustering_claims
+                    WHERE entity_type = ? AND entity > ?
+                    ORDER BY entity
+                    LIMIT ?
+                )
+                SELECT entity, node_id, node_epoch, claim_epoch,
+                       CASE WHEN NOT EXISTS (
+                         SELECT 1 FROM clustering_nodes n
+                         WHERE n.node_id = raw_claims.node_id
+                           AND NOT n.expired
+                           AND n.node_epoch = raw_claims.node_epoch
+                       ) THEN 1 ELSE 0 END AS owner_stale,
+                       CASE WHEN EXISTS (
+                         SELECT 1 FROM sm_sessions s
+                         WHERE raw_claims.entity = ('sm_session:' || s.stream_id)
+                       ) THEN 1 ELSE 0 END AS has_durable
+                FROM raw_claims
+                ORDER BY entity
+                "#,
+                crate::db_params![
+                    EntityType::SmSession.as_db_str().to_string(),
+                    cursor,
+                    i64::try_from(scan_limit).unwrap_or(i64::MAX),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        // Exact stale-owner snapshot plus an optional durable suffix. The
+        // cleanup transaction revalidates claim-only absence; this scan-time
+        // classification is never destructive authority by itself.
+        let mut cleanup = Vec::new();
+        let mut next_cursor = None;
+        let mut observed_extra = false;
+        let mut scanned = 0usize;
+        while let Some(row) = rows.next().await.map_err(db_err)? {
+            if scanned == limit {
+                observed_extra = true;
+                break;
+            }
+            scanned += 1;
+            let encoded: String = row.get(0).map_err(db_err)?;
+            let node_id: String = row.get(1).map_err(db_err)?;
+            let node_epoch: String = row.get(2).map_err(db_err)?;
+            let claim_epoch: i64 = row.get(3).map_err(db_err)?;
+            let owner_stale: i64 = row.get(4).map_err(db_err)?;
+            let has_durable: i64 = row.get(5).map_err(db_err)?;
+            next_cursor = Some(SmOrphanScanCursor::from_raw(encoded.clone()));
+            if owner_stale != 1 {
+                continue;
+            }
+            let Some(entity) = decode_sm_session_entity(&encoded) else {
+                // Only malformed keys in the canonical namespace may name
+                // matching poison durable rows. Wrong-prefix keys can never
+                // authorize deleting session state.
+                let durable_suffix = encoded
+                    .strip_prefix("sm_session:")
+                    .filter(|_| has_durable == 1)
+                    .map(str::to_string);
+                cleanup.push(OrphanedSmClaimCleanup {
+                    encoded,
+                    owner: NodeIdentity::new(node_id, node_epoch),
+                    claim_epoch: ClaimEpoch(claim_epoch),
+                    durable_stream_id: durable_suffix,
+                    malformed: true,
+                });
+                continue;
+            };
+            if has_durable != 1 {
+                // A committed stale owner cannot still be in the live
+                // claim-before-detach window. Remove only the exact stale
+                // claim; never manufacture a durable session or steal it.
+                cleanup.push(OrphanedSmClaimCleanup {
+                    encoded,
+                    owner: NodeIdentity::new(node_id, node_epoch),
+                    claim_epoch: ClaimEpoch(claim_epoch),
+                    durable_stream_id: None,
+                    malformed: false,
+                });
+                continue;
+            }
+            out.push(OrphanedSmSessionClaim {
+                entity,
+                epoch: ClaimEpoch(claim_epoch),
+                owner: NodeIdentity::new(node_id, node_epoch),
+            });
+        }
+        drop(rows);
+        drop(conn);
+        let mut quarantined = 0usize;
+        for cleanup in cleanup {
+            quarantined += usize::from(self.cleanup_orphaned_sm_claim(cleanup).await?);
+        }
+        Ok(OrphanedSmSessionClaimPage {
+            has_more: observed_extra,
+            candidates: out,
+            next_cursor,
+            quarantined,
+        })
+    }
+
+    async fn persist_orphan_reaper_cursor(
+        &self,
+        update: OrphanReaperCursorUpdate,
+    ) -> Result<(), ClaimError> {
+        let (lane, cursor) = update.into_db_parts();
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        conn.execute(
+            "INSERT INTO clustering_orphan_reaper_cursors (lane, cursor_entity) VALUES (?, ?) \
+             ON CONFLICT (lane) DO UPDATE SET cursor_entity = EXCLUDED.cursor_entity",
+            crate::db_params![lane.as_db_str().to_string(), cursor],
+        )
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_orphaned_sm_session_claims_for_owner(
+        &self,
+        owner: &NodeIdentity,
+        limit: usize,
+    ) -> Result<Vec<OrphanedSmSessionClaim>, ClaimError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                r#"
+                WITH raw_claims AS (
+                    SELECT entity, claim_epoch
+                    FROM clustering_claims
+                    WHERE node_id = ? AND node_epoch = ? AND entity_type = ?
+                    ORDER BY entity
+                    LIMIT ?
+                )
+                SELECT entity, claim_epoch,
+                       CASE WHEN EXISTS (
+                         SELECT 1 FROM sm_sessions s
+                         WHERE raw_claims.entity = ('sm_session:' || s.stream_id)
+                       ) THEN 1 ELSE 0 END AS has_durable
+                FROM raw_claims
+                ORDER BY entity
+                "#,
+                crate::db_params![
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    EntityType::SmSession.as_db_str().to_string(),
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next().await.map_err(db_err)? {
+            let encoded: String = row.get(0).map_err(db_err)?;
+            let claim_epoch: i64 = row.get(1).map_err(db_err)?;
+            let has_durable: i64 = row.get(2).map_err(db_err)?;
+            if has_durable != 1 {
+                continue;
+            }
+            let Some(entity) = decode_sm_session_entity(&encoded) else {
+                continue;
+            };
+            candidates.push(OrphanedSmSessionClaim {
+                entity,
+                epoch: ClaimEpoch(claim_epoch),
+                owner: owner.clone(),
+            });
+        }
+        Ok(candidates)
     }
 
     async fn steal_orphaned_sm_session_claim(
@@ -1846,32 +2485,74 @@ impl NodeLeaseStore for PostgresClaimStore {
         }
     }
 
+    async fn steal_own_expired_sm_session_claim(
+        &self,
+        _claim_store: &dyn ClaimStore,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        me: &NodeIdentity,
+        lease_ttl: Duration,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        self.steal_orphaned_sm_session_claim(entity, observed, me, lease_ttl)
+            .await
+    }
+
     async fn list_orphaned_room_actor_claims(
         &self,
         limit: usize,
     ) -> Result<Vec<OrphanedRoomActorClaim>, ClaimError> {
+        Ok(self
+            .list_orphaned_room_actor_claims_page(None, limit)
+            .await?
+            .candidates)
+    }
+
+    async fn list_orphaned_room_actor_claims_page(
+        &self,
+        after: Option<RoomOrphanScanCursor>,
+        limit: usize,
+    ) -> Result<OrphanedRoomActorClaimPage, ClaimError> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok(OrphanedRoomActorClaimPage {
+                candidates: Vec::new(),
+                next_cursor: after,
+                has_more: false,
+                quarantined: 0,
+            });
         }
+        let scan_limit = limit.saturating_add(1);
+        let cursor = match after {
+            Some(cursor) => cursor.raw_key,
+            None => self
+                .load_room_orphan_reaper_cursor()
+                .await?
+                .map(|cursor| cursor.raw_key)
+                .unwrap_or_default(),
+        };
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let scan_limit = limit.saturating_mul(4);
         let mut rows = conn
             .query(
                 r#"
-                SELECT entity, node_id, node_epoch, claim_epoch
-                FROM clustering_claims
-                WHERE entity_type = ?
-                  AND NOT EXISTS (
-                    SELECT 1 FROM clustering_nodes n
-                    WHERE n.node_id = clustering_claims.node_id
-                      AND NOT n.expired
-                      AND n.node_epoch = clustering_claims.node_epoch
-                  )
+                WITH raw_claims AS (
+                    SELECT entity, node_id, node_epoch, claim_epoch
+                    FROM clustering_claims
+                    WHERE entity_type = ? AND entity > ?
+                    ORDER BY entity
+                    LIMIT ?
+                )
+                SELECT entity, node_id, node_epoch, claim_epoch,
+                       CASE WHEN NOT EXISTS (
+                         SELECT 1 FROM clustering_nodes n
+                         WHERE n.node_id = raw_claims.node_id
+                           AND NOT n.expired
+                           AND n.node_epoch = raw_claims.node_epoch
+                       ) THEN 1 ELSE 0 END AS owner_stale
+                FROM raw_claims
                 ORDER BY entity
-                LIMIT ?
                 "#,
                 crate::db_params![
                     EntityType::RoomActor.as_db_str().to_string(),
+                    cursor,
                     i64::try_from(scan_limit).unwrap_or(i64::MAX),
                 ],
             )
@@ -1879,16 +2560,34 @@ impl NodeLeaseStore for PostgresClaimStore {
             .map_err(db_err)?;
         let mut out = Vec::new();
         let mut malformed = Vec::new();
+        let mut next_cursor = None;
+        let mut scanned = 0usize;
+        let mut has_more = false;
         while let Some(row) = rows.next().await.map_err(db_err)? {
+            if scanned == limit {
+                has_more = true;
+                break;
+            }
+            scanned += 1;
             let encoded: String = row.get(0).map_err(db_err)?;
             let node_id: String = row.get(1).map_err(db_err)?;
             let node_epoch: String = row.get(2).map_err(db_err)?;
             let claim_epoch: i64 = row.get(3).map_err(db_err)?;
+            let owner_stale: i64 = row.get(4).map_err(db_err)?;
+            next_cursor = Some(RoomOrphanScanCursor::from_raw(encoded.clone()));
+            if owner_stale != 1 {
+                continue;
+            }
             let Some(entity) = decode_entity(&encoded, EntityType::RoomActor) else {
                 malformed.push((encoded, node_id, node_epoch, claim_epoch));
                 continue;
             };
-            if entity.id.parse::<jid::BareJid>().is_err() {
+            // XEP-0045 Business Rules / Addresses requires a non-empty Room
+            // ID (the node portion); a domain-only BareJid is not a room JID.
+            if !matches!(
+                entity.id.parse::<jid::BareJid>(),
+                Ok(room_jid) if room_jid.node().is_some()
+            ) {
                 malformed.push((encoded, node_id, node_epoch, claim_epoch));
                 continue;
             }
@@ -1897,9 +2596,6 @@ impl NodeLeaseStore for PostgresClaimStore {
                 epoch: ClaimEpoch(claim_epoch),
                 owner: NodeIdentity::new(node_id, node_epoch),
             });
-            if out.len() == limit {
-                break;
-            }
         }
         drop(rows);
         let mut quarantined = 0usize;
@@ -1935,7 +2631,12 @@ impl NodeLeaseStore for PostgresClaimStore {
                 "quarantined malformed stale RoomActor claim rows"
             );
         }
-        Ok(out)
+        Ok(OrphanedRoomActorClaimPage {
+            candidates: out,
+            next_cursor,
+            has_more,
+            quarantined,
+        })
     }
 
     async fn steal_orphaned_room_actor_claim(
@@ -2057,6 +2758,35 @@ mod tests {
         Entity::new(EntityType::SmSession, id.to_string())
     }
 
+    #[test]
+    fn orphan_reaper_cursor_updates_preserve_their_lane_when_set_or_reset() {
+        let sm = SmOrphanScanCursor::from_raw("sm_session:page-064".to_string());
+        let room =
+            RoomOrphanScanCursor::from_raw("room_actor:page-064@muc.example.com".to_string());
+        assert_eq!(
+            OrphanReaperCursorUpdate::SmSession(Some(sm)).into_db_parts(),
+            (
+                EntityType::SmSession,
+                Some("sm_session:page-064".to_string())
+            )
+        );
+        assert_eq!(
+            OrphanReaperCursorUpdate::RoomActor(Some(room)).into_db_parts(),
+            (
+                EntityType::RoomActor,
+                Some("room_actor:page-064@muc.example.com".to_string())
+            )
+        );
+        assert_eq!(
+            OrphanReaperCursorUpdate::SmSession(None).into_db_parts(),
+            (EntityType::SmSession, None)
+        );
+        assert_eq!(
+            OrphanReaperCursorUpdate::RoomActor(None).into_db_parts(),
+            (EntityType::RoomActor, None)
+        );
+    }
+
     async fn clean_store() -> Option<PostgresClaimStore> {
         let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
         let db = Database::from_config(
@@ -2085,6 +2815,9 @@ mod tests {
         conn.execute("DELETE FROM clustering_claims", ())
             .await
             .expect("clean claims");
+        conn.execute("DELETE FROM clustering_orphan_reaper_cursors", ())
+            .await
+            .expect("clean orphan reaper cursors");
         conn.execute("DELETE FROM clustering_nodes", ())
             .await
             .expect("clean nodes");
@@ -2092,6 +2825,59 @@ mod tests {
             .await
             .expect("clean steal intents");
         Some(store)
+    }
+
+    #[tokio::test]
+    async fn durable_orphan_reaper_cursors_are_lane_typed_and_reset_independently() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let sm = SmOrphanScanCursor::from_raw("sm_session:durable-064".to_string());
+        let room =
+            RoomOrphanScanCursor::from_raw("room_actor:durable-064@muc.example.com".to_string());
+        store
+            .persist_orphan_reaper_cursor(OrphanReaperCursorUpdate::SmSession(Some(sm.clone())))
+            .await
+            .expect("persist SM cursor");
+        store
+            .persist_orphan_reaper_cursor(OrphanReaperCursorUpdate::RoomActor(Some(room.clone())))
+            .await
+            .expect("persist room cursor");
+
+        assert_eq!(
+            store
+                .load_sm_orphan_reaper_cursor()
+                .await
+                .expect("load SM cursor"),
+            Some(sm)
+        );
+        assert_eq!(
+            store
+                .load_room_orphan_reaper_cursor()
+                .await
+                .expect("load room cursor"),
+            Some(room.clone())
+        );
+
+        store
+            .persist_orphan_reaper_cursor(OrphanReaperCursorUpdate::SmSession(None))
+            .await
+            .expect("reset SM cursor");
+        assert_eq!(
+            store
+                .load_sm_orphan_reaper_cursor()
+                .await
+                .expect("load reset SM cursor"),
+            None
+        );
+        assert_eq!(
+            store
+                .load_room_orphan_reaper_cursor()
+                .await
+                .expect("room cursor survives SM reset"),
+            Some(room)
+        );
     }
 
     /// Seed a `clustering_nodes` row directly with a caller-chosen `expired`
@@ -2565,7 +3351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_is_epoch_gated_and_idempotent() {
+    async fn release_is_idempotent_and_exact_release_requires_owner_incarnation_and_epoch() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
@@ -2574,12 +3360,31 @@ mod tests {
         let entity = sm_entity("stream-1");
         let epoch0 = store.acquire(&entity, &owner).await.expect("acquire");
 
-        // Releasing under the wrong epoch is a silent no-op — the claim
-        // must survive.
         store
             .release(&entity, &owner, ClaimEpoch(99))
             .await
-            .expect("release under wrong epoch is a no-op");
+            .expect("idempotent stale release");
+        assert_eq!(
+            store
+                .release_exact(&entity, &owner, ClaimEpoch(99))
+                .await
+                .expect("exact stale release"),
+            waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned
+        );
+        assert!(store.fence(&entity, &owner, epoch0).await.expect("fence"));
+
+        let replacement = NodeIdentity::new(owner.node_id.clone(), "replacement-incarnation");
+        assert!(!store
+            .fence(&entity, &replacement, epoch0)
+            .await
+            .expect("replacement fence"));
+        assert_eq!(
+            store
+                .release_exact(&entity, &replacement, epoch0)
+                .await
+                .expect("exact release"),
+            waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned
+        );
         assert!(store.fence(&entity, &owner, epoch0).await.expect("fence"));
 
         store
@@ -2591,11 +3396,10 @@ mod tests {
             .await
             .expect("fence after release"));
 
-        // Releasing again (already gone) is still not an error.
         store
             .release(&entity, &owner, epoch0)
             .await
-            .expect("re-release is a no-op, not an error");
+            .expect("repeat release is idempotent");
     }
 
     #[tokio::test]
@@ -2820,8 +3624,13 @@ mod tests {
         let mut fencing_tx = store.db.begin().await.expect("begin fencing tx");
         let held = fencing_tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![entity_key(&entity), owner.node_id.clone(), epoch0.0],
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity_key(&entity),
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    epoch0.0,
+                ],
             )
             .await
             .expect("fencing select")
@@ -3354,6 +4163,100 @@ mod tests {
         Entity::new(EntityType::RoomActor, id.to_string())
     }
 
+    #[tokio::test]
+    async fn terminal_claim_lookup_waits_for_an_in_flight_steal_update() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let previous_owner = node_identity();
+        let new_owner = node_identity();
+        seed_node(&store.db, &previous_owner, true).await;
+        seed_node(&store.db, &new_owner, false).await;
+        let entity = room_entity("terminal-barrier@muc.example.com");
+        store
+            .acquire(&entity, &previous_owner)
+            .await
+            .expect("seed previous claim");
+
+        let mut steal = store.db.begin().await.expect("begin detached steal");
+        let mut rows = steal
+            .query(
+                r#"
+                UPDATE clustering_claims
+                SET node_id = ?, node_epoch = ?,
+                    claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
+                WHERE entity = ?
+                RETURNING claim_epoch
+                "#,
+                crate::db_params![
+                    new_owner.node_id.clone(),
+                    new_owner.node_epoch.clone(),
+                    entity_key(&entity),
+                ],
+            )
+            .await
+            .expect("stage steal update");
+        let committed_epoch = ClaimEpoch(
+            rows.next()
+                .await
+                .expect("read staged update")
+                .expect("updated claim")
+                .get::<i64>(0)
+                .expect("claim epoch"),
+        );
+        drop(rows);
+
+        let barrier_store = PostgresClaimStore::new(store.db.clone());
+        let barrier_entity = entity.clone();
+        let barrier = tokio::spawn(async move {
+            barrier_store
+                .current_claim_after_pending_writes(&barrier_entity)
+                .await
+        });
+
+        let monitor = store.db.guard().await.expect("monitor guard");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut rows = monitor
+                    .query(
+                        r#"
+                        SELECT COUNT(*) FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND query LIKE '%terminal_claim_reconciliation_lock%'
+                          AND wait_event_type = 'Lock'
+                        "#,
+                        (),
+                    )
+                    .await
+                    .expect("inspect blocked terminal lookup");
+                let blocked = rows
+                    .next()
+                    .await
+                    .expect("read blocked lookup count")
+                    .expect("blocked lookup count row")
+                    .get::<i64>(0)
+                    .expect("blocked lookup count");
+                if blocked > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal lookup reached the claim-row barrier");
+        drop(monitor);
+
+        steal.commit().await.expect("commit detached steal");
+        let snapshot = barrier
+            .await
+            .expect("terminal lookup joined")
+            .expect("terminal lookup")
+            .expect("claim remains present");
+        assert_eq!(snapshot.owner, new_owner);
+        assert_eq!(snapshot.claim_epoch, committed_epoch);
+    }
+
     // --- ADR-0017 Phase 3 Slice 10: the acquire-side draining gate -------
 
     #[tokio::test]
@@ -3561,6 +4464,247 @@ mod tests {
             .await
             .expect("a heartbeat-fresh stealer can reclaim the orphaned SM session claim");
         assert!(epoch1.0 > epoch0.0);
+    }
+
+    #[tokio::test]
+    async fn room_orphan_scan_and_steal_are_bounded_and_fenced_against_races() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let store = Arc::new(store);
+        let dead_owner = node_identity();
+        seed_node(&store.db, &dead_owner, true).await;
+        let first = room_entity("a-orphan@muc.example.com");
+        let renewed = room_entity("b-renewed@muc.example.com");
+        let concurrent = room_entity("c-concurrent@muc.example.com");
+        let first_epoch = store
+            .acquire(&first, &dead_owner)
+            .await
+            .expect("first claim");
+        let renewed_epoch = store
+            .acquire(&renewed, &dead_owner)
+            .await
+            .expect("renewed claim");
+        let concurrent_epoch = store
+            .acquire(&concurrent, &dead_owner)
+            .await
+            .expect("concurrent claim");
+
+        let bounded = store
+            .list_orphaned_room_actor_claims(2)
+            .await
+            .expect("bounded room scan");
+        assert_eq!(bounded.len(), 2, "the SQL LIMIT must bound each sweep");
+        assert_eq!(bounded[0].entity, first);
+        assert_eq!(bounded[1].entity, renewed);
+
+        let live_stealer = node_identity();
+        store
+            .register(&live_stealer, None)
+            .await
+            .expect("register live stealer");
+        let won = store
+            .steal_orphaned_room_actor_claim(&first, first_epoch, &live_stealer, NODE_LEASE_TTL)
+            .await
+            .expect("fresh sweeper wins");
+        assert!(
+            won > concurrent_epoch,
+            "a room-claim steal must allocate a generation newer than every earlier claim"
+        );
+        let claimed = store
+            .current_claim(&first)
+            .await
+            .expect("read stolen room claim")
+            .expect("stolen room remains claimed");
+        assert_eq!(claimed.owner, live_stealer);
+        assert_eq!(claimed.claim_epoch, won);
+
+        // Candidate discovery was advisory. If the owner renews before the
+        // CAS, the stale snapshot cannot displace it.
+        store
+            .register(&dead_owner, None)
+            .await
+            .expect("owner renews its exact lease identity");
+        assert!(matches!(
+            store
+                .steal_orphaned_room_actor_claim(
+                    &renewed,
+                    renewed_epoch,
+                    &live_stealer,
+                    NODE_LEASE_TTL,
+                )
+                .await,
+            Err(ClaimError::Conflict)
+        ));
+
+        // Make the owner stale again, then race two sweepers against the
+        // same observed epoch. Exactly one can bump it once.
+        backdate_heartbeat(&store.db, &dead_owner).await;
+        assert!(store
+            .expire(&dead_owner, NODE_LEASE_TTL)
+            .await
+            .expect("commit the renewed owner as expired"));
+        let second_stealer = node_identity();
+        store
+            .register(&second_stealer, None)
+            .await
+            .expect("register second stealer");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let task_a = {
+            let store = Arc::clone(&store);
+            let entity = concurrent.clone();
+            let stealer = live_stealer.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .steal_orphaned_room_actor_claim(
+                        &entity,
+                        concurrent_epoch,
+                        &stealer,
+                        NODE_LEASE_TTL,
+                    )
+                    .await
+            })
+        };
+        let task_b = {
+            let store = Arc::clone(&store);
+            let entity = concurrent.clone();
+            let stealer = second_stealer.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .steal_orphaned_room_actor_claim(
+                        &entity,
+                        concurrent_epoch,
+                        &stealer,
+                        NODE_LEASE_TTL,
+                    )
+                    .await
+            })
+        };
+        let (a, b) = tokio::join!(task_a, task_b);
+        let results = [a.expect("task a"), b.expect("task b")];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(ClaimError::Conflict)))
+                .count(),
+            1
+        );
+
+        // A heartbeat-stale (but not yet committed-expired) sweeper is
+        // fenced inside the same CAS statement.
+        let stale_sweeper = node_identity();
+        store
+            .register(&stale_sweeper, None)
+            .await
+            .expect("register stale sweeper");
+        backdate_heartbeat(&store.db, &stale_sweeper).await;
+        let another = room_entity("d-stale-sweeper@muc.example.com");
+        let another_epoch = store
+            .acquire(&another, &dead_owner)
+            .await
+            .expect("another orphan");
+        assert!(matches!(
+            store
+                .steal_orphaned_room_actor_claim(
+                    &another,
+                    another_epoch,
+                    &stale_sweeper,
+                    NODE_LEASE_TTL,
+                )
+                .await,
+            Err(ClaimError::Conflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_preserves_valid_room_jids_longer_than_128_bytes() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let dead_owner = node_identity();
+        seed_node(&store.db, &dead_owner, true).await;
+        let long_room_jid: jid::BareJid = format!("{}@muc.example.com", "a".repeat(129))
+            .parse()
+            .expect("valid long room JID");
+        let entity = room_entity(long_room_jid.as_str());
+        store
+            .acquire(&entity, &dead_owner)
+            .await
+            .expect("long room claim");
+
+        let candidates = store
+            .list_orphaned_room_actor_claims(1)
+            .await
+            .expect("orphan scan");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].entity, entity);
+        assert!(
+            store
+                .current_claim(&entity)
+                .await
+                .expect("claim lookup")
+                .is_some(),
+            "a valid long room claim must be returned for adoption, not quarantined"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_room_claims_are_quarantined_without_starving_valid_page() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let dead_owner = node_identity();
+        seed_node(&store.db, &dead_owner, true).await;
+        let mut malformed = Vec::new();
+        for index in 0..65 {
+            let entity = Entity::new(EntityType::RoomActor, format!("000-invalid-{index:02}"));
+            store
+                .acquire(&entity, &dead_owner)
+                .await
+                .expect("malformed claim");
+            malformed.push(entity);
+        }
+        let valid = room_entity("zzz-valid@muc.example.com");
+        store
+            .acquire(&valid, &dead_owner)
+            .await
+            .expect("valid claim");
+
+        let first = store
+            .list_orphaned_room_actor_claims_page(None, 64)
+            .await
+            .expect("first bounded scan");
+        assert!(first.candidates.is_empty());
+        assert!(first.has_more);
+        assert_eq!(first.quarantined, 64);
+        let second = store
+            .list_orphaned_room_actor_claims_page(first.next_cursor, 64)
+            .await
+            .expect("second bounded scan");
+        assert!(second
+            .candidates
+            .iter()
+            .any(|candidate| candidate.entity == valid));
+        assert_eq!(second.quarantined, 1);
+        assert!(!second.has_more);
+        for entity in [
+            malformed.first().expect("first"),
+            malformed.last().expect("last"),
+        ] {
+            assert!(store
+                .current_claim(entity)
+                .await
+                .expect("claim lookup")
+                .is_none());
+        }
     }
 
     // --- ADR-0017 Phase 3 Slice 10: current_generation (Q5's mechanism) --
@@ -4450,6 +5594,395 @@ mod tests {
             candidates_after.is_empty(),
             "the reclaimed claim (now owned by a fresh, registered node) must no longer \
              be reported as orphaned"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_orphaned_sm_scan_skips_ids_above_the_sm_wire_limit() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        let malformed_id = "z".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
+        let malformed = sm_entity(&malformed_id);
+        seed_sm_session_row(&store.db, &malformed_id).await;
+        store
+            .acquire(&malformed, &stale_owner)
+            .await
+            .expect("seed overlong SM claim");
+
+        let candidates = store
+            .list_orphaned_sm_session_claims()
+            .await
+            .expect("legacy orphan scan");
+        assert!(
+            candidates.is_empty(),
+            "the legacy scan must not construct a typed orphan candidate from an overlong SM id"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_sm_pages_advance_past_sixty_four_and_quarantine_malformed_rows() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        for index in 0..70 {
+            let entity = sm_entity(&format!("paged-{index:03}"));
+            seed_sm_session_row(&store.db, &entity.id).await;
+            store
+                .acquire(&entity, &stale_owner)
+                .await
+                .expect("acquire paged claim");
+        }
+
+        let first = store
+            .list_orphaned_sm_session_claims_page(None, 64)
+            .await
+            .expect("first page");
+        assert_eq!(first.candidates.len(), 64);
+        assert!(first.has_more);
+        let second = store
+            .list_orphaned_sm_session_claims_page(first.next_cursor, 64)
+            .await
+            .expect("second page");
+        assert_eq!(
+            second.candidates.len(),
+            6,
+            "cursor must expose rows beyond the first 64"
+        );
+
+        // An id above the SM wire limit can still fit the deliberately wider
+        // generic Entity bound, but it is not a valid typed SmSessionId. It
+        // satisfies the durable-row join, so the scan must exact-owner/epoch
+        // quarantine it instead of re-WARN forever.
+        let malformed_id = "z".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
+        seed_sm_session_row(&store.db, &malformed_id).await;
+        let encoded = format!("{}:{malformed_id}", EntityType::SmSession.as_db_str());
+        let conn = store.db.guard().await.expect("guard");
+        conn.execute(
+            r#"INSERT INTO clustering_claims
+               (entity, entity_type, node_id, node_epoch, claim_epoch)
+               VALUES (?, ?, ?, ?, 0)"#,
+            crate::db_params![
+                encoded.clone(),
+                EntityType::SmSession.as_db_str().to_string(),
+                stale_owner.node_id.clone(),
+                stale_owner.node_epoch.clone(),
+            ],
+        )
+        .await
+        .expect("seed malformed claim");
+        drop(conn);
+        let malformed_page = store
+            .list_orphaned_sm_session_claims_page(
+                Some(SmOrphanScanCursor::from_raw(
+                    "sm_session:paged-999".to_string(),
+                )),
+                64,
+            )
+            .await
+            .expect("malformed page");
+        assert_eq!(malformed_page.quarantined, 1);
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM clustering_claims WHERE entity = ?",
+                crate::db_params![encoded],
+            )
+            .await
+            .expect("count quarantined row");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("row")
+            .get(0)
+            .expect("count");
+        assert_eq!(count, 0);
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sm_sessions WHERE stream_id = ?",
+                crate::db_params![malformed_id],
+            )
+            .await
+            .expect("count quarantined durable row");
+        let durable_count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("row")
+            .get(0)
+            .expect("count");
+        assert_eq!(durable_count, 0);
+    }
+
+    #[tokio::test]
+    async fn orphaned_sm_page_classifies_claim_only_and_wrong_prefix_rows_safely() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+
+        let claim_only = sm_entity("claim-only-cleanup");
+        store
+            .acquire(&claim_only, &stale_owner)
+            .await
+            .expect("seed valid claim without durable state");
+        let wrong_prefix = "wrong-prefix:must-not-touch-durable";
+        let conn = store.db.guard().await.expect("guard");
+        conn.execute(
+            r#"INSERT INTO clustering_claims
+               (entity, entity_type, node_id, node_epoch, claim_epoch)
+               VALUES (?, ?, ?, ?, 0)"#,
+            crate::db_params![
+                wrong_prefix,
+                EntityType::SmSession.as_db_str().to_string(),
+                stale_owner.node_id.clone(),
+                stale_owner.node_epoch.clone(),
+            ],
+        )
+        .await
+        .expect("seed wrong-prefix claim");
+        drop(conn);
+        // A similarly named durable row proves wrong-prefix cleanup cannot
+        // derive a suffix and delete persistence state.
+        seed_sm_session_row(&store.db, "must-not-touch-durable").await;
+
+        let page = store
+            .list_orphaned_sm_session_claims_page(None, 64)
+            .await
+            .expect("classify stale rows");
+        assert!(page.candidates.is_empty());
+        assert_eq!(page.quarantined, 1, "only the malformed key is quarantine");
+
+        let conn = store.db.guard().await.expect("guard");
+        for encoded in [claim_only.to_string(), wrong_prefix.to_string()] {
+            let mut rows = conn
+                .query(
+                    "SELECT COUNT(*) FROM clustering_claims WHERE entity = ?",
+                    crate::db_params![encoded],
+                )
+                .await
+                .expect("count claim");
+            let count: i64 = rows
+                .next()
+                .await
+                .expect("row")
+                .expect("row")
+                .get(0)
+                .expect("count");
+            assert_eq!(count, 0);
+        }
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sm_sessions WHERE stream_id = ?",
+                crate::db_params!["must-not-touch-durable"],
+            )
+            .await
+            .expect("count protected durable row");
+        let durable_count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("row")
+            .get(0)
+            .expect("count");
+        assert_eq!(durable_count, 1);
+    }
+
+    #[tokio::test]
+    async fn claim_only_cleanup_rechecks_durable_absence_after_scan_classification() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        let entity = sm_entity("claim-only-raced-by-detach");
+        let claim_epoch = store
+            .acquire(&entity, &stale_owner)
+            .await
+            .expect("seed stale claim without durable state");
+
+        // This cleanup value is the exact classification the unlocked page
+        // scan produced while no sm_sessions row existed. A paused owner can
+        // finish its already-fenced detach before cleanup locks the claim.
+        let cleanup = OrphanedSmClaimCleanup {
+            encoded: entity_key(&entity),
+            owner: stale_owner.clone(),
+            claim_epoch,
+            durable_stream_id: None,
+            malformed: false,
+        };
+        seed_sm_session_row(&store.db, &entity.id).await;
+
+        assert!(!store
+            .cleanup_orphaned_sm_claim(cleanup)
+            .await
+            .expect("cleanup transaction"));
+        let snapshot = store
+            .current_claim(&entity)
+            .await
+            .expect("read claim after cleanup");
+        assert_eq!(
+            snapshot.as_ref().map(|claim| (&claim.owner, claim.claim_epoch)),
+            Some((&stale_owner, claim_epoch)),
+            "a durable row appearing after scan classification must retain its exact claim for a later steal"
+        );
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sm_sessions WHERE stream_id = ?",
+                crate::db_params![entity.id],
+            )
+            .await
+            .expect("count durable row");
+        let durable_count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("row")
+            .get(0)
+            .expect("count");
+        assert_eq!(durable_count, 1);
+    }
+
+    #[tokio::test]
+    async fn claim_only_cleanup_observes_detach_committed_while_waiting_for_claim_lock() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let store = Arc::new(store);
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        let entity = sm_entity("claim-only-in-flight-detach");
+        let claim_epoch = store
+            .acquire(&entity, &stale_owner)
+            .await
+            .expect("seed stale claim without durable state");
+
+        // Model a real fenced detach: hold FOR SHARE on the exact claim and
+        // stage the durable row without committing it yet.
+        let mut writer = store.db.begin().await.expect("begin detach writer");
+        let mut fenced = writer
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity_key(&entity),
+                    stale_owner.node_id.clone(),
+                    stale_owner.node_epoch.clone(),
+                    claim_epoch.0,
+                ],
+            )
+            .await
+            .expect("lock exact claim for detach");
+        assert!(fenced.next().await.expect("read fence").is_some());
+        drop(fenced);
+        writer
+            .execute(
+                r#"
+                INSERT INTO sm_sessions (
+                    stream_id, user_id, full_jid, inbound_count, outbound_count,
+                    last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
+                    carbons_enabled, roster_interested, blocklist_interested,
+                    presence_available, presence_priority
+                ) VALUES (?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+                "#,
+                crate::db_params![
+                    entity.id.clone(),
+                    "alice".to_string(),
+                    "alice@example.com/web".to_string(),
+                ],
+            )
+            .await
+            .expect("stage durable detach row");
+
+        let cleanup = OrphanedSmClaimCleanup {
+            encoded: entity_key(&entity),
+            owner: stale_owner.clone(),
+            claim_epoch,
+            durable_stream_id: None,
+            malformed: false,
+        };
+        let cleanup_store = Arc::clone(&store);
+        let cleanup_task =
+            tokio::spawn(async move { cleanup_store.cleanup_orphaned_sm_claim(cleanup).await });
+
+        // Do not release the writer until Postgres confirms the cleanup's
+        // exact FOR UPDATE statement is waiting on that writer's share lock.
+        let monitor = store.db.guard().await.expect("monitor guard");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut rows = monitor
+                    .query(
+                        r#"
+                        SELECT COUNT(*) FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND query LIKE '%orphan_sm_cleanup_exact_lock%'
+                          AND wait_event_type = 'Lock'
+                        "#,
+                        (),
+                    )
+                    .await
+                    .expect("inspect blocked cleanup");
+                let blocked = rows
+                    .next()
+                    .await
+                    .expect("read blocked cleanup count")
+                    .expect("blocked cleanup count row")
+                    .get::<i64>(0)
+                    .expect("blocked cleanup count");
+                if blocked > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup reached exact claim lock");
+        drop(monitor);
+
+        writer.commit().await.expect("commit durable detach");
+        cleanup_task
+            .await
+            .expect("cleanup task joined")
+            .expect("cleanup transaction");
+
+        let snapshot = store
+            .current_claim(&entity)
+            .await
+            .expect("read claim after cleanup");
+        assert_eq!(
+            snapshot
+                .as_ref()
+                .map(|claim| (&claim.owner, claim.claim_epoch)),
+            Some((&stale_owner, claim_epoch)),
+            "cleanup must preserve the exact claim once the blocked detach commits durable state"
+        );
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sm_sessions WHERE stream_id = ?",
+                crate::db_params![entity.id],
+            )
+            .await
+            .expect("count durable row");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row")
+                .expect("row")
+                .get::<i64>(0)
+                .expect("count"),
+            1
         );
     }
 }

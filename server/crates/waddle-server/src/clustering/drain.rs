@@ -269,6 +269,19 @@ mod tests {
 
     #[async_trait]
     impl NodeLeaseStore for NoopLease {
+        async fn list_orphaned_room_actor_claims_page(
+            &self,
+            _after: Option<crate::clustering::claims::RoomOrphanScanCursor>,
+            _limit: usize,
+        ) -> Result<crate::clustering::claims::OrphanedRoomActorClaimPage, ClaimError> {
+            Ok(crate::clustering::claims::OrphanedRoomActorClaimPage {
+                candidates: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+                quarantined: 0,
+            })
+        }
+
         async fn register(
             &self,
             _me: &NodeIdentity,

@@ -3821,6 +3821,7 @@ mod fix3_shutdown_race {
             resume_bridge: None,
             ordered_relay_delivery_bridge: None,
             stop_token: None,
+            fatal_fence: None,
             resume_handshake_timeout: Some(handshake_budget),
         };
 
@@ -4152,6 +4153,7 @@ mod fix_a_post_cas_shutdown {
             resume_bridge: None,
             ordered_relay_delivery_bridge: None,
             stop_token: None,
+            fatal_fence: None,
             resume_handshake_timeout: Some(handshake_budget),
         };
 

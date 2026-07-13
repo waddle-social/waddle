@@ -127,6 +127,18 @@ pub enum SmPersistenceError {
         sm_database_url: String,
         global_database_url: String,
     },
+
+    /// Clustering cannot use the portable SQLite/in-memory persistence
+    /// implementation because its ownership fence lives in Postgres.
+    #[error(
+        "clustered SM persistence requires a postgres:// or postgresql:// database URL; got {sm_database_url}"
+    )]
+    ClusterRequiresPostgres { sm_database_url: String },
+
+    /// Startup wiring enabled clustering without providing the live claim
+    /// store and rotating node identity needed by fenced persistence.
+    #[error("clustered SM persistence started without live claim-store handles")]
+    ClusterClaimHandlesUnavailable,
 }
 
 /// A durable record of an XEP-0198 detached session.

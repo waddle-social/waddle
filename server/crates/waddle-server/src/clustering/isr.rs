@@ -82,6 +82,11 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 
 use crate::db::{Database, DatabaseError};
 
+/// Keep each TTL pass short enough that cleanup cannot monopolize the ISR
+/// tables. Repeated janitor ticks make monotonic progress in oldest-first
+/// order.
+const ISR_SWEEP_BATCH_SIZE: i64 = 64;
+
 /// Convert a backend database failure into the upstream
 /// [`IsrTokenStoreError`]. Mirrors [`super::claims::db_err`] one type over
 /// — a human-facing `Display` conversion, not a structured payload (see
@@ -155,6 +160,15 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         .map_err(db_err)?;
         conn.execute(
             r#"
+            CREATE INDEX IF NOT EXISTS clustering_isr_tokens_created_at_sm_id
+                ON clustering_isr_tokens (created_at, sm_id)
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        conn.execute(
+            r#"
             CREATE TABLE IF NOT EXISTS clustering_isr_revocation_fences (
                 sm_id      TEXT NOT NULL,
                 token      TEXT NOT NULL,
@@ -163,6 +177,34 @@ impl IsrTokenStore for PostgresIsrTokenStore {
                 PRIMARY KEY (sm_id, token, mechanism)
             )
             "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        conn.execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS clustering_isr_revocation_fences_created_at_identity
+                ON clustering_isr_revocation_fences (created_at, sm_id, token, mechanism)
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS clustering_isr_sweep_state (
+                singleton         BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+                cursor_created_at TIMESTAMPTZ,
+                cursor_sm_id      TEXT
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(db_err)?;
+        conn.execute(
+            "INSERT INTO clustering_isr_sweep_state (singleton) VALUES (TRUE) \
+             ON CONFLICT (singleton) DO NOTHING",
             (),
         )
         .await
@@ -428,25 +470,137 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         // SM session registry (`waddle-xmpp`, cross-node-generic) to know
         // about ISR (`waddle-server`-local, Postgres-only) at all — the
         // exact coupling `ClaimStore`/`IsrTokenStore`'s trait split
-        // deliberately avoids. `created_at` already exists on this table
-        // (the schema this module's own `ensure_schema` creates), so a
-        // bounded sweep over it, run at the same cadence as
-        // `session_janitors.rs`'s orphan-reaper sweep, is the smaller
-        // correct option. Mirrors `lease.rs`'s own
-        // `(? || ' milliseconds')::interval` TTL-comparison idiom.
-        let conn = self.db.guard().await.map_err(db_err)?;
-        let deleted_tokens = conn
-            .execute(
-                "DELETE FROM clustering_isr_tokens \
-                 WHERE created_at < now() - (? || ' milliseconds')::interval",
-                crate::db_params![max_age.as_millis().to_string()],
+        // deliberately avoids. Age alone is not terminal authority: an SM
+        // stream can remain live for longer than this backstop and its ISR
+        // token must remain valid throughout that lifetime. Reap only an old
+        // token whose typed SM-session claim and durable detached-session row
+        // are both absent. A persisted session is still resumable even while
+        // its former node's exact claim is being recovered, so deleting its
+        // ISR credential would turn a recoverable node loss into permanent
+        // resume failure. Mirrors
+        // `lease.rs`'s own `(? || ' milliseconds')::interval`
+        // TTL-comparison idiom.
+        let mut tx = self.db.begin().await.map_err(db_err)?;
+        let mut cursor_rows = tx
+            .query(
+                "SELECT COALESCE(cursor_created_at::text, '0001-01-01 00:00:00+00'), \
+                        COALESCE(cursor_sm_id, '') \
+                 FROM clustering_isr_sweep_state WHERE singleton = TRUE FOR UPDATE",
+                (),
             )
             .await
             .map_err(db_err)?;
+        let cursor_row =
+            cursor_rows.next().await.map_err(db_err)?.ok_or_else(|| {
+                IsrTokenStoreError::Backend("missing ISR sweep cursor row".into())
+            })?;
+        let raw_after_created_at: String = cursor_row.get(0).map_err(db_err)?;
+        let raw_after_sm_id: String = cursor_row.get(1).map_err(db_err)?;
+        drop(cursor_rows);
+        let raw_limit = ISR_SWEEP_BATCH_SIZE.saturating_add(1);
+        let mut raw_rows = tx
+            .query(
+                r#"
+                SELECT created_at::text, sm_id
+                FROM clustering_isr_tokens
+                WHERE created_at < now() - (? || ' milliseconds')::interval
+                  AND (created_at, sm_id) > (CAST(? AS TIMESTAMPTZ), ?)
+                ORDER BY created_at, sm_id
+                LIMIT ?
+                FOR UPDATE SKIP LOCKED
+                "#,
+                crate::db_params![
+                    max_age.as_millis().to_string(),
+                    raw_after_created_at,
+                    raw_after_sm_id,
+                    raw_limit,
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut raw_tokens = Vec::new();
+        while let Some(row) = raw_rows.next().await.map_err(db_err)? {
+            raw_tokens.push((
+                row.get::<String>(0).map_err(db_err)?,
+                row.get::<String>(1).map_err(db_err)?,
+            ));
+        }
+        drop(raw_rows);
+
+        let batch_size = usize::try_from(ISR_SWEEP_BATCH_SIZE).unwrap_or(64);
+        let has_more = raw_tokens.len() > batch_size;
+        raw_tokens.truncate(batch_size);
+        let mut deleted_tokens = 0u64;
+        for (_, sm_id) in &raw_tokens {
+            deleted_tokens = deleted_tokens.saturating_add(
+                tx.execute(
+                    r#"
+                    DELETE FROM clustering_isr_tokens AS token
+                    WHERE token.sm_id = ?
+                      AND token.created_at < now() - (? || ' milliseconds')::interval
+                      AND NOT EXISTS (
+                        SELECT 1 FROM clustering_claims AS claim
+                        WHERE claim.entity = (? || ':' || token.sm_id)
+                          AND claim.entity_type = ?
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM sm_sessions AS session
+                        WHERE session.stream_id = token.sm_id
+                      )
+                    "#,
+                    crate::db_params![
+                        sm_id.clone(),
+                        max_age.as_millis().to_string(),
+                        EntityType::SmSession.as_db_str().to_string(),
+                        EntityType::SmSession.as_db_str().to_string(),
+                    ],
+                )
+                .await
+                .map_err(db_err)?,
+            );
+        }
+        if has_more {
+            let (created_at, sm_id) = raw_tokens
+                .last()
+                .expect("a page with an extra row has a retained cursor row");
+            tx.execute(
+                "UPDATE clustering_isr_sweep_state \
+                 SET cursor_created_at = CAST(? AS TIMESTAMPTZ), cursor_sm_id = ? \
+                 WHERE singleton = TRUE",
+                crate::db_params![created_at.clone(), sm_id.clone()],
+            )
+            .await
+            .map_err(db_err)?;
+        } else {
+            tx.execute(
+                "UPDATE clustering_isr_sweep_state \
+                 SET cursor_created_at = NULL, cursor_sm_id = NULL \
+                 WHERE singleton = TRUE",
+                (),
+            )
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+
+        let conn = self.db.guard().await.map_err(db_err)?;
         conn.execute(
-            "DELETE FROM clustering_isr_revocation_fences \
-                 WHERE created_at < now() - (? || ' milliseconds')::interval",
-            crate::db_params![max_age.as_millis().to_string()],
+            r#"
+            WITH expired_fences AS (
+                SELECT fence.sm_id, fence.token, fence.mechanism
+                FROM clustering_isr_revocation_fences AS fence
+                WHERE fence.created_at < now() - (? || ' milliseconds')::interval
+                ORDER BY fence.created_at, fence.sm_id, fence.token, fence.mechanism
+                LIMIT ?
+                FOR UPDATE OF fence SKIP LOCKED
+            )
+            DELETE FROM clustering_isr_revocation_fences AS fence
+            USING expired_fences AS expired
+            WHERE fence.sm_id = expired.sm_id
+              AND fence.token = expired.token
+              AND fence.mechanism = expired.mechanism
+            "#,
+            crate::db_params![max_age.as_millis().to_string(), ISR_SWEEP_BATCH_SIZE],
         )
         .await
         .map_err(db_err)?;
@@ -459,7 +613,10 @@ mod tests {
     use super::*;
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver};
-    use waddle_xmpp::ownership::{ClaimEpoch, ClaimStore, Entity, NodeIdentity};
+    use std::sync::Arc;
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimStore, Entity, NodeIdentity, SharedNodeIdentity,
+    };
     use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
     fn node_identity() -> NodeIdentity {
@@ -504,6 +661,72 @@ mod tests {
             .acquire(&entity, me)
             .await
             .expect("acquire sm_session claim")
+    }
+
+    async fn ensure_sm_persistence_schema(db: &Database) {
+        let claim_store = Arc::new(PostgresClaimStore::new(db.clone()));
+        claim_store
+            .ensure_schema()
+            .await
+            .expect("ensure claims schema");
+        crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
+            db.clone(),
+            claim_store,
+            SharedNodeIdentity::new(node_identity()),
+        )
+        .await
+        .expect("ensure SM persistence schema");
+    }
+
+    async fn clean_sweep_tables(db: &Database) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute("DELETE FROM sm_unacked", ())
+            .await
+            .expect("clean sm_unacked");
+        conn.execute("DELETE FROM sm_sessions", ())
+            .await
+            .expect("clean sm_sessions");
+        conn.execute("DELETE FROM clustering_isr_tokens", ())
+            .await
+            .expect("clean ISR tokens");
+        conn.execute("DELETE FROM clustering_isr_revocation_fences", ())
+            .await
+            .expect("clean ISR revocation fences");
+        conn.execute(
+            "UPDATE clustering_isr_sweep_state \
+             SET cursor_created_at = NULL, cursor_sm_id = NULL \
+             WHERE singleton = TRUE",
+            (),
+        )
+        .await
+        .expect("reset ISR sweep cursor");
+        conn.execute("DELETE FROM clustering_claims", ())
+            .await
+            .expect("clean claims");
+        conn.execute("DELETE FROM clustering_nodes", ())
+            .await
+            .expect("clean nodes");
+    }
+
+    async fn seed_sm_session_row(db: &Database, sm_id: &SmSessionId) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            r#"
+            INSERT INTO sm_sessions (
+                stream_id, user_id, full_jid, inbound_count, outbound_count,
+                last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
+                carbons_enabled, roster_interested, blocklist_interested,
+                presence_available, presence_priority
+            ) VALUES (?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+            "#,
+            crate::db_params![
+                sm_id.to_string(),
+                "alice".to_string(),
+                "alice@example.com/web".to_string(),
+            ],
+        )
+        .await
+        .expect("seed durable SM session");
     }
 
     #[tokio::test]
@@ -693,38 +916,57 @@ mod tests {
         assert!(!bool::from(stored.ct_eq(mismatch_at_last_byte)));
     }
 
-    /// Council-adjudicated FIX 4: `sweep_expired` reaps only rows whose
-    /// `created_at` predates the TTL — a token issued moments ago survives
-    /// a short-TTL sweep; a token backdated (via a direct UPDATE, standing
-    /// in for one that has genuinely aged past the TTL) is reaped.
+    /// Council-adjudicated FIX 4: `sweep_expired` reaps an old terminal row
+    /// but preserves fresh, exactly claimed, and durably persisted sessions.
+    /// Token age starts at SM enable, not at disconnect, so age alone must
+    /// never invalidate a live or recoverable stream.
     #[tokio::test]
-    async fn sweep_expired_reaps_only_rows_older_than_max_age() {
+    async fn sweep_expired_requires_both_claim_and_durable_session_to_be_absent() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(db) = test_db().await else {
             return;
         };
         let store = PostgresIsrTokenStore::new(db.clone());
         store.ensure_schema().await.expect("ensure isr schema");
+        ensure_sm_persistence_schema(&db).await;
+        clean_sweep_tables(&db).await;
 
         let fresh_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
-        let stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let claimed_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let persisted_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let terminal_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         store
             .issue(&fresh_sm_id, "PLAIN")
             .await
             .expect("issue fresh token");
         store
-            .issue(&stale_sm_id, "PLAIN")
+            .issue(&claimed_stale_sm_id, "PLAIN")
             .await
-            .expect("issue stale token");
+            .expect("issue claimed stale token");
+        store
+            .issue(&persisted_stale_sm_id, "PLAIN")
+            .await
+            .expect("issue persisted stale token");
+        store
+            .issue(&terminal_stale_sm_id, "PLAIN")
+            .await
+            .expect("issue terminal stale token");
 
-        // Backdate the "stale" row directly — standing in for a token that
-        // has genuinely aged past the TTL without needing the test to
-        // actually sleep.
+        let me = node_identity();
+        let claimed_stale_epoch = claim_sm_session(&db, &claimed_stale_sm_id, &me).await;
+        seed_sm_session_row(&db, &persisted_stale_sm_id).await;
+
+        // Backdate all non-fresh rows directly. Only the row with neither
+        // exact ownership nor durable resume state is terminal.
         let conn = db.guard().await.expect("guard");
         conn.execute(
             "UPDATE clustering_isr_tokens SET created_at = now() - interval '1 day' \
-             WHERE sm_id = ?",
-            crate::db_params![stale_sm_id.to_string()],
+             WHERE sm_id IN (?, ?, ?)",
+            crate::db_params![
+                claimed_stale_sm_id.to_string(),
+                persisted_stale_sm_id.to_string(),
+                terminal_stale_sm_id.to_string()
+            ],
         )
         .await
         .expect("backdate stale row");
@@ -733,18 +975,52 @@ mod tests {
             .sweep_expired(std::time::Duration::from_secs(3600))
             .await
             .expect("sweep_expired");
-        assert_eq!(deleted, 1, "exactly the backdated row must be reaped");
+        assert_eq!(deleted, 1, "only the terminal token may be reaped");
 
-        // The fresh row survives; the stale one is gone (a subsequent
-        // consume for it finds no row at all).
-        let me = node_identity();
+        // The fresh row survives by age. The two old recoverable rows survive
+        // by ownership and persistence respectively. Only the terminal row
+        // is gone.
         let fresh_epoch = claim_sm_session(&db, &fresh_sm_id, &me).await;
-        let stale_epoch = claim_sm_session(&db, &stale_sm_id, &me).await;
-        let stale_outcome = store
-            .consume(&stale_sm_id, b"anything", "PLAIN", &fence(&me, stale_epoch))
+        let persisted_stale_epoch = claim_sm_session(&db, &persisted_stale_sm_id, &me).await;
+        let terminal_stale_epoch = claim_sm_session(&db, &terminal_stale_sm_id, &me).await;
+        let terminal_stale_outcome = store
+            .consume(
+                &terminal_stale_sm_id,
+                b"anything",
+                "PLAIN",
+                &fence(&me, terminal_stale_epoch),
+            )
             .await
-            .expect("consume stale");
-        assert_eq!(stale_outcome, IsrConsumeOutcome::NoSuchToken);
+            .expect("consume terminal stale");
+        assert_eq!(terminal_stale_outcome, IsrConsumeOutcome::NoSuchToken);
+        let claimed_stale_outcome = store
+            .consume(
+                &claimed_stale_sm_id,
+                b"wrong-token-but-row-must-exist",
+                "PLAIN",
+                &fence(&me, claimed_stale_epoch),
+            )
+            .await
+            .expect("consume claimed stale");
+        assert_eq!(
+            claimed_stale_outcome,
+            IsrConsumeOutcome::Mismatched,
+            "an old token with a live SM claim must not be swept"
+        );
+        let persisted_stale_outcome = store
+            .consume(
+                &persisted_stale_sm_id,
+                b"wrong-token-but-row-must-exist",
+                "PLAIN",
+                &fence(&me, persisted_stale_epoch),
+            )
+            .await
+            .expect("consume persisted stale");
+        assert_eq!(
+            persisted_stale_outcome,
+            IsrConsumeOutcome::Mismatched,
+            "an old token with durable resumable state must not be swept while its claim is absent"
+        );
         let fresh_outcome = store
             .consume(
                 &fresh_sm_id,
@@ -759,6 +1035,120 @@ mod tests {
             IsrConsumeOutcome::Mismatched,
             "fresh row must still exist (Mismatched, not NoSuchToken) — only wrong-token, \
              not swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_deletes_ordered_batches_until_both_tables_are_empty() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure isr schema");
+        ensure_sm_persistence_schema(&db).await;
+        clean_sweep_tables(&db).await;
+
+        let row_count = usize::try_from(ISR_SWEEP_BATCH_SIZE).expect("positive batch") + 3;
+        for index in 0..row_count {
+            let token_id = SmSessionId::new(format!("batch-token-{index:03}"));
+            store
+                .issue(&token_id, "PLAIN")
+                .await
+                .expect("seed token row");
+
+            let fence_id = SmSessionId::new(format!("batch-fence-{index:03}"));
+            let issued = store
+                .issue(&fence_id, "PLAIN")
+                .await
+                .expect("seed fence source");
+            assert_eq!(
+                store
+                    .revoke_if_current(&fence_id, &issued)
+                    .await
+                    .expect("turn token into revocation fence"),
+                IsrRevokeOutcome::Revoked
+            );
+        }
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE clustering_isr_tokens SET created_at = now() - interval '1 day'",
+            (),
+        )
+        .await
+        .expect("backdate token batch");
+        conn.execute(
+            "UPDATE clustering_isr_revocation_fences SET created_at = now() - interval '1 day'",
+            (),
+        )
+        .await
+        .expect("backdate fence batch");
+        drop(conn);
+
+        assert_eq!(
+            store
+                .sweep_expired(std::time::Duration::from_secs(3600))
+                .await
+                .expect("first bounded sweep"),
+            u64::try_from(ISR_SWEEP_BATCH_SIZE).expect("positive batch"),
+            "the first pass must report only its bounded token deletion count"
+        );
+        let conn = db.guard().await.expect("guard");
+        for table in ["clustering_isr_tokens", "clustering_isr_revocation_fences"] {
+            let query = match table {
+                "clustering_isr_tokens" => "SELECT COUNT(*) FROM clustering_isr_tokens",
+                _ => "SELECT COUNT(*) FROM clustering_isr_revocation_fences",
+            };
+            let mut rows = conn
+                .query(query, ())
+                .await
+                .expect("count rows after first pass");
+            assert_eq!(
+                rows.next()
+                    .await
+                    .expect("count result")
+                    .expect("count row")
+                    .get::<i64>(0)
+                    .expect("count"),
+                3,
+                "first pass must leave the ordered tail in {table}"
+            );
+        }
+        drop(conn);
+
+        assert_eq!(
+            store
+                .sweep_expired(std::time::Duration::from_secs(3600))
+                .await
+                .expect("second bounded sweep"),
+            3,
+            "the next pass must make monotonic progress through the tail"
+        );
+        assert_eq!(
+            store
+                .sweep_expired(std::time::Duration::from_secs(3600))
+                .await
+                .expect("empty sweep"),
+            0,
+            "once drained, subsequent passes must be stable"
+        );
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM clustering_isr_tokens) + \
+                        (SELECT COUNT(*) FROM clustering_isr_revocation_fences)",
+                (),
+            )
+            .await
+            .expect("count final rows");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("count result")
+                .expect("count row")
+                .get::<i64>(0)
+                .expect("count"),
+            0
         );
     }
 
