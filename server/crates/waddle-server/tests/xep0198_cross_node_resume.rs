@@ -450,8 +450,11 @@ async fn pure_two_node_detached_steal_race_exactly_one_winner() {
         winning_identity,
         winning_epoch,
     );
+    let reservation = winning_registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("winner reserves reclaimed ownership capacity");
     winning_registry
-        .hydrate_reclaimed(&[(entity, winning_fence)])
+        .hydrate_reclaimed(&[(entity, winning_fence, reservation)])
         .await
         .expect("hydrate_reclaimed succeeds for the winner");
     let resumed = winning_registry

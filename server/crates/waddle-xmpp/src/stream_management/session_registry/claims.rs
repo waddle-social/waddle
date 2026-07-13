@@ -173,6 +173,10 @@ impl InMemorySmSessionRegistry {
             out.extend(reservations.iter().cloned());
         }
         {
+            let reservations = self.reclaimed_claim_reservations.read().ok()?;
+            out.extend(reservations.keys().cloned());
+        }
+        {
             let pending_acquisitions = self.pending_claim_acquisitions.read().ok()?;
             out.extend(
                 pending_acquisitions
@@ -189,7 +193,7 @@ impl InMemorySmSessionRegistry {
             out.extend(
                 pending_hydration
                     .keys()
-                    .map(|(stream_id, _)| stream_id.clone()),
+                    .map(|(stream_id, _, _)| stream_id.clone()),
             );
         }
         {
@@ -197,7 +201,7 @@ impl InMemorySmSessionRegistry {
             out.extend(
                 pending_lookups
                     .keys()
-                    .map(|(stream_id, _)| stream_id.clone()),
+                    .map(|(stream_id, _, _)| stream_id.clone()),
             );
         }
         {
@@ -265,8 +269,12 @@ impl InMemorySmSessionRegistry {
                 {
                     continue;
                 }
-                self.reconcile_uncertain_claim_acquisition(&stream_id, identity, disposition)
-                    .await;
+                self.reconcile_uncertain_claim_acquisition_locked(
+                    &stream_id,
+                    identity,
+                    disposition,
+                )
+                .await;
                 continue;
             }
             self.reconcile_uncertain_claim_acquisition(&stream_id, identity, disposition)
@@ -290,6 +298,14 @@ impl InMemorySmSessionRegistry {
                 continue;
             };
             let _stream_guard = stream_lock.lock().await;
+            let still_pending = self
+                .pending_claim_releases
+                .read()
+                .map(|current| current.contains(&(stream_id.clone(), fence.clone())))
+                .unwrap_or(false);
+            if !still_pending {
+                continue;
+            }
             match self.stream_liveness(&stream_id) {
                 None => continue,
                 Some(true) => {
@@ -424,16 +440,29 @@ impl InMemorySmSessionRegistry {
         identity: crate::ownership::NodeIdentity,
         disposition: PendingClaimAcquisitionDisposition,
     ) {
-        let stream_lock =
-            if disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession {
-                self.stream_lock(stream_id).ok()
-            } else {
-                None
-            };
-        let _stream_guard = match &stream_lock {
-            Some(lock) => Some(lock.lock().await),
-            None => None,
+        let Ok(stream_lock) = self.stream_lock(stream_id) else {
+            return;
         };
+        let _stream_guard = stream_lock.lock().await;
+        self.reconcile_uncertain_claim_acquisition_locked(stream_id, identity, disposition)
+            .await;
+    }
+
+    async fn reconcile_uncertain_claim_acquisition_locked(
+        &self,
+        stream_id: &str,
+        identity: crate::ownership::NodeIdentity,
+        disposition: PendingClaimAcquisitionDisposition,
+    ) {
+        let pending_key = (stream_id.to_string(), identity.clone(), disposition);
+        let still_pending = self
+            .pending_claim_acquisitions
+            .read()
+            .map(|pending| pending.contains(&pending_key))
+            .unwrap_or(false);
+        if !still_pending {
+            return;
+        }
         let entity = sm_session_entity(stream_id);
         match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
@@ -442,7 +471,6 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => {
-                let pending_key = (stream_id.to_string(), identity.clone(), disposition);
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
                 match disposition {
                     PendingClaimAcquisitionDisposition::ReleaseRejectedEnable => {
@@ -531,19 +559,55 @@ impl InMemorySmSessionRegistry {
         if let Ok(mut claimed) = self.claimed_sessions.write() {
             claimed.remove(stream_id);
         }
-        let fence = self
-            .claim_fences
-            .write()
-            .ok()
-            .and_then(|mut fences| fences.remove(stream_id));
-        if let Some(fence) = fence.as_ref() {
-            if let Ok(mut pending) = self.pending_claim_releases.write() {
-                pending.remove(&(stream_id.to_string(), fence.clone()));
+        // A reservation/acquisition/lookup represents an ownership CAS that
+        // may still be in flight outside this shard. Preserve that ambiguous,
+        // capacity-counted responsibility until its read-only reconciliation
+        // proves loss; clearing it here lets a late CAS completion recreate an
+        // unrepresented fresh claim after demotion.
+        if let Ok(mut epoch_failures) = self.pending_epoch_failure_reconciliations.write() {
+            epoch_failures.remove(stream_id);
+        }
+        let mut forgotten_fences = Vec::new();
+        if let (
+            Ok(_reservations),
+            Ok(reclaimed_reservations),
+            Ok(mut releases),
+            Ok(mut fences),
+            Ok(mut hydrations),
+        ) = (
+            self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.read(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+            self.pending_reclaimed_hydrations.write(),
+        ) {
+            let active_reclaimed_reservation = reclaimed_reservations.get(stream_id).copied();
+            hydrations.retain(|(id, _, reservation), _| {
+                id != stream_id || Some(*reservation) == active_reclaimed_reservation
+            });
+            if let Some(fence) = fences.remove(stream_id) {
+                forgotten_fences.push(fence);
             }
+            releases.retain(|(id, pending_fence)| {
+                if id == stream_id {
+                    forgotten_fences.push(pending_fence.clone());
+                    false
+                } else {
+                    true
+                }
+            });
         }
         if let Some(storage) = &self.persistence {
-            if let Some(fence) = fence {
-                let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            forgotten_fences.sort_by(|left, right| {
+                left.owner()
+                    .node_id
+                    .cmp(&right.owner().node_id)
+                    .then_with(|| left.owner().node_epoch.cmp(&right.owner().node_epoch))
+                    .then_with(|| left.epoch().cmp(&right.epoch()))
+            });
+            forgotten_fences.dedup();
+            for fence in forgotten_fences {
                 storage.evict_claim_cache(&session_id, &fence);
             }
         }

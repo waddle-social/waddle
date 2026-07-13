@@ -582,11 +582,11 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
-        if !self.reserve_reclaimed_claim_capacity(entity) {
+        let Some(reservation) = self.reserve_reclaimed_claim_capacity(entity) else {
             return Err(SmRegistryError::Internal(
                 "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
             ));
-        }
+        };
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
             self.claim_store
@@ -595,21 +595,21 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(new_epoch)) => {
-                self.complete_local_claim(entity, me, new_epoch, stream_id)
+                self.complete_local_claim(entity, me, new_epoch, stream_id, reservation)
                     .await
             }
             Ok(Err(ClaimError::Conflict)) => {
-                self.cancel_reclaimed_claim_capacity(entity);
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
                 Ok(CrossNodeResumeOutcome::NotFound)
             }
             Ok(Err(other)) => {
-                self.cancel_reclaimed_claim_capacity(entity);
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
                 Err(SmRegistryError::Internal(format!(
                     "attempt_cross_node_resume: steal_for_resume failed: {other}"
                 )))
             }
             Err(_timeout) => {
-                self.defer_uncertain_reclaimed_claim(entity, &me);
+                self.defer_uncertain_reclaimed_claim(entity, &me, reservation);
                 Err(SmRegistryError::Internal(
                     "attempt_cross_node_resume: steal_for_resume timed out; outcome retained for non-replaying reconciliation".to_string(),
                 ))
@@ -643,11 +643,11 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
-        if !self.reserve_reclaimed_claim_capacity(entity) {
+        let Some(reservation) = self.reserve_reclaimed_claim_capacity(entity) else {
             return Err(SmRegistryError::Internal(
                 "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
             ));
-        }
+        };
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
             self.claim_store.ensure_claimed(entity, &me),
@@ -655,21 +655,21 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => {
-                self.complete_local_claim(entity, me, epoch, stream_id)
+                self.complete_local_claim(entity, me, epoch, stream_id, reservation)
                     .await
             }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Draining)) => {
-                self.cancel_reclaimed_claim_capacity(entity);
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
                 Ok(CrossNodeResumeOutcome::NotFound)
             }
             Ok(Err(other)) => {
-                self.cancel_reclaimed_claim_capacity(entity);
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
                 Err(SmRegistryError::Internal(format!(
                     "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed failed: {other}"
                 )))
             }
             Err(_timeout) => {
-                self.defer_uncertain_reclaimed_claim(entity, &me);
+                self.defer_uncertain_reclaimed_claim(entity, &me, reservation);
                 Err(SmRegistryError::Internal(
                     "attempt_cross_node_resume: direct acquire timed out; outcome retained for non-replaying reconciliation".to_string(),
                 ))
@@ -689,11 +689,12 @@ impl InMemorySmSessionRegistry {
         owner: NodeIdentity,
         epoch: ClaimEpoch,
         stream_id: &str,
+        reservation: super::ReclaimedClaimReservation,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let fence = super::super::persistence::SmClaimFence::new(owner, epoch);
         let hydrated = match tokio::time::timeout(
             FINISH_HYDRATE_TIMEOUT,
-            self.hydrate_reclaimed(&[(entity.clone(), fence.clone())]),
+            self.hydrate_reclaimed(&[(entity.clone(), fence.clone(), reservation)]),
         )
         .await
         {
@@ -704,6 +705,7 @@ impl InMemorySmSessionRegistry {
                         entity,
                         &fence,
                         stream_id,
+                        reservation,
                         format!("hydrate_reclaimed errored: {error}"),
                     )
                     .await;
@@ -714,6 +716,7 @@ impl InMemorySmSessionRegistry {
                         entity,
                         &fence,
                         stream_id,
+                        reservation,
                         format!("hydrate_reclaimed timed out after {FINISH_HYDRATE_TIMEOUT:?}"),
                     )
                     .await;
@@ -732,6 +735,7 @@ impl InMemorySmSessionRegistry {
                     entity,
                     &fence,
                     stream_id,
+                    reservation,
                     "hydrate_reclaimed hydrated nothing (already-present race, missing \
                      durable row, or a storage read failure — see its own debug logs)"
                         .to_string(),
@@ -754,6 +758,7 @@ impl InMemorySmSessionRegistry {
                     entity,
                     &fence,
                     stream_id,
+                    reservation,
                     format!("claim_session errored post-hydrate: {error}"),
                 )
                 .await
@@ -763,6 +768,7 @@ impl InMemorySmSessionRegistry {
                     entity,
                     &fence,
                     stream_id,
+                    reservation,
                     format!("claim_session timed out after {FINISH_CLAIM_TIMEOUT:?} post-hydrate"),
                 )
                 .await
@@ -798,10 +804,11 @@ impl InMemorySmSessionRegistry {
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
         stream_id: &str,
+        reservation: super::ReclaimedClaimReservation,
         reason: String,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         self.forget_claim_locally(stream_id).await;
-        self.transfer_reclaimed_claim_to_exact_release(entity, fence);
+        self.transfer_reclaimed_claim_to_exact_release(entity, fence, reservation);
 
         for attempt in 1..=REPAIR_RELEASE_MAX_ATTEMPTS {
             match tokio::time::timeout(

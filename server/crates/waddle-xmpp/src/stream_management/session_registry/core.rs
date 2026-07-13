@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -21,6 +22,54 @@ pub(super) enum PendingClaimAcquisitionDisposition {
 }
 
 const STREAM_LOCK_SHARDS: usize = 256;
+
+/// Operation-owned capacity marker for a reclaimed SM claim mutation.
+/// Only the operation holding this token may consume, cancel, or defer its
+/// reservation, so an older same-stream lifecycle cannot erase a newer
+/// ownership CAS's ambiguity marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReclaimedClaimReservation(u64);
+
+impl ReclaimedClaimReservation {
+    /// Construct a deterministic token for adapters that model reservation
+    /// ownership in tests. Production tokens are issued by the registry.
+    #[doc(hidden)]
+    pub const fn from_generation(generation: u64) -> Self {
+        Self(generation)
+    }
+}
+
+/// Count distinct bounded ownership responsibilities across the three exact
+/// fence inventories. A reservation paired with an active, non-terminal
+/// fence is only an ambiguity marker for that same responsibility; counting
+/// both would reject otherwise usable session capacity. A reservation next
+/// to a pending-release fence remains distinct because that release may have
+/// committed and a subsequent acquisition may mint a new generation.
+fn occupied_claim_fence_capacity(
+    reservations: &HashSet<String>,
+    reclaimed_reservations: &HashMap<String, ReclaimedClaimReservation>,
+    pending: &HashSet<(String, super::super::persistence::SmClaimFence)>,
+    fences: &HashMap<String, super::super::persistence::SmClaimFence>,
+) -> usize {
+    let current_not_pending = fences
+        .iter()
+        .filter(|(id, fence)| !pending.contains(&(id.to_string(), (*fence).clone())))
+        .count();
+    let unrepresented_reservations = reservations
+        .iter()
+        .chain(reclaimed_reservations.keys())
+        .filter(|id| {
+            fences
+                .get(*id)
+                .is_none_or(|fence| pending.contains(&((*id).clone(), fence.clone())))
+        })
+        .count();
+
+    pending
+        .len()
+        .saturating_add(current_not_pending)
+        .saturating_add(unrepresented_reservations)
+}
 
 /// Bound on any `ClaimStore` acquire/`ensure_claimed` call made while this
 /// registry holds one of its [`STREAM_LOCK_SHARDS`] stream-shard locks (FIX
@@ -129,19 +178,30 @@ pub struct InMemorySmSessionRegistry {
     /// self-fence path: once a node wins a claim, a transient durable read or
     /// an identity rotation must not leave that live-owned claim invisible to
     /// every future orphan scan.
-    pub(super) pending_reclaimed_hydrations:
-        RwLock<HashMap<(String, super::super::persistence::SmClaimFence), Entity>>,
+    pub(super) pending_reclaimed_hydrations: RwLock<
+        HashMap<
+            (
+                String,
+                super::super::persistence::SmClaimFence,
+                ReclaimedClaimReservation,
+            ),
+            Entity,
+        >,
+    >,
     /// Ownership-changing calls whose timeout made the committed result
     /// unknown before an epoch could be returned. The attempted owner is
     /// enough to reconcile them without replaying a one-shot CAS: a later
     /// `current_claim` either supplies the exact epoch now owned by that
     /// incarnation or proves that this attempt did not remain authoritative.
-    pub(super) pending_reclaimed_claim_lookups: RwLock<HashMap<(String, NodeIdentity), Entity>>,
+    pub(super) pending_reclaimed_claim_lookups:
+        RwLock<HashMap<(String, NodeIdentity, ReclaimedClaimReservation), Entity>>,
     /// Capacity reserved before an acquisition whose exact epoch is not yet
     /// known. A reservation survives an ambiguous timeout and is consumed
     /// only when reconciliation either records the resulting fence or proves
     /// that this node did not acquire the claim.
     pub(super) claim_fence_reservations: RwLock<HashSet<String>>,
+    pub(super) reclaimed_claim_reservations: RwLock<HashMap<String, ReclaimedClaimReservation>>,
+    next_reclaimed_claim_reservation: AtomicU64,
     /// ADR-0017 Phase 3 Slice 6: the cross-node "ask the live owner to
     /// detach" bridge for the XEP-0198 resume path's live-handshake branch.
     /// `None` for single-node/non-clustering deployments (the cross-node
@@ -182,20 +242,41 @@ impl InMemorySmSessionRegistry {
     /// performs an ownership-changing CAS for a reclaimed SM session.
     /// The reservation is consumed when the exact returned fence is
     /// published, or cancelled when the CAS is known not to have won.
-    pub fn reserve_reclaimed_claim_capacity(&self, entity: &Entity) -> bool {
-        entity.entity_type == EntityType::SmSession && self.reserve_claim_fence_capacity(&entity.id)
+    pub fn reserve_reclaimed_claim_capacity(
+        &self,
+        entity: &Entity,
+    ) -> Option<ReclaimedClaimReservation> {
+        if entity.entity_type != EntityType::SmSession {
+            return None;
+        }
+        self.reserve_reclaimed_claim_fence_capacity(&entity.id)
     }
 
-    pub fn cancel_reclaimed_claim_capacity(&self, entity: &Entity) {
-        self.cancel_claim_fence_reservation(&entity.id);
+    pub fn cancel_reclaimed_claim_capacity(
+        &self,
+        entity: &Entity,
+        reservation: ReclaimedClaimReservation,
+    ) {
+        self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
     }
 
     /// Retain a timed-out ownership mutation without replaying it. The
     /// registry later uses a read-only `current_claim` to discover the exact
     /// epoch iff this attempted owner actually won.
-    pub fn defer_uncertain_reclaimed_claim(&self, entity: &Entity, owner: &NodeIdentity) {
+    pub fn defer_uncertain_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        owner: &NodeIdentity,
+        reservation: ReclaimedClaimReservation,
+    ) {
+        if !self.has_reclaimed_claim_fence_reservation(&entity.id, reservation) {
+            return;
+        }
         if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
-            pending.insert((entity.id.clone(), owner.clone()), entity.clone());
+            pending.insert(
+                (entity.id.clone(), owner.clone(), reservation),
+                entity.clone(),
+            );
         }
     }
 
@@ -205,16 +286,69 @@ impl InMemorySmSessionRegistry {
         &self,
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
     ) {
-        self.clear_pending_reclaimed_hydration(entity, fence);
+        self.clear_pending_reclaimed_hydration(entity, fence, reservation);
         if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
-            pending.remove(&(entity.id.clone(), fence.owner().clone()));
+            pending.remove(&(entity.id.clone(), fence.owner().clone(), reservation));
         }
-        self.cancel_claim_fence_reservation(&entity.id);
+        self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
     }
 
     pub(super) fn reserve_claim_fence_capacity(&self, stream_id: &str) -> bool {
         self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions)
+    }
+
+    fn reserve_reclaimed_claim_fence_capacity(
+        &self,
+        stream_id: &str,
+    ) -> Option<ReclaimedClaimReservation> {
+        let (Ok(reservations), Ok(mut reclaimed), Ok(pending), Ok(fences)) = (
+            self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.write(),
+            self.pending_claim_releases.read(),
+            self.claim_fences.read(),
+        ) else {
+            return None;
+        };
+        if reservations.contains(stream_id) || reclaimed.contains_key(stream_id) {
+            return None;
+        }
+        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
+        let active_nonterminal = fences
+            .get(stream_id)
+            .is_some_and(|fence| !pending.contains(&(stream_id.to_string(), fence.clone())));
+        if !active_nonterminal && occupied >= self.max_sessions {
+            return None;
+        }
+        let token = ReclaimedClaimReservation(
+            self.next_reclaimed_claim_reservation
+                .fetch_add(1, Ordering::Relaxed),
+        );
+        reclaimed.insert(stream_id.to_string(), token);
+        Some(token)
+    }
+
+    fn cancel_reclaimed_claim_fence_reservation(
+        &self,
+        stream_id: &str,
+        reservation: ReclaimedClaimReservation,
+    ) {
+        if let Ok(mut reservations) = self.reclaimed_claim_reservations.write() {
+            if reservations.get(stream_id) == Some(&reservation) {
+                reservations.remove(stream_id);
+            }
+        }
+    }
+
+    fn has_reclaimed_claim_fence_reservation(
+        &self,
+        stream_id: &str,
+        reservation: ReclaimedClaimReservation,
+    ) -> bool {
+        self.reclaimed_claim_reservations
+            .read()
+            .is_ok_and(|reservations| reservations.get(stream_id) == Some(&reservation))
     }
 
     /// Reserve the exact-fence slot needed by a live detach. Capacity
@@ -231,15 +365,27 @@ impl InMemorySmSessionRegistry {
         // represented here: every reclaim reserves before its ownership CAS,
         // then either retains that reservation while the epoch is unknown or
         // consumes it into `claim_fences` once the exact fence is known.
+        // `try_record_verified_reclaimed_fence` removes the reservation and
+        // inserts that fence while holding all three inventory write locks in
+        // one non-awaiting critical section; no transient/cancellation window
+        // can leave only `pending_reclaimed_hydrations` behind.
         // Counting those retry maps separately would double-charge the same
         // ownership responsibility and reject usable capacity.
-        let (Ok(mut reservations), Ok(pending), Ok(fences)) = (
+        let (Ok(mut reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
             self.claim_fence_reservations.write(),
+            self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.read(),
             self.claim_fences.read(),
         ) else {
             return false;
         };
+        // A reservation is an operation-owned ambiguity marker, not an
+        // idempotent shared lease. Admitting another same-stream mutation
+        // onto it would let the loser cancel the winner's only capacity
+        // representation after an external CAS committed ambiguously.
+        if reservations.contains(stream_id) || reclaimed.contains_key(stream_id) {
+            return false;
+        }
         if let Some(fence) = fences.get(stream_id) {
             // A confirmed-current fence makes ensure_claimed idempotent and
             // cannot create another generation. A fence whose terminal
@@ -247,20 +393,16 @@ impl InMemorySmSessionRegistry {
             // so the next ensure can mint a new generation and must reserve a
             // second exact-fence slot before touching the backend.
             if !pending.contains(&(stream_id.to_string(), fence.clone())) {
+                // Even an idempotent self-ensure can be cancelled before its
+                // outcome is observed. Publish an in-flight marker paired
+                // with this already-counted fence so demotion can transfer
+                // the ambiguity into reservation-backed retry responsibility
+                // before removing the confirmed fence.
+                reservations.insert(stream_id.to_string());
                 return true;
             }
         }
-        if reservations.contains(stream_id) {
-            return true;
-        }
-        let current_not_pending = fences
-            .iter()
-            .filter(|(id, fence)| !pending.contains(&(id.to_string(), (*fence).clone())))
-            .count();
-        let occupied = pending
-            .len()
-            .saturating_add(current_not_pending)
-            .saturating_add(reservations.len());
+        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
         if occupied >= capacity {
             return false;
         }
@@ -282,21 +424,15 @@ impl InMemorySmSessionRegistry {
 
     #[cfg(test)]
     pub(super) fn claim_fence_capacity_used(&self) -> usize {
-        let (Ok(reservations), Ok(pending), Ok(fences)) = (
+        let (Ok(reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
             self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.read(),
             self.claim_fences.read(),
         ) else {
             return self.max_sessions;
         };
-        let current_not_pending = fences
-            .iter()
-            .filter(|(id, fence)| !pending.contains(&(id.to_string(), (*fence).clone())))
-            .count();
-        pending
-            .len()
-            .saturating_add(current_not_pending)
-            .saturating_add(reservations.len())
+        occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences)
     }
 
     pub(super) fn try_record_claim_fence(
@@ -304,8 +440,9 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+        let (Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
             self.claim_fence_reservations.write(),
+            self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
             self.claim_fences.write(),
         ) else {
@@ -316,14 +453,7 @@ impl InMemorySmSessionRegistry {
             return true;
         }
         let reserved = reservations.remove(stream_id);
-        let current_not_pending = fences
-            .iter()
-            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
-            .count();
-        let occupied = pending
-            .len()
-            .saturating_add(current_not_pending)
-            .saturating_add(reservations.len());
+        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
         if !reserved && occupied >= self.max_sessions {
             return false;
         }
@@ -343,8 +473,9 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
+        let (Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
             self.claim_fence_reservations.write(),
+            self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
             self.claim_fences.write(),
         ) else {
@@ -359,18 +490,36 @@ impl InMemorySmSessionRegistry {
         }
         let reserved = reservations.remove(stream_id);
         let converts_active = fences.get(stream_id) == Some(&fence);
-        let current_not_pending = fences
-            .iter()
-            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
-            .count();
-        let occupied = pending
-            .len()
-            .saturating_add(current_not_pending)
-            .saturating_add(reservations.len());
+        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
         if !reserved && !converts_active && occupied >= self.max_sessions {
             return false;
         }
         if converts_active {
+            fences.remove(stream_id);
+        }
+        pending.insert((stream_id.to_string(), fence));
+        true
+    }
+
+    fn try_record_terminal_reclaimed_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
+    ) -> bool {
+        let (Ok(_reservations), Ok(mut reclaimed), Ok(mut pending), Ok(mut fences)) = (
+            self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.write(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+        ) else {
+            return false;
+        };
+        if reclaimed.get(stream_id) != Some(&reservation) {
+            return false;
+        }
+        reclaimed.remove(stream_id);
+        if fences.get(stream_id) == Some(&fence) {
             fences.remove(stream_id);
         }
         pending.insert((stream_id.to_string(), fence));
@@ -387,8 +536,9 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        let (Ok(reservations), Ok(mut pending), Ok(fences)) = (
+        let (Ok(reservations), Ok(reclaimed), Ok(mut pending), Ok(fences)) = (
             self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
             self.claim_fences.read(),
         ) else {
@@ -401,21 +551,15 @@ impl InMemorySmSessionRegistry {
         let represented_exact = fences.get(stream_id) == Some(&fence);
         let represented_other = fences.contains_key(stream_id)
             || pending.iter().any(|(id, _)| id == stream_id)
-            || reservations.contains(stream_id);
+            || reservations.contains(stream_id)
+            || reclaimed.contains_key(stream_id);
         if represented_other && !represented_exact {
             // Direction cannot be inferred from numeric epochs across node
             // incarnations. Only the verified-hydration path may replace a
             // same-stream generation.
             return false;
         }
-        let current_not_pending = fences
-            .iter()
-            .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
-            .count();
-        let occupied = pending
-            .len()
-            .saturating_add(current_not_pending)
-            .saturating_add(reservations.len());
+        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
         if !represented_exact && occupied >= self.max_sessions {
             return false;
         }
@@ -431,27 +575,27 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
     ) -> bool {
         let mut superseded = Vec::new();
         let recorded = {
-            let (Ok(mut reservations), Ok(mut pending), Ok(mut fences)) = (
-                self.claim_fence_reservations.write(),
+            let (Ok(reservations), Ok(mut reclaimed), Ok(mut pending), Ok(mut fences)) = (
+                self.claim_fence_reservations.read(),
+                self.reclaimed_claim_reservations.write(),
                 self.pending_claim_releases.write(),
                 self.claim_fences.write(),
             ) else {
                 return false;
             };
-            let represented = reservations.remove(stream_id)
+            let reserved = reclaimed.get(stream_id) == Some(&reservation);
+            if reserved {
+                reclaimed.remove(stream_id);
+            }
+            let represented = reserved
                 || fences.contains_key(stream_id)
                 || pending.iter().any(|(id, _)| id == stream_id);
-            let current_not_pending = fences
-                .iter()
-                .filter(|(id, current)| !pending.contains(&(id.to_string(), (*current).clone())))
-                .count();
-            let occupied = pending
-                .len()
-                .saturating_add(current_not_pending)
-                .saturating_add(reservations.len());
+            let occupied =
+                occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
             if !represented && occupied >= self.max_sessions {
                 return false;
             }
@@ -513,6 +657,8 @@ impl InMemorySmSessionRegistry {
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
+            reclaimed_claim_reservations: RwLock::new(HashMap::new()),
+            next_reclaimed_claim_reservation: AtomicU64::new(1),
             remote_resume: None,
         }
     }
@@ -535,6 +681,8 @@ impl InMemorySmSessionRegistry {
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
+            reclaimed_claim_reservations: RwLock::new(HashMap::new()),
+            next_reclaimed_claim_reservation: AtomicU64::new(1),
             remote_resume: None,
         }
     }
@@ -870,27 +1018,99 @@ impl InMemorySmSessionRegistry {
         &self,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
     ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
         if entity.entity_type != EntityType::SmSession {
             return Ok(ReclaimedHydrationOutcome::LostClaim);
         }
-        let key = (entity.id.clone(), caller_fence.clone());
-        self.pending_reclaimed_hydrations
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .insert(key.clone(), entity.clone());
+        if !self.try_record_pending_reclaimed_hydration(entity, caller_fence, reservation)? {
+            self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
+            return Ok(ReclaimedHydrationOutcome::LostClaim);
+        }
+        let stream_lock = self.stream_lock(&entity.id)?;
+        let _stream_guard = stream_lock.lock().await;
+        self.hydrate_reclaimed_typed_locked(entity, caller_fence, reservation)
+            .await
+    }
 
-        let outcome = self.hydrate_reclaimed_once(entity, caller_fence).await?;
+    fn try_record_pending_reclaimed_hydration(
+        &self,
+        entity: &Entity,
+        caller_fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
+    ) -> Result<bool, SmRegistryError> {
+        let (reservations, releases, fences, mut hydrations) = (
+            self.reclaimed_claim_reservations
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?,
+            self.pending_claim_releases
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?,
+            self.claim_fences
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?,
+            self.pending_reclaimed_hydrations
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?,
+        );
+        let represented = reservations.get(&entity.id) == Some(&reservation)
+            || fences.get(&entity.id) == Some(caller_fence)
+            || releases.contains(&(entity.id.clone(), caller_fence.clone()));
+        if represented {
+            hydrations.insert(
+                (entity.id.clone(), caller_fence.clone(), reservation),
+                entity.clone(),
+            );
+        }
+        Ok(represented)
+    }
+
+    async fn hydrate_reclaimed_typed_locked(
+        &self,
+        entity: &Entity,
+        caller_fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
+    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+        let pending = self
+            .pending_reclaimed_hydrations
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .contains_key(&(entity.id.clone(), caller_fence.clone(), reservation));
+        let represented = self
+            .reclaimed_claim_reservations
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(&entity.id)
+            == Some(&reservation)
+            || self
+                .claim_fences
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .get(&entity.id)
+                == Some(caller_fence)
+            || self
+                .pending_claim_releases
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .contains(&(entity.id.clone(), caller_fence.clone()));
+        if !pending || !represented {
+            self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
+            return Ok(ReclaimedHydrationOutcome::LostClaim);
+        }
+
+        let outcome = self
+            .hydrate_reclaimed_once(entity, caller_fence, reservation)
+            .await?;
         if matches!(
             outcome,
             ReclaimedHydrationOutcome::Hydrated
                 | ReclaimedHydrationOutcome::AlreadyPresent
                 | ReclaimedHydrationOutcome::LostClaim
         ) {
-            self.clear_pending_reclaimed_hydration(entity, caller_fence);
+            self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
         }
         if outcome == ReclaimedHydrationOutcome::LostClaim {
-            self.cancel_claim_fence_reservation(&entity.id);
+            self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
         }
         Ok(outcome)
     }
@@ -899,9 +1119,10 @@ impl InMemorySmSessionRegistry {
         &self,
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
     ) {
         if let Ok(mut pending) = self.pending_reclaimed_hydrations.write() {
-            pending.remove(&(entity.id.clone(), fence.clone()));
+            pending.remove(&(entity.id.clone(), fence.clone(), reservation));
         }
     }
 
@@ -909,6 +1130,7 @@ impl InMemorySmSessionRegistry {
         &self,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
     ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
         if entity.entity_type != EntityType::SmSession {
             return Ok(ReclaimedHydrationOutcome::LostClaim);
@@ -917,8 +1139,6 @@ impl InMemorySmSessionRegistry {
             return Ok(ReclaimedHydrationOutcome::StaleIdentity);
         }
         let stream_id = entity.id.clone();
-        let stream_lock = self.stream_lock(&stream_id)?;
-        let _stream_guard = stream_lock.lock().await;
 
         let present = {
             let sessions = self
@@ -952,7 +1172,11 @@ impl InMemorySmSessionRegistry {
                 Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
             }
             if !exact_fence
-                && !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone())
+                && !self.try_record_verified_reclaimed_fence(
+                    &stream_id,
+                    caller_fence.clone(),
+                    reservation,
+                )
             {
                 return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
@@ -1005,7 +1229,8 @@ impl InMemorySmSessionRegistry {
             );
             return Ok(ReclaimedHydrationOutcome::LostClaim);
         }
-        if !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone()) {
+        if !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone(), reservation)
+        {
             return Ok(ReclaimedHydrationOutcome::TransientFailure);
         }
         let Some(storage) = &self.persistence else {
@@ -1175,11 +1400,17 @@ impl InMemorySmSessionRegistry {
 
     pub async fn hydrate_reclaimed(
         &self,
-        entities: &[(Entity, super::super::persistence::SmClaimFence)],
+        entities: &[(
+            Entity,
+            super::super::persistence::SmClaimFence,
+            ReclaimedClaimReservation,
+        )],
     ) -> Result<usize, SmRegistryError> {
         let mut hydrated = 0usize;
-        for (entity, fence) in entities {
-            if self.hydrate_reclaimed_typed(entity, fence).await?
+        for (entity, fence, reservation) in entities {
+            if self
+                .hydrate_reclaimed_typed(entity, fence, *reservation)
+                .await?
                 == ReclaimedHydrationOutcome::Hydrated
             {
                 hydrated += 1;
@@ -1201,13 +1432,28 @@ impl InMemorySmSessionRegistry {
                 pending
                     .iter()
                     .take(limit)
-                    .map(|((_, owner), entity)| (entity.clone(), owner.clone()))
+                    .map(|((_, owner, reservation), entity)| {
+                        (entity.clone(), owner.clone(), *reservation)
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         let mut attempted = 0;
-        for (entity, owner) in lookups {
+        for (entity, owner, reservation) in lookups {
             attempted += 1;
+            let Ok(stream_lock) = self.stream_lock(&entity.id) else {
+                continue;
+            };
+            let stream_guard = stream_lock.lock().await;
+            let lookup_key = (entity.id.clone(), owner.clone(), reservation);
+            let still_pending = self
+                .pending_reclaimed_claim_lookups
+                .read()
+                .map(|pending| pending.contains_key(&lookup_key))
+                .unwrap_or(false);
+            if !still_pending {
+                continue;
+            }
             let snapshot = match tokio::time::timeout(
                 CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
                 self.claim_store.current_claim(&entity),
@@ -1219,23 +1465,36 @@ impl InMemorySmSessionRegistry {
             };
             if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.owner == owner) {
                 if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
-                    pending.remove(&(entity.id.clone(), owner.clone()));
+                    pending.remove(&lookup_key);
                 }
                 let fence =
                     super::super::persistence::SmClaimFence::new(owner, snapshot.claim_epoch);
-                if let Ok(
-                    ReclaimedHydrationOutcome::MissingDurable
-                    | ReclaimedHydrationOutcome::PoisonReleased
-                    | ReclaimedHydrationOutcome::StaleIdentity,
-                ) = self.hydrate_reclaimed_typed(&entity, &fence).await
+                let outcome = if self
+                    .try_record_pending_reclaimed_hydration(&entity, &fence, reservation)
+                    .unwrap_or(false)
                 {
-                    let _ = self.release_reclaimed_claim(&entity, &fence).await;
+                    self.hydrate_reclaimed_typed_locked(&entity, &fence, reservation)
+                        .await
+                } else {
+                    Ok(ReclaimedHydrationOutcome::LostClaim)
+                };
+                let terminal = matches!(
+                    outcome,
+                    Ok(ReclaimedHydrationOutcome::MissingDurable
+                        | ReclaimedHydrationOutcome::PoisonReleased
+                        | ReclaimedHydrationOutcome::StaleIdentity)
+                );
+                drop(stream_guard);
+                if terminal {
+                    let _ = self
+                        .release_reclaimed_claim(&entity, &fence, reservation)
+                        .await;
                 }
             } else {
                 if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
-                    pending.remove(&(entity.id.clone(), owner));
+                    pending.remove(&lookup_key);
                 }
-                self.cancel_claim_fence_reservation(&entity.id);
+                self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
             }
         }
         let remaining = limit.saturating_sub(attempted);
@@ -1246,19 +1505,26 @@ impl InMemorySmSessionRegistry {
                 pending
                     .iter()
                     .take(remaining)
-                    .map(|((_, fence), entity)| (entity.clone(), fence.clone()))
+                    .map(|((_, fence, reservation), entity)| {
+                        (entity.clone(), fence.clone(), *reservation)
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        for (entity, fence) in pending {
+        for (entity, fence, reservation) in pending {
             attempted += 1;
-            match self.hydrate_reclaimed_typed(&entity, &fence).await {
+            match self
+                .hydrate_reclaimed_typed(&entity, &fence, reservation)
+                .await
+            {
                 Ok(
                     ReclaimedHydrationOutcome::MissingDurable
                     | ReclaimedHydrationOutcome::PoisonReleased
                     | ReclaimedHydrationOutcome::StaleIdentity,
                 ) => {
-                    let _ = self.release_reclaimed_claim(&entity, &fence).await;
+                    let _ = self
+                        .release_reclaimed_claim(&entity, &fence, reservation)
+                        .await;
                 }
                 Ok(
                     ReclaimedHydrationOutcome::Hydrated
@@ -1283,6 +1549,7 @@ impl InMemorySmSessionRegistry {
         &self,
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
     ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
         let stream_lock = self.stream_lock(&entity.id)?;
         let _stream_guard = stream_lock.lock().await;
@@ -1290,11 +1557,13 @@ impl InMemorySmSessionRegistry {
             Some(true) => {
                 // Responsibility transferred back to the live local session.
                 // Never let terminal cleanup release its claim.
-                self.clear_pending_reclaimed_hydration(entity, fence);
+                self.clear_pending_reclaimed_hydration(entity, fence, reservation);
                 return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
             }
             None => {
-                if !self.try_record_uncertain_release_fence(&entity.id, fence.clone()) {
+                if !self.try_record_terminal_reclaimed_fence(&entity.id, fence.clone(), reservation)
+                    && !self.try_record_uncertain_release_fence(&entity.id, fence.clone())
+                {
                     return Err(SmRegistryError::Internal(
                         "release_reclaimed_claim: local liveness is uncertain and exact retry capacity is exhausted".to_string(),
                     ));
@@ -1308,16 +1577,18 @@ impl InMemorySmSessionRegistry {
             }
             Some(false) => {}
         }
-        if !self.reserve_claim_fence_capacity(&entity.id) {
-            return Err(SmRegistryError::Internal(
-                "release_reclaimed_claim: exact-release retry capacity exhausted".to_string(),
-            ));
-        }
-        if !self.try_record_claim_fence(&entity.id, fence.clone()) {
-            self.cancel_claim_fence_reservation(&entity.id);
-            return Err(SmRegistryError::Internal(
-                "release_reclaimed_claim: failed to retain exact claim fence".to_string(),
-            ));
+        if !self.try_record_terminal_reclaimed_fence(&entity.id, fence.clone(), reservation) {
+            if !self.reserve_claim_fence_capacity(&entity.id) {
+                return Err(SmRegistryError::Internal(
+                    "release_reclaimed_claim: exact-release retry capacity exhausted".to_string(),
+                ));
+            }
+            if !self.try_record_claim_fence(&entity.id, fence.clone()) {
+                self.cancel_claim_fence_reservation(&entity.id);
+                return Err(SmRegistryError::Internal(
+                    "release_reclaimed_claim: failed to retain exact claim fence".to_string(),
+                ));
+            }
         }
         let outcome = match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
@@ -1349,7 +1620,7 @@ impl InMemorySmSessionRegistry {
             let session_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
             storage.evict_claim_cache(&session_id, fence);
         }
-        self.clear_pending_reclaimed_hydration(entity, fence);
+        self.clear_pending_reclaimed_hydration(entity, fence, reservation);
         Ok(outcome)
     }
 }

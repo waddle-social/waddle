@@ -389,10 +389,16 @@ fn reclaimed_claim_admission_is_bounded_before_the_ownership_cas() {
     let second =
         crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "bounded-reclaim-2");
 
-    assert!(registry.reserve_reclaimed_claim_capacity(&first));
-    assert!(!registry.reserve_reclaimed_claim_capacity(&second));
-    registry.cancel_reclaimed_claim_capacity(&first);
-    assert!(registry.reserve_reclaimed_claim_capacity(&second));
+    let first_reservation = registry
+        .reserve_reclaimed_claim_capacity(&first)
+        .expect("first reservation");
+    assert!(
+        registry.reserve_reclaimed_claim_capacity(&first).is_none(),
+        "same-stream ownership mutations must not share one cancellable reservation"
+    );
+    assert!(registry.reserve_reclaimed_claim_capacity(&second).is_none());
+    registry.cancel_reclaimed_claim_capacity(&first, first_reservation);
+    assert!(registry.reserve_reclaimed_claim_capacity(&second).is_some());
 }
 
 #[test]
@@ -403,15 +409,51 @@ fn ambiguous_reclaim_lookup_retains_its_reserved_capacity() {
     let second =
         crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "lookup-reclaim-2");
 
-    assert!(registry.reserve_reclaimed_claim_capacity(&first));
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&first)
+        .expect("reclaim reservation");
     registry.defer_uncertain_reclaimed_claim(
         &first,
         &crate::ownership::NodeIdentity::new("reclaimer", "incarnation"),
+        reservation,
     );
 
     assert!(
-        !registry.reserve_reclaimed_claim_capacity(&second),
+        registry.reserve_reclaimed_claim_capacity(&second).is_none(),
         "the reservation retained alongside an ambiguous lookup must bound ownership without double-counting the retry map"
+    );
+}
+
+#[test]
+fn stale_reclaim_completion_cannot_cancel_a_newer_same_stream_reservation() {
+    let registry = InMemorySmSessionRegistry::with_capacity(2);
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "reclaim-reservation-generation",
+    );
+    let owner = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let fence =
+        super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(1));
+    let first = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("first reservation");
+    assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence.clone(), first));
+    let second = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("newer reservation");
+
+    assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence.clone(), first));
+    registry.cancel_reclaimed_claim_capacity(&entity, first);
+    registry.transfer_reclaimed_claim_to_exact_release(&entity, &fence, first);
+
+    assert_eq!(
+        registry
+            .reclaimed_claim_reservations
+            .read()
+            .expect("reclaimed reservations")
+            .get(&entity.id),
+        Some(&second),
+        "an older operation may only consume or cancel its own reservation token"
     );
 }
 
@@ -439,6 +481,181 @@ fn local_ownership_includes_ambiguous_and_in_flight_claim_admission() {
         vec![ambiguous.to_string(), in_flight.to_string()],
         "self-fence and drain snapshots must conservatively include both an ambiguous CAS and its reservation-only in-flight window without duplicates"
     );
+}
+
+#[tokio::test]
+async fn local_demotion_clears_confirmed_reclaim_retry_inventory() {
+    let registry = InMemorySmSessionRegistry::with_capacity(3);
+    let stream_id = "demoted-reclaim-inventory";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    let owner = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let fence = super::super::persistence::SmClaimFence::new(
+        owner.clone(),
+        crate::ownership::ClaimEpoch(1),
+    );
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
+    assert!(registry.try_record_verified_reclaimed_fence(stream_id, fence.clone(), reservation));
+    registry
+        .pending_reclaimed_hydrations
+        .write()
+        .unwrap()
+        .insert(
+            (stream_id.to_string(), fence.clone(), reservation),
+            entity.clone(),
+        );
+    registry
+        .pending_epoch_failure_reconciliations
+        .write()
+        .unwrap()
+        .insert(stream_id.to_string());
+    registry.pending_claim_releases.write().unwrap().insert((
+        stream_id.to_string(),
+        super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(0)),
+    ));
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
+    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    let replacement = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "replacement-after-demotion",
+    );
+    assert!(registry
+        .reserve_reclaimed_claim_capacity(&replacement)
+        .is_some());
+}
+
+#[tokio::test]
+async fn local_demotion_preserves_ambiguous_reclaim_until_lookup_disproves_it() {
+    let registry = InMemorySmSessionRegistry::with_capacity(1);
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "demoted-ambiguous-reclaim",
+    );
+    let owner = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
+    registry.defer_uncertain_reclaimed_claim(&entity, &owner, reservation);
+
+    registry.forget_claim_locally(&entity.id).await;
+
+    assert_eq!(
+        registry.locally_owned_claim_ids().unwrap(),
+        vec![entity.id.clone()]
+    );
+    let replacement = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "replacement-before-ambiguous-resolution",
+    );
+    assert!(registry
+        .reserve_reclaimed_claim_capacity(&replacement)
+        .is_none());
+
+    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
+    assert!(registry
+        .reserve_reclaimed_claim_capacity(&replacement)
+        .is_some());
+}
+
+#[tokio::test]
+async fn local_demotion_discards_hydration_from_an_older_reclaim_generation() {
+    let registry = InMemorySmSessionRegistry::with_capacity(2);
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "demoted-stale-reclaim-hydration",
+    );
+    let owner = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let fence = super::super::persistence::SmClaimFence::new(
+        owner.clone(),
+        crate::ownership::ClaimEpoch(1),
+    );
+    let first = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("first reservation");
+    assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence.clone(), first));
+    registry
+        .pending_reclaimed_hydrations
+        .write()
+        .unwrap()
+        .insert((entity.id.clone(), fence, first), entity.clone());
+    let second = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("newer reservation");
+    registry.defer_uncertain_reclaimed_claim(&entity, &owner, second);
+
+    registry.forget_claim_locally(&entity.id).await;
+
+    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert_eq!(
+        registry
+            .reclaimed_claim_reservations
+            .read()
+            .unwrap()
+            .get(&entity.id),
+        Some(&second)
+    );
+    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn active_fence_readmission_publishes_a_demotion_safe_reservation() {
+    let registry = InMemorySmSessionRegistry::with_capacity(1);
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "active-fence-readmission",
+    );
+    let owner = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let fence = super::super::persistence::SmClaimFence::new(
+        owner.clone(),
+        crate::ownership::ClaimEpoch(1),
+    );
+    let first_reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("initial reclaim reservation");
+    assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence, first_reservation));
+
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("readmission reservation");
+    registry.defer_uncertain_reclaimed_claim(&entity, &owner, reservation);
+    registry.forget_claim_locally(&entity.id).await;
+
+    assert!(
+        registry
+            .reclaimed_claim_reservations
+            .read()
+            .unwrap()
+            .get(&entity.id)
+            == Some(&reservation)
+    );
+    assert!(registry
+        .pending_reclaimed_claim_lookups
+        .read()
+        .unwrap()
+        .contains_key(&(entity.id.clone(), owner, reservation)));
+    let replacement = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "replacement-after-active-readmission",
+    );
+    assert!(registry
+        .reserve_reclaimed_claim_capacity(&replacement)
+        .is_none());
+
+    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
+    assert!(registry
+        .reserve_reclaimed_claim_capacity(&replacement)
+        .is_some());
 }
 
 #[tokio::test]
@@ -965,15 +1182,18 @@ async fn reclaimed_terminal_release_failure_retains_exact_retry() {
     let registry = InMemorySmSessionRegistry::new()
         .with_claim_store(store, crate::ownership::SharedNodeIdentity::new(me));
 
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
     assert_eq!(
         registry
-            .hydrate_reclaimed_typed(&entity, &fence)
+            .hydrate_reclaimed_typed(&entity, &fence, reservation)
             .await
             .expect("typed hydration"),
         ReclaimedHydrationOutcome::MissingDurable
     );
     assert!(registry
-        .release_reclaimed_claim(&entity, &fence)
+        .release_reclaimed_claim(&entity, &fence, reservation)
         .await
         .is_err());
     assert_eq!(
@@ -1006,10 +1226,13 @@ async fn reclaimed_terminal_release_retains_caller_work_when_liveness_is_poisone
     })
     .join()
     .is_err());
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
 
     assert!(
         registry
-            .release_reclaimed_claim(&entity, &fence)
+            .release_reclaimed_claim(&entity, &fence, reservation)
             .await
             .is_err(),
         "unknown liveness must keep the caller's exact work retryable"
@@ -1044,11 +1267,9 @@ async fn self_fence_reclaim_reuses_full_old_incarnation_slot_when_liveness_is_po
     let entity = crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, stream_id);
     let old_epoch = store.acquire(&entity, &old_owner).await.expect("old claim");
     let old_fence = super::super::persistence::SmClaimFence::new(old_owner.clone(), old_epoch);
-    registry
-        .claim_fence_reservations
-        .write()
-        .expect("claim fence reservations")
-        .insert(stream_id.to_string());
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("self-fence reclaim reservation");
     assert_eq!(
         store
             .release_exact(&entity, &old_owner, old_epoch)
@@ -1064,7 +1285,7 @@ async fn self_fence_reclaim_reuses_full_old_incarnation_slot_when_liveness_is_po
     identity_handle.rotate(fresh_fence.owner().clone()).await;
     assert_eq!(
         registry
-            .hydrate_reclaimed_typed(&entity, &fresh_fence)
+            .hydrate_reclaimed_typed(&entity, &fresh_fence, reservation)
             .await
             .expect("verified self-fence hydration"),
         ReclaimedHydrationOutcome::MissingDurable
@@ -1078,7 +1299,7 @@ async fn self_fence_reclaim_reuses_full_old_incarnation_slot_when_liveness_is_po
     .is_err());
 
     assert!(registry
-        .release_reclaimed_claim(&entity, &fresh_fence)
+        .release_reclaimed_claim(&entity, &fresh_fence, reservation)
         .await
         .is_err());
     assert_eq!(
@@ -1088,7 +1309,7 @@ async fn self_fence_reclaim_reuses_full_old_incarnation_slot_when_liveness_is_po
     );
     assert!(
         registry
-            .release_reclaimed_claim(&entity, &old_fence)
+            .release_reclaimed_claim(&entity, &old_fence, reservation)
             .await
             .is_err(),
         "a delayed obsolete cleanup must remain with its supervised caller"
@@ -1240,10 +1461,13 @@ async fn reclaimed_terminal_release_reports_not_owned_without_touching_replaceme
         store.clone(),
         crate::ownership::SharedNodeIdentity::new(old_owner),
     );
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("obsolete cleanup reservation");
 
     assert_eq!(
         registry
-            .release_reclaimed_claim(&entity, &old_fence)
+            .release_reclaimed_claim(&entity, &old_fence, reservation)
             .await
             .expect("exact lost-race outcome"),
         crate::ownership::ExactReleaseOutcome::NotOwned
@@ -1569,6 +1793,23 @@ async fn enable_claim_publication_failure_retains_ambiguous_exact_release() {
             .expect("claim lookup after retry")
             .is_none()
     );
+}
+
+#[test]
+fn active_fence_ambiguity_marker_does_not_double_charge_capacity() {
+    let registry = InMemorySmSessionRegistry::with_capacity(2);
+    let owner = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let fence =
+        super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(1));
+
+    assert!(registry.reserve_claim_fence_capacity("stream-a"));
+    assert!(registry.try_record_claim_fence("stream-a", fence));
+    assert!(registry.reserve_claim_fence_capacity("stream-a"));
+    assert_eq!(registry.claim_fence_capacity_used(), 1);
+
+    assert!(registry.reserve_claim_fence_capacity("stream-b"));
+    assert_eq!(registry.claim_fence_capacity_used(), 2);
+    assert!(!registry.reserve_claim_fence_capacity("stream-c"));
 }
 
 #[test]
@@ -4389,8 +4630,11 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
     );
     let epoch = crate::ownership::ClaimEpoch(0);
     let fence = super::super::persistence::SmClaimFence::new(me, epoch);
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
     let hydrated = registry
-        .hydrate_reclaimed(&[(entity, fence)])
+        .hydrate_reclaimed(&[(entity, fence, reservation)])
         .await
         .expect("hydrate_reclaimed");
     assert_eq!(
@@ -4458,8 +4702,11 @@ async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
         crate::ownership::ClaimEpoch(current_epoch.0 + 1),
     );
 
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
     let outcome = registry
-        .hydrate_reclaimed_typed(&entity, &stale_fence)
+        .hydrate_reclaimed_typed(&entity, &stale_fence, reservation)
         .await
         .expect("hydrate stale work");
 
@@ -4659,10 +4906,14 @@ async fn hydrate_reclaimed_quarantines_corrupt_persistence_before_terminal_outco
         .corrupt
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
     let outcome = registry
         .hydrate_reclaimed_typed(
             &entity,
             &super::super::persistence::SmClaimFence::new(me, epoch),
+            reservation,
         )
         .await
         .expect("hydrate poison");
@@ -4724,23 +4975,41 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
     let registry = InMemorySmSessionRegistry::with_capacity(1)
         .with_persistence(storage.clone())
         .with_claim_store(claim_store, crate::ownership::SharedNodeIdentity::new(me));
-    assert!(registry.reserve_reclaimed_claim_capacity(&entity));
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
     storage
         .fail_get_once
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     assert_eq!(
         registry
-            .hydrate_reclaimed_typed(&entity, &fence)
+            .hydrate_reclaimed_typed(&entity, &fence, reservation)
             .await
             .expect("first hydration"),
         super::ReclaimedHydrationOutcome::TransientFailure
     );
     assert_eq!(registry.pending_reclaimed_hydration_count(), 1);
+    assert!(!registry
+        .claim_fence_reservations
+        .read()
+        .expect("reservations")
+        .contains(stream_id));
+    assert_eq!(
+        registry
+            .claim_fences
+            .read()
+            .expect("claim fences")
+            .get(stream_id),
+        Some(&fence),
+        "verified hydration must atomically replace the reservation with a counted exact fence before transient storage I/O"
+    );
     let another =
         crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "another-reclaim");
     assert!(
-        !registry.reserve_reclaimed_claim_capacity(&another),
+        registry
+            .reserve_reclaimed_claim_capacity(&another)
+            .is_none(),
         "transient hydration must retain and consume the sole bounded ownership slot"
     );
 
@@ -4751,6 +5020,55 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
         .await
         .expect("peek hydrated session")
         .is_some());
+}
+
+#[tokio::test]
+async fn cancelled_reclaimed_hydration_waiting_for_shard_remains_retryable() {
+    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let owner = crate::ownership::NodeIdentity::local();
+    let stream_id = "cancelled-reclaimed-hydration-shard-wait";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    let epoch = claim_store.acquire(&entity, &owner).await.unwrap();
+    let fence = super::super::persistence::SmClaimFence::new(owner.clone(), epoch);
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+            claim_store,
+            crate::ownership::SharedNodeIdentity::new(owner),
+        ),
+    );
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
+    let blocker = registry.lock_session_operation(stream_id).await.unwrap();
+    let hydrating_registry = registry.clone();
+    let hydrating_entity = entity.clone();
+    let hydrating_fence = fence.clone();
+    let hydration = tokio::spawn(async move {
+        hydrating_registry
+            .hydrate_reclaimed_typed(&hydrating_entity, &hydrating_fence, reservation)
+            .await
+    });
+    tokio::task::yield_now().await;
+    hydration.abort();
+    assert!(hydration.await.unwrap_err().is_cancelled());
+
+    assert_eq!(registry.pending_reclaimed_hydration_count(), 1);
+    assert!(
+        registry
+            .reclaimed_claim_reservations
+            .read()
+            .unwrap()
+            .get(stream_id)
+            == Some(&reservation)
+    );
+    drop(blocker);
+
+    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -4825,10 +5143,14 @@ async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_
     storage
         .armed
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaim reservation");
     let hydrate_registry = std::sync::Arc::clone(&registry);
     let hydrate_entities = vec![(
         entity,
         super::super::persistence::SmClaimFence::new(me, epoch),
+        reservation,
     )];
     let hydrate =
         tokio::spawn(async move { hydrate_registry.hydrate_reclaimed(&hydrate_entities).await });

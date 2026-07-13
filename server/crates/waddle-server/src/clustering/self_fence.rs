@@ -185,7 +185,12 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// owns nothing to hydrate.
     async fn hydrate_reclaimed(
         &self,
-        entities: &[(Entity, NodeIdentity, ClaimEpoch)],
+        entities: &[(
+            Entity,
+            NodeIdentity,
+            ClaimEpoch,
+            waddle_xmpp::stream_management::ReclaimedClaimReservation,
+        )],
     ) -> ReclaimedHydrationHandoff {
         let _ = entities;
         ReclaimedHydrationHandoff::NotAccepted
@@ -193,17 +198,31 @@ pub trait LocallyClaimedEntities: Send + Sync {
 
     /// Reserve bounded local responsibility before inline self-fence reclaim
     /// performs an ownership-changing CAS.
-    fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
-        false
+    fn reserve_reclaimed_claim_capacity(
+        &self,
+        _entity: &Entity,
+    ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+        None
     }
 
     /// Cancel a reservation after an ownership CAS is known not to have won.
-    fn cancel_reclaimed_claim_capacity(&self, _entity: &Entity) {}
+    fn cancel_reclaimed_claim_capacity(
+        &self,
+        _entity: &Entity,
+        _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) {
+    }
 
     /// Retain responsibility when cancellation makes the CAS outcome
     /// ambiguous. The implementation reconciles with a read-only lookup;
     /// the one-shot ownership mutation is never replayed.
-    fn defer_uncertain_reclaimed_claim(&self, _entity: &Entity, _owner: &NodeIdentity) {}
+    fn defer_uncertain_reclaimed_claim(
+        &self,
+        _entity: &Entity,
+        _owner: &NodeIdentity,
+        _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) {
+    }
 
     /// ADR-0017 Phase 3 Slice 10: complete `entity`'s final fenced write —
     /// whatever "durable, up to date, and safe to hand to a new owner"
@@ -509,11 +528,17 @@ async fn reclaim_own_expired_claims<L>(
             // 4's "residual window" carried-risk note.
             continue;
         }
-        if !local_claims.reserve_reclaimed_claim_capacity(&candidate.entity) {
+        let Some(reservation_token) =
+            local_claims.reserve_reclaimed_claim_capacity(&candidate.entity)
+        else {
             break;
-        }
-        let mut reservation =
-            InlineReclaimReservation::new(local_claims, candidate.entity.clone(), fresh.clone());
+        };
+        let mut reservation = InlineReclaimReservation::new(
+            local_claims,
+            candidate.entity.clone(),
+            fresh.clone(),
+            reservation_token,
+        );
         match claim_store
             .steal_stale(
                 &candidate.entity,
@@ -525,7 +550,12 @@ async fn reclaim_own_expired_claims<L>(
         {
             Ok(new_epoch) => {
                 let handoff = local_claims
-                    .hydrate_reclaimed(&[(candidate.entity, fresh.clone(), new_epoch)])
+                    .hydrate_reclaimed(&[(
+                        candidate.entity,
+                        fresh.clone(),
+                        new_epoch,
+                        reservation_token,
+                    )])
                     .await;
                 // Hydration publishes exact retry responsibility before its
                 // first await. Keep the reservation armed until that handoff
@@ -561,6 +591,7 @@ struct InlineReclaimReservation<'a> {
     local_claims: &'a dyn LocallyClaimedEntities,
     entity: Entity,
     owner: NodeIdentity,
+    reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
     armed: bool,
 }
 
@@ -569,18 +600,20 @@ impl<'a> InlineReclaimReservation<'a> {
         local_claims: &'a dyn LocallyClaimedEntities,
         entity: Entity,
         owner: NodeIdentity,
+        reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
     ) -> Self {
         Self {
             local_claims,
             entity,
             owner,
+            reservation,
             armed: true,
         }
     }
 
     fn cancel(&mut self) {
         self.local_claims
-            .cancel_reclaimed_claim_capacity(&self.entity);
+            .cancel_reclaimed_claim_capacity(&self.entity, self.reservation);
         self.armed = false;
     }
 
@@ -594,8 +627,11 @@ impl<'a> InlineReclaimReservation<'a> {
 impl Drop for InlineReclaimReservation<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.local_claims
-                .defer_uncertain_reclaimed_claim(&self.entity, &self.owner);
+            self.local_claims.defer_uncertain_reclaimed_claim(
+                &self.entity,
+                &self.owner,
+                self.reservation,
+            );
         }
     }
 }
@@ -2051,24 +2087,32 @@ mod tests {
 
         async fn hydrate_reclaimed(
             &self,
-            entities: &[(Entity, NodeIdentity, ClaimEpoch)],
+            entities: &[(
+                Entity,
+                NodeIdentity,
+                ClaimEpoch,
+                waddle_xmpp::stream_management::ReclaimedClaimReservation,
+            )],
         ) -> ReclaimedHydrationHandoff {
             if let Some(live_identity) = &self.live_identity_at_hydration {
                 let current = live_identity.current();
-                if entities.iter().any(|(_, owner, _)| *owner != current) {
+                if entities.iter().any(|(_, owner, _, _)| *owner != current) {
                     self.stale_hydration_observed.store(true, Ordering::SeqCst);
                 }
             }
             self.hydrated.lock().expect("lock").extend(
                 entities
                     .iter()
-                    .map(|(entity, _owner, _epoch)| entity.clone()),
+                    .map(|(entity, _owner, _epoch, _reservation)| entity.clone()),
             );
             ReclaimedHydrationHandoff::Accepted
         }
 
-        fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
-            true
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            Some(waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1))
         }
     }
 
@@ -2099,11 +2143,19 @@ mod tests {
             true
         }
 
-        fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
-            true
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            Some(waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1))
         }
 
-        fn defer_uncertain_reclaimed_claim(&self, entity: &Entity, _owner: &NodeIdentity) {
+        fn defer_uncertain_reclaimed_claim(
+            &self,
+            entity: &Entity,
+            _owner: &NodeIdentity,
+            _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+        ) {
             self.deferred.lock().expect("lock").push(entity.clone());
         }
     }
@@ -2122,17 +2174,30 @@ mod tests {
 
         async fn hydrate_reclaimed(
             &self,
-            _entities: &[(Entity, NodeIdentity, ClaimEpoch)],
+            _entities: &[(
+                Entity,
+                NodeIdentity,
+                ClaimEpoch,
+                waddle_xmpp::stream_management::ReclaimedClaimReservation,
+            )],
         ) -> ReclaimedHydrationHandoff {
             self.hydration_started.notify_one();
             std::future::pending().await
         }
 
-        fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
-            true
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            Some(waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1))
         }
 
-        fn defer_uncertain_reclaimed_claim(&self, entity: &Entity, _owner: &NodeIdentity) {
+        fn defer_uncertain_reclaimed_claim(
+            &self,
+            entity: &Entity,
+            _owner: &NodeIdentity,
+            _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+        ) {
             self.deferred.lock().expect("lock").push(entity.clone());
         }
     }
@@ -2149,23 +2214,36 @@ mod tests {
             true
         }
 
-        fn reserve_reclaimed_claim_capacity(&self, _entity: &Entity) -> bool {
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
             self.admission_attempts.fetch_add(1, Ordering::SeqCst);
             self.remaining
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
-                .is_ok()
+                .ok()
+                .map(|generation| {
+                    waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(
+                        u64::from(generation) + 1,
+                    )
+                })
         }
 
         async fn hydrate_reclaimed(
             &self,
-            entities: &[(Entity, NodeIdentity, ClaimEpoch)],
+            entities: &[(
+                Entity,
+                NodeIdentity,
+                ClaimEpoch,
+                waddle_xmpp::stream_management::ReclaimedClaimReservation,
+            )],
         ) -> ReclaimedHydrationHandoff {
             self.hydrated
                 .lock()
                 .expect("lock")
-                .extend(entities.iter().map(|(entity, _, _)| entity.clone()));
+                .extend(entities.iter().map(|(entity, _, _, _)| entity.clone()));
             ReclaimedHydrationHandoff::Accepted
         }
     }

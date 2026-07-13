@@ -111,15 +111,22 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         true
     }
 
-    fn reserve_reclaimed_claim_capacity(&self, entity: &Entity) -> bool {
+    fn reserve_reclaimed_claim_capacity(
+        &self,
+        entity: &Entity,
+    ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
         self.registry
             .get()
-            .is_some_and(|registry| registry.reserve_reclaimed_claim_capacity(entity))
+            .and_then(|registry| registry.reserve_reclaimed_claim_capacity(entity))
     }
 
-    fn cancel_reclaimed_claim_capacity(&self, entity: &Entity) {
+    fn cancel_reclaimed_claim_capacity(
+        &self,
+        entity: &Entity,
+        reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) {
         if let Some(registry) = self.registry.get() {
-            registry.cancel_reclaimed_claim_capacity(entity);
+            registry.cancel_reclaimed_claim_capacity(entity, reservation);
         }
     }
 
@@ -127,9 +134,10 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         &self,
         entity: &Entity,
         owner: &waddle_xmpp::ownership::NodeIdentity,
+        reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
     ) {
         if let Some(registry) = self.registry.get() {
-            registry.defer_uncertain_reclaimed_claim(entity, owner);
+            registry.defer_uncertain_reclaimed_claim(entity, owner, reservation);
         }
     }
 
@@ -146,23 +154,30 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             Entity,
             waddle_xmpp::ownership::NodeIdentity,
             waddle_xmpp::ownership::ClaimEpoch,
+            waddle_xmpp::stream_management::ReclaimedClaimReservation,
         )],
     ) -> ReclaimedHydrationHandoff {
         let Some(registry) = self.registry.get() else {
             return ReclaimedHydrationHandoff::NotAccepted;
         };
-        for (entity, owner, epoch) in entities {
+        for (entity, owner, epoch, reservation) in entities {
             let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
                 owner.clone(),
                 *epoch,
             );
-            match registry.hydrate_reclaimed_typed(entity, &fence).await {
+            match registry
+                .hydrate_reclaimed_typed(entity, &fence, *reservation)
+                .await
+            {
                 Ok(
                     waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
                     | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
                     | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
                 ) => {
-                    if let Err(error) = registry.release_reclaimed_claim(entity, &fence).await {
+                    if let Err(error) = registry
+                        .release_reclaimed_claim(entity, &fence, *reservation)
+                        .await
+                    {
                         tracing::warn!(
                             entity_id = %entity.id,
                             %error,
@@ -792,16 +807,23 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         }
     }
 
-    fn reserve_reclaimed_claim_capacity(&self, entity: &Entity) -> bool {
+    fn reserve_reclaimed_claim_capacity(
+        &self,
+        entity: &Entity,
+    ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
         match entity.entity_type {
             EntityType::SmSession => self.sm.reserve_reclaimed_claim_capacity(entity),
-            EntityType::RoomActor | EntityType::UserActor => false,
+            EntityType::RoomActor | EntityType::UserActor => None,
         }
     }
 
-    fn cancel_reclaimed_claim_capacity(&self, entity: &Entity) {
+    fn cancel_reclaimed_claim_capacity(
+        &self,
+        entity: &Entity,
+        reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) {
         if entity.entity_type == EntityType::SmSession {
-            self.sm.cancel_reclaimed_claim_capacity(entity);
+            self.sm.cancel_reclaimed_claim_capacity(entity, reservation);
         }
     }
 
@@ -809,9 +831,11 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         &self,
         entity: &Entity,
         owner: &waddle_xmpp::ownership::NodeIdentity,
+        reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
     ) {
         if entity.entity_type == EntityType::SmSession {
-            self.sm.defer_uncertain_reclaimed_claim(entity, owner);
+            self.sm
+                .defer_uncertain_reclaimed_claim(entity, owner, reservation);
         }
     }
 
@@ -821,12 +845,13 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
             Entity,
             waddle_xmpp::ownership::NodeIdentity,
             waddle_xmpp::ownership::ClaimEpoch,
+            waddle_xmpp::stream_management::ReclaimedClaimReservation,
         )],
     ) -> ReclaimedHydrationHandoff {
         let (sm_entities, rest): (Vec<_>, Vec<_>) = entities
             .iter()
             .cloned()
-            .partition(|(entity, _, _)| entity.entity_type == EntityType::SmSession);
+            .partition(|(entity, _, _, _)| entity.entity_type == EntityType::SmSession);
         let sm_handoff = if sm_entities.is_empty() {
             ReclaimedHydrationHandoff::NotAccepted
         } else {
@@ -917,10 +942,13 @@ mod tests {
             claim_store.clone(),
             waddle_xmpp::ownership::SharedNodeIdentity::new(identity.clone()),
         ));
-        local_claims.wire(registry);
+        local_claims.wire(registry.clone());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("inline reclaim reservation");
 
         local_claims
-            .hydrate_reclaimed(&[(entity.clone(), identity, epoch)])
+            .hydrate_reclaimed(&[(entity.clone(), identity, epoch, reservation)])
             .await;
 
         assert!(claim_store
@@ -947,10 +975,13 @@ mod tests {
             claim_store.clone(),
             waddle_xmpp::ownership::SharedNodeIdentity::new(current_identity),
         ));
-        local_claims.wire(registry);
+        local_claims.wire(registry.clone());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("inline reclaim reservation");
 
         local_claims
-            .hydrate_reclaimed(&[(entity.clone(), won_identity, epoch)])
+            .hydrate_reclaimed(&[(entity.clone(), won_identity, epoch, reservation)])
             .await;
 
         assert!(
