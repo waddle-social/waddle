@@ -1703,9 +1703,17 @@ impl OrphanReaperSupervisor {
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
+                        crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
+                            "sm_hydration",
+                            "error",
+                        );
                         debug!(%error, entity_id = %work.entity.id, "orphan reaper: terminal SM cleanup failed");
                     }
                     Err(_) => {
+                        crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
+                            "sm_hydration",
+                            "timeout",
+                        );
                         debug!(entity_id = %work.entity.id, "orphan reaper: terminal SM cleanup timed out");
                     }
                 }
@@ -1723,9 +1731,17 @@ impl OrphanReaperSupervisor {
             {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
+                    crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
+                        "room_release",
+                        "error",
+                    );
                     debug!(%error, entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup failed");
                 }
                 Err(_) => {
+                    crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
+                        "room_release",
+                        "timeout",
+                    );
                     debug!(entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup timed out");
                 }
             }
