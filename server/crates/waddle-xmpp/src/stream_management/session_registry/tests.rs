@@ -298,6 +298,39 @@ async fn hung_claim_release_is_bounded_and_retains_exact_fence() {
         .contains_key(stream_id));
 }
 
+#[tokio::test]
+async fn uncertain_reclaimed_claim_without_observed_owner_retains_capacity() {
+    let attempted_owner = crate::ownership::NodeIdentity::new("sweeper", "uncertain");
+    let store: std::sync::Arc<dyn crate::ownership::ClaimStore> =
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+        store,
+        crate::ownership::SharedNodeIdentity::new(attempted_owner.clone()),
+    );
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "unobserved-uncertain-claim",
+    );
+    let replacement = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        "replacement-after-uncertain-claim",
+    );
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reserve uncertain claim capacity");
+
+    assert!(registry
+        .retire_uncertain_reclaimed_claim(&entity, &attempted_owner, reservation)
+        .await
+        .is_err());
+    assert!(
+        registry
+            .reserve_reclaimed_claim_capacity(&replacement)
+            .is_none(),
+        "a missing snapshot is not proof that the in-flight ownership CAS cannot still commit"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn claim_session_commit_before_timeout_retains_acquisition_for_reconciliation() {
     use crate::ownership::ClaimStore as _;

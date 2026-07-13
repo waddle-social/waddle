@@ -46,6 +46,22 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
     }
 }
 
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustering_refuses_portable_sm_persistence() {
+    let global_db = crate::db::Database::in_memory("cluster-sm-portable-rejected")
+        .await
+        .expect("in-memory global database");
+    let error = match open_for_cluster_mode(None, true, None, &global_db).await {
+        Ok(_) => panic!("cluster mode must never fall back to unfenced portable persistence"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SmPersistenceError::ClusterRequiresPostgres { .. }
+    ));
+}
+
 #[tokio::test]
 async fn round_trip_session_preserves_every_field() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();

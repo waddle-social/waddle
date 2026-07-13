@@ -79,6 +79,9 @@ impl ClaimStore for InProcessClaimStore {
     }
 
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         let mut state = self.lock()?;
         // Same contract as `PostgresClaimStore::acquire` (INSERT ... ON
         // CONFLICT DO NOTHING): a fresh claim only succeeds when the
@@ -106,6 +109,9 @@ impl ClaimStore for InProcessClaimStore {
         entity: &Entity,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         // FIX 1: same observable contract as `PostgresClaimStore::ensure_claimed`
         // — a fresh acquire, or (on conflict) a self-reacquire iff the
         // existing row's owner is exactly `me`. Implemented directly against
@@ -137,6 +143,9 @@ impl ClaimStore for InProcessClaimStore {
         _staleness: StalePredicate,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        if !me.is_active() {
+            return Err(ClaimError::AuthorityDisabled);
+        }
         // Real epoch-fenced CAS, mirroring `PostgresClaimStore::steal_stale`'s
         // `WHERE entity=$e AND claim_epoch=$observed` gate exactly (ADR-0017
         // Phase 3 Slice 6 fix: the previous unconditional-overwrite shape

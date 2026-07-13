@@ -250,3 +250,122 @@ pub fn record_claims_abandoned_on_drain(count: u64) {
     })
     .add(count, &[]);
 }
+
+/// Count bounded proactive `RoomActor` orphan-reconciliation outcomes.
+/// `outcome` is one of `hydrated`, `released`, `already_live`,
+/// `adopted_local`, `pending_retry`, `lost_race`, or `failed`; callers
+/// aggregate a whole sweep before recording, avoiding per-room warning noise
+/// after a node loss.
+pub fn record_room_orphan_reconciliation(outcome: &'static str, count: u64) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.room_orphan_reconciliations")
+            .with_description("Proactive RoomActor orphan-claim reconciliation outcomes")
+            .with_unit("claim")
+            .build()
+    })
+    .add(count, &[opentelemetry::KeyValue::new("outcome", outcome)]);
+}
+
+pub fn record_room_orphan_pending_backlog(depth: usize, oldest_age_ms: u64) {
+    static DEPTH: OnceLock<Gauge<u64>> = OnceLock::new();
+    DEPTH
+        .get_or_init(|| {
+            meter()
+                .u64_gauge("waddle.clustering.room_orphan_pending_depth")
+                .with_description("Reclaimed room epochs awaiting adoption or release")
+                .with_unit("claim")
+                .build()
+        })
+        .record(depth as u64, &[]);
+    static AGE: OnceLock<Gauge<u64>> = OnceLock::new();
+    AGE.get_or_init(|| {
+        meter()
+            .u64_gauge("waddle.clustering.room_orphan_pending_oldest_age_ms")
+            .with_description("Age of the oldest pending reclaimed room epoch")
+            .with_unit("ms")
+            .build()
+    })
+    .record(oldest_age_ms, &[]);
+}
+
+/// Report the bounded orphan-reaper work queues. `queue` is the stable
+/// low-cardinality value `sm_hydration`, `room_release`, or `room_handoff`.
+pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
+    static G: OnceLock<Gauge<u64>> = OnceLock::new();
+    G.get_or_init(|| {
+        meter()
+            .u64_gauge("waddle.clustering.orphan_work_queue_depth")
+            .with_description("Current deduplicated orphan-reaper work queue depth")
+            .with_unit("item")
+            .build()
+    })
+    .record(
+        depth as u64,
+        &[opentelemetry::KeyValue::new("queue", queue)],
+    );
+}
+
+/// Count work rejected by a bounded orphan-reaper queue or reservation gate.
+/// `queue` is one of the stable low-cardinality values `sm_hydration`,
+/// `room_release`, or `room_adoption`. A nonzero value means ownership
+/// remains fenced-safe but recovery is deferred to a later sweep or
+/// node-incarnation expiry.
+pub fn record_orphan_work_queue_backpressure(queue: &'static str) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.orphan_work_queue_backpressure")
+            .with_description("Orphan-reaper work rejected because its bounded queue was full")
+            .with_unit("item")
+            .build()
+    })
+    .add(1, &[opentelemetry::KeyValue::new("queue", queue)]);
+}
+
+pub fn record_orphan_worker_failure(worker: &'static str, reason: &'static str) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.orphan_worker_failures")
+            .with_description("Orphan-reaper worker tasks that exited unexpectedly")
+            .with_unit("failure")
+            .build()
+    })
+    .add(
+        1,
+        &[
+            opentelemetry::KeyValue::new("worker", worker),
+            opentelemetry::KeyValue::new("reason", reason),
+        ],
+    );
+}
+
+/// Report each bounded SM candidate page, including whether another page was
+/// visible at scan time and how many malformed stale rows were quarantined.
+pub fn record_sm_orphan_candidate_page(candidates: usize, has_more: bool, quarantined: usize) {
+    static H: OnceLock<Histogram<u64>> = OnceLock::new();
+    H.get_or_init(|| {
+        meter()
+            .u64_histogram("waddle.clustering.sm_orphan_candidate_page_size")
+            .with_description("Bounded SM orphan candidates returned per cursor page")
+            .with_unit("claim")
+            .build()
+    })
+    .record(
+        candidates as u64,
+        &[opentelemetry::KeyValue::new("has_more", has_more)],
+    );
+    if quarantined > 0 {
+        static C: OnceLock<Counter<u64>> = OnceLock::new();
+        C.get_or_init(|| {
+            meter()
+                .u64_counter("waddle.clustering.sm_orphan_malformed_quarantined")
+                .with_description("Malformed stale SM claim rows quarantined by the bounded scan")
+                .with_unit("claim")
+                .build()
+        })
+        .add(quarantined as u64, &[]);
+    }
+}

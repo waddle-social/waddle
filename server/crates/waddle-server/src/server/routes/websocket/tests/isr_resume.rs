@@ -168,6 +168,7 @@ async fn isr_fixture() -> Option<IsrFixture> {
         resume_bridge: None,
         ordered_relay_delivery_bridge: None,
         stop_token: None,
+        fatal_fence: None,
         resume_handshake_timeout: None,
     };
 
@@ -207,6 +208,7 @@ async fn in_memory_isr_fixture() -> IsrFixture {
         resume_bridge: None,
         ordered_relay_delivery_bridge: None,
         stop_token: None,
+        fatal_fence: None,
         resume_handshake_timeout: None,
     };
     let state = create_test_websocket_state_with_clustering(clustering, sm_session_registry).await;
@@ -1290,6 +1292,7 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
         ordered_relay_delivery_bridge: None,
         resume_bridge: None,
         stop_token: None,
+        fatal_fence: None,
         // FIX 2: a real handshake budget — node B's cross-node steal must
         // actually reach branch 1 (`current_claim` finds node A's foreign
         // claim; a persisted snapshot already exists too), never

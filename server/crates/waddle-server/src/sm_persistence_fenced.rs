@@ -181,9 +181,10 @@ fn claim_error_to_sm_persistence_error(error: ClaimError, entity: Entity) -> SmP
         // `AlreadyClaimed`/`Conflict` — this node is not, and for
         // `Draining` will not become, the owner, so the caller should treat
         // it exactly like any other ownership loss.
-        ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining => {
-            SmPersistenceError::NotOwner { entity }
-        }
+        ClaimError::AlreadyClaimed
+        | ClaimError::Conflict
+        | ClaimError::Draining
+        | ClaimError::AuthorityDisabled => SmPersistenceError::NotOwner { entity },
         ClaimError::Backend(_) | ClaimError::Poisoned => {
             SmPersistenceError::Other(error.to_string())
         }
