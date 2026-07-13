@@ -13,8 +13,7 @@
 
 use super::*;
 
-use crate::auth::AuthError;
-use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
+use crate::db::actor::DbActor;
 use crate::db::{row_value, ValueExt};
 
 /// Per-sweep counts returned by [`AuthHandshakeStore::sweep_expired`].
@@ -189,13 +188,19 @@ impl AuthHandshakeStore {
         }
     }
 
-    pub async fn insert_device(&self, entry: &DeviceAuthorization) -> Result<(), AuthError> {
+    /// Returns `false` when the insert lost to a `device_code` /
+    /// `user_code` uniqueness conflict (`ON CONFLICT DO NOTHING`) —
+    /// the caller regenerates both codes and retries, which is what
+    /// guarantees a `user_code` maps to exactly one active grant.
+    pub async fn insert_device(&self, entry: &DeviceAuthorization) -> Result<bool, AuthError> {
         let payload = Self::encode(entry)?;
-        self.actor
+        let inserted = self
+            .actor
             .ask(DbExecute {
                 sql: "INSERT INTO device_auth \
                       (device_code, user_code, status, payload, expires_at_ms) \
-                      VALUES (?, ?, ?, ?, ?)"
+                      VALUES (?, ?, ?, ?, ?) \
+                      ON CONFLICT DO NOTHING"
                     .to_string(),
                 params: vec![
                     crate::db::Value::from(&entry.device_code),
@@ -207,7 +212,7 @@ impl AuthHandshakeStore {
             })
             .await
             .map_err(Self::ask_err)?;
-        Ok(())
+        Ok(inserted == 1)
     }
 
     pub async fn get_device(
@@ -237,13 +242,15 @@ impl AuthHandshakeStore {
     }
 
     /// Persist a device-flow state transition (Pending → InProgress →
-    /// Approved / session attach). Returns `false` when the row is gone
-    /// (expired-and-pruned or redeemed by another replica) or when the
-    /// write lost to an approval: a non-approved write can never
-    /// overwrite an `approved` row, so a delayed duplicate
-    /// verify-submit cannot clobber the callback's approval and wipe
-    /// its `session_id` (read-modify-write here holds no row lock
-    /// between replicas).
+    /// Approved / session attach). Returns `false` when the write did
+    /// not land, which happens when the row is gone (pruned or
+    /// redeemed by another replica), when the grant's validity window
+    /// has passed (an expired grant must not be approvable even if the
+    /// janitor hasn't pruned it yet), or when the write lost to an
+    /// approval: a non-approved write can never overwrite an
+    /// `approved` row, so a delayed duplicate verify-submit cannot
+    /// clobber the callback's approval and wipe its `session_id`
+    /// (read-modify-write here holds no row lock between replicas).
     pub async fn update_device(&self, entry: &DeviceAuthorization) -> Result<bool, AuthError> {
         let payload = Self::encode(entry)?;
         let status = Self::device_status_str(&entry.status);
@@ -251,7 +258,9 @@ impl AuthHandshakeStore {
             .actor
             .ask(DbExecute {
                 sql: "UPDATE device_auth SET payload = ?, status = ?, expires_at_ms = ? \
-                      WHERE device_code = ? AND (status <> 'approved' OR ? = 'approved')"
+                      WHERE device_code = ? \
+                        AND (status <> 'approved' OR ? = 'approved') \
+                        AND expires_at_ms > ?"
                     .to_string(),
                 params: vec![
                     crate::db::Value::from(payload),
@@ -259,6 +268,7 @@ impl AuthHandshakeStore {
                     crate::db::Value::from(entry.expires_at.timestamp_millis()),
                     crate::db::Value::from(&entry.device_code),
                     crate::db::Value::from(status),
+                    crate::db::Value::from(Utc::now().timestamp_millis()),
                 ],
             })
             .await
@@ -511,6 +521,43 @@ mod tests {
         store.remove_device("dev-1").await.expect("remove");
         assert!(store.get_device("dev-1").await.expect("get").is_none());
         assert!(!store.update_device(&device).await.expect("update gone"));
+    }
+
+    #[tokio::test]
+    async fn expired_device_grant_cannot_be_approved() {
+        let store = create_store("handshake-device-expired-approve").await;
+        let mut device = make_device("dev-late", -1);
+        assert!(store.insert_device(&device).await.expect("insert"));
+
+        device.status = DeviceAuthStatus::Approved;
+        device.session_id = Some("session-late".to_string());
+        assert!(
+            !store.update_device(&device).await.expect("update"),
+            "approval must not land on a grant past its validity window"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_user_code_insert_is_rejected_not_silently_merged() {
+        let store = create_store("handshake-device-user-code-unique").await;
+        let first = make_device("dev-a", 15);
+        assert!(store.insert_device(&first).await.expect("insert"));
+
+        let mut clash = make_device("dev-b", 15);
+        clash.user_code = first.user_code.clone();
+        assert!(
+            !store.insert_device(&clash).await.expect("insert clash"),
+            "second grant with the same user_code must lose the insert"
+        );
+
+        // The surviving row is the first grant, so the verify page can
+        // never approve the wrong device.
+        let resolved = store
+            .find_device_by_user_code(&first.user_code)
+            .await
+            .expect("find")
+            .expect("entry exists");
+        assert_eq!(resolved.device_code, "dev-a");
     }
 
     #[tokio::test]

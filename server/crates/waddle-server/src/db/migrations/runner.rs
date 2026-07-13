@@ -147,9 +147,14 @@ impl MigrationRunner {
                 ))
             })?;
 
-            // Record the migration
+            // Record the migration. `ON CONFLICT DO NOTHING`: there is
+            // no cross-node lock (#1338), so two replicas booting
+            // concurrently can both pass the applied-versions check and
+            // race this insert; the loser must not crash-loop on the
+            // duplicate primary key after (idempotent) DDL succeeded.
             conn.execute(
-                "INSERT INTO _migrations (version, description) VALUES (?, ?)",
+                "INSERT INTO _migrations (version, description) VALUES (?, ?) \
+                 ON CONFLICT (version) DO NOTHING",
                 (migration.version, migration.description.as_str()),
             )
             .await

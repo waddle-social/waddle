@@ -622,7 +622,7 @@ CREATE TABLE IF NOT EXISTS device_auth (
     expires_at_ms INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_auth(user_code);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_device_auth_user_code ON device_auth(user_code);
 CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth(expires_at_ms);
 
 CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
@@ -651,7 +651,7 @@ CREATE TABLE IF NOT EXISTS device_auth (
     expires_at_ms BIGINT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_auth(user_code);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_device_auth_user_code ON device_auth(user_code);
 CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth(expires_at_ms);
 
 CREATE TABLE IF NOT EXISTS xmpp_auth_codes (

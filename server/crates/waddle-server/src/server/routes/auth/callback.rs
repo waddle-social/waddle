@@ -295,11 +295,22 @@ pub(super) async fn callback_handler(
             // surface the expiry instead.
             let approved = match state.auth_handshake.get_device(&device_code).await {
                 Ok(Some(mut entry)) => {
-                    entry.status = DeviceAuthStatus::Approved;
-                    entry.session_id = Some(session.id.clone());
-                    match state.auth_handshake.update_device(&entry).await {
-                        Ok(approved) => approved,
-                        Err(err) => return auth_error_to_response(err).into_response(),
+                    if entry.is_expired() {
+                        // The IdP round-trip outlived the device-code
+                        // window. `update_device` is also time-gated in
+                        // SQL, so this is belt-and-braces plus eager
+                        // cleanup of the dead row.
+                        if let Err(err) = state.auth_handshake.remove_device(&device_code).await {
+                            warn!(error = %err, "Failed to remove expired device authorization");
+                        }
+                        false
+                    } else {
+                        entry.status = DeviceAuthStatus::Approved;
+                        entry.session_id = Some(session.id.clone());
+                        match state.auth_handshake.update_device(&entry).await {
+                            Ok(approved) => approved,
+                            Err(err) => return auth_error_to_response(err).into_response(),
+                        }
                     }
                 }
                 Ok(None) => false,
@@ -333,7 +344,7 @@ pub(super) async fn callback_handler(
                 .insert_xmpp_code(
                     &auth_code,
                     &XmppAuthCode {
-                        session_id: session.id,
+                        session_id: session.id.clone(),
                         redirect_uri: client_redirect_uri.clone(),
                         code_challenge: client_code_challenge,
                         created_at: Utc::now(),
@@ -341,6 +352,11 @@ pub(super) async fn callback_handler(
                 )
                 .await
             {
+                // No code ever reaches the client, so the session just
+                // created would be a live 30-day orphan — roll it back.
+                if let Err(rollback_err) = state.session_manager.delete_session(&session.id).await {
+                    warn!(error = %rollback_err, "Failed to roll back session for failed xmpp code insert");
+                }
                 return auth_error_to_response(err).into_response();
             }
 

@@ -153,26 +153,52 @@ pub async fn device_start_handler(
             .into_response();
     }
 
-    let auth = DeviceAuthorization {
-        device_code: generate_device_code(),
-        user_code: generate_user_code(),
-        provider_id: request.provider,
-        expires_at: Utc::now() + Duration::minutes(15),
-        status: DeviceAuthStatus::Pending,
-        session_id: None,
+    // `user_code` is unique in the store; regenerate both codes on a
+    // collision with another active grant (the insert is ON CONFLICT
+    // DO NOTHING, so a loss is reported as `false`, not an error).
+    const INSERT_ATTEMPTS: usize = 5;
+    let mut auth = None;
+    for _ in 0..INSERT_ATTEMPTS {
+        let candidate = DeviceAuthorization {
+            device_code: generate_device_code(),
+            user_code: generate_user_code(),
+            provider_id: request.provider.clone(),
+            expires_at: Utc::now() + Duration::minutes(15),
+            status: DeviceAuthStatus::Pending,
+            session_id: None,
+        };
+
+        match state.auth_handshake.insert_device(&candidate).await {
+            Ok(true) => {
+                auth = Some(candidate);
+                break;
+            }
+            Ok(false) => continue,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("server_error", &err.to_string())),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let Some(auth) = auth else {
+        warn!("Device flow could not allocate a unique user_code after retries");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                "server_error",
+                "Could not allocate a device code; try again",
+            )),
+        )
+            .into_response();
     };
 
     let device_code = auth.device_code.clone();
     let user_code = auth.user_code.clone();
     let expires_in = (auth.expires_at - Utc::now()).num_seconds() as u32;
-
-    if let Err(err) = state.auth_handshake.insert_device(&auth).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("server_error", &err.to_string())),
-        )
-            .into_response();
-    }
 
     let verification_uri = format!("{}/api/auth/device/verify", state.base_url);
 
