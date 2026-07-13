@@ -481,6 +481,126 @@ async fn test_list_rooms() {
 }
 
 #[tokio::test]
+async fn list_rooms_owned_by_excludes_fresh_post_rotation_rooms() {
+    let registry = spawn_registry().await;
+    let old = NodeIdentity::new("room-node", "old-incarnation");
+    let fresh = NodeIdentity::new("room-node", "fresh-incarnation");
+    let identity = SharedNodeIdentity::new(old.clone());
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    registry
+        .ask(WireClusteringClaims {
+            claim_store: claim_store.clone(),
+            node_identity: identity.clone(),
+            durable_store: None,
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire claims");
+
+    registry
+        .ask(CreateRoom {
+            room_jid: test_room_jid("old-owner"),
+            waddle_id: "w-old".to_string(),
+            channel_id: "c-old".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create old-owner room");
+    identity.rotate(fresh.clone()).await;
+    registry
+        .ask(CreateRoom {
+            room_jid: test_room_jid("fresh-owner"),
+            waddle_id: "w-fresh".to_string(),
+            channel_id: "c-fresh".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create fresh-owner room");
+
+    assert_eq!(
+        registry
+            .ask(ListRoomsOwnedBy { owner: old })
+            .await
+            .expect("old owner rooms"),
+        vec![test_room_jid("old-owner")]
+    );
+    assert_eq!(
+        registry
+            .ask(ListRoomsOwnedBy { owner: fresh })
+            .await
+            .expect("fresh owner rooms"),
+        vec![test_room_jid("fresh-owner")]
+    );
+}
+
+#[tokio::test]
+async fn stale_exact_owner_demotion_preserves_a_fresh_same_jid_room() {
+    let registry = spawn_registry().await;
+    let old = NodeIdentity::new("room-node", "old-incarnation");
+    let fresh = NodeIdentity::new("room-node", "fresh-incarnation");
+    let identity = SharedNodeIdentity::new(old.clone());
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    registry
+        .ask(WireClusteringClaims {
+            claim_store: claim_store.clone(),
+            node_identity: identity.clone(),
+            durable_store: None,
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire claims");
+    let room_jid = test_room_jid("same-jid");
+    registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-old".to_string(),
+            channel_id: "c-old".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create old room");
+    assert!(registry
+        .ask(DemoteRoomIfOwner {
+            room_jid: room_jid.clone(),
+            owner: old.clone(),
+        })
+        .await
+        .expect("demote old room"));
+    claim_store
+        .release(
+            &Entity::new(EntityType::RoomActor, room_jid.to_string()),
+            &old,
+            ClaimEpoch(0),
+        )
+        .await
+        .expect("simulate authoritative old-claim retirement");
+
+    identity.rotate(fresh).await;
+    registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-fresh".to_string(),
+            channel_id: "c-fresh".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create fresh room");
+
+    assert!(!registry
+        .ask(DemoteRoomIfOwner {
+            room_jid: room_jid.clone(),
+            owner: old,
+        })
+        .await
+        .expect("stale demotion"));
+    assert!(registry
+        .ask(GetRoom { room_jid })
+        .await
+        .expect("fresh room lookup")
+        .is_some());
+}
+
+#[tokio::test]
 async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
     let registry = spawn_registry().await;
     let room_jid = test_room_jid("restart");

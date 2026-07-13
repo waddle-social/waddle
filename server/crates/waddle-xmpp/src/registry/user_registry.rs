@@ -49,6 +49,10 @@ struct UserClaimLease {
 struct UserEntry {
     actor_ref: ActorRef<UserActor>,
     claim: UserClaimLease,
+    /// Actor-authoritative registration mirror used only for exact hard
+    /// demotion. Keeping the cheap Arc-backed entries here avoids asking a
+    /// potentially wedged child actor before it can be killed.
+    resources: HashMap<FullJid, ConnectionEntry>,
 }
 
 enum UserEntryClaimStatus {
@@ -171,9 +175,23 @@ impl UserRegistryActor {
             UserEntry {
                 actor_ref: actor_ref.clone(),
                 claim,
+                resources: HashMap::new(),
             },
         );
         actor_ref
+    }
+
+    async fn acquire_and_publish_user(
+        &mut self,
+        bare_jid: BareJid,
+    ) -> Result<ActorRef<UserActor>, UserRegistryError> {
+        let claim = self.acquire_user_claim(&bare_jid).await?;
+        let Some(_publication_guard) = self.node_identity.guard_if_current(&claim.owner).await
+        else {
+            self.release_user_claim(&bare_jid, &claim).await;
+            return Err(UserRegistryError::ClaimUnavailable(bare_jid));
+        };
+        Ok(self.spawn_user_actor(bare_jid, claim))
     }
 
     async fn release_user_claim(&self, bare_jid: &BareJid, claim: &UserClaimLease) {
@@ -444,8 +462,7 @@ impl kameo::message::Message<GetOrCreateUser> for UserRegistryActor {
         }
 
         debug!(jid = %msg.bare_jid, "Spawning new UserActor");
-        let claim = self.acquire_user_claim(&msg.bare_jid).await?;
-        let actor_ref = self.spawn_user_actor(msg.bare_jid, claim);
+        let actor_ref = self.acquire_and_publish_user(msg.bare_jid).await?;
         Ok(actor_ref)
     }
 }
@@ -515,6 +532,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bare_jid = msg.jid.to_bare();
+        let mirrored_entry = msg.entry.clone();
         if self.poisoned_users.contains(&bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
@@ -525,8 +543,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
         {
             actor_ref
         } else {
-            let claim = self.acquire_user_claim(&bare_jid).await?;
-            self.spawn_user_actor(bare_jid.clone(), claim)
+            self.acquire_and_publish_user(bare_jid.clone()).await?
         };
 
         match user_actor
@@ -538,7 +555,11 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
             .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(user) = self.users.get_mut(&bare_jid) {
+                    user.resources.insert(msg.jid.clone(), mirrored_entry);
+                }
+            }
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 return Err(UserRegistryError::UserActorBusy(bare_jid));
             }
@@ -570,6 +591,7 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bare_jid = msg.jid.to_bare();
+        let mirrored_entry = msg.entry.clone();
         if self.poisoned_users.contains(&bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
@@ -580,8 +602,7 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
         {
             actor_ref
         } else {
-            let claim = self.acquire_user_claim(&bare_jid).await?;
-            self.spawn_user_actor(bare_jid.clone(), claim)
+            self.acquire_and_publish_user(bare_jid.clone()).await?
         };
 
         match user_actor
@@ -594,7 +615,14 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
             .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
         {
-            Ok(registered) => Ok(registered),
+            Ok(registered) => {
+                if registered {
+                    if let Some(user) = self.users.get_mut(&bare_jid) {
+                        user.resources.insert(msg.jid.clone(), mirrored_entry);
+                    }
+                }
+                Ok(registered)
+            }
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 Err(UserRegistryError::UserActorBusy(bare_jid))
             }
@@ -622,6 +650,7 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bare_jid = msg.jid.to_bare();
+        let resource_jid = msg.jid.clone();
         if self.poisoned_users.contains(&bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
@@ -633,7 +662,7 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
             return Err(self.mark_actor_state_lost(&bare_jid).await);
         }
 
-        let is_empty = match entry
+        let unregister = match entry
             .actor_ref
             .ask(UnregisterConnectionAndReportEmpty {
                 jid: msg.jid,
@@ -643,14 +672,20 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
             .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
         {
-            Ok(is_empty) => is_empty,
+            Ok(outcome) => outcome,
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 return Err(UserRegistryError::UserActorBusy(bare_jid));
             }
             Err(_) => return Err(self.mark_actor_state_lost(&bare_jid).await),
         };
 
-        if is_empty {
+        if unregister.removed {
+            if let Some(user) = self.users.get_mut(&bare_jid) {
+                user.resources.remove(&resource_jid);
+            }
+        }
+
+        if unregister.is_empty {
             if let Some(entry) = self.users.remove(&bare_jid) {
                 self.release_user_claim(&bare_jid, &entry.claim).await;
             }
@@ -715,6 +750,51 @@ impl kameo::message::Message<DemoteUserActor> for UserRegistryActor {
     }
 }
 
+/// One exact resource removed with an owner-conditional UserActor demotion.
+pub struct DemotedUserResource {
+    pub jid: FullJid,
+    pub entry: ConnectionEntry,
+}
+
+/// Resources that belonged to the exact UserActor entry that was demoted.
+#[derive(kameo::Reply)]
+pub struct DemotedUserActor {
+    pub resources: Vec<DemotedUserResource>,
+}
+
+/// Demote a UserActor only if its immutable claim lease still belongs to
+/// `owner`. Resource capture, owner comparison, removal, and kill share one
+/// registry mailbox turn, preventing a stale sweep from targeting an ABA
+/// same-JID replacement.
+pub struct DemoteUserActorIfOwner {
+    pub bare_jid: BareJid,
+    pub owner: NodeIdentity,
+}
+
+impl kameo::message::Message<DemoteUserActorIfOwner> for UserRegistryActor {
+    type Reply = Option<DemotedUserActor>;
+
+    async fn handle(
+        &mut self,
+        msg: DemoteUserActorIfOwner,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let entry = self.users.get(&msg.bare_jid)?.clone();
+        if entry.claim.owner != msg.owner {
+            return None;
+        }
+        let removed = self.users.remove(&msg.bare_jid)?;
+        removed.actor_ref.kill();
+        Some(DemotedUserActor {
+            resources: removed
+                .resources
+                .into_iter()
+                .map(|(jid, entry)| DemotedUserResource { jid, entry })
+                .collect(),
+        })
+    }
+}
+
 /// List all bare JIDs that currently have a `UserActor`.
 pub struct ListUsers;
 
@@ -727,6 +807,27 @@ impl kameo::message::Message<ListUsers> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.users.keys().cloned().collect()
+    }
+}
+
+/// List local UserActors whose immutable claim lease belongs to `owner`.
+pub struct ListUsersOwnedBy {
+    pub owner: NodeIdentity,
+}
+
+impl kameo::message::Message<ListUsersOwnedBy> for UserRegistryActor {
+    type Reply = Vec<BareJid>;
+
+    async fn handle(
+        &mut self,
+        msg: ListUsersOwnedBy,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.users
+            .iter()
+            .filter(|(_, entry)| entry.claim.owner == msg.owner)
+            .map(|(jid, _)| jid.clone())
+            .collect()
     }
 }
 

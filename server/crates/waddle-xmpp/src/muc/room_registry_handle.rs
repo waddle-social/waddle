@@ -36,19 +36,19 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DestroyRoom,
-    DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom,
+    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
+    DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom,
     GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
     IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease, IsMucJid,
     IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
-    PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom,
-    ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    ListRoomsOwnedBy, PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog,
+    ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
     ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
     RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
-use crate::ownership::{ClaimStore, SharedNodeIdentity};
+use crate::ownership::{ClaimStore, NodeIdentity, SharedNodeIdentity};
 use crate::xep::xep0421::OccupantIdSecret;
 
 /// Explicit bounded mailbox capacity for the `RoomRegistryActor`.
@@ -428,6 +428,20 @@ impl RoomRegistry {
         list_rooms() -> Vec<BareJid>,
         "list_rooms",
         ListRooms
+    );
+
+    registry_method!(
+        /// List rooms and pending release work tied to one exact owner.
+        list_rooms_owned_by(owner: NodeIdentity) -> Vec<BareJid>,
+        "list_rooms_owned_by",
+        ListRoomsOwnedBy { owner }
+    );
+
+    registry_method!(
+        /// Demote a live room only if its entry still belongs to `owner`.
+        demote_room_if_owner(room_jid: BareJid, owner: NodeIdentity) -> bool,
+        "demote_room_if_owner",
+        DemoteRoomIfOwner { room_jid, owner }
     );
 
     registry_method!(

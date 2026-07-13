@@ -153,6 +153,13 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// of hard kill, not a `tell`.
     async fn demote(&self, entity: &Entity);
 
+    /// Demote work still recorded under an exact superseded node identity
+    /// after identity rotation has made new admissions distinguishable. Most
+    /// local actor registries do not retain owner identity per entry and use
+    /// the ordinary pre-rotation sweep; typed SM claim fences do, so their
+    /// implementation closes the final inventory-snapshot race precisely.
+    async fn demote_owned_by(&self, _owner: &NodeIdentity) {}
+
     /// Health-ask the local actor owning `entity` (ADR-0017 Phase 3 Slice
     /// 3's owner-veto path): `true` if it answered promptly (the owner may
     /// then clear the entity's steal intent — FIX 1(e): the veto is
@@ -1178,6 +1185,7 @@ pub async fn run_node_lease<L>(
                         let superseded_identity = identity.clone();
                         identity = fresh;
                         live_identity.rotate(identity.clone()).await;
+                        local_claims.demote_owned_by(&superseded_identity).await;
 
                         // What "claim re-acquisition" can mean AT THIS
                         // EXACT POINT: every entity this node owned before
@@ -2055,6 +2063,7 @@ mod tests {
         owned: Vec<Entity>,
         healthy: Arc<AtomicBool>,
         demoted: Arc<std::sync::Mutex<Vec<Entity>>>,
+        exact_demoted_owners: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
         /// Every entity ever passed to `hydrate_reclaimed`, in call order —
         /// lets FIX 4(b)'s inline-post-fence-reclaim test assert the
         /// targeted-hydration hook actually fires. Defaults are wired via
@@ -2079,6 +2088,13 @@ mod tests {
 
         async fn demote(&self, entity: &Entity) {
             self.demoted.lock().expect("lock").push(entity.clone());
+        }
+
+        async fn demote_owned_by(&self, owner: &NodeIdentity) {
+            self.exact_demoted_owners
+                .lock()
+                .expect("lock")
+                .push(owner.clone());
         }
 
         async fn health_check(&self, _entity: &Entity) -> bool {
@@ -2265,6 +2281,7 @@ mod tests {
             owned: vec![entity.clone()],
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
+            exact_demoted_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: FakeLocalClaims::unhydrated(),
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
@@ -2333,6 +2350,7 @@ mod tests {
             // instead of waiting to be stolen from.
             healthy: Arc::new(AtomicBool::new(false)),
             demoted: Arc::clone(&demoted),
+            exact_demoted_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: FakeLocalClaims::unhydrated(),
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
@@ -2402,6 +2420,7 @@ mod tests {
             owned: vec![entity.clone()],
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
+            exact_demoted_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: FakeLocalClaims::unhydrated(),
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
@@ -2474,6 +2493,7 @@ mod tests {
             owned: vec![entity_a.clone(), entity_b.clone()],
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
+            exact_demoted_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: FakeLocalClaims::unhydrated(),
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
@@ -2520,6 +2540,68 @@ mod tests {
         assert!(
             !readiness.is_ready(),
             "readiness must flip not-ready before the lease becomes stealable"
+        );
+        stop_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_lease_post_rotation_sweeps_the_exact_superseded_owner() {
+        let interval = Duration::from_millis(50);
+        let initial_identity = identity();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            // Both ordinary inventories are deliberately empty. This models
+            // an admission landing after the final snapshot; the exact-owner
+            // hook must still run after rotation.
+            owned: Vec::new(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            exact_demoted_owners: Arc::clone(&exact_demoted_owners),
+            hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
+        });
+        let stop_token = CancellationToken::new();
+        tokio::spawn(run_node_lease(
+            FakeLease::new(Box::new(|| Ok(false))),
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: ClusteringReadiness::new(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        advance_until(interval, 20, || {
+            !exact_demoted_owners.lock().expect("lock").is_empty()
+        })
+        .await;
+        assert_eq!(
+            exact_demoted_owners.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&initial_identity)
+        );
+        assert_ne!(
+            live_identity.current(),
+            initial_identity,
+            "exact-owner cleanup must run only after admissions use the fresh identity"
         );
         stop_token.cancel();
     }
@@ -2756,6 +2838,7 @@ mod tests {
             owned: Vec::new(),
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            exact_demoted_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: Arc::clone(&hydrated),
             live_identity_at_hydration: Some(live_identity.clone()),
             stale_hydration_observed: Arc::clone(&stale_hydration_observed),

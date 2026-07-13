@@ -165,11 +165,12 @@ async fn test_unregister_and_report_empty_is_atomic_per_user_actor() {
         .await
         .expect("register");
 
-    let is_empty: bool = actor
+    let outcome = actor
         .ask(UnregisterConnectionAndReportEmpty { jid, owner: None })
         .await
         .expect("unregister+check");
-    assert!(is_empty);
+    assert!(outcome.removed);
+    assert!(outcome.is_empty);
 }
 
 /// Owner-gated unregister mirrors the DashMap `unregister_if_owner`: a lagging
@@ -221,7 +222,7 @@ async fn test_unregister_is_owner_gated() {
     );
 
     // The replacement's own teardown (matching token) removes it.
-    let is_empty: bool = actor
+    let outcome = actor
         .ask(UnregisterConnectionAndReportEmpty {
             jid,
             owner: Some(new_owner),
@@ -229,7 +230,7 @@ async fn test_unregister_is_owner_gated() {
         .await
         .expect("owned unregister");
     assert!(
-        is_empty,
+        outcome.removed && outcome.is_empty,
         "matching-owner unregister must remove the resource"
     );
 }

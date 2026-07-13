@@ -33,8 +33,9 @@ use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::ownership::{Entity, EntityType};
 use waddle_xmpp::registry::user_actor::HealthCheck as UserHealthCheck;
 use waddle_xmpp::registry::{
-    ConnectionRegistry, DemoteUserActor, ForceDetachOutcome, ForceDetachRequest, GetResources,
-    GetUserForLocalClaim, ListUsers, UserRegistryActor,
+    ConnectionRegistry, DemoteUserActor, DemoteUserActorIfOwner, DemotedUserResource,
+    ForceDetachOutcome, ForceDetachRequest, GetResources, GetUserForLocalClaim, ListUsers,
+    ListUsersOwnedBy, UserRegistryActor,
 };
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
@@ -98,6 +99,18 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             return;
         }
         registry.forget_claim_locally(&entity.id).await;
+    }
+
+    async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        let entities = registry
+            .locally_owned_claim_ids_for_owner(owner)
+            .unwrap_or_default();
+        for stream_id in entities {
+            registry.forget_claim_locally(&stream_id).await;
+        }
     }
 
     async fn health_check(&self, _entity: &Entity) -> bool {
@@ -331,6 +344,28 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         }
     }
 
+    async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        let Ok(room_jids) = registry.list_rooms_owned_by(owner.clone()).await else {
+            return;
+        };
+        for room_jid in room_jids {
+            if registry
+                .demote_room_if_owner(room_jid.clone(), owner.clone())
+                .await
+                .unwrap_or(false)
+            {
+                tracing::warn!(
+                    room = %room_jid,
+                    owner = %owner.node_id,
+                    "post-rotation exact-owner sweep demoted stale RoomActor"
+                );
+            }
+        }
+    }
+
     /// Health-ask the local `RoomActor` (ADR-0017 Phase 3 Slice 3's
     /// owner-veto path, now genuinely applicable to `RoomActor` claims).
     ///
@@ -559,10 +594,41 @@ impl UserLocalClaims {
             );
             return;
         };
-        for jid in resources {
-            let Some(entry) = connection_registry.get_entry(&jid) else {
-                continue;
-            };
+        let entries = resources
+            .into_iter()
+            .filter_map(|jid| {
+                connection_registry
+                    .get_entry(&jid)
+                    .map(|entry| (jid, entry))
+            })
+            .collect();
+        self.force_detach_entries(bare_jid, entries).await;
+    }
+
+    async fn force_detach_exact_resources(
+        &self,
+        bare_jid: &BareJid,
+        resources: Vec<DemotedUserResource>,
+    ) {
+        self.force_detach_entries(
+            bare_jid,
+            resources
+                .into_iter()
+                .map(|resource| (resource.jid, resource.entry))
+                .collect(),
+        )
+        .await;
+    }
+
+    async fn force_detach_entries(
+        &self,
+        bare_jid: &BareJid,
+        entries: Vec<(FullJid, waddle_xmpp::registry::ConnectionEntry)>,
+    ) {
+        let Some(connection_registry) = self.connection_registry.get() else {
+            return;
+        };
+        for (jid, entry) in entries {
             let owner = entry.carbons_handle();
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
@@ -755,6 +821,51 @@ impl LocallyClaimedEntities for UserLocalClaims {
             true
         }
     }
+
+    async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        let users = match registry
+            .ask(ListUsersOwnedBy {
+                owner: owner.clone(),
+            })
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(users) => users,
+            Err(error) => {
+                tracing::warn!(?error, "UserLocalClaims exact-owner listing failed");
+                return;
+            }
+        };
+        for bare_jid in users {
+            match registry
+                .ask(DemoteUserActorIfOwner {
+                    bare_jid: bare_jid.clone(),
+                    owner: owner.clone(),
+                })
+                .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+                .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+                .await
+            {
+                Ok(Some(demoted)) => {
+                    self.force_detach_exact_resources(&bare_jid, demoted.resources)
+                        .await;
+                    tracing::warn!(
+                        jid = %bare_jid,
+                        owner = %owner.node_id,
+                        "post-rotation exact-owner sweep demoted stale UserActor"
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(jid = %bare_jid, ?error, "exact-owner UserActor demotion failed");
+                }
+            }
+        }
+    }
 }
 
 /// Dispatches [`LocallyClaimedEntities`] calls across `SmSession`,
@@ -797,6 +908,12 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
             EntityType::RoomActor => self.room.demote(entity).await,
             EntityType::UserActor => self.user.demote(entity).await,
         }
+    }
+
+    async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
+        self.sm.demote_owned_by(owner).await;
+        self.room.demote_owned_by(owner).await;
+        self.user.demote_owned_by(owner).await;
     }
 
     async fn health_check(&self, entity: &Entity) -> bool {

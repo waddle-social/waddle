@@ -91,6 +91,31 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Publish an SM stream id only while `owner` still owns the full-JID
+    /// slot. The connection entry guard serializes the ownership check,
+    /// entry update, and reverse-index update against same-JID replacement.
+    pub fn set_sm_stream_id_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        stream_id: Option<crate::pending_delivery::SmSessionId>,
+    ) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
+            return false;
+        }
+        if let Some(previous) = entry.sm_stream_id() {
+            self.sm_stream_owners.remove(&previous);
+        }
+        entry.set_sm_stream_id(stream_id.clone());
+        if let Some(stream_id) = stream_id {
+            self.sm_stream_owners.insert(stream_id, jid.clone());
+        }
+        true
+    }
+
     /// Look up which full JID currently publishes `stream_id`, if any
     /// (ADR-0017 Phase 3 Slice 6). **Best-effort**: this index is not
     /// proactively swept on every teardown path, so callers MUST re-verify

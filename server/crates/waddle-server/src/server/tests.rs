@@ -293,9 +293,100 @@ fn reset_xmpp_config_env() {
         "WADDLE_XMPP_DOMAIN",
         "WADDLE_SPACES_JID",
         "WADDLE_MUC_DOMAIN",
+        "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL",
     ] {
         std::env::remove_var(key);
     }
+}
+
+#[test]
+fn test_xmpp_config_parses_trimmed_public_websocket_url() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    std::env::set_var(
+        "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL",
+        "  wss://xmpp.example.com/ws  ",
+    );
+
+    let config = XmppConfig::from_env().expect("public WebSocket URL parses");
+    assert_eq!(
+        config.public_websocket_url.as_str(),
+        "wss://xmpp.example.com/ws"
+    );
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_rejects_non_websocket_public_url() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    std::env::set_var(
+        "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL",
+        "https://xmpp.example.com/ws",
+    );
+
+    let error = XmppConfig::from_env().expect_err("HTTP URL must fail startup");
+    assert!(
+        error.to_string().contains("must use the ws or wss scheme"),
+        "unexpected error: {error:#}"
+    );
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_rejects_malformed_public_websocket_url() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    std::env::set_var("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL", "not a URL");
+
+    let error = XmppConfig::from_env().expect_err("malformed URL must fail startup");
+    assert!(
+        error.to_string().contains("is not a valid absolute URL"),
+        "unexpected error: {error:#}"
+    );
+    assert!(!error.to_string().contains("not a URL"));
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_rejects_sensitive_or_ambiguous_websocket_urls() {
+    let _guard = env_lock();
+    for (configured, expected) in [
+        ("wss://alice:secret@xmpp.example.com/ws", "user information"),
+        ("wss://xmpp.example.com/ws?token=secret", "query"),
+        ("wss://xmpp.example.com/ws#fragment", "fragment"),
+    ] {
+        reset_xmpp_config_env();
+        std::env::set_var("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL", configured);
+
+        let error = XmppConfig::from_env().expect_err("unsafe URL must fail startup");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error for {configured}: {error:#}"
+        );
+        assert!(
+            !error.to_string().contains(configured),
+            "configuration diagnostics must redact the rejected URL"
+        );
+        assert!(!error.to_string().contains("secret"));
+    }
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn transport_security_uses_the_public_websocket_scheme() {
+    let secure = url::Url::parse("wss://xmpp.example.com/ws").expect("secure URL");
+    let unsecured = url::Url::parse("ws://xmpp.example.com/ws").expect("plain URL");
+
+    assert!(routes::websocket::TransportSecurity::from_public_websocket_url(&secure).is_tls());
+    assert!(!routes::websocket::TransportSecurity::from_public_websocket_url(&unsecured).is_tls());
 }
 
 #[test]
@@ -308,6 +399,10 @@ fn test_xmpp_config_defaults_spaces_and_muc_from_xmpp_domain() {
     let config = XmppConfig::from_env().expect("config parses");
     assert_eq!(config.spaces_jid.to_string(), "spaces.waddle.example");
     assert_eq!(config.muc_domain.as_str(), "muc.waddle.example");
+    assert_eq!(
+        config.public_websocket_url.as_str(),
+        "ws://waddle.example/ws"
+    );
 
     reset_xmpp_config_env();
 }

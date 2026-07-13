@@ -328,6 +328,65 @@ impl InMemorySmSessionRegistry {
         Some(out)
     }
 
+    /// Snapshot claim responsibilities tied to one immutable node identity.
+    /// Used after self-fence rotation: fresh admissions now carry the new
+    /// identity, while anything returned here is provably stale local work
+    /// that the final pre-rotation inventory may have missed.
+    pub fn locally_owned_claim_ids_for_owner(
+        &self,
+        owner: &crate::ownership::NodeIdentity,
+    ) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        {
+            let pending = self.pending_claim_acquisitions.read().ok()?;
+            out.extend(
+                pending
+                    .iter()
+                    .filter(|(_, pending_owner, _)| pending_owner == owner)
+                    .map(|(stream_id, _, _)| stream_id.clone()),
+            );
+        }
+        {
+            let lookups = self.pending_reclaimed_claim_lookups.read().ok()?;
+            out.extend(
+                lookups
+                    .keys()
+                    .filter(|(_, pending_owner, _)| pending_owner == owner)
+                    .map(|(stream_id, _, _)| stream_id.clone()),
+            );
+        }
+        {
+            let hydrations = self.pending_reclaimed_hydrations.read().ok()?;
+            out.extend(
+                hydrations
+                    .keys()
+                    .filter(|(_, fence, _)| fence.owner() == owner)
+                    .map(|(stream_id, _, _)| stream_id.clone()),
+            );
+        }
+        {
+            let fences = self.claim_fences.read().ok()?;
+            out.extend(
+                fences
+                    .iter()
+                    .filter(|(_, fence)| fence.owner() == owner)
+                    .map(|(stream_id, _)| stream_id.clone()),
+            );
+        }
+        {
+            let pending = self.pending_claim_releases.read().ok()?;
+            out.extend(
+                pending
+                    .iter()
+                    .filter(|(_, fence)| fence.owner() == owner)
+                    .map(|(stream_id, _)| stream_id.clone()),
+            );
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
+    }
+
     /// Retry exact terminal releases retained after a backend error/timeout.
     /// Entries still represented by a live/detached session are excluded:
     /// those claims remain intentionally held.
@@ -693,7 +752,9 @@ impl InMemorySmSessionRegistry {
             return;
         };
         let _stream_guard = stream_lock.lock().await;
-        self.forget_claim_locally_locked(stream_id, None);
+        self.node_identity
+            .with_publications_blocked(|| self.forget_claim_locally_locked(stream_id, None))
+            .await;
     }
 
     pub(super) fn forget_claim_locally_locked(

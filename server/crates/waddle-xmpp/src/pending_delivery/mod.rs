@@ -99,20 +99,26 @@ pub struct SmSessionIdTooLong {
 /// stream-id-shaped value on the wire, while every in-process consumer still
 /// only ever sees the typed newtype. `Deserialize` is hand-written (below),
 /// not derived, so it can enforce [`SM_SESSION_ID_MAX_LEN`] — see
-/// [`SM_SESSION_ID_MAX_LEN`]'s own doc comment for why. [`Self::new`] itself
-/// stays unvalidated: every production caller mints server-generated UUIDs
-/// (far under the cap), and validating there too would force every one of
-/// those internal call sites to handle a `Result` for a case that cannot
-/// occur in practice — the wire boundary is where an untrusted length
-/// actually arrives.
+/// [`SM_SESSION_ID_MAX_LEN`]'s own doc comment for why. [`Self::new`] is for
+/// server-minted identifiers; untrusted wire values must enter through
+/// [`Self::try_from_wire`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(transparent)]
 pub struct SmSessionId(String);
 
 impl SmSessionId {
-    /// Wrap a stream-id value.
+    /// Wrap a server-minted stream-id value.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+
+    /// Validate and wrap an untrusted stream-id received from the wire.
+    pub fn try_from_wire(value: impl Into<String>) -> Result<Self, SmSessionIdTooLong> {
+        let value = value.into();
+        if value.len() > SM_SESSION_ID_MAX_LEN {
+            return Err(SmSessionIdTooLong { len: value.len() });
+        }
+        Ok(Self(value))
     }
 
     /// Borrow the underlying string.
@@ -133,12 +139,7 @@ impl<'de> serde::Deserialize<'de> for SmSessionId {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value.len() > SM_SESSION_ID_MAX_LEN {
-            return Err(serde::de::Error::custom(SmSessionIdTooLong {
-                len: value.len(),
-            }));
-        }
-        Ok(Self(value))
+        Self::try_from_wire(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -288,6 +289,14 @@ mod tests {
             error.to_string().contains("exceeds"),
             "unexpected error message: {error}"
         );
+    }
+
+    #[test]
+    fn sm_session_id_wire_constructor_rejects_one_byte_over_the_cap() {
+        let value = "a".repeat(SM_SESSION_ID_MAX_LEN + 1);
+        let error = SmSessionId::try_from_wire(value)
+            .expect_err("untrusted wire ids must enforce the same bound as serde");
+        assert_eq!(error.len, SM_SESSION_ID_MAX_LEN + 1);
     }
 
     #[test]

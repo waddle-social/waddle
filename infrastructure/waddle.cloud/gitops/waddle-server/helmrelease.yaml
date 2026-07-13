@@ -120,6 +120,7 @@ spec:
             key: uri
     xmpp:
       domain: waddle.social
+      publicWebsocketUrl: wss://xmpp.waddle.social/ws
       tls:
         secretName: waddle-xmpp-tls
     persistence:

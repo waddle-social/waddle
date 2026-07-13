@@ -11,6 +11,15 @@ use tower::ServiceExt;
 async fn create_test_auth_state(
     server_config: &ServerConfig,
 ) -> (Arc<AuthState>, kameo::actor::ActorRef<DbActor>) {
+    let public_websocket_url =
+        url::Url::parse("ws://localhost:3000/ws").expect("test WebSocket URL");
+    create_test_auth_state_with_websocket_url(server_config, &public_websocket_url).await
+}
+
+async fn create_test_auth_state_with_websocket_url(
+    server_config: &ServerConfig,
+    public_websocket_url: &url::Url,
+) -> (Arc<AuthState>, kameo::actor::ActorRef<DbActor>) {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
     let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
@@ -22,7 +31,12 @@ async fn create_test_auth_state(
 
     let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
     (
-        Arc::new(AuthState::new(app_state, server_config, None)),
+        Arc::new(AuthState::new(
+            app_state,
+            server_config,
+            public_websocket_url,
+            None,
+        )),
         actor,
     )
 }
@@ -79,6 +93,47 @@ async fn session_response_includes_jid_websocket_url_and_link_preview_media_orig
         json["link_preview_media_origin"].as_str(),
         Some("http://localhost:3000")
     );
+}
+
+#[tokio::test]
+async fn session_response_advertises_public_wss_when_app_base_url_is_internal_http() {
+    let mut server_config = ServerConfig::test_homeserver();
+    server_config.base_url = "http://localhost:3000".to_string();
+    let public_websocket_url =
+        url::Url::parse("wss://xmpp.example.com/ws").expect("public WebSocket URL");
+    let (auth_state, actor) =
+        create_test_auth_state_with_websocket_url(&server_config, &public_websocket_url).await;
+    let session = Session::new("alice@example.com", "alice", "alice");
+    auth_state
+        .session_manager
+        .create_session(&session)
+        .await
+        .expect("create session");
+
+    let response = router(auth_state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/session")
+                .header(header::COOKIE, format!("waddle_session={}", session.id))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("session response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("session JSON");
+    assert_eq!(
+        json["xmpp_websocket_url"].as_str(),
+        Some("wss://xmpp.example.com/ws")
+    );
+
+    drop(actor);
 }
 
 #[tokio::test]

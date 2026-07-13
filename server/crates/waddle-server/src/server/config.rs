@@ -2,6 +2,7 @@ use anyhow::Context;
 use jid::{BareJid, DomainPart};
 use std::path::PathBuf;
 use std::str::FromStr;
+use url::Url;
 
 /// XMPP server configuration loaded from environment variables.
 #[derive(Debug, Clone)]
@@ -55,6 +56,11 @@ pub struct XmppConfig {
     pub sm_database_url: Option<String>,
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub pubsub_database_url: Option<String>,
+    /// Trusted public RFC 7395 endpoint used by clients. Its scheme is the
+    /// authoritative source for transport-security decisions such as the
+    /// XEP-0397 TLS-only feature and bearer-token gates; the unrelated HTTP
+    /// application base URL and client-controlled forwarding headers are not.
+    pub public_websocket_url: Url,
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
@@ -93,6 +99,8 @@ impl Default for XmppConfig {
             pending_delivery_database_url: None,
             sm_database_url: None,
             pubsub_database_url: None,
+            public_websocket_url: Url::parse("ws://localhost:3000/ws")
+                .expect("default public XMPP WebSocket URL is valid"),
             native_auth_enabled: true,
             acme: XmppAcmeConfig {
                 enabled: false,
@@ -155,6 +163,12 @@ impl XmppConfig {
             resolve_xmpp_database_url("WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL");
         let sm_database_url = resolve_xmpp_database_url("WADDLE_XMPP_SM_DATABASE_URL");
         let pubsub_database_url = resolve_xmpp_database_url("WADDLE_XMPP_PUBSUB_DATABASE_URL");
+        let public_websocket_url = parse_public_websocket_url(
+            std::env::var("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL")
+                .ok()
+                .as_deref(),
+            &domain,
+        )?;
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
             .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -186,6 +200,7 @@ impl XmppConfig {
             pending_delivery_database_url,
             sm_database_url,
             pubsub_database_url,
+            public_websocket_url,
             native_auth_enabled,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
@@ -195,6 +210,37 @@ impl XmppConfig {
             },
         })
     }
+}
+
+/// Parse the operator-declared public RFC 7395 endpoint. When it is omitted,
+/// derive an explicitly plaintext endpoint so security-sensitive features
+/// fail closed until the deployment declares its TLS-terminated `wss://`
+/// address. Whitespace is normalized here and malformed/HTTP URLs fail
+/// startup instead of silently changing XEP-0397 availability.
+fn parse_public_websocket_url(raw: Option<&str>, xmpp_domain: &str) -> anyhow::Result<Url> {
+    let configured = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("ws://{xmpp_domain}/ws"));
+    let url = Url::parse(&configured)
+        .context("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL is not a valid absolute URL")?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must use the ws or wss scheme");
+    }
+    if url.host().is_none() {
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must not include user information");
+    }
+    if url.query().is_some() {
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must not include a query");
+    }
+    if url.fragment().is_some() {
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must not include a fragment");
+    }
+    Ok(url)
 }
 
 /// Parse an optional typed env var. Returns `Ok(None)` when the var is

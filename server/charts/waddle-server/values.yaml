@@ -147,6 +147,10 @@ database:
 xmpp:
   enabled: true
   domain: waddle.local
+  # Trusted public RFC 7395 endpoint. Use wss:// when TLS is terminated at
+  # the ingress/gateway; TLS-only XEP-0397 ISR stays disabled for ws://. Empty
+  # derives the fail-closed ws://<xmpp.domain>/ws endpoint at server startup.
+  publicWebsocketUrl: ""
   tls:
     secretName: ""
     mountPath: /etc/waddle/tls

@@ -96,6 +96,18 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+pub(crate) async fn create_test_websocket_state_with_sm_registry(
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        None,
+        None,
+        Some(sm_session_registry),
+    )
+    .await
+}
+
 /// Build a test [`WebSocketState`] with clustering-enabled
 /// [`crate::clustering::ClusteringHandles`] and a caller-supplied SM-session
 /// registry (e.g. one backed by [`crate::sm_persistence_fenced::PostgresFencedSmPersistence`]
@@ -340,6 +352,9 @@ async fn create_test_websocket_state_with_extension_manager(
     runner.run(db_pool.global()).await.expect("migrations");
 
     let server_config = ServerConfig::test_homeserver();
+    // XEP-0397 fixtures exercise token advertisement/issuance and therefore
+    // model the TLS-secured public RFC 7395 endpoint required by the XEP.
+    let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
     let mut app_state_built = AppState::new(Arc::new(db_pool));
     if let Some(clustering) = clustering_override {
         app_state_built.clustering_claims = clustering;
@@ -348,6 +363,7 @@ async fn create_test_websocket_state_with_extension_manager(
     let mut auth_state_inner = AuthState::new(
         app_state.clone(),
         &server_config,
+        &public_websocket_url,
         Some(b"test-encryption-key-32-bytes!!!"),
     );
     // The dispatcher path's bare-JID branch
@@ -425,6 +441,10 @@ async fn create_test_websocket_state_with_extension_manager(
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
+                transport_security:
+                    super::state::TransportSecurity::from_public_websocket_url(
+                        &public_websocket_url,
+                    ),
                 service_domains: XmppServiceDomains {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),
