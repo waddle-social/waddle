@@ -600,60 +600,65 @@ CREATE INDEX IF NOT EXISTS idx_link_preview_media_refs_message
 /// callback / token / device endpoints (#1336). Entries are single-use
 /// JSON payloads keyed by their opaque secret; `expires_at_ms` (unix
 /// epoch milliseconds) exists purely for the janitor's SQL prune.
+///
+/// `IF NOT EXISTS` throughout: the migration runner has no cross-node
+/// lock, so two replicas starting concurrently can both attempt this
+/// DDL; idempotent statements make the loser a no-op instead of a
+/// startup crash-loop.
 pub const V0009_AUTH_HANDSHAKE_STATE: &str = r#"
-CREATE TABLE pending_auth (
+CREATE TABLE IF NOT EXISTS pending_auth (
     state TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
     expires_at_ms INTEGER NOT NULL
 );
 
-CREATE INDEX idx_pending_auth_expires_at ON pending_auth(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_pending_auth_expires_at ON pending_auth(expires_at_ms);
 
-CREATE TABLE device_auth (
+CREATE TABLE IF NOT EXISTS device_auth (
     device_code TEXT PRIMARY KEY,
     user_code TEXT NOT NULL,
     payload TEXT NOT NULL,
     expires_at_ms INTEGER NOT NULL
 );
 
-CREATE INDEX idx_device_auth_user_code ON device_auth(user_code);
-CREATE INDEX idx_device_auth_expires_at ON device_auth(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_auth(user_code);
+CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth(expires_at_ms);
 
-CREATE TABLE xmpp_auth_codes (
+CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
     code TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
     expires_at_ms INTEGER NOT NULL
 );
 
-CREATE INDEX idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
 "#;
 
 pub const V0009_AUTH_HANDSHAKE_STATE_POSTGRES: &str = r#"
-CREATE TABLE pending_auth (
+CREATE TABLE IF NOT EXISTS pending_auth (
     state TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
     expires_at_ms BIGINT NOT NULL
 );
 
-CREATE INDEX idx_pending_auth_expires_at ON pending_auth(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_pending_auth_expires_at ON pending_auth(expires_at_ms);
 
-CREATE TABLE device_auth (
+CREATE TABLE IF NOT EXISTS device_auth (
     device_code TEXT PRIMARY KEY,
     user_code TEXT NOT NULL,
     payload TEXT NOT NULL,
     expires_at_ms BIGINT NOT NULL
 );
 
-CREATE INDEX idx_device_auth_user_code ON device_auth(user_code);
-CREATE INDEX idx_device_auth_expires_at ON device_auth(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_auth(user_code);
+CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth(expires_at_ms);
 
-CREATE TABLE xmpp_auth_codes (
+CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
     code TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
     expires_at_ms BIGINT NOT NULL
 );
 
-CREATE INDEX idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
 "#;
 
 /// Get all global migrations in order
