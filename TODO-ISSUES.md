@@ -168,7 +168,7 @@ remaining unblocked frontier.
 1. ✅ **#1280 — XEP-0198 handler-timeout false ack: cancelled message/presence dispatch remains sender-owned, `h` cannot cross the hole, and cleanup detaches without hanging. DONE (PR #1292, merged).**
 2. ✅ **#1281 — scope MUC-PM MAM history to the full occupant JID. DONE (PR #1293, merged).**
 3. ✅ **#1287 — scope MUC-PM displayed state to the full occupant JID. DONE (PR #1308, merged).**
-4. ✅ **#1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs. DONE (closed after cross-check: the existing WebSocket ingress boundary and dedicated XEP-0203 test already cover reflection and MAM replay).**
+4. ✅ **#1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs. DONE (closed after cross-check on #1282: commit `b01a3336` added authenticated-ingress stripping and `xep0203_delayed_delivery_ws::client_spoofed_delay_is_stripped_from_groupchat_flow`, which injects a forged occupant delay and proves it absent from live reflection and MAM replay).**
 5. ✅ **#1288 — prevent cross-occupant MUC message-ID collision merges. DONE (PR #1304, merged).**
 6. #1289 — make mediated-invite grants and rollback atomic.
 7. #1283 — seal room destruction and purge the destroyed MAM epoch.
