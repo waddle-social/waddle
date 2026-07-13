@@ -34,7 +34,7 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
-use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
+use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
 
@@ -218,6 +218,18 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// successful `<resumed/>` (the session is now live again, no
     /// longer detached) and on session timeout.
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError>;
+
+    /// Delete a session while the caller already holds current-incarnation
+    /// authority. Clustered implementations reuse this guard instead of
+    /// reacquiring the writer-preferring identity gate; portable stores have
+    /// no identity fence and use their ordinary atomic delete.
+    async fn delete_session_with_authority(
+        &self,
+        stream_id: &SmSessionId,
+        _authority: &CurrentNodeIdentityGuard,
+    ) -> Result<(), SmPersistenceError> {
+        self.delete_session(stream_id).await
+    }
 
     /// Delete an undecodable session and its unacked queue as one durable
     /// quarantine operation. Clustered implementations bind the immutable

@@ -497,7 +497,34 @@ impl PostgresFencedSmPersistence {
         stream_id: &SmSessionId,
         fence: &SmClaimFence,
     ) -> Result<CurrentNodeIdentityGuard, SmPersistenceError> {
-        if self.node_identity.current() != *fence.owner() {
+        let authority = self
+            .node_identity
+            .guard_if_current(fence.owner())
+            .await
+            .ok_or_else(|| {
+                self.remove_claim_fence_if(stream_id, fence);
+                SmPersistenceError::NotOwner {
+                    entity: sm_session_entity(stream_id),
+                }
+            })?;
+        self.assert_fenced_with_authority(tx, stream_id, fence, &authority)
+            .await?;
+        Ok(authority)
+    }
+
+    async fn assert_fenced_with_authority(
+        &self,
+        tx: &mut Transaction<'_>,
+        stream_id: &SmSessionId,
+        fence: &SmClaimFence,
+        authority: &CurrentNodeIdentityGuard,
+    ) -> Result<(), SmPersistenceError> {
+        if !self.node_identity.owns_guard(authority) {
+            return Err(SmPersistenceError::NotOwner {
+                entity: sm_session_entity(stream_id),
+            });
+        }
+        if authority.identity() != fence.owner() {
             self.remove_claim_fence_if(stream_id, fence);
             return Err(SmPersistenceError::NotOwner {
                 entity: sm_session_entity(stream_id),
@@ -527,15 +554,7 @@ impl PostgresFencedSmPersistence {
                 entity: sm_session_entity(stream_id),
             });
         }
-        self.node_identity
-            .guard_if_current(fence.owner())
-            .await
-            .ok_or_else(|| {
-                self.remove_claim_fence_if(stream_id, fence);
-                SmPersistenceError::NotOwner {
-                    entity: sm_session_entity(stream_id),
-                }
-            })
+        Ok(())
     }
 
     async fn guard_query(
@@ -690,6 +709,38 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
+        tx.commit()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        self.remove_claim_fence_if(stream_id, &fence);
+        Ok(())
+    }
+
+    async fn delete_session_with_authority(
+        &self,
+        stream_id: &SmSessionId,
+        authority: &CurrentNodeIdentityGuard,
+    ) -> Result<(), SmPersistenceError> {
+        let fence = self.claim_fence_for(stream_id).await?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        self.assert_fenced_with_authority(&mut tx, stream_id, &fence, authority)
+            .await?;
+        tx.execute(
+            "DELETE FROM sm_unacked WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.commit()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;

@@ -2508,6 +2508,196 @@ async fn complete_claim_deletes_durable_session_on_resume() {
 }
 
 #[tokio::test]
+async fn authoritative_completion_does_not_reenter_identity_gate_behind_rotation() {
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let identity = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let shared_identity = crate::ownership::SharedNodeIdentity::new(identity.clone());
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(
+            std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+            shared_identity.clone(),
+        );
+    registry
+        .store_session(realistic_test_session("stream-authoritative-complete"))
+        .await
+        .unwrap();
+    registry
+        .claim_session("stream-authoritative-complete")
+        .await
+        .unwrap();
+
+    let operation = registry
+        .lock_session_operation("stream-authoritative-complete")
+        .await
+        .unwrap();
+    let authority = shared_identity.guard_if_current(&identity).await.unwrap();
+    let rotating_identity = shared_identity.clone();
+    let rotation = tokio::spawn(async move {
+        rotating_identity
+            .rotate(crate::ownership::NodeIdentity::new(
+                "node-a",
+                "incarnation-b",
+            ))
+            .await;
+    });
+    tokio::task::yield_now().await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        registry.complete_claim_with_authority(operation, &authority),
+    )
+    .await
+    .expect("completion must not wait on a nested identity read")
+    .unwrap();
+    assert!(matches!(outcome, Some(SmClaimCompletion::Resumed(_))));
+    drop(authority);
+    tokio::time::timeout(std::time::Duration::from_secs(1), rotation)
+        .await
+        .expect("rotation proceeds after authoritative completion")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn authoritative_completion_rejects_a_foreign_equal_identity_guard() {
+    let identity = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let registry_identity = crate::ownership::SharedNodeIdentity::new(identity.clone());
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+        registry_identity,
+    );
+    registry
+        .store_session(realistic_test_session("stream-foreign-authority"))
+        .await
+        .unwrap();
+    registry
+        .claim_session("stream-foreign-authority")
+        .await
+        .unwrap();
+    let operation = registry
+        .lock_session_operation("stream-foreign-authority")
+        .await
+        .unwrap();
+    let foreign_identity = crate::ownership::SharedNodeIdentity::new(identity.clone());
+    let foreign_authority = foreign_identity.guard_if_current(&identity).await.unwrap();
+
+    assert!(registry
+        .complete_claim_with_authority(operation, &foreign_authority)
+        .await
+        .is_err());
+    assert!(matches!(
+        registry
+            .complete_claim("stream-foreign-authority")
+            .await
+            .unwrap(),
+        Some(SmClaimCompletion::Resumed(_))
+    ));
+}
+
+#[tokio::test]
+async fn authoritative_release_reinserts_before_queued_rotation() {
+    let identity = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let shared_identity = crate::ownership::SharedNodeIdentity::new(identity.clone());
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+        shared_identity.clone(),
+    );
+    registry
+        .store_session(realistic_test_session("stream-authoritative-release"))
+        .await
+        .unwrap();
+    registry
+        .claim_session("stream-authoritative-release")
+        .await
+        .unwrap();
+    let operation = registry
+        .lock_session_operation("stream-authoritative-release")
+        .await
+        .unwrap();
+    let authority = shared_identity.guard_if_current(&identity).await.unwrap();
+    let rotating_identity = shared_identity.clone();
+    let rotation = tokio::spawn(async move {
+        rotating_identity
+            .rotate(crate::ownership::NodeIdentity::new(
+                "node-a",
+                "incarnation-b",
+            ))
+            .await;
+    });
+    tokio::task::yield_now().await;
+
+    registry
+        .release_claim_with_authority(operation, &authority)
+        .await
+        .unwrap();
+    assert_eq!(registry.session_count().await, 1);
+    assert_eq!(shared_identity.current(), identity);
+    drop(authority);
+    tokio::time::timeout(std::time::Duration::from_secs(1), rotation)
+        .await
+        .expect("rotation proceeds after authoritative release")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn authoritative_lifecycle_rejects_a_fresh_guard_for_a_stale_fence() {
+    let old_identity = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let shared_identity = crate::ownership::SharedNodeIdentity::new(old_identity);
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+        shared_identity.clone(),
+    );
+    for (stream_id, jid) in [
+        ("stream-stale-release", "alice@example.com/release"),
+        ("stream-stale-complete", "alice@example.com/complete"),
+    ] {
+        registry
+            .store_session(realistic_test_session_for_jid(
+                stream_id,
+                jid.parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+        registry.claim_session(stream_id).await.unwrap();
+    }
+    let new_identity = crate::ownership::NodeIdentity::new("node-a", "incarnation-b");
+    shared_identity.rotate(new_identity.clone()).await;
+    let fresh_authority = shared_identity
+        .guard_if_current(&new_identity)
+        .await
+        .unwrap();
+
+    let release_operation = registry
+        .lock_session_operation("stream-stale-release")
+        .await
+        .unwrap();
+    assert!(registry
+        .release_claim_with_authority(release_operation, &fresh_authority)
+        .await
+        .is_err());
+    let complete_operation = registry
+        .lock_session_operation("stream-stale-complete")
+        .await
+        .unwrap();
+    assert!(registry
+        .complete_claim_with_authority(complete_operation, &fresh_authority)
+        .await
+        .is_err());
+    drop(fresh_authority);
+
+    assert!(registry
+        .complete_claim("stream-stale-release")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(registry
+        .complete_claim("stream-stale-complete")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
 async fn store_session_returns_jid_collision_eviction_and_preserves_rows_until_confirmed() {
     // Two store_session calls for the same JID with different
     // stream_ids: the second supersedes the first per RFC resume

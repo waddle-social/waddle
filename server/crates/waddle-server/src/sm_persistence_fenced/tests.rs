@@ -378,6 +378,79 @@ async fn delete_session_removes_session_and_unacked_queue() {
 }
 
 #[tokio::test]
+async fn authoritative_delete_reuses_the_guard_while_rotation_is_queued() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-authoritative-delete");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("upsert_session");
+    let authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .expect("current authority");
+    let rotating_identity = f.shared_identity.clone();
+    let rotation = tokio::spawn(async move {
+        rotating_identity
+            .rotate(NodeIdentity::new("node-a", "next-incarnation"))
+            .await;
+    });
+    tokio::task::yield_now().await;
+
+    tokio::time::timeout(
+        StdDuration::from_secs(1),
+        f.fenced
+            .delete_session_with_authority(&stream_id, &authority),
+    )
+    .await
+    .expect("authoritative delete must not reacquire the queued identity gate")
+    .expect("delete_session_with_authority");
+    drop(authority);
+    tokio::time::timeout(StdDuration::from_secs(1), rotation)
+        .await
+        .expect("rotation proceeds after delete")
+        .expect("rotation task");
+}
+
+#[tokio::test]
+async fn authoritative_delete_rejects_a_foreign_equal_identity_guard() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-foreign-authority");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("upsert_session");
+    let foreign_identity = SharedNodeIdentity::new(f.identity.clone());
+    let foreign_authority = foreign_identity
+        .guard_if_current(&f.identity)
+        .await
+        .expect("equal-valued foreign authority");
+
+    assert!(matches!(
+        f.fenced
+            .delete_session_with_authority(&stream_id, &foreign_authority)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("get_session")
+        .is_some());
+    let correct_authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .expect("correct authority");
+    f.fenced
+        .delete_session_with_authority(&stream_id, &correct_authority)
+        .await
+        .expect("foreign rejection must retain the legitimate fence cache");
+}
+
+#[tokio::test]
 async fn append_ack_through_and_delete_unacked_lifecycle() {
     let Some(f) = fixture().await else { return };
     let stream_id = SmSessionId::new("stream-unacked");

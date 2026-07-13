@@ -1383,6 +1383,23 @@ impl InMemorySmSessionRegistry {
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
 
+    pub(super) async fn persist_delete_session_with_authority(
+        &self,
+        stream_id: &str,
+        authority: &crate::ownership::CurrentNodeIdentityGuard,
+    ) -> Result<(), SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(());
+        };
+        storage
+            .delete_session_with_authority(
+                &crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
+                authority,
+            )
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
     pub(super) async fn persist_detached_session_snapshot(
         &self,
         session: &DetachedSession,
@@ -1452,6 +1469,19 @@ impl InMemorySmSessionRegistry {
         stream_id.hash(&mut hasher);
         let shard = (hasher.finish() as usize) % self.stream_locks.len();
         Ok(Arc::clone(&self.stream_locks[shard]))
+    }
+
+    pub async fn lock_session_operation(
+        &self,
+        stream_id: &str,
+    ) -> Result<super::SmSessionOperationGuard, SmRegistryError> {
+        let shard = self.stream_lock(stream_id)?;
+        let guard = shard.clone().lock_owned().await;
+        Ok(super::SmSessionOperationGuard {
+            stream_id: stream_id.to_string(),
+            shard,
+            _guard: guard,
+        })
     }
 
     pub(super) fn find_session_id_matching(

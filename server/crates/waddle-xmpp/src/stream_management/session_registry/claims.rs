@@ -1143,6 +1143,21 @@ impl InMemorySmSessionRegistry {
     pub async fn release_claim(&self, stream_id: &str) -> Result<(), SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        self.release_claim_locked(stream_id).await
+    }
+
+    /// Return a claimed session to the resumable pool while reusing the
+    /// caller's shard and current-incarnation authorities.
+    pub async fn release_claim_with_authority(
+        &self,
+        operation: super::SmSessionOperationGuard,
+        authority: &crate::ownership::CurrentNodeIdentityGuard,
+    ) -> Result<(), SmRegistryError> {
+        self.validate_operation_authority(&operation, authority)?;
+        self.release_claim_locked(&operation.stream_id).await
+    }
+
+    async fn release_claim_locked(&self, stream_id: &str) -> Result<(), SmRegistryError> {
         let reinserted = {
             let mut sessions = self
                 .sessions
@@ -1352,6 +1367,50 @@ impl InMemorySmSessionRegistry {
         self.complete_claim_checked(stream_id, None).await
     }
 
+    /// Destructively complete a claimed session while reusing authority the
+    /// caller acquired after this stream's shard. This preserves the global
+    /// shard-before-identity lock order and avoids reacquiring the
+    /// writer-preferring identity gate inside fenced persistence.
+    pub async fn complete_claim_with_authority(
+        &self,
+        operation: super::SmSessionOperationGuard,
+        authority: &crate::ownership::CurrentNodeIdentityGuard,
+    ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
+        self.validate_operation_authority(&operation, authority)?;
+        self.complete_claim_checked_locked(&operation.stream_id, None, Some(authority))
+            .await
+    }
+
+    fn validate_operation_authority(
+        &self,
+        operation: &super::SmSessionOperationGuard,
+        authority: &crate::ownership::CurrentNodeIdentityGuard,
+    ) -> Result<(), SmRegistryError> {
+        let expected_shard = self.stream_lock(&operation.stream_id)?;
+        if !std::sync::Arc::ptr_eq(&expected_shard, &operation.shard) {
+            return Err(SmRegistryError::Internal(
+                "SM operation guard belongs to a different registry".to_string(),
+            ));
+        }
+        if !self.node_identity.owns_guard(authority) {
+            return Err(SmRegistryError::Internal(
+                "SM identity authority belongs to a different registry".to_string(),
+            ));
+        }
+        let fence_owner = self
+            .claim_fences
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(&operation.stream_id)
+            .map(|fence| fence.owner().clone());
+        if fence_owner.as_ref() != Some(authority.identity()) {
+            return Err(SmRegistryError::Internal(
+                "SM identity authority does not match the active claim fence".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Complete a claim only if the final claimed session still has
     /// every stanza needed by `client_h`. If late detached fanout
     /// during the claim handoff evicted an older stanza, the claim is
@@ -1372,6 +1431,16 @@ impl InMemorySmSessionRegistry {
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        self.complete_claim_checked_locked(stream_id, client_h, None)
+            .await
+    }
+
+    async fn complete_claim_checked_locked(
+        &self,
+        stream_id: &str,
+        client_h: Option<u32>,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
         // Persist-first ordering: durably erase the session BEFORE
         // we hand it back to the resuming connection. If the durable
         // delete fails, abort the resume — the in-memory entry stays
@@ -1459,7 +1528,12 @@ impl InMemorySmSessionRegistry {
                 return Ok(None);
             }
         }
-        self.persist_delete_session(stream_id).await?;
+        if let Some(authority) = authority {
+            self.persist_delete_session_with_authority(stream_id, authority)
+                .await?;
+        } else {
+            self.persist_delete_session(stream_id).await?;
+        }
         // Now remove from in-memory; the durable side has already
         // committed.
         let outcome = self

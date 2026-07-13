@@ -288,7 +288,25 @@ pub(super) async fn handle_isr_resume_authenticate(
     };
     let claim_fence =
         waddle_xmpp::stream_management::persistence::SmClaimFence::new(identity.clone(), epoch);
+    // Serialize the SM stream shard before taking incarnation authority.
+    // Every registry publisher follows this shard -> identity order; keeping
+    // it here lets the mismatch terminalization reuse both authorities
+    // without a writer-preference lock inversion during fenced persistence.
+    let operation_guard = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .lock_session_operation(&resume.previd)
+        .await
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!(stream_id = %resume.previd, %error, "ISR resume failed: could not serialize terminal claim handling");
+            return vec![sasl2_failure("temporary-auth-failure")];
+        }
+    };
     let Some(identity_guard) = node_identity.guard_if_current(claim_fence.owner()).await else {
+        drop(operation_guard);
         if let Err(error) = state
             .deps
             .protocol
@@ -322,17 +340,21 @@ pub(super) async fn handle_isr_resume_authenticate(
             // -force MUST: destroy the session state the SM-ID identified.
             // `complete_claim`, not `release_claim` — this claim ends
             // here, it does not go back into the resumable pool.
-            drop(identity_guard.take());
             warn!(stream_id = %resume.previd, "ISR resume rejected: token mismatch; destroying session state");
             if let Err(error) = state
                 .deps
                 .protocol
                 .sm_session_registry
-                .complete_claim(&resume.previd)
+                .complete_claim_with_authority(operation_guard, identity_guard.as_ref().unwrap())
                 .await
             {
                 warn!(stream_id = %resume.previd, error = %error, "Failed to destroy session state after ISR token mismatch");
             }
+            // Token mismatch is destructive under XEP-0397. Keep the same
+            // incarnation authority that fenced token consumption until the
+            // detached session and its exact claim are terminalized, so an
+            // identity rotation cannot let stale authority finish deletion.
+            drop(identity_guard.take());
             return vec![sasl2_failure("not-authorized")];
         }
         Ok(IsrConsumeOutcome::NoSuchToken) => {
@@ -350,30 +372,30 @@ pub(super) async fn handle_isr_resume_authenticate(
                 stream_id = %resume.previd,
                 "ISR resume rejected: no ISR token exists for this SM-ID"
             );
-            drop(identity_guard.take());
             if let Err(error) = state
                 .deps
                 .protocol
                 .sm_session_registry
-                .release_claim(&resume.previd)
+                .release_claim_with_authority(operation_guard, identity_guard.as_ref().unwrap())
                 .await
             {
                 warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after no-such-token outcome");
             }
+            drop(identity_guard.take());
             return vec![sasl2_failure("not-authorized")];
         }
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "ISR resume failed: token store error");
-            drop(identity_guard.take());
             if let Err(release_error) = state
                 .deps
                 .protocol
                 .sm_session_registry
-                .release_claim(&resume.previd)
+                .release_claim_with_authority(operation_guard, identity_guard.as_ref().unwrap())
                 .await
             {
                 warn!(stream_id = %resume.previd, error = %release_error, "Failed to release ISR resume claim after store error");
             }
+            drop(identity_guard.take());
             return vec![sasl2_failure("temporary-auth-failure")];
         }
     };
@@ -396,16 +418,16 @@ pub(super) async fn handle_isr_resume_authenticate(
             replay_gap_through = ?detached.replay_gap_through,
             "ISR resume: resumption impossible (replay window no longer covers client h)"
         );
-        drop(identity_guard.take());
         if let Err(error) = state
             .deps
             .protocol
             .sm_session_registry
-            .release_claim(&resume.previd)
+            .release_claim_with_authority(operation_guard, identity_guard.as_ref().unwrap())
             .await
         {
             warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after replay-window truncation");
         }
+        drop(identity_guard.take());
         let failed = SmFailed::resume_failed("resource-constraint", detached.inbound_count);
         return vec![sasl2_success(
             &bare_jid,
@@ -420,22 +442,24 @@ pub(super) async fn handle_isr_resume_authenticate(
             send_count = detached.outbound_count,
             "ISR resume: resumption impossible (handled count exceeds server's outbound count)"
         );
-        drop(identity_guard.take());
         if let Err(error) = state
             .deps
             .protocol
             .sm_session_registry
-            .release_claim(&resume.previd)
+            .release_claim_with_authority(operation_guard, identity_guard.as_ref().unwrap())
             .await
         {
             warn!(stream_id = %resume.previd, error = %error, "Failed to release ISR resume claim after handled-count mismatch");
         }
+        drop(identity_guard.take());
         let failed = SmFailed::resume_failed("unexpected-request", detached.inbound_count);
         return vec![sasl2_success(
             &bare_jid,
             inst_resume_failed_element(&failed),
         )];
     }
+
+    drop(operation_guard);
 
     // Successful instant stream resumption — restore SM state exactly as
     // `handle_sm_resume`'s own tail does.
