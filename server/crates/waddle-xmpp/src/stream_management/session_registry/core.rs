@@ -118,6 +118,11 @@ pub struct InMemorySmSessionRegistry {
     /// retain ownership).
     pub(super) pending_claim_acquisitions:
         RwLock<HashSet<(String, NodeIdentity, PendingClaimAcquisitionDisposition)>>,
+    /// Claimed ISR sessions whose follow-up epoch lookup failed before the
+    /// route could prove that the recorded exact fence still owns the backend
+    /// row. Kept out of `sessions` until a read-only reconciliation proves
+    /// the same owner+epoch or terminalizes the stale local lifecycle.
+    pub(super) pending_epoch_failure_reconciliations: RwLock<HashSet<String>>,
     /// Exact reclaimed-session hydration work that has not yet reached a
     /// terminal outcome. This registry-owned inventory is the common safety
     /// net for both the supervised orphan reaper and the one-shot inline
@@ -504,6 +509,7 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
@@ -525,6 +531,7 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),

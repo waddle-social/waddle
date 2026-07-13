@@ -181,6 +181,10 @@ impl InMemorySmSessionRegistry {
             );
         }
         {
+            let pending_epoch_failures = self.pending_epoch_failure_reconciliations.read().ok()?;
+            out.extend(pending_epoch_failures.iter().cloned());
+        }
+        {
             let pending_hydration = self.pending_reclaimed_hydrations.read().ok()?;
             out.extend(
                 pending_hydration
@@ -213,12 +217,36 @@ impl InMemorySmSessionRegistry {
     /// Entries still represented by a live/detached session are excluded:
     /// those claims remain intentionally held.
     pub async fn retry_pending_claim_releases(&self, limit: usize) -> usize {
-        let uncertain = self
-            .pending_claim_acquisitions
+        let epoch_failures = self
+            .pending_epoch_failure_reconciliations
             .read()
             .map(|pending| pending.iter().take(limit).cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         let mut budget_used = 0;
+        for stream_id in epoch_failures {
+            budget_used += 1;
+            if let Err(error) = self
+                .reconcile_claim_after_epoch_lookup_failure(&stream_id)
+                .await
+            {
+                tracing::debug!(
+                    stream_id,
+                    %error,
+                    "SM epoch-failure reconciliation remains pending"
+                );
+            }
+        }
+        let uncertain = self
+            .pending_claim_acquisitions
+            .read()
+            .map(|pending| {
+                pending
+                    .iter()
+                    .take(limit.saturating_sub(budget_used))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for (stream_id, identity, disposition) in uncertain {
             budget_used += 1;
             // Rejected-enable reconciliation is a terminal release retry.
@@ -574,6 +602,14 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<(), SmRegistryError> {
+        // Publish retry responsibility before the first await. The websocket
+        // task may be cancelled while waiting for the shard or backend read;
+        // without this entry the session would remain claimed and invisible
+        // to every future janitor pass.
+        self.pending_epoch_failure_reconciliations
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .insert(stream_id.to_string());
         let stream_lock = self.stream_lock(stream_id)?;
         let stream_guard = stream_lock.lock().await;
         let fence = self
@@ -582,14 +618,60 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
             .get(stream_id)
             .cloned();
-        let release_fence = self.node_identity.with_current(|current_identity| {
-            if let Some(stale) = fence
-                .as_ref()
-                .filter(|active| active.owner() != current_identity)
+        let Some(fence) = fence else {
+            self.sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .remove(stream_id);
+            self.claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .remove(stream_id);
+            self.pending_epoch_failure_reconciliations
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .remove(stream_id);
+            return Ok(());
+        };
+        let identity_is_stale = self.node_identity.current() != *fence.owner();
+        let backend_exact = if identity_is_stale {
+            false
+        } else {
+            let entity = sm_session_entity(stream_id);
+            match tokio::time::timeout(
+                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                self.claim_store.current_claim(&entity),
+            )
+            .await
             {
-                if !self.try_record_terminal_claim_fence(stream_id, stale.clone()) {
+                Ok(Ok(snapshot)) => snapshot.is_some_and(|snapshot| {
+                    snapshot.owner == *fence.owner() && snapshot.claim_epoch == fence.epoch()
+                }),
+                Ok(Err(error)) => {
+                    self.pending_epoch_failure_reconciliations
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                        .insert(stream_id.to_string());
+                    return Err(SmRegistryError::Internal(format!(
+                        "epoch-failure owner lookup failed: {error}"
+                    )));
+                }
+                Err(_) => {
+                    self.pending_epoch_failure_reconciliations
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                        .insert(stream_id.to_string());
                     return Err(SmRegistryError::Internal(
-                        "stale-identity cleanup could not retain the exact fence".to_string(),
+                        "epoch-failure owner lookup timed out".to_string(),
+                    ));
+                }
+            }
+        };
+        let release_fence = self.node_identity.with_current(|current_identity| {
+            if fence.owner() != current_identity || !backend_exact {
+                if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                    return Err(SmRegistryError::Internal(
+                        "lost-ownership cleanup could not retain the exact fence".to_string(),
                     ));
                 }
                 self.sessions
@@ -600,7 +682,7 @@ impl InMemorySmSessionRegistry {
                     .write()
                     .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
                     .remove(stream_id);
-                return Ok(Some(stale.clone()));
+                return Ok(Some(fence.clone()));
             }
 
             let resumable = self
@@ -610,18 +692,16 @@ impl InMemorySmSessionRegistry {
                 .get(stream_id)
                 .is_some_and(|session| !session.is_expired());
             if !resumable {
-                if let Some(fence) = &fence {
-                    if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
-                        return Err(SmRegistryError::Internal(
-                            "epoch-failure cleanup could not retain the exact fence".to_string(),
-                        ));
-                    }
+                if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                    return Err(SmRegistryError::Internal(
+                        "epoch-failure cleanup could not retain the exact fence".to_string(),
+                    ));
                 }
                 self.claimed_sessions
                     .write()
                     .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
                     .remove(stream_id);
-                return Ok(fence.clone());
+                return Ok(Some(fence.clone()));
             }
             let session = self
                 .claimed_sessions
@@ -639,6 +719,10 @@ impl InMemorySmSessionRegistry {
                 .insert(stream_id.to_string(), session);
             Ok(None)
         })?;
+        self.pending_epoch_failure_reconciliations
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id);
         drop(stream_guard);
         if let Some(fence) = release_fence {
             self.release_claim_store_entry_under(stream_id, fence).await;

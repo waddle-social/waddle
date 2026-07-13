@@ -2756,6 +2756,101 @@ async fn authoritative_lifecycle_rejects_a_fresh_guard_for_a_stale_fence() {
 }
 
 #[tokio::test]
+async fn epoch_failure_does_not_reinsert_after_backend_ownership_moves() {
+    use crate::ownership::ClaimStore as _;
+
+    let local = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let remote = crate::ownership::NodeIdentity::new("node-b", "incarnation-b");
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(local.clone()),
+    );
+    let stream_id = "epoch-failure-ownership-moved";
+    registry
+        .store_session(realistic_test_session(stream_id))
+        .await
+        .unwrap();
+    registry.claim_session(stream_id).await.unwrap();
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    let local_claim = store
+        .current_claim(&entity)
+        .await
+        .unwrap()
+        .expect("local claim");
+    store
+        .release(&entity, &local, local_claim.claim_epoch)
+        .await
+        .unwrap();
+    store.acquire(&entity, &remote).await.unwrap();
+
+    registry
+        .reconcile_claim_after_epoch_lookup_failure(stream_id)
+        .await
+        .unwrap();
+
+    assert!(registry.live_session_ids().unwrap().is_empty());
+    assert_eq!(
+        store
+            .current_claim(&entity)
+            .await
+            .unwrap()
+            .expect("remote claim survives exact old-fence cleanup")
+            .owner,
+        remote
+    );
+    assert!(registry
+        .pending_epoch_failure_reconciliations
+        .read()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_epoch_failure_reconciliation_remains_janitor_owned() {
+    let identity = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+        crate::ownership::SharedNodeIdentity::new(identity),
+    ));
+    let stream_id = "cancelled-epoch-failure-reconciliation";
+    registry
+        .store_session(realistic_test_session(stream_id))
+        .await
+        .unwrap();
+    registry.claim_session(stream_id).await.unwrap();
+    let blocker = registry.lock_session_operation(stream_id).await.unwrap();
+    let reconciling_registry = registry.clone();
+    let reconciliation = tokio::spawn(async move {
+        reconciling_registry
+            .reconcile_claim_after_epoch_lookup_failure(stream_id)
+            .await
+    });
+    tokio::task::yield_now().await;
+    reconciliation.abort();
+    assert!(reconciliation.await.unwrap_err().is_cancelled());
+
+    assert!(registry
+        .pending_epoch_failure_reconciliations
+        .read()
+        .unwrap()
+        .contains(stream_id));
+    assert_eq!(registry.session_count().await, 0);
+    drop(blocker);
+
+    registry.retry_pending_claim_releases(1).await;
+    assert!(registry
+        .pending_epoch_failure_reconciliations
+        .read()
+        .unwrap()
+        .is_empty());
+    assert_eq!(registry.session_count().await, 1);
+}
+
+#[tokio::test]
 async fn store_session_returns_jid_collision_eviction_and_preserves_rows_until_confirmed() {
     // Two store_session calls for the same JID with different
     // stream_ids: the second supersedes the first per RFC resume
