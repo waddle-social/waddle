@@ -21,6 +21,20 @@ pub(super) enum PendingClaimAcquisitionDisposition {
     RetainDetachedSession,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DetachClaimFenceReservation {
+    Owned,
+    BorrowedRejectedEnable,
+}
+
+impl DetachClaimFenceReservation {
+    pub(super) fn cancel_if_owned(self, registry: &InMemorySmSessionRegistry, stream_id: &str) {
+        if self == Self::Owned {
+            registry.cancel_claim_fence_reservation(stream_id);
+        }
+    }
+}
+
 const STREAM_LOCK_SHARDS: usize = 256;
 
 /// Operation-owned capacity marker for a reclaimed SM claim mutation.
@@ -356,8 +370,35 @@ impl InMemorySmSessionRegistry {
     /// caller confirms promotion) and the replacement session's fence. Keep
     /// one explicitly bounded turnover slot for that transition; subsequent
     /// detaches reject until the displaced responsibility is drained.
-    pub(super) fn reserve_detach_claim_fence_capacity(&self, stream_id: &str) -> bool {
+    pub(super) fn reserve_detach_claim_fence_capacity(
+        &self,
+        stream_id: &str,
+    ) -> Option<DetachClaimFenceReservation> {
+        // A detach can intentionally supersede this stream's timed-out,
+        // rejected-enable acquisition. Both paths are serialized by the
+        // stream shard before the detach reaches this point, so transferring
+        // that already-counted marker is not the unsafe concurrent sharing
+        // rejected by the general reservation API.
+        let rejected_enable_handoff = self
+            .claim_fence_reservations
+            .read()
+            .is_ok_and(|reservations| reservations.contains(stream_id))
+            && self.pending_claim_acquisitions.read().is_ok_and(|pending| {
+                let has_rejected_enable = pending.iter().any(|(id, _, disposition)| {
+                    id == stream_id
+                        && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
+                });
+                let has_uncertain_detach = pending.iter().any(|(id, _, disposition)| {
+                    id == stream_id
+                        && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
+                });
+                has_rejected_enable && !has_uncertain_detach
+            });
+        if rejected_enable_handoff {
+            return Some(DetachClaimFenceReservation::BorrowedRejectedEnable);
+        }
         self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions.saturating_add(1))
+            .then_some(DetachClaimFenceReservation::Owned)
     }
 
     fn reserve_claim_fence_capacity_up_to(&self, stream_id: &str, capacity: usize) -> bool {

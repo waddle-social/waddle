@@ -98,13 +98,20 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
     s
 }
 
+enum EnsureClaimTestAction {
+    PoisonFenceCache(std::sync::Weak<InMemorySmSessionRegistry>),
+    RotateIdentity {
+        identity: crate::ownership::SharedNodeIdentity,
+        next: crate::ownership::NodeIdentity,
+    },
+}
+
 struct HangingReleaseClaimStore {
     inner: crate::ownership::InProcessClaimStore,
     hang_release: std::sync::atomic::AtomicBool,
     hang_ensure: std::sync::atomic::AtomicBool,
     commit_then_hang_ensure_once: std::sync::atomic::AtomicBool,
-    poison_fence_cache_after_ensure:
-        std::sync::Mutex<Option<std::sync::Weak<InMemorySmSessionRegistry>>>,
+    poison_fence_cache_after_ensure: std::sync::Mutex<Option<EnsureClaimTestAction>>,
 }
 
 #[async_trait::async_trait]
@@ -137,17 +144,24 @@ impl crate::ownership::ClaimStore for HangingReleaseClaimStore {
             return std::future::pending().await;
         }
         let result = self.inner.ensure_claimed(entity, me).await;
-        let registry = self
+        let action = self
             .poison_fence_cache_after_ensure
             .lock()
             .expect("poison injection lock")
-            .take()
-            .and_then(|registry| registry.upgrade());
-        if let Some(registry) = registry {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _fences = registry.claim_fences.write().expect("claim fences");
-                panic!("inject claim-fence publication failure");
-            }));
+            .take();
+        match action {
+            Some(EnsureClaimTestAction::PoisonFenceCache(registry)) => {
+                if let Some(registry) = registry.upgrade() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _fences = registry.claim_fences.write().expect("claim fences");
+                        panic!("inject claim-fence publication failure");
+                    }));
+                }
+            }
+            Some(EnsureClaimTestAction::RotateIdentity { identity, next }) => {
+                identity.rotate(next).await;
+            }
+            None => {}
         }
         result
     }
@@ -923,6 +937,138 @@ async fn rejected_enable_reconciliation_skips_stream_that_became_live_again() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn conflicting_detach_preserves_borrowed_rejected_enable_reservation() {
+    use crate::ownership::ClaimStore as _;
+
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let current = crate::ownership::NodeIdentity::new("sm-node", "current-incarnation");
+    let identity = crate::ownership::SharedNodeIdentity::new(old.clone());
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(true),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = InMemorySmSessionRegistry::with_capacity(1)
+        .with_claim_store(store.clone(), identity.clone());
+    let stream_id = "borrowed-rejected-enable-reservation";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+
+    assert!(registry.ensure_session_claim(stream_id).await.is_none());
+    assert!(registry.has_claim_fence_reservation(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(id, owner, disposition)| {
+            id == stream_id
+                && owner == &old
+                && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
+        }));
+    store
+        .hang_ensure
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    identity.rotate(current).await;
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("detach remains best effort after the old claim wins");
+
+    assert!(registry.has_claim_fence_reservation(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(id, owner, disposition)| {
+            id == stream_id
+                && owner == &old
+                && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
+        }));
+    assert!(
+        !registry.reserve_claim_fence_capacity("another-stream"),
+        "the borrowed marker must remain capacity-counted until reconciliation"
+    );
+
+    assert_eq!(registry.retry_pending_claim_releases(1).await, 0);
+    assert!(!registry.has_claim_fence_reservation(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .unwrap()
+        .is_empty());
+    assert!(store.current_claim(&entity).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cancelled_borrowed_detach_acquisition_retains_current_claim_reconciliation() {
+    use crate::ownership::ClaimStore as _;
+
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let current = crate::ownership::NodeIdentity::new("sm-node", "current-incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+            store.clone(),
+            crate::ownership::SharedNodeIdentity::new(current.clone()),
+        ),
+    );
+    let stream_id = "cancelled-borrowed-detach-acquisition";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    registry
+        .pending_claim_acquisitions
+        .write()
+        .unwrap()
+        .insert((
+            stream_id.to_string(),
+            old,
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        ));
+
+    let storing_registry = registry.clone();
+    let storing = tokio::spawn(async move {
+        storing_registry
+            .store_session(realistic_test_session(stream_id))
+            .await
+    });
+    loop {
+        if store.current_claim(&entity).await.unwrap().is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    storing.abort();
+    assert!(storing.await.unwrap_err().is_cancelled());
+
+    assert!(registry.has_claim_fence_reservation(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(id, owner, disposition)| {
+            id == stream_id
+                && owner == &current
+                && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
+        }));
+}
+
 #[tokio::test]
 async fn live_stream_releases_timed_out_old_identity_without_adopting_its_fence() {
     use crate::ownership::ClaimStore as _;
@@ -1017,6 +1163,12 @@ async fn old_claim_cleanup_waits_for_shared_detach_reservation_to_resolve() {
         .write()
         .expect("sessions")
         .insert(stream_id.to_string(), make_test_session(stream_id));
+
+    assert_eq!(
+        registry.reserve_detach_claim_fence_capacity(stream_id),
+        None,
+        "a marker already backing uncertain detach work must not be borrowed again"
+    );
 
     assert!(
         registry
@@ -1745,7 +1897,7 @@ async fn detach_capacity_rejection_precedes_memory_durable_and_claim_publication
 }
 
 #[tokio::test(start_paused = true)]
-async fn enable_claim_publication_failure_retains_ambiguous_exact_release() {
+async fn enable_claim_publication_failure_retains_bounded_acquisition_responsibility() {
     let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
     let store = std::sync::Arc::new(HangingReleaseClaimStore {
         inner: crate::ownership::InProcessClaimStore::new(),
@@ -1761,16 +1913,82 @@ async fn enable_claim_publication_failure_retains_ambiguous_exact_release() {
     *store
         .poison_fence_cache_after_ensure
         .lock()
-        .expect("poison injection lock") = Some(std::sync::Arc::downgrade(&registry));
+        .expect("poison injection lock") = Some(EnsureClaimTestAction::PoisonFenceCache(
+        std::sync::Arc::downgrade(&registry),
+    ));
     let stream_id = "publication-failure";
 
     assert!(registry.ensure_session_claim(stream_id).await.is_none());
-    assert_eq!(
-        registry.pending_claim_release_count(),
-        1,
-        "an ambiguous compensating release remains an exact retry responsibility"
-    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(registry.has_claim_fence_reservation(stream_id));
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(id, owner, disposition)| {
+            id == stream_id
+                && owner.node_epoch == "incarnation"
+                && *disposition == PendingClaimAcquisitionDisposition::ReleaseRejectedEnable
+        }));
 
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(
+        crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("claim lookup")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_enable_compensation_retains_exact_release_responsibility() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let identity = crate::ownership::SharedNodeIdentity::new(me.clone());
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(true),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_claim_store(store.clone(), identity.clone()),
+    );
+    *store
+        .poison_fence_cache_after_ensure
+        .lock()
+        .expect("poison injection lock") = Some(EnsureClaimTestAction::RotateIdentity {
+        identity,
+        next: crate::ownership::NodeIdentity::new("sm-node", "next-incarnation"),
+    });
+    let stream_id = "cancelled-enable-compensation";
+    let claiming_registry = registry.clone();
+    let claiming =
+        tokio::spawn(async move { claiming_registry.ensure_session_claim(stream_id).await });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while registry.pending_claim_release_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("exact release responsibility should publish before compensating release");
+    claiming.abort();
+    let cancellation = claiming
+        .await
+        .err()
+        .expect("claim task should be cancelled");
+    assert!(cancellation.is_cancelled());
+
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert!(
+        !registry.has_claim_fence_reservation(stream_id),
+        "the exact release supersedes the acquisition reservation"
+    );
     let entity = crate::ownership::Entity::new(
         crate::ownership::EntityType::SmSession,
         stream_id.to_string(),
@@ -3628,6 +3846,37 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
         }
         self.inner.store_session_atomic(session, unacked).await
     }
+}
+
+#[tokio::test]
+async fn cancelled_detach_snapshot_releases_its_owned_claim_reservation() {
+    let stream_id = "cancelled-detach-snapshot";
+    let storage = std::sync::Arc::new(GatedSnapshotPersistence::new(stream_id));
+    storage
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::with_capacity(1).with_persistence(storage.clone()),
+    );
+    let storing_registry = registry.clone();
+    let mut storing = tokio::spawn(async move {
+        storing_registry
+            .store_session(realistic_test_session(stream_id))
+            .await
+    });
+    tokio::select! {
+        _ = storage.reached.notified() => {}
+        result = &mut storing => panic!("store completed before the snapshot gate: {result:?}"),
+    }
+    assert!(registry.has_claim_fence_reservation(stream_id));
+
+    storing.abort();
+    assert!(storing.await.unwrap_err().is_cancelled());
+
+    assert!(
+        !registry.has_claim_fence_reservation(stream_id),
+        "cancellation before claim acquisition must release a detach-owned marker"
+    );
 }
 
 #[tokio::test]

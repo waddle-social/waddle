@@ -4,7 +4,7 @@ use tracing::debug;
 use crate::ownership::{ClaimError, Entity, EntityType};
 
 use super::core::{
-    InMemorySmSessionRegistry, PendingClaimAcquisitionDisposition,
+    DetachClaimFenceReservation, InMemorySmSessionRegistry, PendingClaimAcquisitionDisposition,
     CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
 };
 use super::{DetachedSession, SmClaimCompletion, SmRegistryError};
@@ -1063,17 +1063,20 @@ impl InMemorySmSessionRegistry {
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
                 let Some(publication_guard) = self.node_identity.guard_if_current(&identity).await
                 else {
-                    self.cancel_claim_fence_reservation(stream_id);
-                    acquisition_guard.disarm();
-                    self.release_claim_store_entry_under(stream_id, fence).await;
+                    if self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                        acquisition_guard.disarm();
+                        self.release_claim_store_entry_under(stream_id, fence).await;
+                    }
                     return None;
                 };
                 let recorded = self.try_record_claim_fence(stream_id, fence.clone());
                 if !recorded {
                     drop(publication_guard);
-                    self.cancel_claim_fence_reservation(stream_id);
-                    self.release_claim_store_entry_under(stream_id, fence).await;
-                    None
+                    if self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                        acquisition_guard.disarm();
+                        self.release_claim_store_entry_under(stream_id, fence).await;
+                    }
+                    return None;
                 } else {
                     Some(publication_guard)
                 }
@@ -1356,10 +1359,20 @@ impl InMemorySmSessionRegistry {
     /// successful acquire for it (e.g. this node's own restart). Logged at
     /// `warn` so a persistently failing acquire (e.g. a genuinely wedged
     /// `ClaimStore` backend) is visible.
-    pub(super) async fn acquire_claim_store_entry_for_detach(&self, stream_id: &str) {
+    pub(super) async fn acquire_claim_store_entry_for_detach(
+        &self,
+        stream_id: &str,
+        reservation: DetachClaimFenceReservation,
+    ) {
         let acquisition_reserved = self.has_claim_fence_reservation(stream_id);
         let entity = sm_session_entity(stream_id);
         let identity = self.node_identity.current();
+        let mut acquisition_guard = PendingAcquisitionGuard::new(
+            self,
+            stream_id,
+            identity.clone(),
+            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+        );
         // FIX 5: bounded — this call runs under `stream_id`'s shard lock
         // (`store_session` holds it for the whole function, including this
         // call), shared by every other stream id hashing to the same shard
@@ -1379,19 +1392,26 @@ impl InMemorySmSessionRegistry {
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
                 let Some(publication_guard) = self.node_identity.guard_if_current(&identity).await
                 else {
-                    self.cancel_claim_fence_reservation(stream_id);
-                    self.release_claim_store_entry_under(stream_id, fence).await;
+                    if self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                        acquisition_guard.disarm();
+                        self.release_claim_store_entry_under(stream_id, fence).await;
+                    }
                     return;
                 };
                 let recorded = self.try_record_claim_fence(stream_id, fence.clone());
                 drop(publication_guard);
                 if !recorded {
-                    self.cancel_claim_fence_reservation(stream_id);
-                    self.release_claim_store_entry_under(stream_id, fence).await;
+                    if self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+                        acquisition_guard.disarm();
+                        self.release_claim_store_entry_under(stream_id, fence).await;
+                    }
+                    return;
                 }
+                acquisition_guard.disarm();
             }
             Ok(Err(error)) => {
-                self.cancel_claim_fence_reservation(stream_id);
+                reservation.cancel_if_owned(self, stream_id);
+                acquisition_guard.disarm();
                 tracing::warn!(
                     stream_id = %stream_id,
                     %error,
@@ -1409,17 +1429,12 @@ impl InMemorySmSessionRegistry {
                      (best-effort — see this function's doc comment)"
                 );
                 if acquisition_reserved {
-                    if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
-                        pending.insert((
-                            stream_id.to_string(),
-                            identity.clone(),
-                            PendingClaimAcquisitionDisposition::RetainDetachedSession,
-                        ));
-                    }
                     // Do not issue a second ClaimStore call while the caller
                     // holds this stream's shard lock. The bounded SM janitor
-                    // owns reconciliation after `store_session` returns and
-                    // releases the shard.
+                    // owns the guard-published reconciliation after
+                    // `store_session` returns and releases the shard.
+                } else {
+                    acquisition_guard.disarm();
                 }
             }
         }

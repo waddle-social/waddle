@@ -1,9 +1,44 @@
 use async_trait::async_trait;
 use tracing::{debug, warn};
 
-use super::core::InMemorySmSessionRegistry;
+use super::core::{DetachClaimFenceReservation, InMemorySmSessionRegistry};
 use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
 use crate::tombstone::{matching_tombstone_sequences, TombstoneTarget};
+
+struct DetachReservationGuard<'a> {
+    registry: &'a InMemorySmSessionRegistry,
+    stream_id: &'a str,
+    reservation: DetachClaimFenceReservation,
+    armed: bool,
+}
+
+impl<'a> DetachReservationGuard<'a> {
+    fn new(
+        registry: &'a InMemorySmSessionRegistry,
+        stream_id: &'a str,
+        reservation: DetachClaimFenceReservation,
+    ) -> Self {
+        Self {
+            registry,
+            stream_id,
+            reservation,
+            armed: true,
+        }
+    }
+
+    fn transfer(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DetachReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.reservation
+                .cancel_if_owned(self.registry, self.stream_id);
+        }
+    }
+}
 
 #[async_trait]
 impl SmSessionRegistry for InMemorySmSessionRegistry {
@@ -33,12 +68,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // exists, a successful or ambiguous backend claim must have bounded
         // local ownership bookkeeping; rejecting after publication would
         // strand an unrecorded live-node claim.
-        if !self.reserve_detach_claim_fence_capacity(&stream_id) {
+        let Some(detach_reservation) = self.reserve_detach_claim_fence_capacity(&stream_id) else {
             return Err(SmRegistryError::Internal(
                 "store_session: exact claim-fence capacity exhausted before detach publication"
                     .to_string(),
             ));
-        }
+        };
+        let mut detach_reservation_guard =
+            DetachReservationGuard::new(self, &stream_id, detach_reservation);
         // Scope the RwLock guards in a block so they're definitively
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
@@ -126,7 +163,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         let count = match state_result {
             Ok(count) => count,
             Err(error) => {
-                self.cancel_claim_fence_reservation(&stream_id);
+                detach_reservation.cancel_if_owned(self, &stream_id);
                 return Err(error);
             }
         };
@@ -166,7 +203,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // calls re-inserting each other's displaced sessions would
         // otherwise deadlock.
         if let Err(error) = self.persist_detached_session_snapshot(&session).await {
-            self.cancel_claim_fence_reservation(&stream_id);
+            detach_reservation.cancel_if_owned(self, &stream_id);
             for displaced_session in displaced {
                 if displaced_session.stream_id == stream_id {
                     // Already (re)inserted above as the new session's
@@ -194,7 +231,9 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // `claims.rs::acquire_claim_store_entry_for_detach`'s doc comment
         // for the acquire-on-detach half of the acquire-then-hydrate
         // invariant this slice establishes.
-        self.acquire_claim_store_entry_for_detach(&stream_id).await;
+        detach_reservation_guard.transfer();
+        self.acquire_claim_store_entry_for_detach(&stream_id, detach_reservation)
+            .await;
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
         Ok(displaced)
