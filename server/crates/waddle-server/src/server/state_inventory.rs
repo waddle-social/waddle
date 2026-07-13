@@ -128,11 +128,23 @@ pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
         }
     }
 
+    // Handshake entries live in the shared database (#1336), so the
+    // counts are DB-wide rather than per-process; a query failure is
+    // reported as zeros rather than dropping the whole snapshot.
+    let handshake_counts = auth_state
+        .auth_handshake
+        .counts()
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "state inventory: auth handshake counts unavailable");
+            Default::default()
+        });
+
     StateInventorySnapshot {
         auth: AuthInventory {
-            pending_auth: auth_state.pending_auth.len(),
-            device_auth: auth_state.device_auth.len(),
-            xmpp_auth_codes: auth_state.xmpp_auth_codes.len(),
+            pending_auth: handshake_counts.pending_auth,
+            device_auth: handshake_counts.device_auth,
+            xmpp_auth_codes: handshake_counts.xmpp_auth_codes,
             dynamic_oidc_clients: auth_state.dynamic_oidc_clients.len(),
             dynamic_oidc_client_locks: auth_state.dynamic_oidc_client_locks.len(),
         },

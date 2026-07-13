@@ -596,6 +596,73 @@ CREATE INDEX IF NOT EXISTS idx_link_preview_media_refs_message
     ON link_preview_media_refs(archive_jid, message_id);
 "#;
 
+/// Durable OIDC/OAuth handshake state so any replica can serve the
+/// callback / token / device endpoints (#1336). Entries are single-use
+/// JSON payloads keyed by their opaque secret; `expires_at_ms` (unix
+/// epoch milliseconds) exists purely for the janitor's SQL prune.
+///
+/// `IF NOT EXISTS` throughout: the migration runner has no cross-node
+/// lock, so two replicas starting concurrently can both attempt this
+/// DDL; idempotent statements make the loser a no-op instead of a
+/// startup crash-loop.
+pub const V0009_AUTH_HANDSHAKE_STATE: &str = r#"
+CREATE TABLE IF NOT EXISTS pending_auth (
+    state TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_auth_expires_at ON pending_auth(expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS device_auth (
+    device_code TEXT PRIMARY KEY,
+    user_code TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_device_auth_user_code ON device_auth(user_code);
+CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth(expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
+    code TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
+"#;
+
+pub const V0009_AUTH_HANDSHAKE_STATE_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS pending_auth (
+    state TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    expires_at_ms BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_auth_expires_at ON pending_auth(expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS device_auth (
+    device_code TEXT PRIMARY KEY,
+    user_code TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    expires_at_ms BIGINT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_device_auth_user_code ON device_auth(user_code);
+CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth(expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
+    code TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    expires_at_ms BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -649,6 +716,12 @@ pub fn all() -> Vec<Migration> {
             description: "Repair missing global tables after migration drift".to_string(),
             sql_sqlite: V0008_REPAIR_GLOBAL_SCHEMA_DRIFT,
             sql_postgres: V0008_REPAIR_GLOBAL_SCHEMA_DRIFT_POSTGRES,
+        },
+        Migration {
+            version: 9,
+            description: "Durable OIDC/OAuth handshake state shared across replicas".to_string(),
+            sql_sqlite: V0009_AUTH_HANDSHAKE_STATE,
+            sql_postgres: V0009_AUTH_HANDSHAKE_STATE_POSTGRES,
         },
     ]
 }

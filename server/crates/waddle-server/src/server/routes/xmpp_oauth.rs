@@ -189,15 +189,22 @@ pub async fn xmpp_token_handler(
             .into_response();
     }
 
-    let code = match state.xmpp_auth_codes.remove(&request.code) {
-        Some((_, code)) => code,
-        None => {
+    let code = match state.auth_handshake.take_xmpp_code(&request.code).await {
+        Ok(Some(code)) => code,
+        Ok(None) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
                     "invalid_grant",
                     "Invalid or expired code",
                 )),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("server_error", &err.to_string())),
             )
                 .into_response();
         }
