@@ -418,9 +418,17 @@ impl InMemorySmSessionRegistry {
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
                 match disposition {
                     PendingClaimAcquisitionDisposition::ReleaseRejectedEnable => {
-                        let recorded = self.try_record_claim_fence(stream_id, fence.clone());
+                        // Convert to terminal inventory before the release
+                        // await. The janitor's outer wall-clock budget may
+                        // cancel this future at any await; pending exact
+                        // responsibility must already be durable in memory.
+                        let recorded =
+                            self.try_record_terminal_claim_fence(stream_id, fence.clone());
                         if !recorded {
-                            self.cancel_claim_fence_reservation(stream_id);
+                            if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
+                                pending.insert(pending_key);
+                            }
+                            return;
                         }
                         if let Ok(mut pending) = self.pending_claim_acquisitions.write() {
                             pending.remove(&pending_key);

@@ -127,18 +127,6 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .retry_pending_reclaimed_hydrations(64)
-                .await;
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .retry_pending_claim_releases(64)
-                .await;
             let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
                 .deps
                 .protocol
@@ -149,16 +137,15 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 Ok(sessions) => sessions,
                 Err(err) => {
                     warn!(error = %err, "SM janitor: drain_expired failed");
-                    continue;
+                    Vec::new()
                 }
             };
-            if drained.is_empty() {
-                continue;
+            if !drained.is_empty() {
+                info!(
+                    count = drained.len(),
+                    "SM janitor: cleaning up expired detached sessions"
+                );
             }
-            info!(
-                count = drained.len(),
-                "SM janitor: cleaning up expired detached sessions"
-            );
             for session in drained {
                 let blocklist = match state
                     .deps
@@ -470,8 +457,68 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     );
                 }
             }
+            retry_pending_sm_ownership(&state).await;
         }
     });
+}
+
+async fn retry_pending_sm_ownership(state: &WebSocketState) {
+    const COMBINED_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    let registry = &state.deps.protocol.sm_session_registry;
+    let hydration = async {
+        registry.retry_pending_reclaimed_hydrations(64).await;
+    };
+    let releases = async {
+        registry.retry_pending_claim_releases(64).await;
+    };
+    if !run_sm_retries_with_budget(COMBINED_RETRY_BUDGET, hydration, releases).await {
+        warn!(
+            budget = ?COMBINED_RETRY_BUDGET,
+            "SM janitor: ownership reconciliation exhausted its post-expiry tick budget"
+        );
+    }
+}
+
+async fn run_sm_retries_with_budget<H, R>(
+    budget: std::time::Duration,
+    hydration: H,
+    releases: R,
+) -> bool
+where
+    H: std::future::Future<Output = ()>,
+    R: std::future::Future<Output = ()>,
+{
+    // Both inventories retain responsibility until their individual item
+    // succeeds or ownership is disproved, so cancelling this joined tail at
+    // the tick deadline is safe. Polling concurrently prevents a degraded
+    // hydration backend from starving exact terminal releases every tick.
+    tokio::time::timeout(budget, async {
+        tokio::join!(hydration, releases);
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(test)]
+mod sm_retry_budget_tests {
+    use super::run_sm_retries_with_budget;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_hydration_retry_does_not_starve_release_retry() {
+        let release_polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_observer = release_polled.clone();
+        let completed = run_sm_retries_with_budget(
+            std::time::Duration::from_secs(5),
+            std::future::pending(),
+            async move {
+                release_observer.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert!(!completed);
+        assert!(release_polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }
 
 /// ADR-0017 Phase 3 Slice 5, element 9 (quoted verbatim): *"any node may

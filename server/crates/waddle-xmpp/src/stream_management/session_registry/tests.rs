@@ -323,6 +323,64 @@ async fn claim_session_commit_before_timeout_retains_acquisition_for_reconciliat
         .is_empty());
 }
 
+#[tokio::test(start_paused = true)]
+async fn cancelled_rejected_enable_release_retains_terminal_exact_inventory() {
+    use crate::ownership::ClaimStore as _;
+
+    let identity = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store = std::sync::Arc::new(HangingReleaseClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+        hang_release: std::sync::atomic::AtomicBool::new(false),
+        hang_ensure: std::sync::atomic::AtomicBool::new(false),
+        commit_then_hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+        poison_fence_cache_after_ensure: std::sync::Mutex::new(None),
+    });
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(identity.clone()),
+    );
+    let stream_id = "cancelled-rejected-enable-release";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    store
+        .ensure_claimed(&entity, &identity)
+        .await
+        .expect("seed rejected enable claim");
+    assert!(registry.reserve_claim_fence_capacity(stream_id));
+    registry
+        .pending_claim_acquisitions
+        .write()
+        .expect("pending acquisitions")
+        .insert((
+            stream_id.to_string(),
+            identity,
+            PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
+        ));
+    store
+        .hang_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(tokio::time::timeout(
+        Duration::from_millis(1),
+        registry.retry_pending_claim_releases(1),
+    )
+    .await
+    .is_err());
+    assert!(registry
+        .pending_claim_acquisitions
+        .read()
+        .expect("pending acquisitions")
+        .is_empty());
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert!(!registry
+        .claim_fences
+        .read()
+        .expect("active fences")
+        .contains_key(stream_id));
+}
+
 #[test]
 fn reclaimed_claim_admission_is_bounded_before_the_ownership_cas() {
     let registry = InMemorySmSessionRegistry::with_capacity(1);
