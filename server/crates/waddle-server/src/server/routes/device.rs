@@ -153,20 +153,52 @@ pub async fn device_start_handler(
             .into_response();
     }
 
-    let auth = DeviceAuthorization {
-        device_code: generate_device_code(),
-        user_code: generate_user_code(),
-        provider_id: request.provider,
-        expires_at: Utc::now() + Duration::minutes(15),
-        status: DeviceAuthStatus::Pending,
-        session_id: None,
+    // `user_code` is unique in the store; regenerate both codes on a
+    // collision with another active grant (the insert is ON CONFLICT
+    // DO NOTHING, so a loss is reported as `false`, not an error).
+    const INSERT_ATTEMPTS: usize = 5;
+    let mut auth = None;
+    for _ in 0..INSERT_ATTEMPTS {
+        let candidate = DeviceAuthorization {
+            device_code: generate_device_code(),
+            user_code: generate_user_code(),
+            provider_id: request.provider.clone(),
+            expires_at: Utc::now() + Duration::minutes(15),
+            status: DeviceAuthStatus::Pending,
+            session_id: None,
+        };
+
+        match state.auth_handshake.insert_device(&candidate).await {
+            Ok(true) => {
+                auth = Some(candidate);
+                break;
+            }
+            Ok(false) => continue,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("server_error", &err.to_string())),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let Some(auth) = auth else {
+        warn!("Device flow could not allocate a unique user_code after retries");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                "server_error",
+                "Could not allocate a device code; try again",
+            )),
+        )
+            .into_response();
     };
 
     let device_code = auth.device_code.clone();
     let user_code = auth.user_code.clone();
     let expires_in = (auth.expires_at - Utc::now()).num_seconds() as u32;
-
-    state.device_auth.insert(device_code.clone(), auth);
 
     let verification_uri = format!("{}/api/auth/device/verify", state.base_url);
 
@@ -189,9 +221,9 @@ pub async fn device_poll_handler(
     State(state): State<Arc<AuthState>>,
     Json(request): Json<DevicePollRequest>,
 ) -> impl IntoResponse {
-    let auth = match state.device_auth.get(&request.device_code) {
-        Some(v) => v.clone(),
-        None => {
+    let auth = match state.auth_handshake.get_device(&request.device_code).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -201,10 +233,23 @@ pub async fn device_poll_handler(
             )
                 .into_response();
         }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("server_error", &err.to_string())),
+            )
+                .into_response();
+        }
     };
 
     if auth.is_expired() {
-        state.device_auth.remove(&request.device_code);
+        if let Err(err) = state
+            .auth_handshake
+            .remove_device(&request.device_code)
+            .await
+        {
+            warn!(error = %err, "Failed to remove expired device authorization");
+        }
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -299,52 +344,43 @@ pub async fn device_verify_submit_handler(
 ) -> impl IntoResponse {
     let normalized = request.user_code.trim().to_uppercase();
 
-    let selected = state
-        .device_auth
-        .iter()
-        .find(|entry| entry.value().user_code == normalized)
-        .map(|entry| entry.key().clone());
-
-    let Some(device_code) = selected else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("invalid_user_code", "Invalid user code")),
-        )
-            .into_response();
-    };
-
+    let mut auth = match state
+        .auth_handshake
+        .find_device_by_user_code(&normalized)
+        .await
     {
-        let mut auth = match state.device_auth.get_mut(&device_code) {
-            Some(v) => v,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "invalid_device_code",
-                        "Device code no longer exists",
-                    )),
-                )
-                    .into_response();
-            }
-        };
-
-        if auth.is_expired() {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "expired_token",
-                    "Device code has expired",
-                )),
+                Json(ErrorResponse::new("invalid_user_code", "Invalid user code")),
             )
                 .into_response();
         }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("server_error", &err.to_string())),
+            )
+                .into_response();
+        }
+    };
 
-        auth.status = DeviceAuthStatus::InProgress;
+    if auth.is_expired() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "expired_token",
+                "Device code has expired",
+            )),
+        )
+            .into_response();
     }
 
-    let provider_id = match state.device_auth.get(&device_code) {
-        Some(v) => v.provider_id.clone(),
-        None => {
+    auth.status = DeviceAuthStatus::InProgress;
+    match state.auth_handshake.update_device(&auth).await {
+        Ok(true) => {}
+        Ok(false) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -354,7 +390,17 @@ pub async fn device_verify_submit_handler(
             )
                 .into_response();
         }
-    };
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("server_error", &err.to_string())),
+            )
+                .into_response();
+        }
+    }
+
+    let device_code = auth.device_code.clone();
+    let provider_id = auth.provider_id.clone();
 
     let provider = match state.providers.get(&provider_id) {
         Some(v) => v,

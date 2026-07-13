@@ -18,9 +18,10 @@ pub(super) async fn callback_handler(
             .into_response();
     };
 
-    let pending = match state.pending_auth.remove(&state_key) {
-        Some((_, pending)) => pending,
-        None => return auth_error_to_response(AuthError::InvalidState).into_response(),
+    let pending = match state.auth_handshake.take_pending(&state_key).await {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return auth_error_to_response(AuthError::InvalidState).into_response(),
+        Err(err) => return auth_error_to_response(err).into_response(),
     };
 
     if pending.is_expired() {
@@ -287,9 +288,53 @@ pub(super) async fn callback_handler(
             response
         }
         PendingFlow::Device { device_code } => {
-            if let Some(mut entry) = state.device_auth.get_mut(&device_code) {
-                entry.status = DeviceAuthStatus::Approved;
-                entry.session_id = Some(session.id.clone());
+            // The approval must actually land on the device row: if the
+            // grant expired and was pruned mid-callback, reporting
+            // "Device authorized" would strand the poller forever and
+            // leak the session we just created — so roll it back and
+            // surface the expiry instead.
+            // The session is already committed; any exit from this
+            // block that can't hand it to the device poller must roll
+            // it back or it lives as a 30-day orphan.
+            let rollback_session = |err: AuthError| async {
+                if let Err(rollback_err) = state.session_manager.delete_session(&session.id).await {
+                    warn!(error = %rollback_err, "Failed to roll back session for failed device approval");
+                }
+                auth_error_to_response(err).into_response()
+            };
+
+            let approved = match state.auth_handshake.get_device(&device_code).await {
+                Ok(Some(mut entry)) => {
+                    if entry.is_expired() {
+                        // The IdP round-trip outlived the device-code
+                        // window. `update_device` is also time-gated in
+                        // SQL, so this is belt-and-braces plus eager
+                        // cleanup of the dead row.
+                        if let Err(err) = state.auth_handshake.remove_device(&device_code).await {
+                            warn!(error = %err, "Failed to remove expired device authorization");
+                        }
+                        false
+                    } else {
+                        entry.status = DeviceAuthStatus::Approved;
+                        entry.session_id = Some(session.id.clone());
+                        match state.auth_handshake.update_device(&entry).await {
+                            Ok(approved) => approved,
+                            Err(err) => return rollback_session(err).await,
+                        }
+                    }
+                }
+                Ok(None) => false,
+                Err(err) => return rollback_session(err).await,
+            };
+
+            if !approved {
+                if let Err(err) = state.session_manager.delete_session(&session.id).await {
+                    warn!(error = %err, "Failed to roll back session for expired device grant");
+                }
+                return auth_error_to_response(AuthError::InvalidRequest(
+                    "device authorization expired; restart the device login".to_string(),
+                ))
+                .into_response();
             }
 
             (
@@ -304,15 +349,26 @@ pub(super) async fn callback_handler(
             client_code_challenge,
         } => {
             let auth_code = Uuid::new_v4().to_string();
-            state.xmpp_auth_codes.insert(
-                auth_code.clone(),
-                XmppAuthCode {
-                    session_id: session.id,
-                    redirect_uri: client_redirect_uri.clone(),
-                    code_challenge: client_code_challenge,
-                    created_at: Utc::now(),
-                },
-            );
+            if let Err(err) = state
+                .auth_handshake
+                .insert_xmpp_code(
+                    &auth_code,
+                    &XmppAuthCode {
+                        session_id: session.id.clone(),
+                        redirect_uri: client_redirect_uri.clone(),
+                        code_challenge: client_code_challenge,
+                        created_at: Utc::now(),
+                    },
+                )
+                .await
+            {
+                // No code ever reaches the client, so the session just
+                // created would be a live 30-day orphan — roll it back.
+                if let Err(rollback_err) = state.session_manager.delete_session(&session.id).await {
+                    warn!(error = %rollback_err, "Failed to roll back session for failed xmpp code insert");
+                }
+                return auth_error_to_response(err).into_response();
+            }
 
             let mut redirect = match url::Url::parse(&client_redirect_uri) {
                 Ok(v) => v,

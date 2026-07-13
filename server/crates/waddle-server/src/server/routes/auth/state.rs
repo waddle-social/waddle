@@ -29,9 +29,12 @@ pub struct AuthState {
     /// `WADDLE_XMPP_DOMAIN` value at runtime.
     pub caps_server_domain: crate::server::caps_resolution::ServerDomainJid,
     pub http_client: reqwest::Client,
-    pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
-    pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
-    pub xmpp_auth_codes: Arc<DashMap<String, XmppAuthCode>>,
+    /// Durable OIDC/OAuth handshake state (`pending_auth`,
+    /// `device_auth`, `xmpp_auth_codes`) shared across replicas via the
+    /// global database — see #1336. Never cache these entries in
+    /// process memory: the pod that mints a state/code is not
+    /// necessarily the pod that redeems it.
+    pub auth_handshake: AuthHandshakeStore,
     pub dynamic_oidc_clients: Arc<DashMap<String, oidc::DynamicClientRegistration>>,
     pub dynamic_oidc_client_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub permission_actor: ActorRef<PermissionActor>,
@@ -72,9 +75,7 @@ impl AuthState {
             xmpp_domain,
             caps_server_domain,
             http_client: reqwest::Client::new(),
-            pending_auth: Arc::new(DashMap::new()),
-            device_auth: Arc::new(DashMap::new()),
-            xmpp_auth_codes: Arc::new(DashMap::new()),
+            auth_handshake: AuthHandshakeStore::new(app_state.db_pool.global_actor().clone()),
             dynamic_oidc_clients: Arc::new(DashMap::new()),
             dynamic_oidc_client_locks: Arc::new(DashMap::new()),
             permission_actor: app_state.permission_actor.clone(),
@@ -248,9 +249,8 @@ impl AuthState {
             qp.append_pair("nonce", &nonce);
         }
 
-        self.pending_auth.insert(
-            state.clone(),
-            PendingAuthorization {
+        self.auth_handshake
+            .insert_pending(&PendingAuthorization {
                 state,
                 provider_id: provider.id.clone(),
                 nonce,
@@ -262,8 +262,8 @@ impl AuthState {
                 require_dpop: provider.require_dpop,
                 flow,
                 created_at: Utc::now(),
-            },
-        );
+            })
+            .await?;
 
         Ok(url.to_string())
     }
