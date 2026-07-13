@@ -163,19 +163,19 @@ _Cross-refs (already-lane'd, referenced not re-filed): #1173/#1171/#1170 (Lane D
 
 The original Lane J scope above remains historical completion. A subsequent adversarial
 audit found residual loss, isolation, concurrency, and conformance defects. Work the
-unblocked frontier; #1287 is natively blocked by #1281.
+remaining unblocked frontier.
 
 1. ✅ **#1280 — XEP-0198 handler-timeout false ack: cancelled message/presence dispatch remains sender-owned, `h` cannot cross the hole, and cleanup detaches without hanging. DONE (PR #1292, merged).**
-2. 🚧 **#1281 — scope MUC-PM MAM history to the full occupant JID. IN REVIEW (PR #1293).**
-3. #1287 — scope MUC-PM displayed state to the full occupant JID. Blocked by #1281.
-4. #1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs.
-5. #1288 — prevent cross-occupant MUC message-ID collision merges.
+2. ✅ **#1281 — scope MUC-PM MAM history to the full occupant JID. DONE (PR #1293, merged).**
+3. ✅ **#1287 — scope MUC-PM displayed state to the full occupant JID. DONE (PR #1308, merged).**
+4. ✅ **#1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs. DONE (closed after cross-check: the existing WebSocket ingress boundary and dedicated XEP-0203 test already cover reflection and MAM replay).**
+5. ✅ **#1288 — prevent cross-occupant MUC message-ID collision merges. DONE (PR #1304, merged).**
 6. #1289 — make mediated-invite grants and rollback atomic.
 7. #1283 — seal room destruction and purge the destroyed MAM epoch.
-8. #1290 — implement XEP-0313 `with=self` intersection semantics.
-9. #1286 — advertise XEP-0085 chat-state support in entity capabilities.
-10. #1291 — reject duplicate `FORM_TYPE` values across capability forms.
-11. #1284 — reconcile `RoomActor` claims left by dead nodes.
+8. ✅ **#1290 — implement XEP-0313 `with=self` intersection semantics. DONE (PR #1309, merged).**
+9. ✅ **#1286 — advertise XEP-0085 chat-state support in entity capabilities. DONE (PR #1307, merged).**
+10. ✅ **#1291 — reject duplicate `FORM_TYPE` values across capability forms. DONE (PR #1310, merged).**
+11. ✅ **#1284 — reconcile `RoomActor` claims left by dead nodes. DONE (PR #1335, merged; exact-ownership prerequisites PRs #1332–#1334 and restart follow-up PR #1340).**
 12. #1285 — send MUC status 332 on non-resumable service shutdown.
 
 _Shared completion work: #1136 proves the handler-timeout metric end to end; its completion
