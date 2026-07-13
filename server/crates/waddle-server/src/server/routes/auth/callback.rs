@@ -293,6 +293,16 @@ pub(super) async fn callback_handler(
             // "Device authorized" would strand the poller forever and
             // leak the session we just created — so roll it back and
             // surface the expiry instead.
+            // The session is already committed; any exit from this
+            // block that can't hand it to the device poller must roll
+            // it back or it lives as a 30-day orphan.
+            let rollback_session = |err: AuthError| async {
+                if let Err(rollback_err) = state.session_manager.delete_session(&session.id).await {
+                    warn!(error = %rollback_err, "Failed to roll back session for failed device approval");
+                }
+                auth_error_to_response(err).into_response()
+            };
+
             let approved = match state.auth_handshake.get_device(&device_code).await {
                 Ok(Some(mut entry)) => {
                     if entry.is_expired() {
@@ -309,12 +319,12 @@ pub(super) async fn callback_handler(
                         entry.session_id = Some(session.id.clone());
                         match state.auth_handshake.update_device(&entry).await {
                             Ok(approved) => approved,
-                            Err(err) => return auth_error_to_response(err).into_response(),
+                            Err(err) => return rollback_session(err).await,
                         }
                     }
                 }
                 Ok(None) => false,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Err(err) => return rollback_session(err).await,
             };
 
             if !approved {

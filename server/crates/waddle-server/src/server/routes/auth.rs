@@ -66,8 +66,11 @@ impl PendingAuthorization {
         self.created_at + Duration::minutes(10)
     }
 
+    /// Inclusive boundary (`>=`) to match the store's SQL gates
+    /// (`expires_at_ms > now` to act, `<= now` to prune), so an entry
+    /// can never pass this check yet be rejected by the database.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at()
+        Utc::now() >= self.expires_at()
     }
 }
 
@@ -116,8 +119,9 @@ pub struct DeviceAuthorization {
 }
 
 impl DeviceAuthorization {
+    /// Inclusive boundary (`>=`) — see `PendingAuthorization::is_expired`.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        Utc::now() >= self.expires_at
     }
 }
 
@@ -141,8 +145,9 @@ impl XmppAuthCode {
         self.created_at + Duration::minutes(10)
     }
 
+    /// Inclusive boundary (`>=`) — see `PendingAuthorization::is_expired`.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at()
+        Utc::now() >= self.expires_at()
     }
 }
 
