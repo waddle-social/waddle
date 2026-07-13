@@ -103,10 +103,10 @@
 //!   error or bound expiry — triggers
 //!   [`InMemorySmSessionRegistry::repair_failed_local_claim`]: an
 //!   epoch-gated, best-effort `ClaimStore::release` of the claim this call
-//!   just won, retried a bounded few times, with a loud `error!` log if
-//!   every attempt fails (the release is the *only* path back to sanity
-//!   here — a live node's own fresh lease means the orphan reaper's
-//!   staleness predicate will never fire for it).
+//!   just won, retried a bounded few times. Exact terminal-release inventory
+//!   is published before the first attempt, so cancellation or exhaustion
+//!   leaves the janitor a durable retry owner even though a live node's own
+//!   fresh lease prevents the orphan reaper from stealing the claim.
 //! - **FIX C — the unclaimed-but-persisted branch** (this module's branch
 //!   4, above) is what makes a successful repair actually recoverable: a
 //!   client's very next resume retry must find a working path back in, not
@@ -166,9 +166,8 @@ const REPAIR_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How many times [`InMemorySmSessionRegistry::repair_failed_local_claim`]
 /// retries its `ClaimStore::release` call before giving up and surfacing a
 /// loud, named error (FIX B). The release is the PRIMARY path back to
-/// sanity for a post-win hydrate/claim failure — a live node's own fresh
-/// lease means the orphan reaper's staleness predicate can never fire for
-/// it, so there is no fallback if every release attempt fails.
+/// sanity for a post-win hydrate/claim failure. The normal exact-release
+/// inventory remains the fallback if every inline attempt fails.
 const REPAIR_RELEASE_MAX_ATTEMPTS: u32 = 3;
 
 /// Delay between [`REPAIR_RELEASE_MAX_ATTEMPTS`] repair-release retries.
@@ -799,6 +798,22 @@ impl InMemorySmSessionRegistry {
     /// failure as an error: a repaired claim means the entity is once again
     /// unclaimed-but-persisted (branch 4/FIX C), which the client's very
     /// next resume retry can walk straight into.
+    async fn prepare_failed_local_claim_release(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+        stream_id: &str,
+        reservation: super::ReclaimedClaimReservation,
+    ) -> Result<bool, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+        if !self.transfer_reclaimed_claim_to_exact_release(entity, fence, reservation) {
+            return Ok(false);
+        }
+        self.forget_claim_locally_locked(stream_id, Some(fence));
+        Ok(true)
+    }
+
     async fn repair_failed_local_claim(
         &self,
         entity: &Entity,
@@ -807,8 +822,15 @@ impl InMemorySmSessionRegistry {
         reservation: super::ReclaimedClaimReservation,
         reason: String,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
-        self.forget_claim_locally(stream_id).await;
-        self.transfer_reclaimed_claim_to_exact_release(entity, fence, reservation);
+        if !self
+            .prepare_failed_local_claim_release(entity, fence, stream_id, reservation)
+            .await?
+        {
+            return Err(SmRegistryError::Internal(format!(
+                "attempt_cross_node_resume: post-win repair could not transfer {stream_id} \
+                 into exact-release inventory after {reason}; reclaimed responsibility retained"
+            )));
+        }
 
         for attempt in 1..=REPAIR_RELEASE_MAX_ATTEMPTS {
             match tokio::time::timeout(
@@ -819,6 +841,7 @@ impl InMemorySmSessionRegistry {
             .await
             {
                 Ok(Ok(())) => {
+                    self.complete_terminal_claim_release(stream_id, fence);
                     tracing::warn!(
                         stream_id = %stream_id,
                         entity = %entity,
@@ -859,10 +882,8 @@ impl InMemorySmSessionRegistry {
             reason = %reason,
             attempts = REPAIR_RELEASE_MAX_ATTEMPTS,
             "attempt_cross_node_resume: post-win repair release FAILED after every retry — \
-             this node now holds a self-owned, un-hydrated claim under a FRESH lease that the \
-             orphan reaper can never steal (steal_stale's OwnerStale predicate never fires for \
-             a live owner); the entity is wedged until this node's own lease naturally lapses \
-             or it self-fences and re-registers under a new epoch"
+             exact terminal-release inventory remains queued for janitor retry because the \
+             orphan reaper cannot steal a claim held under this live node's fresh lease"
         );
         Err(SmRegistryError::Internal(format!(
             "attempt_cross_node_resume: post-win repair failed for {stream_id} after {reason} \
@@ -927,8 +948,10 @@ mod tests {
     use super::*;
     use crate::ownership::{ClaimEpoch, ClaimStore, InProcessClaimStore, SharedNodeIdentity};
     use crate::stream_management::persistence::{
-        InMemorySmPersistence, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+        InMemorySmPersistence, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
+        SmPersistenceStorage,
     };
+    use crate::stream_management::session_registry::core::PendingClaimAcquisitionDisposition;
     use std::sync::Arc;
 
     /// Council-adjudicated FIX 1 test double: an asker that sleeps far
@@ -1401,6 +1424,197 @@ mod tests {
         );
     }
 
+    /// A post-win repair must publish exact terminal inventory before its
+    /// first backend release attempt. Leaving that inventory in place models
+    /// cancellation or exhaustion of every inline attempt; the janitor still
+    /// owns a bounded retry.
+    #[tokio::test]
+    async fn repair_transfer_retains_exact_release_until_backend_success() {
+        let registry = InMemorySmSessionRegistry::with_capacity(1);
+        let entity = Entity::new(EntityType::SmSession, "repair-release-retry".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed repair capacity");
+        let fence = SmClaimFence::new(
+            crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+            ClaimEpoch(7),
+        );
+
+        assert!(registry
+            .prepare_failed_local_claim_release(&entity, &fence, &entity.id, reservation,)
+            .await
+            .expect("prepare repair release"));
+        assert_eq!(registry.pending_claim_release_count(), 1);
+        assert_eq!(registry.claim_fence_capacity_used(), 1);
+        assert!(
+            registry
+                .reserve_reclaimed_claim_capacity(&Entity::new(
+                    EntityType::SmSession,
+                    "another-repair".to_string(),
+                ))
+                .is_none(),
+            "a failed inline release must remain capacity-counted for janitor retry"
+        );
+
+        registry.complete_terminal_claim_release(&entity.id, &fence);
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert_eq!(registry.claim_fence_capacity_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_repair_never_forgets_a_newer_active_lifecycle() {
+        let registry = InMemorySmSessionRegistry::with_capacity(2);
+        let entity = Entity::new(EntityType::SmSession, "stale-repair".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve old reclaimed generation");
+        let owner = crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation");
+        let old_fence = SmClaimFence::new(owner.clone(), ClaimEpoch(7));
+        assert!(registry.transfer_reclaimed_claim_to_exact_release(
+            &entity,
+            &old_fence,
+            reservation,
+        ));
+
+        let newer_fence = SmClaimFence::new(owner, ClaimEpoch(8));
+        registry
+            .claim_fences
+            .write()
+            .expect("claim fences")
+            .insert(entity.id.clone(), newer_fence.clone());
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        registry.sessions.write().expect("sessions").insert(
+            entity.id.clone(),
+            make_test_placeholder_session(&entity.id, &jid),
+        );
+
+        assert!(
+            !registry
+                .prepare_failed_local_claim_release(&entity, &old_fence, &entity.id, reservation,)
+                .await
+                .expect("stale repair preparation"),
+            "an old pending release cannot authorize forgetting a newer lifecycle"
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert_eq!(
+            registry
+                .claim_fences
+                .read()
+                .expect("claim fences")
+                .get(&entity.id),
+            Some(&newer_fence)
+        );
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .contains(&(entity.id.clone(), old_fence)));
+    }
+
+    #[tokio::test]
+    async fn stale_repair_never_forgets_a_reserved_detach_lifecycle() {
+        let registry = InMemorySmSessionRegistry::with_capacity(2);
+        let entity = Entity::new(EntityType::SmSession, "reserved-stale-repair".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve old reclaimed generation");
+        let owner = crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation");
+        let old_fence = SmClaimFence::new(owner.clone(), ClaimEpoch(7));
+        assert!(registry.transfer_reclaimed_claim_to_exact_release(
+            &entity,
+            &old_fence,
+            reservation,
+        ));
+        assert!(registry.reserve_claim_fence_capacity(&entity.id));
+        registry
+            .pending_claim_acquisitions
+            .write()
+            .expect("pending acquisitions")
+            .insert((
+                entity.id.clone(),
+                owner,
+                PendingClaimAcquisitionDisposition::RetainDetachedSession,
+            ));
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        registry.sessions.write().expect("sessions").insert(
+            entity.id.clone(),
+            make_test_placeholder_session(&entity.id, &jid),
+        );
+
+        assert!(
+            !registry
+                .prepare_failed_local_claim_release(&entity, &old_fence, &entity.id, reservation,)
+                .await
+                .expect("stale repair preparation"),
+            "an old pending release cannot consume a newer detach reservation"
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert!(registry.has_claim_fence_reservation(&entity.id));
+        assert!(registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions")
+            .contains(&(
+                entity.id.clone(),
+                crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+                PendingClaimAcquisitionDisposition::RetainDetachedSession,
+            )));
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .contains(&(entity.id.clone(), old_fence)));
+    }
+
+    #[tokio::test]
+    async fn stale_repair_never_forgets_a_claimless_live_replacement() {
+        let registry = InMemorySmSessionRegistry::with_capacity(2);
+        let entity = Entity::new(EntityType::SmSession, "claimless-stale-repair".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve old reclaimed generation");
+        let old_fence = SmClaimFence::new(
+            crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+            ClaimEpoch(7),
+        );
+        assert!(registry.transfer_reclaimed_claim_to_exact_release(
+            &entity,
+            &old_fence,
+            reservation,
+        ));
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        registry.sessions.write().expect("sessions").insert(
+            entity.id.clone(),
+            make_test_placeholder_session(&entity.id, &jid),
+        );
+
+        assert!(
+            !registry
+                .prepare_failed_local_claim_release(&entity, &old_fence, &entity.id, reservation,)
+                .await
+                .expect("stale repair preparation"),
+            "an old pending release cannot authorize forgetting a claimless live replacement"
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .contains(&(entity.id.clone(), old_fence)));
+    }
+
     /// FIX B/C regression guard: an ordinary (non-cancellation)
     /// `hydrate_reclaimed` failure after the CAS has already won must
     /// repair (release the just-won claim) rather than strand it — and a
@@ -1476,6 +1690,11 @@ mod tests {
                 .expect("current_claim must not error")
                 .is_none(),
             "the just-won claim must have been released by FIX B's repair"
+        );
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            0,
+            "successful inline repair must retire its terminal retry inventory"
         );
         // ...and the repair's `forget_claim_locally` must have cleared the
         // placeholder too, or the FIX C retry below would hit the same

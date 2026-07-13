@@ -294,19 +294,70 @@ impl InMemorySmSessionRegistry {
         }
     }
 
-    /// Drop retry bookkeeping only when a caller has taken over terminal
-    /// exact release for this fence (the cross-node resume repair path).
+    /// Convert matching reclaimed/active responsibility into terminal exact
+    /// release for the cross-node repair path. The caller must hold this
+    /// stream's shard through this conversion and local-lifecycle removal.
     pub(super) fn transfer_reclaimed_claim_to_exact_release(
         &self,
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
-    ) {
+    ) -> bool {
+        let stream_liveness = self.stream_liveness(&entity.id);
+        let key = (entity.id.clone(), fence.clone());
+        let (Ok(reservations), Ok(mut reclaimed), Ok(mut pending), Ok(mut fences)) = (
+            self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.write(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+        ) else {
+            return false;
+        };
+        let matching_reservation = reclaimed.get(&entity.id) == Some(&reservation);
+        let matching_active_fence = fences.get(&entity.id) == Some(fence);
+        let matching_pending_release = pending.contains(&key);
+        let conflicting_generic_reservation = reservations.contains(&entity.id);
+        let conflicting_reservation = reclaimed
+            .get(&entity.id)
+            .is_some_and(|current| current != &reservation);
+        let conflicting_active_fence = fences
+            .get(&entity.id)
+            .is_some_and(|current| current != fence);
+        let pending_only =
+            matching_pending_release && !matching_reservation && !matching_active_fence;
+        if conflicting_generic_reservation
+            || conflicting_reservation
+            || conflicting_active_fence
+            || (pending_only && stream_liveness != Some(false))
+            || (!matching_reservation && !matching_active_fence && !matching_pending_release)
+        {
+            return false;
+        }
+        if matching_reservation {
+            reclaimed.remove(&entity.id);
+        }
+        if matching_active_fence {
+            fences.remove(&entity.id);
+        }
+        pending.insert(key);
+        drop(fences);
+        drop(pending);
+        drop(reclaimed);
         self.clear_pending_reclaimed_hydration(entity, fence, reservation);
         if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
             pending.remove(&(entity.id.clone(), fence.owner().clone(), reservation));
         }
-        self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
+        true
+    }
+
+    pub(super) fn complete_terminal_claim_release(
+        &self,
+        stream_id: &str,
+        fence: &super::super::persistence::SmClaimFence,
+    ) {
+        if let Ok(mut pending) = self.pending_claim_releases.write() {
+            pending.remove(&(stream_id.to_string(), fence.clone()));
+        }
     }
 
     pub(super) fn reserve_claim_fence_capacity(&self, stream_id: &str) -> bool {

@@ -553,6 +553,14 @@ impl InMemorySmSessionRegistry {
             return;
         };
         let _stream_guard = stream_lock.lock().await;
+        self.forget_claim_locally_locked(stream_id, None);
+    }
+
+    pub(super) fn forget_claim_locally_locked(
+        &self,
+        stream_id: &str,
+        preserve_terminal_release: Option<&super::super::persistence::SmClaimFence>,
+    ) {
         if let Ok(mut sessions) = self.sessions.write() {
             sessions.remove(stream_id);
         }
@@ -567,7 +575,10 @@ impl InMemorySmSessionRegistry {
         if let Ok(mut epoch_failures) = self.pending_epoch_failure_reconciliations.write() {
             epoch_failures.remove(stream_id);
         }
-        let mut forgotten_fences = Vec::new();
+        let mut forgotten_fences = preserve_terminal_release
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         if let (
             Ok(_reservations),
             Ok(reclaimed_reservations),
@@ -590,6 +601,9 @@ impl InMemorySmSessionRegistry {
             }
             releases.retain(|(id, pending_fence)| {
                 if id == stream_id {
+                    if preserve_terminal_release == Some(pending_fence) {
+                        return true;
+                    }
                     forgotten_fences.push(pending_fence.clone());
                     false
                 } else {
