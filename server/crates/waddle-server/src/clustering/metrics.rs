@@ -342,6 +342,29 @@ pub fn record_orphan_worker_failure(worker: &'static str, reason: &'static str) 
     );
 }
 
+/// Count terminal orphan-cleanup attempts that could not prove completion.
+/// `lane` is the stable low-cardinality value `sm_hydration` or
+/// `room_release`; `reason` is `error` or `timeout`. Unlike queue depth, this
+/// remains actionable after the terminal carrier has consumed its local work
+/// inventory.
+pub fn record_orphan_terminal_cleanup_failure(lane: &'static str, reason: &'static str) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.orphan_terminal_cleanup_failures")
+            .with_description("Terminal orphan claim cleanup attempts that did not complete")
+            .with_unit("failure")
+            .build()
+    })
+    .add(
+        1,
+        &[
+            opentelemetry::KeyValue::new("lane", lane),
+            opentelemetry::KeyValue::new("reason", reason),
+        ],
+    );
+}
+
 /// Report each bounded SM candidate page, including whether another page was
 /// visible at scan time and how many malformed stale rows were quarantined.
 pub fn record_sm_orphan_candidate_page(candidates: usize, has_more: bool, quarantined: usize) {
