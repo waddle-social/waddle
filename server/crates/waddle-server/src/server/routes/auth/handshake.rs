@@ -178,16 +178,29 @@ impl AuthHandshakeStore {
         .transpose()
     }
 
+    /// Wire value for the `device_auth.status` column. The column is
+    /// authoritative only for the anti-downgrade guard in
+    /// [`Self::update_device`]; readers decode the JSON payload.
+    fn device_status_str(status: &DeviceAuthStatus) -> &'static str {
+        match status {
+            DeviceAuthStatus::Pending => "pending",
+            DeviceAuthStatus::InProgress => "in_progress",
+            DeviceAuthStatus::Approved => "approved",
+        }
+    }
+
     pub async fn insert_device(&self, entry: &DeviceAuthorization) -> Result<(), AuthError> {
         let payload = Self::encode(entry)?;
         self.actor
             .ask(DbExecute {
-                sql: "INSERT INTO device_auth (device_code, user_code, payload, expires_at_ms) \
-                      VALUES (?, ?, ?, ?)"
+                sql: "INSERT INTO device_auth \
+                      (device_code, user_code, status, payload, expires_at_ms) \
+                      VALUES (?, ?, ?, ?, ?)"
                     .to_string(),
                 params: vec![
                     crate::db::Value::from(&entry.device_code),
                     crate::db::Value::from(&entry.user_code),
+                    crate::db::Value::from(Self::device_status_str(&entry.status)),
                     crate::db::Value::from(payload),
                     crate::db::Value::from(entry.expires_at.timestamp_millis()),
                 ],
@@ -225,18 +238,27 @@ impl AuthHandshakeStore {
 
     /// Persist a device-flow state transition (Pending → InProgress →
     /// Approved / session attach). Returns `false` when the row is gone
-    /// (expired-and-pruned or redeemed by another replica).
+    /// (expired-and-pruned or redeemed by another replica) or when the
+    /// write lost to an approval: a non-approved write can never
+    /// overwrite an `approved` row, so a delayed duplicate
+    /// verify-submit cannot clobber the callback's approval and wipe
+    /// its `session_id` (read-modify-write here holds no row lock
+    /// between replicas).
     pub async fn update_device(&self, entry: &DeviceAuthorization) -> Result<bool, AuthError> {
         let payload = Self::encode(entry)?;
+        let status = Self::device_status_str(&entry.status);
         let updated = self
             .actor
             .ask(DbExecute {
-                sql: "UPDATE device_auth SET payload = ?, expires_at_ms = ? WHERE device_code = ?"
+                sql: "UPDATE device_auth SET payload = ?, status = ?, expires_at_ms = ? \
+                      WHERE device_code = ? AND (status <> 'approved' OR ? = 'approved')"
                     .to_string(),
                 params: vec![
                     crate::db::Value::from(payload),
+                    crate::db::Value::from(status),
                     crate::db::Value::from(entry.expires_at.timestamp_millis()),
                     crate::db::Value::from(&entry.device_code),
+                    crate::db::Value::from(status),
                 ],
             })
             .await
@@ -489,6 +511,36 @@ mod tests {
         store.remove_device("dev-1").await.expect("remove");
         assert!(store.get_device("dev-1").await.expect("get").is_none());
         assert!(!store.update_device(&device).await.expect("update gone"));
+    }
+
+    #[tokio::test]
+    async fn stale_write_cannot_downgrade_an_approved_device() {
+        let store = create_store("handshake-device-no-downgrade").await;
+        let device = make_device("dev-race", 15);
+        store.insert_device(&device).await.expect("insert");
+
+        // Callback approves and attaches the session.
+        let mut approved = device.clone();
+        approved.status = DeviceAuthStatus::Approved;
+        approved.session_id = Some("session-77".to_string());
+        assert!(store.update_device(&approved).await.expect("approve"));
+
+        // A delayed duplicate verify-submit still holds the stale
+        // InProgress view and tries to write it back.
+        let mut stale = device.clone();
+        stale.status = DeviceAuthStatus::InProgress;
+        assert!(!store.update_device(&stale).await.expect("stale write"));
+
+        let reloaded = store
+            .get_device("dev-race")
+            .await
+            .expect("get")
+            .expect("entry exists");
+        assert_eq!(reloaded.status, DeviceAuthStatus::Approved);
+        assert_eq!(reloaded.session_id.as_deref(), Some("session-77"));
+
+        // Re-asserting the approval (idempotent write) still succeeds.
+        assert!(store.update_device(&approved).await.expect("re-approve"));
     }
 
     #[tokio::test]

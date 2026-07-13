@@ -288,16 +288,32 @@ pub(super) async fn callback_handler(
             response
         }
         PendingFlow::Device { device_code } => {
-            match state.auth_handshake.get_device(&device_code).await {
+            // The approval must actually land on the device row: if the
+            // grant expired and was pruned mid-callback, reporting
+            // "Device authorized" would strand the poller forever and
+            // leak the session we just created — so roll it back and
+            // surface the expiry instead.
+            let approved = match state.auth_handshake.get_device(&device_code).await {
                 Ok(Some(mut entry)) => {
                     entry.status = DeviceAuthStatus::Approved;
                     entry.session_id = Some(session.id.clone());
-                    if let Err(err) = state.auth_handshake.update_device(&entry).await {
-                        return auth_error_to_response(err).into_response();
+                    match state.auth_handshake.update_device(&entry).await {
+                        Ok(approved) => approved,
+                        Err(err) => return auth_error_to_response(err).into_response(),
                     }
                 }
-                Ok(None) => {}
+                Ok(None) => false,
                 Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            if !approved {
+                if let Err(err) = state.session_manager.delete_session(&session.id).await {
+                    warn!(error = %err, "Failed to roll back session for expired device grant");
+                }
+                return auth_error_to_response(AuthError::InvalidRequest(
+                    "device authorization expired; restart the device login".to_string(),
+                ))
+                .into_response();
             }
 
             (

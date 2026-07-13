@@ -617,6 +617,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_auth_expires_at ON pending_auth(expires_a
 CREATE TABLE IF NOT EXISTS device_auth (
     device_code TEXT PRIMARY KEY,
     user_code TEXT NOT NULL,
+    status TEXT NOT NULL,
     payload TEXT NOT NULL,
     expires_at_ms INTEGER NOT NULL
 );
@@ -645,6 +646,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_auth_expires_at ON pending_auth(expires_a
 CREATE TABLE IF NOT EXISTS device_auth (
     device_code TEXT PRIMARY KEY,
     user_code TEXT NOT NULL,
+    status TEXT NOT NULL,
     payload TEXT NOT NULL,
     expires_at_ms BIGINT NOT NULL
 );
