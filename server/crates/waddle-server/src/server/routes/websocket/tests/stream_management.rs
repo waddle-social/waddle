@@ -882,6 +882,50 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
 }
 
 #[tokio::test]
+async fn pipelined_sm_enable_cannot_replace_the_unpublished_commit() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/pipelined-enable".parse().expect("jid");
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let first = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let first_enabled = Element::from_str(&first[0]).expect("first enabled xml");
+    let first_stream_id = first_enabled
+        .attr("id")
+        .expect("first stream id")
+        .to_string();
+    assert!(conn.pending_sm_enable_commit.is_some());
+    assert!(!conn.sm_state.enabled);
+
+    let second = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let failed = Element::from_str(&second[0]).expect("second failed xml");
+    assert_eq!(failed.name(), "failed");
+    assert!(failed
+        .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+
+    conn.publish_pending_sm_enable(state.as_ref());
+    assert!(conn.sm_state.enabled);
+    assert_eq!(
+        conn.sm_state.stream_id.as_deref(),
+        Some(first_stream_id.as_str())
+    );
+}
+
+#[tokio::test]
 async fn resumable_enable_cancelled_before_write_never_publishes_and_releases_exact_claim() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();

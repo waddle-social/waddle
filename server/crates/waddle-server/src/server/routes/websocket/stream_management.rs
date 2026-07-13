@@ -528,7 +528,7 @@ async fn handle_sm_enable(
     if !phase.allows_stream_management_enable() {
         return vec![SmFailed::with_condition("unexpected-request").to_xml()];
     }
-    if sm_state.enabled {
+    if sm_state.enabled || pending_commit.is_some() {
         return vec![SmFailed::with_condition("unexpected-request").to_xml()];
     }
 
