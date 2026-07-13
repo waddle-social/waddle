@@ -18,9 +18,10 @@ pub(super) async fn callback_handler(
             .into_response();
     };
 
-    let pending = match state.pending_auth.remove(&state_key) {
-        Some((_, pending)) => pending,
-        None => return auth_error_to_response(AuthError::InvalidState).into_response(),
+    let pending = match state.auth_handshake.take_pending(&state_key).await {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return auth_error_to_response(AuthError::InvalidState).into_response(),
+        Err(err) => return auth_error_to_response(err).into_response(),
     };
 
     if pending.is_expired() {
@@ -287,9 +288,16 @@ pub(super) async fn callback_handler(
             response
         }
         PendingFlow::Device { device_code } => {
-            if let Some(mut entry) = state.device_auth.get_mut(&device_code) {
-                entry.status = DeviceAuthStatus::Approved;
-                entry.session_id = Some(session.id.clone());
+            match state.auth_handshake.get_device(&device_code).await {
+                Ok(Some(mut entry)) => {
+                    entry.status = DeviceAuthStatus::Approved;
+                    entry.session_id = Some(session.id.clone());
+                    if let Err(err) = state.auth_handshake.update_device(&entry).await {
+                        return auth_error_to_response(err).into_response();
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => return auth_error_to_response(err).into_response(),
             }
 
             (
@@ -304,15 +312,21 @@ pub(super) async fn callback_handler(
             client_code_challenge,
         } => {
             let auth_code = Uuid::new_v4().to_string();
-            state.xmpp_auth_codes.insert(
-                auth_code.clone(),
-                XmppAuthCode {
-                    session_id: session.id,
-                    redirect_uri: client_redirect_uri.clone(),
-                    code_challenge: client_code_challenge,
-                    created_at: Utc::now(),
-                },
-            );
+            if let Err(err) = state
+                .auth_handshake
+                .insert_xmpp_code(
+                    &auth_code,
+                    &XmppAuthCode {
+                        session_id: session.id,
+                        redirect_uri: client_redirect_uri.clone(),
+                        code_challenge: client_code_challenge,
+                        created_at: Utc::now(),
+                    },
+                )
+                .await
+            {
+                return auth_error_to_response(err).into_response();
+            }
 
             let mut redirect = match url::Url::parse(&client_redirect_uri) {
                 Ok(v) => v,

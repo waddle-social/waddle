@@ -39,12 +39,14 @@ use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
 mod callback;
+mod handshake;
 mod state;
 
 use callback::callback_handler;
+pub use handshake::AuthHandshakeStore;
 pub use state::{AuthState, ProfilePublishHook};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingAuthorization {
     pub state: String,
     pub provider_id: String,
@@ -60,12 +62,16 @@ pub struct PendingAuthorization {
 }
 
 impl PendingAuthorization {
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.created_at + Duration::minutes(10)
+    }
+
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.created_at + Duration::minutes(10)
+        Utc::now() > self.expires_at()
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PendingFlow {
     Browser {
         next: Option<String>,
@@ -81,7 +87,7 @@ pub enum PendingFlow {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrowserSessionTransport {
     Cookie,
     Fragment,
@@ -99,7 +105,7 @@ impl BrowserSessionTransport {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAuthorization {
     pub device_code: String,
     pub user_code: String,
@@ -115,14 +121,14 @@ impl DeviceAuthorization {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceAuthStatus {
     Pending,
     InProgress,
     Approved,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XmppAuthCode {
     pub session_id: String,
     pub redirect_uri: String,
@@ -131,8 +137,12 @@ pub struct XmppAuthCode {
 }
 
 impl XmppAuthCode {
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.created_at + Duration::minutes(10)
+    }
+
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.created_at + Duration::minutes(10)
+        Utc::now() > self.expires_at()
     }
 }
 
