@@ -1844,9 +1844,10 @@ impl InMemorySmSessionRegistry {
     /// Resolve an ownership CAS whose result was dropped without ever
     /// hydrating the session locally. This is the terminal self-fence path:
     /// a read-only claim lookup discovers whether `attempted_owner` won, and
-    /// an exact release retires only that observed generation. Lookup failure
-    /// cancels the local capacity reservation; the already self-fenced node's
-    /// lease expiry remains the durable recovery backstop.
+    /// an exact release retires only that observed generation. Until that
+    /// generation is observed, the CAS may still commit after the lookup, so
+    /// every lookup failure or non-matching snapshot keeps the local capacity
+    /// reservation and forces the caller to remain self-fenced.
     pub async fn retire_uncertain_reclaimed_claim(
         &self,
         entity: &Entity,
@@ -1865,21 +1866,22 @@ impl InMemorySmSessionRegistry {
         {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
-                self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
                 return Err(SmRegistryError::Internal(format!(
                     "retire_uncertain_reclaimed_claim: exact owner lookup failed: {error}"
                 )));
             }
             Err(_) => {
-                self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
                 return Err(SmRegistryError::Internal(
                     "retire_uncertain_reclaimed_claim: exact owner lookup timed out".to_string(),
                 ));
             }
         };
         let Some(snapshot) = snapshot.filter(|snapshot| snapshot.owner == *attempted_owner) else {
-            self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
-            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+            return Err(SmRegistryError::Internal(
+                "retire_uncertain_reclaimed_claim: attempted owner not yet observable; \
+                 reservation retained because the ownership CAS may still commit"
+                    .to_string(),
+            ));
         };
         let fence = super::super::persistence::SmClaimFence::new(
             attempted_owner.clone(),

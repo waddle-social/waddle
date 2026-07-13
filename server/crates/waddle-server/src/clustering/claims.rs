@@ -279,6 +279,44 @@ impl PostgresClaimStore {
         Self { db }
     }
 
+    async fn load_sm_orphan_reaper_cursor(&self) -> Result<Option<SmOrphanScanCursor>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                "SELECT cursor_entity FROM clustering_orphan_reaper_cursors WHERE lane = ?",
+                crate::db_params![EntityType::SmSession.as_db_str().to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => row
+                .get::<Option<String>>(0)
+                .map(|cursor| cursor.map(SmOrphanScanCursor::from_raw))
+                .map_err(db_err),
+            None => Ok(None),
+        }
+    }
+
+    async fn load_room_orphan_reaper_cursor(
+        &self,
+    ) -> Result<Option<RoomOrphanScanCursor>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                "SELECT cursor_entity FROM clustering_orphan_reaper_cursors WHERE lane = ?",
+                crate::db_params![EntityType::RoomActor.as_db_str().to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => row
+                .get::<Option<String>>(0)
+                .map(|cursor| cursor.map(RoomOrphanScanCursor::from_raw))
+                .map_err(db_err),
+            None => Ok(None),
+        }
+    }
+
     /// Remove one exact stale SM claim discovered by the advisory orphan
     /// scan. A claim classified as claim-only is deleted only if its durable
     /// row is still absent in this transaction. That current-state predicate
@@ -1445,19 +1483,21 @@ pub trait NodeLeaseStore: Send + Sync {
     /// should override this so the bound is enforced by the query itself.
     async fn list_orphaned_sm_session_claims_page(
         &self,
-        after: Option<String>,
+        after: Option<SmOrphanScanCursor>,
         limit: usize,
     ) -> Result<OrphanedSmSessionClaimPage, ClaimError> {
         let mut candidates = self.list_orphaned_sm_session_claims().await?;
-        candidates.sort_by(|left, right| left.entity.id.cmp(&right.entity.id));
-        if let Some(after) = after.as_deref() {
-            candidates.retain(|candidate| candidate.entity.id.as_str() > after);
+        candidates.sort_by_key(|candidate| entity_key(&candidate.entity));
+        if let Some(after) = after.as_ref() {
+            candidates.retain(|candidate| {
+                entity_key(&candidate.entity).as_str() > after.raw_key.as_str()
+            });
         }
         let has_more = candidates.len() > limit;
         candidates.truncate(limit);
         let next_cursor = candidates
             .last()
-            .map(|candidate| candidate.entity.id.clone());
+            .map(|candidate| SmOrphanScanCursor::from_raw(entity_key(&candidate.entity)));
         Ok(OrphanedSmSessionClaimPage {
             candidates,
             next_cursor,
@@ -1466,17 +1506,12 @@ pub trait NodeLeaseStore: Send + Sync {
         })
     }
 
-    /// Durable advisory cursor for raw orphan-integrity scans. Defaults are
-    /// process-local/no-op for fakes; production persists one cursor per
-    /// entity lane so restarts cannot starve high-key claims indefinitely.
-    async fn orphan_reaper_cursor(&self, _lane: EntityType) -> Result<Option<String>, ClaimError> {
-        Ok(None)
-    }
-
+    /// Persist one lane-typed advisory cursor after a complete page. The
+    /// update enum carries its lane even when resetting to `None`, making
+    /// cross-lane cursor writes unrepresentable at this public boundary.
     async fn persist_orphan_reaper_cursor(
         &self,
-        _lane: EntityType,
-        _cursor: Option<String>,
+        _update: OrphanReaperCursorUpdate,
     ) -> Result<(), ClaimError> {
         Ok(())
     }
@@ -1542,28 +1577,9 @@ pub trait NodeLeaseStore: Send + Sync {
     /// budget instead of forcing an unbounded predicate scan before LIMIT.
     async fn list_orphaned_room_actor_claims_page(
         &self,
-        after: Option<String>,
+        after: Option<RoomOrphanScanCursor>,
         limit: usize,
-    ) -> Result<OrphanedRoomActorClaimPage, ClaimError> {
-        let mut candidates = self
-            .list_orphaned_room_actor_claims(limit.saturating_add(1))
-            .await?;
-        candidates.sort_by(|left, right| left.entity.id.cmp(&right.entity.id));
-        if let Some(after) = after.as_deref() {
-            candidates.retain(|candidate| candidate.entity.id.as_str() > after);
-        }
-        let has_more = candidates.len() > limit;
-        candidates.truncate(limit);
-        let next_cursor = candidates
-            .last()
-            .map(|candidate| candidate.entity.id.clone());
-        Ok(OrphanedRoomActorClaimPage {
-            candidates,
-            next_cursor,
-            has_more,
-            quarantined: 0,
-        })
-    }
+    ) -> Result<OrphanedRoomActorClaimPage, ClaimError>;
 
     /// Reaper-only stale-owner steal for a `RoomActor`. The production
     /// implementation binds both the observed claim epoch and the sweeping
@@ -1606,9 +1622,30 @@ pub struct OrphanedSmSessionClaim {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanedSmSessionClaimPage {
     pub candidates: Vec<OrphanedSmSessionClaim>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<SmOrphanScanCursor>,
     pub has_more: bool,
     pub quarantined: usize,
+}
+
+/// Opaque ordering checkpoint for the raw `sm_session` claim-key lane.
+///
+/// The private value intentionally remains the database key rather than a
+/// parsed `SmSessionId`: malformed keys must still advance the integrity
+/// scan so one poison row cannot pin every later claim forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmOrphanScanCursor {
+    raw_key: String,
+}
+
+impl SmOrphanScanCursor {
+    pub(crate) fn from_raw(raw_key: String) -> Self {
+        Self { raw_key }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_raw(&self) -> &str {
+        &self.raw_key
+    }
 }
 
 /// A bounded-scan candidate for proactive `RoomActor` reconciliation.
@@ -1624,9 +1661,45 @@ pub struct OrphanedRoomActorClaim {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanedRoomActorClaimPage {
     pub candidates: Vec<OrphanedRoomActorClaim>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<RoomOrphanScanCursor>,
     pub has_more: bool,
     pub quarantined: usize,
+}
+
+/// Opaque ordering checkpoint for the raw `room_actor` claim-key lane.
+/// The raw key is private because this is a storage cursor, not a room JID;
+/// malformed keys must remain representable for forward progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomOrphanScanCursor {
+    raw_key: String,
+}
+
+impl RoomOrphanScanCursor {
+    pub(crate) fn from_raw(raw_key: String) -> Self {
+        Self { raw_key }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_raw(&self) -> &str {
+        &self.raw_key
+    }
+}
+
+/// Lane-safe durable cursor write. `None` is a typed reset for exactly one
+/// lane rather than an untyped `(EntityType, Option<String>)` pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrphanReaperCursorUpdate {
+    SmSession(Option<SmOrphanScanCursor>),
+    RoomActor(Option<RoomOrphanScanCursor>),
+}
+
+impl OrphanReaperCursorUpdate {
+    fn into_db_parts(self) -> (EntityType, Option<String>) {
+        match self {
+            Self::SmSession(cursor) => (EntityType::SmSession, cursor.map(|cursor| cursor.raw_key)),
+            Self::RoomActor(cursor) => (EntityType::RoomActor, cursor.map(|cursor| cursor.raw_key)),
+        }
+    }
 }
 
 async fn register_node(
@@ -2107,7 +2180,7 @@ impl NodeLeaseStore for PostgresClaimStore {
 
     async fn list_orphaned_sm_session_claims_page(
         &self,
-        after: Option<String>,
+        after: Option<SmOrphanScanCursor>,
         limit: usize,
     ) -> Result<OrphanedSmSessionClaimPage, ClaimError> {
         if limit == 0 {
@@ -2120,10 +2193,11 @@ impl NodeLeaseStore for PostgresClaimStore {
         }
         let scan_limit = limit.saturating_add(1);
         let cursor = match after {
-            Some(cursor) => cursor,
+            Some(cursor) => cursor.raw_key,
             None => self
-                .orphan_reaper_cursor(EntityType::SmSession)
+                .load_sm_orphan_reaper_cursor()
                 .await?
+                .map(|cursor| cursor.raw_key)
                 .unwrap_or_default(),
         };
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
@@ -2179,7 +2253,7 @@ impl NodeLeaseStore for PostgresClaimStore {
             let claim_epoch: i64 = row.get(3).map_err(db_err)?;
             let owner_stale: i64 = row.get(4).map_err(db_err)?;
             let has_durable: i64 = row.get(5).map_err(db_err)?;
-            next_cursor = Some(encoded.clone());
+            next_cursor = Some(SmOrphanScanCursor::from_raw(encoded.clone()));
             if owner_stale != 1 {
                 continue;
             }
@@ -2233,26 +2307,11 @@ impl NodeLeaseStore for PostgresClaimStore {
         })
     }
 
-    async fn orphan_reaper_cursor(&self, lane: EntityType) -> Result<Option<String>, ClaimError> {
-        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let mut rows = conn
-            .query(
-                "SELECT cursor_entity FROM clustering_orphan_reaper_cursors WHERE lane = ?",
-                crate::db_params![lane.as_db_str().to_string()],
-            )
-            .await
-            .map_err(db_err)?;
-        match rows.next().await.map_err(db_err)? {
-            Some(row) => row.get::<Option<String>>(0).map_err(db_err),
-            None => Ok(None),
-        }
-    }
-
     async fn persist_orphan_reaper_cursor(
         &self,
-        lane: EntityType,
-        cursor: Option<String>,
+        update: OrphanReaperCursorUpdate,
     ) -> Result<(), ClaimError> {
+        let (lane, cursor) = update.into_db_parts();
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         conn.execute(
             "INSERT INTO clustering_orphan_reaper_cursors (lane, cursor_entity) VALUES (?, ?) \
@@ -2401,7 +2460,7 @@ impl NodeLeaseStore for PostgresClaimStore {
 
     async fn list_orphaned_room_actor_claims_page(
         &self,
-        after: Option<String>,
+        after: Option<RoomOrphanScanCursor>,
         limit: usize,
     ) -> Result<OrphanedRoomActorClaimPage, ClaimError> {
         if limit == 0 {
@@ -2414,10 +2473,11 @@ impl NodeLeaseStore for PostgresClaimStore {
         }
         let scan_limit = limit.saturating_add(1);
         let cursor = match after {
-            Some(cursor) => cursor,
+            Some(cursor) => cursor.raw_key,
             None => self
-                .orphan_reaper_cursor(EntityType::RoomActor)
+                .load_room_orphan_reaper_cursor()
                 .await?
+                .map(|cursor| cursor.raw_key)
                 .unwrap_or_default(),
         };
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
@@ -2465,7 +2525,7 @@ impl NodeLeaseStore for PostgresClaimStore {
             let node_epoch: String = row.get(2).map_err(db_err)?;
             let claim_epoch: i64 = row.get(3).map_err(db_err)?;
             let owner_stale: i64 = row.get(4).map_err(db_err)?;
-            next_cursor = Some(encoded.clone());
+            next_cursor = Some(RoomOrphanScanCursor::from_raw(encoded.clone()));
             if owner_stale != 1 {
                 continue;
             }
@@ -2649,6 +2709,35 @@ mod tests {
         Entity::new(EntityType::SmSession, id.to_string())
     }
 
+    #[test]
+    fn orphan_reaper_cursor_updates_preserve_their_lane_when_set_or_reset() {
+        let sm = SmOrphanScanCursor::from_raw("sm_session:page-064".to_string());
+        let room =
+            RoomOrphanScanCursor::from_raw("room_actor:page-064@muc.example.com".to_string());
+        assert_eq!(
+            OrphanReaperCursorUpdate::SmSession(Some(sm)).into_db_parts(),
+            (
+                EntityType::SmSession,
+                Some("sm_session:page-064".to_string())
+            )
+        );
+        assert_eq!(
+            OrphanReaperCursorUpdate::RoomActor(Some(room)).into_db_parts(),
+            (
+                EntityType::RoomActor,
+                Some("room_actor:page-064@muc.example.com".to_string())
+            )
+        );
+        assert_eq!(
+            OrphanReaperCursorUpdate::SmSession(None).into_db_parts(),
+            (EntityType::SmSession, None)
+        );
+        assert_eq!(
+            OrphanReaperCursorUpdate::RoomActor(None).into_db_parts(),
+            (EntityType::RoomActor, None)
+        );
+    }
+
     async fn clean_store() -> Option<PostgresClaimStore> {
         let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
         let db = Database::from_config(
@@ -2684,6 +2773,59 @@ mod tests {
             .await
             .expect("clean steal intents");
         Some(store)
+    }
+
+    #[tokio::test]
+    async fn durable_orphan_reaper_cursors_are_lane_typed_and_reset_independently() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let sm = SmOrphanScanCursor::from_raw("sm_session:durable-064".to_string());
+        let room =
+            RoomOrphanScanCursor::from_raw("room_actor:durable-064@muc.example.com".to_string());
+        store
+            .persist_orphan_reaper_cursor(OrphanReaperCursorUpdate::SmSession(Some(sm.clone())))
+            .await
+            .expect("persist SM cursor");
+        store
+            .persist_orphan_reaper_cursor(OrphanReaperCursorUpdate::RoomActor(Some(room.clone())))
+            .await
+            .expect("persist room cursor");
+
+        assert_eq!(
+            store
+                .load_sm_orphan_reaper_cursor()
+                .await
+                .expect("load SM cursor"),
+            Some(sm)
+        );
+        assert_eq!(
+            store
+                .load_room_orphan_reaper_cursor()
+                .await
+                .expect("load room cursor"),
+            Some(room.clone())
+        );
+
+        store
+            .persist_orphan_reaper_cursor(OrphanReaperCursorUpdate::SmSession(None))
+            .await
+            .expect("reset SM cursor");
+        assert_eq!(
+            store
+                .load_sm_orphan_reaper_cursor()
+                .await
+                .expect("load reset SM cursor"),
+            None
+        );
+        assert_eq!(
+            store
+                .load_room_orphan_reaper_cursor()
+                .await
+                .expect("room cursor survives SM reset"),
+            Some(room)
+        );
     }
 
     /// Seed a `clustering_nodes` row directly with a caller-chosen `expired`
@@ -4390,11 +4532,23 @@ mod tests {
             .await
             .expect("valid claim");
 
-        let candidates = store
-            .list_orphaned_room_actor_claims(64)
+        let first = store
+            .list_orphaned_room_actor_claims_page(None, 64)
             .await
-            .expect("bounded scan");
-        assert!(candidates.iter().any(|candidate| candidate.entity == valid));
+            .expect("first bounded scan");
+        assert!(first.candidates.is_empty());
+        assert!(first.has_more);
+        assert_eq!(first.quarantined, 64);
+        let second = store
+            .list_orphaned_room_actor_claims_page(first.next_cursor, 64)
+            .await
+            .expect("second bounded scan");
+        assert!(second
+            .candidates
+            .iter()
+            .any(|candidate| candidate.entity == valid));
+        assert_eq!(second.quarantined, 1);
+        assert!(!second.has_more);
         for entity in [
             malformed.first().expect("first"),
             malformed.last().expect("last"),
@@ -5379,7 +5533,12 @@ mod tests {
         .expect("seed malformed claim");
         drop(conn);
         let malformed_page = store
-            .list_orphaned_sm_session_claims_page(Some("sm_session:paged-999".to_string()), 64)
+            .list_orphaned_sm_session_claims_page(
+                Some(SmOrphanScanCursor::from_raw(
+                    "sm_session:paged-999".to_string(),
+                )),
+                64,
+            )
             .await
             .expect("malformed page");
         assert_eq!(malformed_page.quarantined, 1);

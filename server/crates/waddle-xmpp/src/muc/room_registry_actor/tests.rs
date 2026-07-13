@@ -3286,6 +3286,203 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn terminal_drain_releases_registered_reclaimed_epochs_and_disables_acquisition() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let owner = this_identity();
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(owner.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("terminal-reclaimed-drain");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .acquire(&entity, &owner)
+            .await
+            .expect("seed won claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), owner.clone(), epoch);
+        registry
+            .ask(RememberPendingReclaimedRoom {
+                room_jid: jid.clone(),
+                claim_fence: fence,
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("register won claim");
+
+        let outcome = registry
+            .ask(DrainPendingReclaimedRoomsForShutdown)
+            .await
+            .expect("terminal drain");
+        assert_eq!(
+            outcome,
+            PendingReclaimedRoomDrainOutcome {
+                released: 1,
+                preserved_live: 0,
+                retained: 0,
+            }
+        );
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read drained claim")
+            .is_none());
+        assert!(registry
+            .ask(ListPendingReclaimedRooms { limit: 8 })
+            .await
+            .expect("pending after drain")
+            .is_empty());
+        assert!(!registry
+            .ask(ReservePendingReclaimedRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("terminal reservation refusal"));
+
+        let demand = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-terminal".to_string(),
+                channel_id: "c-terminal".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await;
+        assert!(matches!(
+            demand,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipUnavailable(room)
+            )) if room == jid
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_drain_retains_registered_epoch_when_exact_release_fails() {
+        let registry = spawn_registry().await;
+        let owner = this_identity();
+        let epoch = ClaimEpoch(73);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(owner.clone(), epoch));
+        claim_store.fail_next_release();
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(owner.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("terminal-reclaimed-retained");
+        let fence = room_claim_fence(&jid, epoch);
+        registry
+            .ask(RememberPendingReclaimedRoom {
+                room_jid: jid.clone(),
+                claim_fence: fence.clone(),
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("register won claim");
+
+        let outcome = registry
+            .ask(DrainPendingReclaimedRoomsForShutdown)
+            .await
+            .expect("terminal drain");
+        assert_eq!(
+            outcome,
+            PendingReclaimedRoomDrainOutcome {
+                released: 0,
+                preserved_live: 0,
+                retained: 1,
+            }
+        );
+        assert_eq!(
+            registry
+                .ask(ListPendingReclaimedRooms { limit: 8 })
+                .await
+                .expect("retained pending claim"),
+            vec![PendingReclaimedRoom {
+                room_jid: jid,
+                claim_fence: fence,
+                previous_owner: foreign_identity(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_drain_preserves_a_live_room_with_the_same_registered_fence() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let owner = this_identity();
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(owner.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("terminal-live-duplicate");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-live".to_string(),
+                channel_id: "c-live".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("publish live room");
+        let snapshot = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read live claim")
+            .expect("live claim exists");
+        let fence = RoomClaimFenceContext::new(entity.clone(), owner.clone(), snapshot.claim_epoch);
+        registry
+            .ask(RememberPendingReclaimedRoom {
+                room_jid: jid.clone(),
+                claim_fence: fence.clone(),
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("register delayed duplicate");
+
+        let outcome = registry
+            .ask(DrainPendingReclaimedRoomsForShutdown)
+            .await
+            .expect("terminal drain");
+        assert_eq!(
+            outcome,
+            PendingReclaimedRoomDrainOutcome {
+                released: 0,
+                preserved_live: 1,
+                retained: 0,
+            }
+        );
+        assert!(claim_store
+            .fence(&entity, &owner, snapshot.claim_epoch)
+            .await
+            .expect("fence live claim"));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("get live room")
+            .is_some());
+        assert!(registry
+            .ask(ListPendingReclaimedRooms { limit: 8 })
+            .await
+            .expect("pending after live duplicate cleanup")
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn pending_retry_page_rotates_past_a_persistent_full_prefix() {
         let registry = spawn_registry().await;
         let previous_owner = foreign_identity();

@@ -37,11 +37,12 @@ use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
-    DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom,
-    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
-    IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease, IsMucJid,
-    IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
-    ListRoomsOwnedBy, PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog,
+    DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
+    DrainPendingReclaimedRoomsForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
+    GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
+    IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
+    ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
+    PendingReclaimedRoomBacklog, PendingReclaimedRoomDrainOutcome, PendingRoomReleaseBacklog,
     ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
     ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
     RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
@@ -294,6 +295,12 @@ impl RoomRegistry {
         pending_reclaimed_room_backlog() -> PendingReclaimedRoomBacklog,
         "pending_reclaimed_room_backlog",
         GetPendingReclaimedRoomBacklog
+    );
+
+    registry_method!(
+        drain_pending_reclaimed_rooms_for_shutdown() -> PendingReclaimedRoomDrainOutcome,
+        "drain_pending_reclaimed_rooms_for_shutdown",
+        DrainPendingReclaimedRoomsForShutdown
     );
 
     registry_method!(
