@@ -2815,6 +2815,9 @@ mod tests {
         conn.execute("DELETE FROM clustering_claims", ())
             .await
             .expect("clean claims");
+        conn.execute("DELETE FROM clustering_orphan_reaper_cursors", ())
+            .await
+            .expect("clean orphan reaper cursors");
         conn.execute("DELETE FROM clustering_nodes", ())
             .await
             .expect("clean nodes");
