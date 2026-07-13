@@ -159,7 +159,8 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             match registry.hydrate_reclaimed_typed(entity, &fence).await {
                 Ok(
                     waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
-                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased,
+                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
+                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
                 ) => {
                     if let Err(error) = registry.release_reclaimed_claim(entity, &fence).await {
                         tracing::warn!(
@@ -919,6 +920,39 @@ mod tests {
             .await
             .expect("claim lookup")
             .is_none(), "MissingDurable must exact-release the inline self-fence claim instead of dropping the typed terminal outcome");
+    }
+
+    #[tokio::test]
+    async fn inline_reclaim_exact_releases_a_genuinely_stale_identity() {
+        use waddle_xmpp::ownership::{ClaimStore as _, InProcessClaimStore, NodeIdentity};
+
+        let local_claims = SmSessionLocalClaims::new();
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let won_identity = NodeIdentity::new("self-fence-node", "won-incarnation");
+        let current_identity = NodeIdentity::new("self-fence-node", "rotated-again");
+        let entity = Entity::new(EntityType::SmSession, "stale-inline-reclaim");
+        let epoch = claim_store
+            .acquire(&entity, &won_identity)
+            .await
+            .expect("won inline reclaim epoch");
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+            claim_store.clone(),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(current_identity),
+        ));
+        local_claims.wire(registry);
+
+        local_claims
+            .hydrate_reclaimed(&[(entity.clone(), won_identity, epoch)])
+            .await;
+
+        assert!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("claim lookup")
+                .is_none(),
+            "a second identity rotation must exact-release the now-stale won generation instead of retaining it indefinitely"
+        );
     }
 
     #[tokio::test]

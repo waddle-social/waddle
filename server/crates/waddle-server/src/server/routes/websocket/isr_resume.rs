@@ -288,7 +288,7 @@ pub(super) async fn handle_isr_resume_authenticate(
     };
     let claim_fence =
         waddle_xmpp::stream_management::persistence::SmClaimFence::new(identity.clone(), epoch);
-    if node_identity.current() != identity {
+    let Some(identity_guard) = node_identity.guard_if_current(claim_fence.owner()).await else {
         if let Err(error) = state
             .deps
             .protocol
@@ -303,17 +303,18 @@ pub(super) async fn handle_isr_resume_authenticate(
             );
         }
         return vec![sasl2_failure("temporary-auth-failure")];
-    }
+    };
+    let mut identity_guard = Some(identity_guard);
 
-    let rotated_token = match isr_token_store
+    let consume_result = isr_token_store
         .consume(
             &resume.previd,
             presented_token.as_bytes(),
             ISR_PINNED_MECHANISM,
             &claim_fence,
         )
-        .await
-    {
+        .await;
+    let rotated_token = match consume_result {
         Ok(IsrConsumeOutcome::Matched { rotated }) => rotated.token,
         Ok(IsrConsumeOutcome::Mismatched) => {
             // A token row genuinely EXISTED for this SM-ID and the
@@ -321,6 +322,7 @@ pub(super) async fn handle_isr_resume_authenticate(
             // -force MUST: destroy the session state the SM-ID identified.
             // `complete_claim`, not `release_claim` — this claim ends
             // here, it does not go back into the resumable pool.
+            drop(identity_guard.take());
             warn!(stream_id = %resume.previd, "ISR resume rejected: token mismatch; destroying session state");
             if let Err(error) = state
                 .deps
@@ -348,6 +350,7 @@ pub(super) async fn handle_isr_resume_authenticate(
                 stream_id = %resume.previd,
                 "ISR resume rejected: no ISR token exists for this SM-ID"
             );
+            drop(identity_guard.take());
             if let Err(error) = state
                 .deps
                 .protocol
@@ -361,6 +364,7 @@ pub(super) async fn handle_isr_resume_authenticate(
         }
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "ISR resume failed: token store error");
+            drop(identity_guard.take());
             if let Err(release_error) = state
                 .deps
                 .protocol
@@ -392,6 +396,7 @@ pub(super) async fn handle_isr_resume_authenticate(
             replay_gap_through = ?detached.replay_gap_through,
             "ISR resume: resumption impossible (replay window no longer covers client h)"
         );
+        drop(identity_guard.take());
         if let Err(error) = state
             .deps
             .protocol
@@ -415,6 +420,7 @@ pub(super) async fn handle_isr_resume_authenticate(
             send_count = detached.outbound_count,
             "ISR resume: resumption impossible (handled count exceeds server's outbound count)"
         );
+        drop(identity_guard.take());
         if let Err(error) = state
             .deps
             .protocol

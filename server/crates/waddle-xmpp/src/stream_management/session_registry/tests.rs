@@ -337,6 +337,94 @@ fn reclaimed_claim_admission_is_bounded_before_the_ownership_cas() {
     assert!(registry.reserve_reclaimed_claim_capacity(&second));
 }
 
+#[test]
+fn ambiguous_reclaim_lookup_retains_its_reserved_capacity() {
+    let registry = InMemorySmSessionRegistry::with_capacity(1);
+    let first =
+        crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "lookup-reclaim-1");
+    let second =
+        crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "lookup-reclaim-2");
+
+    assert!(registry.reserve_reclaimed_claim_capacity(&first));
+    registry.defer_uncertain_reclaimed_claim(
+        &first,
+        &crate::ownership::NodeIdentity::new("reclaimer", "incarnation"),
+    );
+
+    assert!(
+        !registry.reserve_reclaimed_claim_capacity(&second),
+        "the reservation retained alongside an ambiguous lookup must bound ownership without double-counting the retry map"
+    );
+}
+
+#[test]
+fn local_ownership_includes_ambiguous_and_in_flight_claim_admission() {
+    let registry = InMemorySmSessionRegistry::with_capacity(4);
+    let identity = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let ambiguous = "ambiguous-acquisition";
+    let in_flight = "reservation-only";
+
+    assert!(registry.reserve_claim_fence_capacity(ambiguous));
+    registry
+        .pending_claim_acquisitions
+        .write()
+        .expect("pending acquisitions")
+        .insert((
+            ambiguous.to_string(),
+            identity,
+            PendingClaimAcquisitionDisposition::RetainDetachedSession,
+        ));
+    assert!(registry.reserve_claim_fence_capacity(in_flight));
+
+    assert_eq!(
+        registry.locally_owned_claim_ids().expect("owned inventory"),
+        vec![ambiguous.to_string(), in_flight.to_string()],
+        "self-fence and drain snapshots must conservatively include both an ambiguous CAS and its reservation-only in-flight window without duplicates"
+    );
+}
+
+#[tokio::test]
+async fn local_ownership_includes_a_confirmed_enabled_claim_before_detach() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "confirmed-enable-before-detach";
+
+    assert!(registry.ensure_session_claim(stream_id).await.is_some());
+    assert!(registry
+        .live_session_ids()
+        .expect("live sessions")
+        .is_empty());
+    assert_eq!(
+        registry.locally_owned_claim_ids().expect("owned inventory"),
+        vec![stream_id.to_string()],
+        "a confirmed enable-time fence is locally owned even before the live socket detaches into the session registry"
+    );
+}
+
+#[tokio::test]
+async fn enable_claim_publication_guard_blocks_identity_rotation_until_caller_publishes() {
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let fresh = crate::ownership::NodeIdentity::new("sm-node", "fresh-incarnation");
+    let shared = crate::ownership::SharedNodeIdentity::new(old);
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+        shared.clone(),
+    );
+    let publication = registry
+        .ensure_session_claim("guarded-enable-publication")
+        .await
+        .expect("claim admission");
+    let rotating = shared.clone();
+    let rotation = tokio::spawn(async move { rotating.rotate(fresh).await });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !rotation.is_finished(),
+        "self-fence rotation must wait until the caller publishes enabled state"
+    );
+    drop(publication);
+    rotation.await.expect("rotation task");
+}
+
 #[tokio::test]
 async fn pending_claim_retry_limit_is_shared_across_acquisitions_and_releases() {
     use crate::ownership::ClaimStore as _;
@@ -496,7 +584,7 @@ async fn rejected_enable_reconciliation_skips_stream_that_became_live_again() {
         .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
     let stream_id = "rejected-enable-became-live";
 
-    assert!(!registry.ensure_session_claim(stream_id).await);
+    assert!(registry.ensure_session_claim(stream_id).await.is_none());
     assert_eq!(
         registry
             .pending_claim_acquisitions
@@ -1141,7 +1229,7 @@ async fn hung_enable_claim_is_bounded_and_not_recorded() {
         }),
         crate::ownership::SharedNodeIdentity::new(me),
     );
-    assert!(!registry.ensure_session_claim("hung-enable").await);
+    assert!(registry.ensure_session_claim("hung-enable").await.is_none());
     assert!(!registry
         .claim_fences
         .read()
@@ -1191,10 +1279,7 @@ async fn cancelled_enable_acquisition_retains_and_releases_commit_before_drop() 
     .expect("claim committed before cancellation");
 
     task.abort();
-    assert!(task
-        .await
-        .expect_err("enable task cancelled")
-        .is_cancelled());
+    assert!(task.await.is_err_and(|error| error.is_cancelled()));
     assert_eq!(
         registry
             .pending_claim_acquisitions
@@ -1233,7 +1318,7 @@ async fn enable_claim_commit_before_timeout_is_reconciled_and_released() {
         .with_claim_store(store.clone(), crate::ownership::SharedNodeIdentity::new(me));
     let stream_id = "commit-before-timeout";
 
-    assert!(!registry.ensure_session_claim(stream_id).await);
+    assert!(registry.ensure_session_claim(stream_id).await.is_none());
 
     let entity = crate::ownership::Entity::new(
         crate::ownership::EntityType::SmSession,
@@ -1397,7 +1482,7 @@ async fn enable_claim_publication_failure_retains_ambiguous_exact_release() {
         .expect("poison injection lock") = Some(std::sync::Arc::downgrade(&registry));
     let stream_id = "publication-failure";
 
-    assert!(!registry.ensure_session_claim(stream_id).await);
+    assert!(registry.ensure_session_claim(stream_id).await.is_none());
     assert_eq!(
         registry.pending_claim_release_count(),
         1,

@@ -1106,7 +1106,6 @@ pub async fn run_node_lease<L>(
                         // `local_claims::SmSessionLocalClaims`), so the
                         // conjunct must do real work here, not just be
                         // documented as a future TODO.
-                        //
                         // FIX 4(a): re-run the demote sweep ONE more time,
                         // right before flipping readiness. The self-fenced
                         // block's own sweep (above, at fence-entry) is a
@@ -1115,15 +1114,17 @@ pub async fn run_node_lease<L>(
                         // that detached (and self-claimed, via
                         // `acquire_claim_store_entry_for_detach`) during
                         // the retry window did so under `live_identity`'s
-                        // STALE, pre-fence value (this loop only calls
-                        // `live_identity.rotate(fresh)` a few lines below, once
-                        // re-registration itself succeeds), so that
+                        // STALE, pre-fence value, so that
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
                         for entity in local_claims.owned().await {
                             local_claims.demote(&entity).await;
                         }
+
+                        let superseded_identity = identity.clone();
+                        identity = fresh;
+                        live_identity.rotate(identity.clone()).await;
 
                         // What "claim re-acquisition" can mean AT THIS
                         // EXACT POINT: every entity this node owned before
@@ -1136,11 +1137,10 @@ pub async fn run_node_lease<L>(
                         // process's bookkeeping to "re-acquire" by name.
                         // What this node uniquely knows, that no other node
                         // can assert as confidently, is that its OWN
-                        // just-superseded identity (`identity`, before the
-                        // reassignment below) is genuinely dead — so it
+                        // just-superseded identity is genuinely dead — so it
                         // commits that knowledge to Postgres immediately
                         // via `NodeLeaseStore::expire`.
-                        expire_bounded(&lease, &identity, config.lease_ttl).await;
+                        expire_bounded(&lease, &superseded_identity, config.lease_ttl).await;
 
                         // FIX 4(b), council-adjudicated: rather than
                         // leaving every one of this node's own dropped
@@ -1153,18 +1153,12 @@ pub async fn run_node_lease<L>(
                         // OTHER node's genuinely dead claims (never
                         // touched by this inline step — see
                         // `reclaim_own_expired_claims`'s owner filter).
-                        // Scoped in its own block: `std::pin::pin!` binds a
-                        // local that lives to the end of its enclosing
-                        // block, not just this statement, and that local
-                        // borrows `identity`/`fresh` — the block ensures
-                        // those borrows end before `identity = fresh` below
-                        // reassigns `identity` (and moves `fresh`).
                         let reclaim_timed_out = {
                             let reclaim_future = std::pin::pin!(reclaim_own_expired_claims(
                                 &lease,
                                 claim_store.as_ref(),
+                                &superseded_identity,
                                 &identity,
-                                &fresh,
                                 local_claims.as_ref(),
                             ));
                             tokio::time::timeout(config.lease_ttl, reclaim_future)
@@ -1180,8 +1174,6 @@ pub async fn run_node_lease<L>(
                             );
                         }
 
-                        identity = fresh;
-                        live_identity.rotate(identity.clone()).await;
                         backoff.reset();
                         readiness.set_ready(true);
                         tracing::info!(
@@ -2015,6 +2007,8 @@ mod tests {
         /// targeted-hydration hook actually fires. Defaults are wired via
         /// `FakeLocalClaims::unhydrated()` for tests that don't care.
         hydrated: Arc<std::sync::Mutex<Vec<Entity>>>,
+        live_identity_at_hydration: Option<waddle_xmpp::ownership::SharedNodeIdentity>,
+        stale_hydration_observed: Arc<AtomicBool>,
     }
 
     impl FakeLocalClaims {
@@ -2039,6 +2033,12 @@ mod tests {
         }
 
         async fn hydrate_reclaimed(&self, entities: &[(Entity, NodeIdentity, ClaimEpoch)]) {
+            if let Some(live_identity) = &self.live_identity_at_hydration {
+                let current = live_identity.current();
+                if entities.iter().any(|(_, owner, _)| *owner != current) {
+                    self.stale_hydration_observed.store(true, Ordering::SeqCst);
+                }
+            }
             self.hydrated.lock().expect("lock").extend(
                 entities
                     .iter()
@@ -2100,6 +2100,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2166,6 +2168,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(false)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2233,6 +2237,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2303,6 +2309,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2480,11 +2488,16 @@ mod tests {
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
         let hydrated = FakeLocalClaims::unhydrated();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let stale_hydration_observed = Arc::new(AtomicBool::new(false));
         let local_claims = Arc::new(FakeLocalClaims {
             owned: Vec::new(),
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: Arc::clone(&hydrated),
+            live_identity_at_hydration: Some(live_identity.clone()),
+            stale_hydration_observed: Arc::clone(&stale_hydration_observed),
         });
 
         let task_lease = PostgresClaimStore::new(db.clone());
@@ -2510,9 +2523,7 @@ mod tests {
                 connected_peers: connected_peers.clone(),
                 local_claims,
                 readiness: readiness.clone(),
-                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(
-                    initial_identity.clone(),
-                ),
+                live_identity,
                 peer_id: None,
                 claim_store: task_claim_store,
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
@@ -2552,6 +2563,10 @@ mod tests {
             std::slice::from_ref(&entity),
             "the inline post-fence reclaim must hydrate this node's own just-expired \
              identity's sm_session claim, not leave it for the general reaper's slower cadence"
+        );
+        assert!(
+            !stale_hydration_observed.load(Ordering::SeqCst),
+            "the fresh registered identity must be published before inline reclaimed hydration begins"
         );
 
         // The claims row must now show the FRESH re-registered identity as

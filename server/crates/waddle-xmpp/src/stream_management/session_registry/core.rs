@@ -222,6 +222,12 @@ impl InMemorySmSessionRegistry {
     }
 
     fn reserve_claim_fence_capacity_up_to(&self, stream_id: &str, capacity: usize) -> bool {
+        // Reclaimed hydration and ambiguous-lookup inventories are already
+        // represented here: every reclaim reserves before its ownership CAS,
+        // then either retains that reservation while the epoch is unknown or
+        // consumes it into `claim_fences` once the exact fence is known.
+        // Counting those retry maps separately would double-charge the same
+        // ownership responsibility and reject usable capacity.
         let (Ok(mut reservations), Ok(pending), Ok(fences)) = (
             self.claim_fence_reservations.write(),
             self.pending_claim_releases.read(),

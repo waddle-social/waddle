@@ -404,10 +404,6 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .await
             .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
         let claim_fence = SmClaimFence::new(identity, epoch);
-        if fencing.node_identity.current() != *claim_fence.owner() {
-            return Err(PendingStorageError::NotOwner { entity });
-        }
-
         let PreparedInsertRow {
             row_id,
             receipt_ms,
@@ -450,6 +446,13 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         if !held || fencing.node_identity.current() != *claim_fence.owner() {
             return Err(PendingStorageError::NotOwner { entity });
         }
+        let Some(identity_guard) = fencing
+            .node_identity
+            .guard_if_current(claim_fence.owner())
+            .await
+        else {
+            return Err(PendingStorageError::NotOwner { entity });
+        };
 
         // Same two INSERT shapes as `insert`, issued on `tx` instead of a
         // pooled single-statement guard, so the fencing check and the
@@ -499,13 +502,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 .map_err(|e| PendingStorageError::Other(e.to_string()))?,
         };
 
-        if fencing.node_identity.current() != *claim_fence.owner() {
-            return Err(PendingStorageError::NotOwner { entity });
-        }
-
         tx.commit()
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        drop(identity_guard);
 
         if affected == 0 {
             Ok(InsertOutcome::QuotaExceeded)

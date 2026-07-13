@@ -164,20 +164,46 @@ impl InMemorySmSessionRegistry {
     /// the local node must not forget that possible ownership.
     pub fn locally_owned_claim_ids(&self) -> Option<Vec<String>> {
         let mut out = self.live_session_ids()?;
-        let pending = self.pending_claim_releases.read().ok()?;
-        out.extend(pending.iter().map(|(stream_id, _)| stream_id.clone()));
-        let pending_hydration = self.pending_reclaimed_hydrations.read().ok()?;
-        out.extend(
-            pending_hydration
-                .keys()
-                .map(|(stream_id, _)| stream_id.clone()),
-        );
-        let pending_lookups = self.pending_reclaimed_claim_lookups.read().ok()?;
-        out.extend(
-            pending_lookups
-                .keys()
-                .map(|(stream_id, _)| stream_id.clone()),
-        );
+        // Snapshot one bookkeeping lock at a time to avoid lock-order
+        // inversion with admission. Read transfer sources before their
+        // destinations so a concurrent source -> destination move can be
+        // observed twice but never disappear between snapshots.
+        {
+            let reservations = self.claim_fence_reservations.read().ok()?;
+            out.extend(reservations.iter().cloned());
+        }
+        {
+            let pending_acquisitions = self.pending_claim_acquisitions.read().ok()?;
+            out.extend(
+                pending_acquisitions
+                    .iter()
+                    .map(|(stream_id, _, _)| stream_id.clone()),
+            );
+        }
+        {
+            let pending_hydration = self.pending_reclaimed_hydrations.read().ok()?;
+            out.extend(
+                pending_hydration
+                    .keys()
+                    .map(|(stream_id, _)| stream_id.clone()),
+            );
+        }
+        {
+            let pending_lookups = self.pending_reclaimed_claim_lookups.read().ok()?;
+            out.extend(
+                pending_lookups
+                    .keys()
+                    .map(|(stream_id, _)| stream_id.clone()),
+            );
+        }
+        {
+            let fences = self.claim_fences.read().ok()?;
+            out.extend(fences.keys().cloned());
+        }
+        {
+            let pending = self.pending_claim_releases.read().ok()?;
+            out.extend(pending.iter().map(|(stream_id, _)| stream_id.clone()));
+        }
         out.sort();
         out.dedup();
         Some(out)
@@ -847,16 +873,21 @@ impl InMemorySmSessionRegistry {
     /// primitive.
     ///
     /// This admission is authoritative: the caller must not enable SM unless
-    /// it returns `true`. Proceeding after a timeout/error would create an
+    /// it receives a publication guard and must retain that guard through the
+    /// synchronous `StreamManagementState::enable` publication. Proceeding
+    /// after a timeout/error would create an
     /// enabled session that cross-node resume cannot discover and would also
     /// leave the socket blocked indefinitely when the backend hangs. Called
     /// with no stream-shard lock held: `stream_id` is freshly minted and
     /// cannot yet appear in `sessions`/`claimed_sessions`, so there is nothing
     /// else to coordinate with under that lock.
-    pub async fn ensure_session_claim(&self, stream_id: &str) -> bool {
+    pub async fn ensure_session_claim(
+        &self,
+        stream_id: &str,
+    ) -> Option<crate::ownership::CurrentNodeIdentityGuard> {
         if !self.reserve_claim_fence_capacity(stream_id) {
             tracing::warn!(stream_id = %stream_id, "handle_sm_enable: exact-release backlog capacity exhausted");
-            return false;
+            return None;
         }
         let entity = sm_session_entity(stream_id);
         let identity = self.node_identity.current();
@@ -872,23 +903,24 @@ impl InMemorySmSessionRegistry {
         )
         .await
         {
-            Ok(Ok(epoch)) if self.node_identity.current() == identity => {
+            Ok(Ok(epoch)) => {
                 let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
-                if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                let Some(publication_guard) = self.node_identity.guard_if_current(&identity).await
+                else {
+                    self.cancel_claim_fence_reservation(stream_id);
+                    acquisition_guard.disarm();
+                    self.release_claim_store_entry_under(stream_id, fence).await;
+                    return None;
+                };
+                let recorded = self.try_record_claim_fence(stream_id, fence.clone());
+                if !recorded {
+                    drop(publication_guard);
                     self.cancel_claim_fence_reservation(stream_id);
                     self.release_claim_store_entry_under(stream_id, fence).await;
-                    false
+                    None
                 } else {
-                    true
+                    Some(publication_guard)
                 }
-            }
-            Ok(Ok(epoch)) => {
-                let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-                if !self.try_record_claim_fence(stream_id, fence.clone()) {
-                    self.cancel_claim_fence_reservation(stream_id);
-                }
-                self.release_claim_store_entry_under(stream_id, fence).await;
-                false
             }
             Ok(Err(error)) => {
                 self.cancel_claim_fence_reservation(stream_id);
@@ -897,7 +929,7 @@ impl InMemorySmSessionRegistry {
                     %error,
                     "handle_sm_enable: ClaimStore ensure_claimed failed; rejecting SM enable"
                 );
-                false
+                None
             }
             Err(_) => {
                 tracing::warn!(stream_id = %stream_id, "handle_sm_enable: ClaimStore ensure_claimed timed out");
@@ -914,7 +946,7 @@ impl InMemorySmSessionRegistry {
                     PendingClaimAcquisitionDisposition::ReleaseRejectedEnable,
                 )
                 .await;
-                false
+                None
             }
         };
         acquisition_guard.disarm();
@@ -1030,16 +1062,17 @@ impl InMemorySmSessionRegistry {
                 )));
             }
         };
-        acquisition_guard.disarm();
-
-        if self.node_identity.current() != identity {
+        let Some(publication_guard) = self.node_identity.guard_if_current(&identity).await else {
+            acquisition_guard.disarm();
+            self.cancel_claim_fence_reservation(stream_id);
             self.release_claim_store_entry_under(
                 stream_id,
-                super::super::persistence::SmClaimFence::new(identity, epoch),
+                super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
             )
             .await;
             return Ok(None);
-        }
+        };
+        acquisition_guard.disarm();
 
         // The store granted the claim: perform the matching in-memory move.
         // `stream_id` is guaranteed still present and unexpired here — this
@@ -1057,6 +1090,7 @@ impl InMemorySmSessionRegistry {
             sessions.remove(stream_id)
         };
         let Some(session) = removed else {
+            drop(publication_guard);
             self.release_claim_store_entry_under(
                 stream_id,
                 super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
@@ -1072,7 +1106,9 @@ impl InMemorySmSessionRegistry {
             claimed.insert(stream_id.to_string(), session.clone());
         }
         let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-        if !self.try_record_claim_fence(stream_id, fence.clone()) {
+        let recorded = self.try_record_claim_fence(stream_id, fence.clone());
+        drop(publication_guard);
+        if !recorded {
             if let Ok(mut claimed) = self.claimed_sessions.write() {
                 claimed.remove(stream_id);
             }
@@ -1169,16 +1205,16 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => {
-                if self.node_identity.current() != identity {
-                    let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-                    if !self.try_record_claim_fence(stream_id, fence.clone()) {
-                        self.cancel_claim_fence_reservation(stream_id);
-                    }
+                let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
+                let Some(publication_guard) = self.node_identity.guard_if_current(&identity).await
+                else {
+                    self.cancel_claim_fence_reservation(stream_id);
                     self.release_claim_store_entry_under(stream_id, fence).await;
                     return;
-                }
-                let fence = super::super::persistence::SmClaimFence::new(identity.clone(), epoch);
-                if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                };
+                let recorded = self.try_record_claim_fence(stream_id, fence.clone());
+                drop(publication_guard);
+                if !recorded {
                     self.cancel_claim_fence_reservation(stream_id);
                     self.release_claim_store_entry_under(stream_id, fence).await;
                 }
