@@ -25,7 +25,7 @@ pub use cross_node_resume::{
 };
 pub use resources::DetachedPresenceState;
 pub use session::{DetachedSession, DetachedUnackedStanza};
-pub use tombstones::RecentTombstoneRecord;
+pub use tombstones::{RecentTombstoneRecord, TOMBSTONE_CLOCK_SKEW_SLACK};
 pub use traits::{SmClaimCompletion, SmRegistryError, SmSessionRegistry};
 
 /// Exclusive authority for one fixed SM stream-lock shard.

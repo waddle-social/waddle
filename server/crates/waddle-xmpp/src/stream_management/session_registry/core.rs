@@ -7,7 +7,8 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::ownership::{
-    ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    SharedNodeIdentity,
 };
 
 use super::persistence_codec::{
@@ -181,6 +182,17 @@ pub struct InMemorySmSessionRegistry {
     /// retain ownership).
     pub(super) pending_claim_acquisitions:
         RwLock<HashSet<(String, NodeIdentity, PendingClaimAcquisitionDisposition)>>,
+    /// Sessions removed from the resumable maps and handed to the XEP-0198
+    /// promote-then-confirm lifecycle. Their exact claim must remain held
+    /// across displacement, expiry, shutdown, invalidation, retry
+    /// reinsertion, and caller cancellation until durable deletion is
+    /// confirmed.
+    pub(super) pending_promotions: RwLock<HashSet<String>>,
+    /// Full payloads handed back by cancellation guards. They remain outside
+    /// the resumable map until `drain_expired` reconciles them against the
+    /// durable row, preventing stale pre-tombstone queues from being
+    /// republished directly from `Drop`.
+    pub(super) pending_promotion_retries: RwLock<HashMap<String, DetachedSession>>,
     /// Claimed ISR sessions whose follow-up epoch lookup failed before the
     /// route could prove that the recorded exact fence still owns the backend
     /// row. Kept out of `sessions` until a read-only reconciliation proves
@@ -302,17 +314,34 @@ impl InMemorySmSessionRegistry {
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
-    ) -> bool {
-        let stream_liveness = self.stream_liveness(&entity.id);
+    ) -> Result<bool, SmRegistryError> {
         let key = (entity.id.clone(), fence.clone());
-        let (Ok(reservations), Ok(mut reclaimed), Ok(mut pending), Ok(mut fences)) = (
+        let (
+            Ok(sessions),
+            Ok(claimed),
+            Ok(promotions),
+            Ok(reservations),
+            Ok(mut reclaimed),
+            Ok(mut pending),
+            Ok(mut fences),
+        ) = (
+            self.sessions.read(),
+            self.claimed_sessions.read(),
+            self.pending_promotions.read(),
             self.claim_fence_reservations.read(),
             self.reclaimed_claim_reservations.write(),
             self.pending_claim_releases.write(),
             self.claim_fences.write(),
-        ) else {
-            return false;
+        )
+        else {
+            return Err(SmRegistryError::Internal(
+                "cross-node repair could not inspect exact-release bookkeeping".to_string(),
+            ));
         };
+        let promotion_pending = promotions.contains(&entity.id);
+        let stream_live = sessions.contains_key(&entity.id)
+            || claimed.contains_key(&entity.id)
+            || promotion_pending;
         let matching_reservation = reclaimed.get(&entity.id) == Some(&reservation);
         let matching_active_fence = fences.get(&entity.id) == Some(fence);
         let matching_pending_release = pending.contains(&key);
@@ -325,13 +354,14 @@ impl InMemorySmSessionRegistry {
             .is_some_and(|current| current != fence);
         let pending_only =
             matching_pending_release && !matching_reservation && !matching_active_fence;
-        if conflicting_generic_reservation
+        if promotion_pending
+            || conflicting_generic_reservation
             || conflicting_reservation
             || conflicting_active_fence
-            || (pending_only && stream_liveness != Some(false))
+            || (pending_only && stream_live)
             || (!matching_reservation && !matching_active_fence && !matching_pending_release)
         {
-            return false;
+            return Ok(false);
         }
         if matching_reservation {
             reclaimed.remove(&entity.id);
@@ -347,7 +377,7 @@ impl InMemorySmSessionRegistry {
         if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
             pending.remove(&(entity.id.clone(), fence.owner().clone(), reservation));
         }
-        true
+        Ok(true)
     }
 
     pub(super) fn complete_terminal_claim_release(
@@ -593,6 +623,88 @@ impl InMemorySmSessionRegistry {
         true
     }
 
+    /// Convert a generic commit-unknown acquisition reservation into the
+    /// exact terminal fence returned by a later successful `ensure_claimed`.
+    /// That read/write result is authoritative and therefore directionally
+    /// supersedes every older same-stream fence; retaining an older active
+    /// fence after the local lifecycle disappeared would leak bounded
+    /// ownership capacity forever.
+    pub(super) fn try_record_verified_terminal_claim_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        self.try_record_verified_acquisition_fence(stream_id, fence, true)
+    }
+
+    /// Publish a later verified acquisition as the active fence while
+    /// directionally retiring every older same-stream generation. Used when
+    /// an in-flight displacement still owns the promote/confirm lifecycle.
+    pub(super) fn try_record_verified_claim_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        self.try_record_verified_acquisition_fence(stream_id, fence, false)
+    }
+
+    fn try_record_verified_acquisition_fence(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+        terminal: bool,
+    ) -> bool {
+        let mut superseded = Vec::new();
+        {
+            let (Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
+                self.claim_fence_reservations.write(),
+                self.reclaimed_claim_reservations.read(),
+                self.pending_claim_releases.write(),
+                self.claim_fences.write(),
+            ) else {
+                return false;
+            };
+            if reclaimed.contains_key(stream_id) || !reservations.remove(stream_id) {
+                return false;
+            }
+            if let Some(old) = fences.remove(stream_id) {
+                if old != fence {
+                    superseded.push(old);
+                }
+            }
+            pending.retain(|(id, old)| {
+                if id == stream_id {
+                    if old != &fence {
+                        superseded.push(old.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if terminal {
+                pending.insert((stream_id.to_string(), fence.clone()));
+            } else {
+                fences.insert(stream_id.to_string(), fence.clone());
+            }
+        }
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            superseded.sort_by(|left, right| {
+                left.owner()
+                    .node_id
+                    .cmp(&right.owner().node_id)
+                    .then_with(|| left.owner().node_epoch.cmp(&right.owner().node_epoch))
+                    .then_with(|| left.epoch().cmp(&right.epoch()))
+            });
+            superseded.dedup();
+            for old in superseded {
+                storage.evict_claim_cache(&session_id, &old);
+            }
+        }
+        true
+    }
+
     fn try_record_terminal_reclaimed_fence(
         &self,
         stream_id: &str,
@@ -745,6 +857,8 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            pending_promotions: RwLock::new(HashSet::new()),
+            pending_promotion_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -769,6 +883,8 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
+            pending_promotions: RwLock::new(HashSet::new()),
+            pending_promotion_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -1241,16 +1357,15 @@ impl InMemorySmSessionRegistry {
                 .claimed_sessions
                 .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+            let promotions = self
+                .pending_promotions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.contains_key(&stream_id)
+                || claimed.contains_key(&stream_id)
+                || promotions.contains(&stream_id)
         };
         if present {
-            let exact_fence = self
-                .claim_fences
-                .read()
-                .ok()
-                .and_then(|fences| fences.get(&stream_id).cloned())
-                .as_ref()
-                == Some(caller_fence);
             match tokio::time::timeout(
                 CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
                 self.claim_store
@@ -1263,13 +1378,11 @@ impl InMemorySmSessionRegistry {
                 Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
                 Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
             }
-            if !exact_fence
-                && !self.try_record_verified_reclaimed_fence(
-                    &stream_id,
-                    caller_fence.clone(),
-                    reservation,
-                )
-            {
+            if !self.try_record_verified_reclaimed_fence(
+                &stream_id,
+                caller_fence.clone(),
+                reservation,
+            ) {
                 return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
             debug!(
@@ -1293,7 +1406,9 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(epoch)) => epoch,
-            Ok(Err(error)) => {
+            Ok(Err(
+                error @ (ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining),
+            )) => {
                 debug!(
                     stream_id = %stream_id,
                     %error,
@@ -1301,6 +1416,15 @@ impl InMemorySmSessionRegistry {
                      (claim lost again since the caller's steal_stale); skipping"
                 );
                 return Ok(ReclaimedHydrationOutcome::LostClaim);
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    %error,
+                    "hydrate_reclaimed: ClaimStore ensure_claimed could not verify the \
+                     already-won claim; retaining reclaimed responsibility for repair"
+                );
+                return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
             Err(_timeout) => {
                 tracing::warn!(
@@ -1650,6 +1774,7 @@ impl InMemorySmSessionRegistry {
                 // Responsibility transferred back to the live local session.
                 // Never let terminal cleanup release its claim.
                 self.clear_pending_reclaimed_hydration(entity, fence, reservation);
+                self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
                 return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
             }
             None => {

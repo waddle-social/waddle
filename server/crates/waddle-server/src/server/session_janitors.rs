@@ -146,7 +146,16 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     "SM janitor: cleaning up expired detached sessions"
                 );
             }
-            for session in drained {
+            let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+                &state.deps.protocol.sm_session_registry,
+                drained,
+            );
+            while let Some(pending_session) = promotion_batch.pop() {
+                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                    &state.deps.protocol.sm_session_registry,
+                    pending_session,
+                );
+                let session = promotion_guard.session().clone();
                 let blocklist = match state
                     .deps
                     .protocol
@@ -174,11 +183,14 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                      record_promotion_failure also failed; preserving \
                                      session state for retry"
                                 );
-                                crate::sm_promotion::reinsert_failed_session_for_retry(
+                                if crate::sm_promotion::reinsert_failed_session_for_retry(
                                     &state.deps.protocol.sm_session_registry,
-                                    session,
+                                    session.clone(),
                                 )
-                                .await;
+                                .await
+                                {
+                                    promotion_guard.complete();
+                                }
                                 continue;
                             }
                         };
@@ -192,12 +204,15 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 "SM janitor: blocklist load has repeatedly failed; \
                                  dead-lettering the durable row to break the retry loop"
                             );
-                            state
+                            if state
                                 .deps
                                 .protocol
                                 .sm_session_registry
                                 .confirm_drained(&session.stream_id)
-                                .await;
+                                .await
+                            {
+                                promotion_guard.complete();
+                            }
                             continue;
                         }
                         warn!(
@@ -211,11 +226,14 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         // Make the retry promise true: drain_expired scans only
                         // memory, so the drained session must go back into the
                         // map for the next tick to see it.
-                        crate::sm_promotion::reinsert_failed_session_for_retry(
+                        if crate::sm_promotion::reinsert_failed_session_for_retry(
                             &state.deps.protocol.sm_session_registry,
-                            session,
+                            session.clone(),
                         )
-                        .await;
+                        .await
+                        {
+                            promotion_guard.complete();
+                        }
                         continue;
                     }
                 };
@@ -286,12 +304,15 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 "SM janitor: record_promotion_failure failed; \
                                  preserving session state for retry"
                             );
-                            crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                            if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                                 &state.deps.protocol.sm_session_registry,
-                                session,
+                                session.clone(),
                                 &summary,
                             )
-                            .await;
+                            .await
+                            {
+                                promotion_guard.complete();
+                            }
                             continue;
                         }
                     };
@@ -305,12 +326,15 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             "SM janitor: Q6 promotion repeatedly failed; \
                              dead-lettering the durable row to break the retry loop"
                         );
-                        state
+                        if state
                             .deps
                             .protocol
                             .sm_session_registry
                             .confirm_drained(&session.stream_id)
-                            .await;
+                            .await
+                        {
+                            promotion_guard.complete();
+                        }
                         continue;
                     }
                     warn!(
@@ -320,20 +344,28 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         "SM janitor: promotion had storage failures; \
                          preserving session state for retry"
                     );
-                    crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &state.deps.protocol.sm_session_registry,
-                        session,
+                        session.clone(),
                         &summary,
                     )
-                    .await;
+                    .await
+                    {
+                        promotion_guard.complete();
+                    }
                     continue;
                 }
-                state
+                if state
                     .deps
                     .protocol
                     .sm_session_registry
                     .confirm_drained(&session.stream_id)
-                    .await;
+                    .await
+                {
+                    promotion_guard.complete();
+                } else {
+                    continue;
+                }
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
 
@@ -1829,7 +1861,16 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 count = drained.len(),
                 "Graceful shutdown: promoting unacked queues for detached SM sessions"
             );
-            for session in drained {
+            let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+                &websocket_state.deps.protocol.sm_session_registry,
+                drained,
+            );
+            while let Some(session) = promotion_batch.pop() {
+                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    session,
+                );
+                let session = promotion_guard.session();
                 let blocklist = match websocket_state
                     .deps
                     .protocol
@@ -1858,7 +1899,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     "Graceful shutdown",
                 );
                 let summary = crate::sm_promotion::promote_session_unacked(
-                    &session,
+                    session,
                     &websocket_state.deps.protocol.connection_registry,
                     &websocket_state.deps.protocol.user_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
@@ -1896,6 +1937,15 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                          preserving durable SM row for restart-time retry"
                     );
                     record_sm_drain_outcome(false);
+                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        session.clone(),
+                        &summary,
+                    )
+                    .await
+                    {
+                        promotion_guard.complete();
+                    }
                     continue;
                 }
                 let confirmed = websocket_state
@@ -1910,6 +1960,24 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 // claim only on success (see that method's own doc
                 // comment).
                 record_sm_drain_outcome(confirmed);
+                if !confirmed {
+                    warn!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        "Graceful shutdown: durable SM confirmation failed; retaining \
+                         promotion ownership and pending-delivery claim for retry"
+                    );
+                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        session.clone(),
+                        &summary,
+                    )
+                    .await
+                    {
+                        promotion_guard.complete();
+                    }
+                    continue;
+                }
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
                 if let Err(error) = websocket_state
@@ -1925,9 +1993,10 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         error = %error,
                         "Graceful shutdown: pending_delivery release_claim failed; \
                          rows remain claimed and will be released by next-startup \
-                         claim-expiry janitor"
+                        claim-expiry janitor"
                     );
                 }
+                promotion_guard.complete();
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }

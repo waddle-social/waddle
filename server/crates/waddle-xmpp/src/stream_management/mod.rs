@@ -39,7 +39,7 @@ pub use session_registry::{
     DetachedUnackedStanza, InMemorySmSessionRegistry, RecentTombstoneRecord,
     ReclaimedClaimReservation, ReclaimedHydrationOutcome, RemoteResumeAskOutcome,
     RemoteResumeAsker, SmClaimCompletion, SmRegistryError, SmSessionRegistry, StealTicket,
-    DEFAULT_MAX_SESSIONS,
+    DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
 pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};
 pub use state::{DetachedSessionSnapshot, StreamManagementState};
