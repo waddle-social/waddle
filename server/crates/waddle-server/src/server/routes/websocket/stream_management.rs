@@ -5,7 +5,7 @@ const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duratio
 
 struct SmEnableClaimGuard {
     registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
-    stream_id: String,
+    stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     provisional_isr_token: Option<waddle_xmpp::isr::IsrRevocationReservation>,
     armed: bool,
 }
@@ -16,7 +16,7 @@ struct SmEnableClaimGuard {
 /// `<enabled/>` frame was written.
 pub(super) struct SmEnableCommit {
     claim_guard: Option<SmEnableClaimGuard>,
-    stream_id: String,
+    stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     resume: bool,
     max: u32,
 }
@@ -24,7 +24,7 @@ pub(super) struct SmEnableCommit {
 impl SmEnableCommit {
     fn new(
         claim_guard: Option<SmEnableClaimGuard>,
-        stream_id: String,
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         resume: bool,
         max: u32,
     ) -> Self {
@@ -48,13 +48,7 @@ impl SmEnableCommit {
                 .deps
                 .protocol
                 .connection_registry
-                .set_sm_stream_id_if_owner(
-                    jid,
-                    owner,
-                    Some(waddle_xmpp::pending_delivery::SmSessionId::new(
-                        self.stream_id.clone(),
-                    )),
-                ),
+                .set_sm_stream_id_if_owner(jid, owner, Some(self.stream_id.clone())),
             _ => false,
         };
 
@@ -62,7 +56,7 @@ impl SmEnableCommit {
         // that positive reply the SM-session commit point. A concurrent
         // same-JID replacement may reject only the shared registry alias,
         // never roll back the state the peer has already observed.
-        sm_state.enable(self.stream_id.clone(), self.resume, Some(self.max));
+        sm_state.enable(self.stream_id.to_string(), self.resume, Some(self.max));
         let unpublished_isr_cleanup = self
             .claim_guard
             .take()
@@ -81,7 +75,7 @@ impl SmEnableCommit {
 impl SmEnableClaimGuard {
     fn new(
         registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
-        stream_id: String,
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     ) -> Self {
         Self {
             registry,
@@ -128,7 +122,7 @@ impl Drop for SmEnableClaimGuard {
         }
         if !self
             .registry
-            .defer_unpublished_enabled_claim_release(&self.stream_id)
+            .defer_unpublished_enabled_claim_release(self.stream_id.as_str())
         {
             warn!(
                 stream_id = %self.stream_id,
@@ -183,7 +177,7 @@ mod enable_claim_guard_tests {
 
         async fn persist_issued(
             &self,
-            sm_id: &str,
+            sm_id: &waddle_xmpp::pending_delivery::SmSessionId,
             issued: &waddle_xmpp::isr::IssuedIsrToken,
         ) -> Result<(), waddle_xmpp::isr::IsrTokenStoreError> {
             self.inner.persist_issued(sm_id, issued).await
@@ -191,9 +185,10 @@ mod enable_claim_guard_tests {
 
         async fn revoke_if_current(
             &self,
-            sm_id: &str,
+            sm_id: &waddle_xmpp::pending_delivery::SmSessionId,
             issued: &waddle_xmpp::isr::IssuedIsrToken,
-        ) -> Result<bool, waddle_xmpp::isr::IsrTokenStoreError> {
+        ) -> Result<waddle_xmpp::isr::IsrRevokeOutcome, waddle_xmpp::isr::IsrTokenStoreError>
+        {
             let revoked = self.inner.revoke_if_current(sm_id, issued).await?;
             self.revoked.notify_one();
             Ok(revoked)
@@ -201,7 +196,7 @@ mod enable_claim_guard_tests {
 
         async fn consume(
             &self,
-            sm_id: &str,
+            sm_id: &waddle_xmpp::pending_delivery::SmSessionId,
             presented_token: &[u8],
             mechanism: &str,
             fence: &SmClaimFence,
@@ -233,7 +228,7 @@ mod enable_claim_guard_tests {
 
         drop(SmEnableClaimGuard::new(
             registry.clone(),
-            stream_id.to_string(),
+            waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
         ));
 
         assert_eq!(registry.pending_claim_release_count(), 1);
@@ -259,9 +254,13 @@ mod enable_claim_guard_tests {
             revoked: tokio::sync::Notify::new(),
         });
         let stream_id = "cancelled-isr-before-enabled-publication";
+        let isr_stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
         assert!(registry.ensure_session_claim(stream_id).await.is_some());
-        let issued = token_store.issue(stream_id, "PLAIN").await.expect("issue");
-        let mut guard = SmEnableClaimGuard::new(registry, stream_id.to_string());
+        let issued = token_store
+            .issue(&isr_stream_id, "PLAIN")
+            .await
+            .expect("issue");
+        let mut guard = SmEnableClaimGuard::new(registry, isr_stream_id.clone());
         let revocations = waddle_xmpp::isr::IsrRevocationQueue::default();
         assert!(guard.retain_provisional_isr_token(
             &revocations,
@@ -278,7 +277,7 @@ mod enable_claim_guard_tests {
         let fence = SmClaimFence::new(identity, waddle_xmpp::ownership::ClaimEpoch(0));
         assert_eq!(
             token_store
-                .consume(stream_id, issued.token.as_bytes(), "PLAIN", &fence)
+                .consume(&isr_stream_id, issued.token.as_bytes(), "PLAIN", &fence,)
                 .await
                 .expect("consume after cancellation"),
             IsrConsumeOutcome::NoSuchToken
@@ -578,7 +577,7 @@ async fn handle_sm_enable(
     let mut claim_guard = enable.resume.then(|| {
         SmEnableClaimGuard::new(
             state.deps.protocol.sm_session_registry.clone(),
-            stream_id.clone(),
+            waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
         )
     });
     // Publishing the armed pre-transport guard transfers exact cleanup
@@ -621,6 +620,8 @@ async fn handle_sm_enable(
                 match state.deps.app_state.clustering_claims.isr_token_store() {
                     Some(isr_token_store) => {
                         let issued = waddle_xmpp::isr::IssuedIsrToken::new(mechanism);
+                        let isr_stream_id =
+                            waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
                         let revocations =
                             waddle_xmpp::isr::revocation_queue_for_store(&isr_token_store);
                         if claim_guard.as_mut().is_none_or(|guard| {
@@ -635,7 +636,7 @@ async fn handle_sm_enable(
                         }
                         match tokio::time::timeout(
                             SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT,
-                            isr_token_store.persist_issued(&stream_id, &issued),
+                            isr_token_store.persist_issued(&isr_stream_id, &issued),
                         )
                         .await
                         {
@@ -679,7 +680,7 @@ async fn handle_sm_enable(
     }
     *pending_commit = Some(SmEnableCommit::new(
         claim_guard,
-        stream_id,
+        waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
         enable.resume,
         max,
     ));

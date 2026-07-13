@@ -460,9 +460,9 @@ pub struct WebSocketState {
 }
 
 /// Whether the externally configured XMPP WebSocket endpoint is protected by
-/// TLS. This is derived once from the trusted deployment `base_url`; request
-/// headers are deliberately not consulted because an untrusted client can
-/// forge forwarding headers.
+/// TLS. This is derived once from the trusted deployment RFC 7395 endpoint;
+/// the unrelated application base URL and request headers are deliberately not
+/// consulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportSecurity {
     Unsecured,
@@ -470,10 +470,11 @@ pub enum TransportSecurity {
 }
 
 impl TransportSecurity {
-    pub fn from_base_url(base_url: &str) -> Self {
-        match url::Url::parse(base_url) {
-            Ok(url) if url.scheme() == "https" => Self::Tls,
-            _ => Self::Unsecured,
+    pub fn from_public_websocket_url(public_websocket_url: &url::Url) -> Self {
+        if public_websocket_url.scheme() == "wss" {
+            Self::Tls
+        } else {
+            Self::Unsecured
         }
     }
 

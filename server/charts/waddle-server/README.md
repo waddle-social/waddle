@@ -29,6 +29,7 @@ helm upgrade --install waddle ./charts/waddle-server \
   --create-namespace \
   --set config.baseUrl=https://chat.example.com \
   --set xmpp.domain=chat.example.com \
+  --set xmpp.publicWebsocketUrl=wss://chat.example.com/ws \
   --set ingress.enabled=true \
   --set ingress.hosts[0].host=chat.example.com \
   --set ingress.tls[0].secretName=chat-example-com-tls \
@@ -194,6 +195,7 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set config.baseUrl=https://xmpp.waddle.social \
   --set config.corsOrigins='https://waddle.chat,http://localhost:4321' \
   --set xmpp.domain=waddle.social \
+  --set xmpp.publicWebsocketUrl=wss://xmpp.waddle.social/ws \
   --set-json secret.authProvidersJson='[{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
 ```
 

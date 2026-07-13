@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use subtle::ConstantTimeEq;
 
+use crate::pending_delivery::SmSessionId;
 use crate::stream_management::persistence::SmClaimFence;
 
 /// A freshly issued or rotated ISR token (ADR-0017 Phase 3 Slice 8,
@@ -78,6 +79,21 @@ pub enum IsrConsumeOutcome {
     NoSuchToken,
 }
 
+/// Outcome of exact provisional-token revocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsrRevokeOutcome {
+    /// The exact provisional issuance was present and removed.
+    Revoked,
+    /// A different issuance is present. The store retained an exact negative
+    /// fence for the provisional value, so a delayed write of that older
+    /// issuance cannot overwrite the current token.
+    Superseded,
+    /// No live row was visible. The store installed an exact negative fence
+    /// atomically with this observation, so a delayed matching write is
+    /// suppressed and consumes the fence instead of publishing a token.
+    Missing,
+}
+
 /// [`IsrTokenStore`] failures. Typed per the repo's typed-payloads hard
 /// rule — never a bare `String` masquerading as structured data.
 #[derive(Debug, thiserror::Error)]
@@ -127,9 +143,10 @@ struct IsrRevocationQueueState {
 
 struct IsrRevocationEntry {
     id: u64,
-    sm_id: String,
+    sm_id: SmSessionId,
     store: Arc<dyn IsrTokenStore>,
     issued: IssuedIsrToken,
+    runtime: tokio::runtime::Handle,
     state: IsrRevocationState,
 }
 
@@ -192,10 +209,11 @@ impl IsrRevocationQueue {
     /// token can be committed without retained cleanup responsibility.
     pub fn reserve(
         &self,
-        sm_id: String,
+        sm_id: SmSessionId,
         store: Arc<dyn IsrTokenStore>,
         issued: IssuedIsrToken,
     ) -> Option<IsrRevocationReservation> {
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
         let mut state = self.inner.state.lock().ok()?;
         if state.entries.len() >= self.inner.capacity {
             return None;
@@ -209,6 +227,7 @@ impl IsrRevocationQueue {
             sm_id,
             store,
             issued,
+            runtime,
             state: IsrRevocationState::Reserved,
         });
         Some(IsrRevocationReservation {
@@ -242,25 +261,24 @@ impl IsrRevocationQueue {
     }
 
     fn start_worker(&self) {
-        let should_start = self.inner.state.lock().is_ok_and(|mut state| {
+        let runtime = self.inner.state.lock().ok().and_then(|mut state| {
             if state.worker_running
                 || !state
                     .entries
                     .iter()
                     .any(|entry| entry.state == IsrRevocationState::Active)
             {
-                return false;
+                return None;
             }
+            let runtime = state
+                .entries
+                .iter()
+                .find(|entry| entry.state == IsrRevocationState::Active)
+                .map(|entry| entry.runtime.clone())?;
             state.worker_running = true;
-            true
+            Some(runtime)
         });
-        if !should_start {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            if let Ok(mut state) = self.inner.state.lock() {
-                state.worker_running = false;
-            }
+        let Some(runtime) = runtime else {
             return;
         };
         let queue = self.clone();
@@ -268,7 +286,13 @@ impl IsrRevocationQueue {
     }
 
     fn schedule_worker_restart(&self) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let Some(runtime) = self.inner.state.lock().ok().and_then(|state| {
+            state
+                .entries
+                .iter()
+                .find(|entry| entry.state == IsrRevocationState::Active)
+                .map(|entry| entry.runtime.clone())
+        }) else {
             return;
         };
         let queue = self.clone();
@@ -403,7 +427,7 @@ pub trait IsrTokenStore: Send + Sync {
     /// backend outcome can be followed by [`Self::revoke_if_current`].
     async fn persist_issued(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         issued: &IssuedIsrToken,
     ) -> Result<(), IsrTokenStoreError>;
 
@@ -415,7 +439,7 @@ pub trait IsrTokenStore: Send + Sync {
     /// token; rotation is [`consume`](Self::consume)'s job.
     async fn issue(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         mechanism: &str,
     ) -> Result<IssuedIsrToken, IsrTokenStoreError> {
         let issued = IssuedIsrToken::new(mechanism);
@@ -426,36 +450,43 @@ pub trait IsrTokenStore: Send + Sync {
     /// Revoke a provisional issuance only if the row still contains the
     /// exact token and mechanism returned by [`Self::issue`]. A delayed
     /// cleanup must never delete a newer issuance or a token rotated by a
-    /// successful resume. Returns whether this exact issuance was removed.
+    /// successful resume. Implementations MUST atomically retain an exact
+    /// negative fence for `issued` when the live value is missing or
+    /// superseded. A later [`Self::persist_issued`] of that exact value MUST
+    /// consume the fence without publishing the token. This makes every
+    /// successful outcome terminal without mistaking temporary absence for
+    /// proof that a timed-out write cannot commit.
     async fn revoke_if_current(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         issued: &IssuedIsrToken,
-    ) -> Result<bool, IsrTokenStoreError>;
+    ) -> Result<IsrRevokeOutcome, IsrTokenStoreError>;
 
     /// Fenced, single-use, constant-time consume. See the trait-level doc
     /// for the locked spec this must implement exactly.
     async fn consume(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         presented_token: &[u8],
         mechanism: &str,
         fence: &SmClaimFence,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError>;
 
     /// Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): reap token
-    /// rows older than `max_age`. A row is minted per `<isr-enable/>` and
+    /// rows older than `max_age`, together with exact negative revocation
+    /// fences older than the same bound. A row is minted per `<isr-enable/>` and
     /// is never reaped by the ordinary [`consume`](Self::consume) path
     /// alone — a token issued but never resumed (or whose SM session is
     /// later expired/reaped by some other path with no cascade hook back
     /// to this store) would otherwise sit in `clustering_isr_tokens`
-    /// forever. Returns the number of rows deleted.
+    /// forever. Returns the number of live token rows deleted; maintenance of
+    /// expired negative fences is intentionally not included in that count.
     ///
     /// [`InMemoryIsrTokenStore`]'s implementation is a no-op returning `0`:
     /// per this module's own doc comment it is never advertised/exercised
     /// in production (ISR requires `clustering.enabled && Postgres`), so
     /// nothing ever accumulates there worth sweeping, and it tracks no
-    /// issuance timestamp to sweep by in the first place.
+    /// issuance/fence timestamp to sweep by in the first place.
     async fn sweep_expired(&self, max_age: std::time::Duration) -> Result<u64, IsrTokenStoreError>;
 }
 
@@ -464,7 +495,13 @@ pub trait IsrTokenStore: Send + Sync {
 /// kept for trait-contract symmetry and unit testing only.
 #[derive(Debug, Default)]
 pub struct InMemoryIsrTokenStore {
-    tokens: RwLock<HashMap<String, IssuedIsrToken>>,
+    state: RwLock<InMemoryIsrTokenState>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryIsrTokenState {
+    tokens: HashMap<SmSessionId, IssuedIsrToken>,
+    revocation_fences: HashMap<SmSessionId, Vec<IssuedIsrToken>>,
 }
 
 impl InMemoryIsrTokenStore {
@@ -482,39 +519,63 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
 
     async fn persist_issued(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         issued: &IssuedIsrToken,
     ) -> Result<(), IsrTokenStoreError> {
-        let mut tokens = self
-            .tokens
+        let mut state = self
+            .state
             .write()
             .map_err(|_| IsrTokenStoreError::Poisoned)?;
-        tokens.insert(sm_id.to_string(), issued.clone());
+        if let Some(fences) = state.revocation_fences.get_mut(sm_id) {
+            if let Some(index) = fences.iter().position(|fenced| {
+                fenced.mechanism == issued.mechanism
+                    && bool::from(fenced.token.as_bytes().ct_eq(issued.token.as_bytes()))
+            }) {
+                fences.remove(index);
+                if fences.is_empty() {
+                    state.revocation_fences.remove(sm_id);
+                }
+                return Ok(());
+            }
+        }
+        state.tokens.insert(sm_id.clone(), issued.clone());
         Ok(())
     }
 
     async fn revoke_if_current(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         issued: &IssuedIsrToken,
-    ) -> Result<bool, IsrTokenStoreError> {
-        let mut tokens = self
-            .tokens
+    ) -> Result<IsrRevokeOutcome, IsrTokenStoreError> {
+        let mut state = self
+            .state
             .write()
             .map_err(|_| IsrTokenStoreError::Poisoned)?;
-        let matches = tokens.get(sm_id).is_some_and(|current| {
+        let matches = state.tokens.get(sm_id).is_some_and(|current| {
             current.mechanism == issued.mechanism
                 && bool::from(current.token.as_bytes().ct_eq(issued.token.as_bytes()))
         });
-        if matches {
-            tokens.remove(sm_id);
+        let outcome = if matches {
+            state.tokens.remove(sm_id);
+            IsrRevokeOutcome::Revoked
+        } else if state.tokens.contains_key(sm_id) {
+            IsrRevokeOutcome::Superseded
+        } else {
+            IsrRevokeOutcome::Missing
+        };
+        let fences = state.revocation_fences.entry(sm_id.clone()).or_default();
+        if !fences.iter().any(|fenced| {
+            fenced.mechanism == issued.mechanism
+                && bool::from(fenced.token.as_bytes().ct_eq(issued.token.as_bytes()))
+        }) {
+            fences.push(issued.clone());
         }
-        Ok(matches)
+        Ok(outcome)
     }
 
     async fn consume(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         presented_token: &[u8],
         mechanism: &str,
         // No node-liveness table exists for the single-node case (mirrors
@@ -522,15 +583,15 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
         // so fencing is a no-op here rather than a meaningful check.
         _fence: &SmClaimFence,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
-        let mut tokens = self
-            .tokens
+        let mut state = self
+            .state
             .write()
             .map_err(|_| IsrTokenStoreError::Poisoned)?;
         // Council-adjudicated FIX 1/FIX 3: distinguish "no row at all"
         // (never opted in / already consumed) from "a row existed but
         // didn't match" (genuine wrong-token attempt) — mirroring
         // `PostgresIsrTokenStore::consume`'s same guard.
-        let Some(stored) = tokens.remove(sm_id) else {
+        let Some(stored) = state.tokens.remove(sm_id) else {
             return Ok(IsrConsumeOutcome::NoSuchToken);
         };
         // Constant-time comparison (ADR-0017 Phase 3 Slice 8, element 10):
@@ -544,7 +605,7 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
             return Ok(IsrConsumeOutcome::Mismatched);
         }
         let rotated = IssuedIsrToken::new(mechanism);
-        tokens.insert(sm_id.to_string(), rotated.clone());
+        state.tokens.insert(sm_id.clone(), rotated.clone());
         Ok(IsrConsumeOutcome::Matched { rotated })
     }
 
@@ -575,6 +636,63 @@ mod tests {
         revoked: tokio::sync::Notify,
     }
 
+    struct DelayedVisibilityStore {
+        inner: InMemoryIsrTokenStore,
+        attempts: std::sync::atomic::AtomicUsize,
+        observed_missing: tokio::sync::Notify,
+        revoked: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl IsrTokenStore for DelayedVisibilityStore {
+        async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn persist_issued(
+            &self,
+            sm_id: &SmSessionId,
+            issued: &IssuedIsrToken,
+        ) -> Result<(), IsrTokenStoreError> {
+            self.inner.persist_issued(sm_id, issued).await
+        }
+
+        async fn revoke_if_current(
+            &self,
+            sm_id: &SmSessionId,
+            issued: &IssuedIsrToken,
+        ) -> Result<IsrRevokeOutcome, IsrTokenStoreError> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self.inner.revoke_if_current(sm_id, issued).await?;
+            match outcome {
+                IsrRevokeOutcome::Missing => self.observed_missing.notify_one(),
+                IsrRevokeOutcome::Revoked => self.revoked.notify_one(),
+                IsrRevokeOutcome::Superseded => {}
+            }
+            Ok(outcome)
+        }
+
+        async fn consume(
+            &self,
+            sm_id: &SmSessionId,
+            presented_token: &[u8],
+            mechanism: &str,
+            fence: &SmClaimFence,
+        ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
+            self.inner
+                .consume(sm_id, presented_token, mechanism, fence)
+                .await
+        }
+
+        async fn sweep_expired(
+            &self,
+            max_age: std::time::Duration,
+        ) -> Result<u64, IsrTokenStoreError> {
+            self.inner.sweep_expired(max_age).await
+        }
+    }
+
     #[async_trait]
     impl IsrTokenStore for PanicFirstRevokeStore {
         async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
@@ -583,7 +701,7 @@ mod tests {
 
         async fn persist_issued(
             &self,
-            sm_id: &str,
+            sm_id: &SmSessionId,
             issued: &IssuedIsrToken,
         ) -> Result<(), IsrTokenStoreError> {
             self.inner.persist_issued(sm_id, issued).await
@@ -591,9 +709,9 @@ mod tests {
 
         async fn revoke_if_current(
             &self,
-            sm_id: &str,
+            sm_id: &SmSessionId,
             issued: &IssuedIsrToken,
-        ) -> Result<bool, IsrTokenStoreError> {
+        ) -> Result<IsrRevokeOutcome, IsrTokenStoreError> {
             if self
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -608,7 +726,7 @@ mod tests {
 
         async fn consume(
             &self,
-            sm_id: &str,
+            sm_id: &SmSessionId,
             presented_token: &[u8],
             mechanism: &str,
             fence: &SmClaimFence,
@@ -634,7 +752,7 @@ mod tests {
 
         async fn persist_issued(
             &self,
-            sm_id: &str,
+            sm_id: &SmSessionId,
             issued: &IssuedIsrToken,
         ) -> Result<(), IsrTokenStoreError> {
             self.inner.persist_issued(sm_id, issued).await
@@ -642,9 +760,9 @@ mod tests {
 
         async fn revoke_if_current(
             &self,
-            sm_id: &str,
+            sm_id: &SmSessionId,
             issued: &IssuedIsrToken,
-        ) -> Result<bool, IsrTokenStoreError> {
+        ) -> Result<IsrRevokeOutcome, IsrTokenStoreError> {
             if self
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -661,7 +779,7 @@ mod tests {
 
         async fn consume(
             &self,
-            sm_id: &str,
+            sm_id: &SmSessionId,
             presented_token: &[u8],
             mechanism: &str,
             fence: &SmClaimFence,
@@ -686,12 +804,17 @@ mod tests {
         )
     }
 
+    fn sid(value: &str) -> SmSessionId {
+        SmSessionId::new(value)
+    }
+
     #[tokio::test]
     async fn issue_then_consume_with_matching_token_rotates() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let stream_id = sid("sm-1");
+        let issued = store.issue(&stream_id, "PLAIN").await.expect("issue");
         let outcome = store
-            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
+            .consume(&stream_id, issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         let IsrConsumeOutcome::Matched { rotated } = outcome else {
@@ -703,9 +826,10 @@ mod tests {
     #[tokio::test]
     async fn consume_with_wrong_token_is_mismatched_and_destroys_the_row() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let stream_id = sid("sm-1");
+        let issued = store.issue(&stream_id, "PLAIN").await.expect("issue");
         let outcome = store
-            .consume("sm-1", b"not-the-token", "PLAIN", &fence())
+            .consume(&stream_id, b"not-the-token", "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
@@ -714,7 +838,7 @@ mod tests {
         // (correct) token now finds no row at all (FIX 3: distinct from
         // the genuine-mismatch outcome above), proving destruction happened.
         let second = store
-            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
+            .consume(&stream_id, issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(second, IsrConsumeOutcome::NoSuchToken);
@@ -723,9 +847,10 @@ mod tests {
     #[tokio::test]
     async fn consume_is_single_use() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let stream_id = sid("sm-1");
+        let issued = store.issue(&stream_id, "PLAIN").await.expect("issue");
         let first = store
-            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
+            .consume(&stream_id, issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         assert!(matches!(first, IsrConsumeOutcome::Matched { .. }));
@@ -734,7 +859,7 @@ mod tests {
         // exists under the same sm_id — a genuine mismatch (a row DOES
         // exist), not `NoSuchToken`.
         let replay = store
-            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
+            .consume(&stream_id, issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(replay, IsrConsumeOutcome::Mismatched);
@@ -744,7 +869,7 @@ mod tests {
     async fn consume_with_no_issued_token_is_no_such_token() {
         let store = InMemoryIsrTokenStore::new();
         let outcome = store
-            .consume("no-such-sm-id", b"anything", "PLAIN", &fence())
+            .consume(&sid("no-such-sm-id"), b"anything", "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::NoSuchToken);
@@ -753,9 +878,15 @@ mod tests {
     #[tokio::test]
     async fn consume_pins_the_mechanism() {
         let store = InMemoryIsrTokenStore::new();
-        let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
+        let stream_id = sid("sm-1");
+        let issued = store.issue(&stream_id, "PLAIN").await.expect("issue");
         let outcome = store
-            .consume("sm-1", issued.token.as_bytes(), "SCRAM-SHA-256", &fence())
+            .consume(
+                &stream_id,
+                issued.token.as_bytes(),
+                "SCRAM-SHA-256",
+                &fence(),
+            )
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
@@ -764,24 +895,91 @@ mod tests {
     #[tokio::test]
     async fn provisional_revoke_is_exact_and_cannot_delete_a_newer_issue() {
         let store = InMemoryIsrTokenStore::new();
-        let old = store.issue("sm-1", "PLAIN").await.expect("old issue");
-        let current = store.issue("sm-1", "PLAIN").await.expect("new issue");
+        let stream_id = sid("sm-1");
+        let old = store.issue(&stream_id, "PLAIN").await.expect("old issue");
+        let current = store.issue(&stream_id, "PLAIN").await.expect("new issue");
 
-        assert!(!store
-            .revoke_if_current("sm-1", &old)
-            .await
-            .expect("stale revoke"));
-        assert!(store
-            .revoke_if_current("sm-1", &current)
-            .await
-            .expect("exact revoke"));
         assert_eq!(
             store
-                .consume("sm-1", current.token.as_bytes(), "PLAIN", &fence())
+                .revoke_if_current(&stream_id, &old)
+                .await
+                .expect("stale revoke"),
+            IsrRevokeOutcome::Superseded
+        );
+        store
+            .persist_issued(&stream_id, &old)
+            .await
+            .expect("late old persistence is suppressed by its exact fence");
+        assert_eq!(
+            store
+                .revoke_if_current(&stream_id, &current)
+                .await
+                .expect("exact revoke"),
+            IsrRevokeOutcome::Revoked
+        );
+        assert_eq!(
+            store
+                .consume(&stream_id, current.token.as_bytes(), "PLAIN", &fence(),)
                 .await
                 .expect("lookup after revoke"),
             IsrConsumeOutcome::NoSuchToken
         );
+    }
+
+    #[tokio::test]
+    async fn revocation_queue_fences_missing_before_a_late_persist_becomes_visible() {
+        let store = Arc::new(DelayedVisibilityStore {
+            inner: InMemoryIsrTokenStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            observed_missing: tokio::sync::Notify::new(),
+            revoked: tokio::sync::Notify::new(),
+        });
+        let stream_id = sid("sm-late-persist");
+        let issued = IssuedIsrToken::new("PLAIN");
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+        let reservation = queue
+            .reserve(stream_id.clone(), dyn_store.clone(), issued.clone())
+            .expect("reserve cleanup capacity");
+        let observed_missing = store.observed_missing.notified();
+
+        // Model a timed-out persistence future whose database write is not
+        // visible when cancellation cleanup first runs.
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(1), observed_missing)
+            .await
+            .expect("cleanup first observes a missing row");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while queue.pending_len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("negative fence makes Missing terminal without leaking capacity");
+
+        store
+            .persist_issued(&stream_id, &issued)
+            .await
+            .expect("late persistence reaches the negative fence");
+        assert_eq!(
+            store
+                .consume(&stream_id, issued.token.as_bytes(), "PLAIN", &fence())
+                .await
+                .expect("lookup after suppressed late persistence"),
+            IsrConsumeOutcome::NoSuchToken
+        );
+
+        assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(queue.pending_len(), 0);
+
+        let next = queue
+            .reserve(
+                sid("sm-after-definite-failure"),
+                dyn_store,
+                IssuedIsrToken::new("PLAIN"),
+            )
+            .expect("definite missing persistence releases bounded capacity");
+        next.disarm();
     }
 
     #[tokio::test]
@@ -792,14 +990,15 @@ mod tests {
             revoked: tokio::sync::Notify::new(),
         });
         let issued = IssuedIsrToken::new("PLAIN");
+        let stream_id = sid("sm-retry");
         store
-            .persist_issued("sm-retry", &issued)
+            .persist_issued(&stream_id, &issued)
             .await
             .expect("persist provisional token");
         let queue = IsrRevocationQueue::with_capacity(1);
         let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
         let reservation = queue
-            .reserve("sm-retry".to_string(), dyn_store, issued)
+            .reserve(stream_id, dyn_store, issued)
             .expect("reserve cleanup capacity");
         let revoked = store.revoked.notified();
 
@@ -820,14 +1019,15 @@ mod tests {
             revoked: tokio::sync::Notify::new(),
         });
         let issued = IssuedIsrToken::new("PLAIN");
+        let stream_id = sid("sm-panic");
         store
-            .persist_issued("sm-panic", &issued)
+            .persist_issued(&stream_id, &issued)
             .await
             .expect("persist provisional token");
         let queue = IsrRevocationQueue::with_capacity(1);
         let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
         let reservation = queue
-            .reserve("sm-panic".to_string(), dyn_store, issued)
+            .reserve(stream_id, dyn_store, issued)
             .expect("reserve cleanup capacity");
         let revoked = store.revoked.notified();
 
@@ -845,17 +1045,51 @@ mod tests {
         let queue = IsrRevocationQueue::with_capacity(1);
         let store: Arc<dyn IsrTokenStore> = Arc::new(InMemoryIsrTokenStore::new());
         let reservation = queue
-            .reserve(
-                "sm-one".to_string(),
-                store.clone(),
-                IssuedIsrToken::new("PLAIN"),
-            )
+            .reserve(sid("sm-one"), store.clone(), IssuedIsrToken::new("PLAIN"))
             .expect("first reservation");
 
         assert!(queue
-            .reserve("sm-two".to_string(), store, IssuedIsrToken::new("PLAIN"),)
+            .reserve(sid("sm-two"), store, IssuedIsrToken::new("PLAIN"),)
             .is_none());
         reservation.disarm();
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    #[test]
+    fn revocation_queue_uses_captured_runtime_when_reservation_drops_outside_it() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let store = Arc::new(FailFirstRevokeStore {
+            inner: InMemoryIsrTokenStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            revoked: tokio::sync::Notify::new(),
+        });
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let reservation = runtime.block_on(async {
+            let issued = IssuedIsrToken::new("PLAIN");
+            let stream_id = sid("sm-outside-runtime-drop");
+            store
+                .persist_issued(&stream_id, &issued)
+                .await
+                .expect("persist provisional token");
+            let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+            queue
+                .reserve(stream_id, dyn_store, issued)
+                .expect("reserve cleanup capacity")
+        });
+
+        // There is deliberately no entered Tokio context on this thread.
+        // The reservation must reuse the handle captured by `reserve`.
+        drop(reservation);
+
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
+                .await
+                .expect("captured runtime completes exact revocation");
+        });
+        assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);
     }
 }

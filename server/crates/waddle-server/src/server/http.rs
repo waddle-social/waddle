@@ -221,6 +221,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
         &server_config,
+        &xmpp_config.public_websocket_url,
         Some(server_config.session_key.as_bytes()),
     ));
 
@@ -718,8 +719,8 @@ async fn create_websocket_state(
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),
-            transport_security: routes::websocket::TransportSecurity::from_base_url(
-                &server_config.base_url,
+            transport_security: routes::websocket::TransportSecurity::from_public_websocket_url(
+                &xmpp_config.public_websocket_url,
             ),
             service_domains,
             protocol: ProtocolServices {

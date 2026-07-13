@@ -18,6 +18,10 @@ pub struct AuthState {
     pub identity_service: IdentityService,
     pub providers: ProviderRegistry,
     pub base_url: String,
+    /// Trusted public RFC 7395 endpoint advertised to XMPP clients. Kept
+    /// separate from `base_url`, which describes the HTTP application and may
+    /// have a different external scheme/authority behind a TLS terminator.
+    pub public_xmpp_websocket_url: url::Url,
     pub xmpp_domain: String,
     /// Pre-parsed XMPP domain JID for server-issued IQ stanzas
     /// (e.g. XEP-0115 caps disco#info queries). Validated at startup
@@ -42,6 +46,7 @@ impl AuthState {
     pub fn new(
         app_state: Arc<AppState>,
         server_config: &ServerConfig,
+        public_xmpp_websocket_url: &url::Url,
         encryption_key: Option<&[u8]>,
     ) -> Self {
         let session_manager =
@@ -63,6 +68,7 @@ impl AuthState {
             identity_service,
             providers,
             base_url: server_config.base_url.trim_end_matches('/').to_string(),
+            public_xmpp_websocket_url: public_xmpp_websocket_url.clone(),
             xmpp_domain,
             caps_server_domain,
             http_client: reqwest::Client::new(),
@@ -122,26 +128,7 @@ impl AuthState {
     }
 
     pub(crate) fn websocket_url(&self) -> String {
-        let parsed = match url::Url::parse(&self.base_url) {
-            Ok(parsed) => parsed,
-            Err(_) => return "ws://localhost/ws".to_string(),
-        };
-
-        let scheme = match parsed.scheme() {
-            "https" => "wss",
-            _ => "ws",
-        };
-
-        let Some(host) = parsed.host_str() else {
-            return "ws://localhost/ws".to_string();
-        };
-
-        let authority = match parsed.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_string(),
-        };
-
-        format!("{scheme}://{authority}/ws")
+        self.public_xmpp_websocket_url.as_str().to_string()
     }
 
     pub(super) fn session_cookie_header(&self, session_id: Option<&str>, max_age: i64) -> String {

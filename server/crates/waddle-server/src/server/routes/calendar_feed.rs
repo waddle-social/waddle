@@ -697,6 +697,7 @@ mod tests {
         Arc::new(AuthState::new(
             Arc::new(AppState::new(Arc::new(db_pool))),
             &server_config,
+            &url::Url::parse("wss://xmpp.example.com/ws").expect("test WebSocket URL"),
             Some(b"test-session-key"),
         ))
     }

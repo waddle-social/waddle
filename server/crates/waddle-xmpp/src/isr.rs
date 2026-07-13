@@ -40,7 +40,7 @@ mod wire;
 
 pub use store::{
     revocation_queue_for_store, InMemoryIsrTokenStore, IsrConsumeOutcome, IsrRevocationQueue,
-    IsrRevocationReservation, IsrTokenStore, IsrTokenStoreError, IssuedIsrToken,
+    IsrRevocationReservation, IsrRevokeOutcome, IsrTokenStore, IsrTokenStoreError, IssuedIsrToken,
 };
 pub use wire::{
     inst_resume_failed_element, inst_resumed_element, isr_enabled_element,

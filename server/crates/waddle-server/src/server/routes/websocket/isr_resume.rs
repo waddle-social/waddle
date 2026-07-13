@@ -64,6 +64,7 @@ use waddle_xmpp::isr::{
     inst_resume_failed_element, inst_resumed_element, IsrConsumeOutcome, ISR_PINNED_MECHANISM,
 };
 use waddle_xmpp::ownership::{resume::verify_resume_identity, Entity, EntityType};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::{stamp_replay_delay, SmFailed, SmResumed};
 
 /// Build a bare SASL2 `<failure/>` carrying a single standard SASL
@@ -120,12 +121,16 @@ pub(super) async fn handle_isr_resume_authenticate(
         pending_sm_enable_commit: _,
     } = ctx;
 
-    // Q8's gate: ISR is only wired when clustering.enabled && Postgres —
-    // `isr_token_store()`/`claim_pair()` are `None` under the exact same
-    // conditions the stream feature is unadvertised, so a client that
-    // somehow pipelines this without ever seeing the advertisement (a
-    // stale token from before a topology change, a misbehaving client)
-    // gets a conformant failure rather than a panic on a missing handle.
+    // XEP-0397 requires TLS for the bearer-token authentication itself, not
+    // only for feature advertisement and token issuance. Reuse the exact same
+    // availability gate so a stale token cannot cross a transport-security or
+    // topology configuration change.
+    if !state.deps.isr_available() {
+        return vec![sasl2_failure("invalid-mechanism")];
+    }
+
+    // Keep the individual handle check defensive even though `isr_available`
+    // already establishes the token-store half of this invariant.
     let (Some(isr_token_store), Some((claim_store, node_identity))) = (
         state.deps.app_state.clustering_claims.isr_token_store(),
         state.deps.app_state.clustering_claims.claim_pair(),
@@ -325,9 +330,10 @@ pub(super) async fn handle_isr_resume_authenticate(
     };
     let mut identity_guard = Some(identity_guard);
 
+    let isr_stream_id = SmSessionId::new(resume.previd.clone());
     let consume_result = isr_token_store
         .consume(
-            &resume.previd,
+            &isr_stream_id,
             presented_token.as_bytes(),
             ISR_PINNED_MECHANISM,
             &claim_fence,

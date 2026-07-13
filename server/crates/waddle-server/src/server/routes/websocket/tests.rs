@@ -351,10 +351,10 @@ async fn create_test_websocket_state_with_extension_manager(
     let runner = MigrationRunner::global();
     runner.run(db_pool.global()).await.expect("migrations");
 
-    let mut server_config = ServerConfig::test_homeserver();
+    let server_config = ServerConfig::test_homeserver();
     // XEP-0397 fixtures exercise token advertisement/issuance and therefore
-    // model the TLS-secured production endpoint required by the XEP.
-    server_config.base_url = "https://example.com".to_string();
+    // model the TLS-secured public RFC 7395 endpoint required by the XEP.
+    let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
     let mut app_state_built = AppState::new(Arc::new(db_pool));
     if let Some(clustering) = clustering_override {
         app_state_built.clustering_claims = clustering;
@@ -363,6 +363,7 @@ async fn create_test_websocket_state_with_extension_manager(
     let mut auth_state_inner = AuthState::new(
         app_state.clone(),
         &server_config,
+        &public_websocket_url,
         Some(b"test-encryption-key-32-bytes!!!"),
     );
     // The dispatcher path's bare-JID branch
@@ -440,9 +441,10 @@ async fn create_test_websocket_state_with_extension_manager(
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
-                transport_security: super::state::TransportSecurity::from_base_url(
-                    &server_config.base_url,
-                ),
+                transport_security:
+                    super::state::TransportSecurity::from_public_websocket_url(
+                        &public_websocket_url,
+                    ),
                 service_domains: XmppServiceDomains {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),

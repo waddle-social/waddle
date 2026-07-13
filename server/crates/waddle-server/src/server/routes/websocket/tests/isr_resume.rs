@@ -25,8 +25,9 @@ use crate::clustering::isr::PostgresIsrTokenStore;
 use crate::clustering::ClusteringHandles;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use waddle_xmpp::isr::{IsrTokenStore, ISR_NS, ISR_PINNED_MECHANISM};
-use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::isr::{InMemoryIsrTokenStore, IsrTokenStore, ISR_NS, ISR_PINNED_MECHANISM};
+use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::{DetachedSession, SmResume, SmSessionRegistry};
 
 struct ControlledPersistIsrTokenStore {
@@ -59,7 +60,7 @@ impl IsrTokenStore for ControlledPersistIsrTokenStore {
 
     async fn persist_issued(
         &self,
-        sm_id: &str,
+        sm_id: &waddle_xmpp::pending_delivery::SmSessionId,
         issued: &waddle_xmpp::isr::IssuedIsrToken,
     ) -> Result<(), waddle_xmpp::isr::IsrTokenStoreError> {
         if self
@@ -82,9 +83,9 @@ impl IsrTokenStore for ControlledPersistIsrTokenStore {
 
     async fn revoke_if_current(
         &self,
-        sm_id: &str,
+        sm_id: &waddle_xmpp::pending_delivery::SmSessionId,
         issued: &waddle_xmpp::isr::IssuedIsrToken,
-    ) -> Result<bool, waddle_xmpp::isr::IsrTokenStoreError> {
+    ) -> Result<waddle_xmpp::isr::IsrRevokeOutcome, waddle_xmpp::isr::IsrTokenStoreError> {
         let revoked = self.inner.revoke_if_current(sm_id, issued).await?;
         if let Some(notify) = &self.revoked {
             notify.notify_one();
@@ -94,7 +95,7 @@ impl IsrTokenStore for ControlledPersistIsrTokenStore {
 
     async fn consume(
         &self,
-        sm_id: &str,
+        sm_id: &waddle_xmpp::pending_delivery::SmSessionId,
         presented_token: &[u8],
         mechanism: &str,
         fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
@@ -175,6 +176,44 @@ async fn isr_fixture() -> Option<IsrFixture> {
         state,
         isr_token_store,
     })
+}
+
+/// An always-on ISR fixture for security-boundary tests that do not need to
+/// exercise Postgres fencing itself. The in-process claim/token stores obey
+/// the same claim and single-use token contracts, so CI cannot silently skip
+/// these tests when `WADDLE_TEST_POSTGRES_URL` is absent.
+async fn in_memory_isr_fixture() -> IsrFixture {
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let isr_token_store: Arc<dyn IsrTokenStore> = Arc::new(InMemoryIsrTokenStore::new());
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    ));
+    let sm_session_registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_claim_store(Arc::clone(&claim_store), node_identity.clone()),
+    );
+    let clustering = ClusteringHandles {
+        claim_store: Some(claim_store),
+        node_identity: Some(node_identity),
+        local_claims: None,
+        room_local_claims: None,
+        user_local_claims: None,
+        muc_durable_store: None,
+        isr_token_store: Some(Arc::clone(&isr_token_store)),
+        node_lease: None,
+        lease_ttl: None,
+        pod_template_hash: None,
+        resume_bridge: None,
+        ordered_relay_delivery_bridge: None,
+        stop_token: None,
+        resume_handshake_timeout: None,
+    };
+    let state = create_test_websocket_state_with_clustering(clustering, sm_session_registry).await;
+    IsrFixture {
+        state,
+        isr_token_store,
+    }
 }
 
 fn isr_authenticate_frame(bare_jid: &str, token: &str, previd: &str, h: u32) -> String {
@@ -497,7 +536,12 @@ async fn dropped_isr_enable_commit_revokes_the_committed_provisional_token() {
     );
     assert_eq!(
         isr_token_store
-            .consume(&stream_id, token.as_bytes(), ISR_PINNED_MECHANISM, &fence)
+            .consume(
+                &SmSessionId::new(stream_id.clone()),
+                token.as_bytes(),
+                ISR_PINNED_MECHANISM,
+                &fence,
+            )
             .await
             .expect("consume after dropped publication"),
         waddle_xmpp::isr::IsrConsumeOutcome::NoSuchToken
@@ -589,7 +633,12 @@ async fn written_isr_enable_that_loses_publication_revokes_on_terminal_cleanup()
     );
     assert_eq!(
         isr_token_store
-            .consume(&stream_id, token.as_bytes(), ISR_PINNED_MECHANISM, &fence)
+            .consume(
+                &SmSessionId::new(stream_id.clone()),
+                token.as_bytes(),
+                ISR_PINNED_MECHANISM,
+                &fence,
+            )
             .await
             .expect("consume after terminal cleanup"),
         waddle_xmpp::isr::IsrConsumeOutcome::NoSuchToken
@@ -743,7 +792,7 @@ async fn isr_resume_succeeds_matches_token_rotates_and_replays() {
         .expect("seed detached session");
     let issued = fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&SmSessionId::new(stream_id.clone()), ISR_PINNED_MECHANISM)
         .await
         .expect("issue token");
 
@@ -826,7 +875,7 @@ async fn isr_resume_rejects_wrong_token_with_bare_failure_and_destroys_session()
         .expect("seed detached session");
     fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&SmSessionId::new(stream_id.clone()), ISR_PINNED_MECHANISM)
         .await
         .expect("issue token");
 
@@ -943,7 +992,7 @@ async fn isr_resume_rejects_identity_mismatch_without_destroying_session() {
         .expect("seed detached session");
     let issued = fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&SmSessionId::new(stream_id.clone()), ISR_PINNED_MECHANISM)
         .await
         .expect("issue token");
 
@@ -993,7 +1042,7 @@ async fn isr_resume_authenticated_but_impossible_wraps_failed_in_success() {
         .expect("seed detached session");
     let issued = fixture
         .isr_token_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&SmSessionId::new(stream_id.clone()), ISR_PINNED_MECHANISM)
         .await
         .expect("issue token");
 
@@ -1017,6 +1066,66 @@ async fn isr_resume_authenticated_but_impossible_wraps_failed_in_success() {
     assert!(failed.attr("h").is_some());
     // The connection was NOT resumed — it stays in its pre-attempt phase.
     assert!(!conn.phase.is_ready());
+}
+
+#[tokio::test]
+async fn isr_resume_rejects_unsecured_transport_without_consuming_token() {
+    let mut fixture = in_memory_isr_fixture().await;
+
+    Arc::get_mut(&mut fixture.state)
+        .expect("fixture owns its WebSocket state")
+        .deps
+        .transport_security = TransportSecurity::Unsecured;
+
+    let jid: FullJid = "tls-gate@example.com/web".parse().expect("jid");
+    let stream_id = format!("sm-{}", uuid::Uuid::new_v4());
+    fixture
+        .state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(seeded_detached_session(&stream_id, &jid))
+        .await
+        .expect("seed detached session");
+    let issued = fixture
+        .isr_token_store
+        .issue(&SmSessionId::new(stream_id.clone()), ISR_PINNED_MECHANISM)
+        .await
+        .expect("issue token");
+
+    let frame = isr_authenticate_frame(&jid.to_bare().to_string(), &issued.token, &stream_id, 4);
+    let mut unsecured_conn = WsConnState::new();
+    let responses = handle_xmpp_frame(
+        &frame,
+        "example.com",
+        fixture.state.as_ref(),
+        &mut unsecured_conn,
+    )
+    .await;
+    let failure = Element::from_str(&responses[0]).expect("failure XML");
+    assert_eq!(failure.name(), "failure");
+    assert!(failure
+        .get_child("invalid-mechanism", waddle_xmpp::ns::SASL)
+        .is_some());
+
+    // The transport gate runs before session claim or token consumption. Once
+    // the trusted public endpoint is secure, the original token can still
+    // resume the original detached session.
+    Arc::get_mut(&mut fixture.state)
+        .expect("fixture still owns its WebSocket state")
+        .deps
+        .transport_security = TransportSecurity::Tls;
+    let mut secure_conn = WsConnState::new();
+    let resumed = handle_xmpp_frame(
+        &frame,
+        "example.com",
+        fixture.state.as_ref(),
+        &mut secure_conn,
+    )
+    .await;
+    let success = Element::from_str(&resumed[0]).expect("success XML");
+    assert_eq!(success.name(), "success");
+    assert!(success.get_child("inst-resumed", ISR_NS).is_some());
 }
 
 // Sanity check that the module-level handler is reachable directly too
@@ -1122,7 +1231,7 @@ async fn isr_resume_wins_a_cross_node_steal_and_consumes_the_token() {
     let isr_store = PostgresIsrTokenStore::new(db.clone());
     isr_store.ensure_schema().await.expect("ensure isr schema");
     let issued = isr_store
-        .issue(&stream_id, ISR_PINNED_MECHANISM)
+        .issue(&SmSessionId::new(stream_id.clone()), ISR_PINNED_MECHANISM)
         .await
         .expect("issue token");
 

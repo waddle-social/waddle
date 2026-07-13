@@ -30,10 +30,10 @@
 //! `clustering_claims` and its `clustering_isr_tokens` reads/writes all run
 //! on the **main pool** ([`Database::begin`]) — a fencing lock and the
 //! write it guards must share one connection/one transaction, exactly the
-//! rule Slices 4 and 7 already follow. `ensure_schema`/`issue` are
-//! single-statement, non-fenced operations and run on the main pool via
-//! [`Database::guard`] (mirroring `ensure_schema`'s own placement in
-//! `claims.rs`/`lease.rs`/`allowlist.rs`).
+//! rule Slices 4 and 7 already follow. `ensure_schema` runs on the main pool
+//! via [`Database::guard`]. Token publication, revocation, and consume use
+//! main-pool transactions sharing a per-SM-ID advisory lock so an ambiguous
+//! late publication cannot cross exact revocation-fence installation.
 //!
 //! **Identity binding**: this store does *not* itself call
 //! `ownership::resume::verify_resume_identity` — that check happens in the
@@ -74,9 +74,11 @@
 use async_trait::async_trait;
 use subtle::ConstantTimeEq;
 use waddle_xmpp::isr::{
-    generate_isr_token, IsrConsumeOutcome, IsrTokenStore, IsrTokenStoreError, IssuedIsrToken,
+    generate_isr_token, IsrConsumeOutcome, IsrRevokeOutcome, IsrTokenStore, IsrTokenStoreError,
+    IssuedIsrToken,
 };
 use waddle_xmpp::ownership::EntityType;
+use waddle_xmpp::pending_delivery::SmSessionId;
 
 use crate::db::{Database, DatabaseError};
 
@@ -95,8 +97,28 @@ fn db_err(error: DatabaseError) -> IsrTokenStoreError {
 /// imported for the same reason `sm_persistence_fenced.rs` duplicates it:
 /// this store owns its own inline fencing SQL, so it also owns its own copy
 /// of the key encoding it binds into that SQL.
-fn sm_session_entity_key(sm_id: &str) -> String {
+fn sm_session_entity_key(sm_id: &SmSessionId) -> String {
     format!("{}:{}", EntityType::SmSession.as_db_str(), sm_id)
+}
+
+/// Serialize token publication and exact negative-fence installation for one
+/// SM session. A transaction-scoped advisory lock avoids a gap between the
+/// live-token and revocation-fence tables where a timed-out UPSERT could land
+/// after cleanup had already declared success.
+async fn lock_isr_stream(
+    tx: &mut crate::db::Transaction<'_>,
+    sm_id: &SmSessionId,
+) -> Result<(), IsrTokenStoreError> {
+    let mut rows = tx
+        .query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+            crate::db_params![sm_id.to_string()],
+        )
+        .await
+        .map_err(db_err)?;
+    rows.next().await.map_err(db_err)?;
+    drop(rows);
+    Ok(())
 }
 
 /// Postgres-only, `clustering`-fenced [`IsrTokenStore`].
@@ -131,40 +153,33 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         )
         .await
         .map_err(db_err)?;
-        Ok(())
-    }
-
-    async fn persist_issued(
-        &self,
-        sm_id: &str,
-        issued: &IssuedIsrToken,
-    ) -> Result<(), IsrTokenStoreError> {
-        let conn = self.db.guard().await.map_err(db_err)?;
         conn.execute(
-            "INSERT INTO clustering_isr_tokens (sm_id, token, mechanism, created_at) \
-             VALUES (?, ?, ?, now()) \
-             ON CONFLICT (sm_id) DO UPDATE SET \
-                 token = EXCLUDED.token, mechanism = EXCLUDED.mechanism, created_at = now()",
-            crate::db_params![
-                sm_id.to_string(),
-                issued.token.clone(),
-                issued.mechanism.clone()
-            ],
+            r#"
+            CREATE TABLE IF NOT EXISTS clustering_isr_revocation_fences (
+                sm_id      TEXT NOT NULL,
+                token      TEXT NOT NULL,
+                mechanism  TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (sm_id, token, mechanism)
+            )
+            "#,
+            (),
         )
         .await
         .map_err(db_err)?;
         Ok(())
     }
 
-    async fn revoke_if_current(
+    async fn persist_issued(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         issued: &IssuedIsrToken,
-    ) -> Result<bool, IsrTokenStoreError> {
-        let conn = self.db.guard().await.map_err(db_err)?;
-        let deleted = conn
+    ) -> Result<(), IsrTokenStoreError> {
+        let mut tx = self.db.begin().await.map_err(db_err)?;
+        lock_isr_stream(&mut tx, sm_id).await?;
+        let suppressed = tx
             .execute(
-                "DELETE FROM clustering_isr_tokens \
+                "DELETE FROM clustering_isr_revocation_fences \
                  WHERE sm_id = ? AND token = ? AND mechanism = ?",
                 crate::db_params![
                     sm_id.to_string(),
@@ -174,17 +189,87 @@ impl IsrTokenStore for PostgresIsrTokenStore {
             )
             .await
             .map_err(db_err)?;
-        Ok(deleted > 0)
+        if suppressed == 0 {
+            tx.execute(
+                "INSERT INTO clustering_isr_tokens (sm_id, token, mechanism, created_at) \
+                 VALUES (?, ?, ?, now()) \
+                 ON CONFLICT (sm_id) DO UPDATE SET \
+                     token = EXCLUDED.token, mechanism = EXCLUDED.mechanism, created_at = now()",
+                crate::db_params![
+                    sm_id.to_string(),
+                    issued.token.clone(),
+                    issued.mechanism.clone()
+                ],
+            )
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn revoke_if_current(
+        &self,
+        sm_id: &SmSessionId,
+        issued: &IssuedIsrToken,
+    ) -> Result<IsrRevokeOutcome, IsrTokenStoreError> {
+        let mut tx = self.db.begin().await.map_err(db_err)?;
+        lock_isr_stream(&mut tx, sm_id).await?;
+        let mut current = tx
+            .query(
+                "SELECT token, mechanism FROM clustering_isr_tokens WHERE sm_id = ?",
+                crate::db_params![sm_id.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        let live = current.next().await.map_err(db_err)?;
+        let outcome = if let Some(row) = live {
+            let token: String = row.get(0).map_err(db_err)?;
+            let mechanism: String = row.get(1).map_err(db_err)?;
+            if mechanism == issued.mechanism
+                && bool::from(token.as_bytes().ct_eq(issued.token.as_bytes()))
+            {
+                IsrRevokeOutcome::Revoked
+            } else {
+                IsrRevokeOutcome::Superseded
+            }
+        } else {
+            IsrRevokeOutcome::Missing
+        };
+        drop(current);
+        if outcome == IsrRevokeOutcome::Revoked {
+            tx.execute(
+                "DELETE FROM clustering_isr_tokens WHERE sm_id = ?",
+                crate::db_params![sm_id.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        }
+        tx.execute(
+            "INSERT INTO clustering_isr_revocation_fences \
+             (sm_id, token, mechanism, created_at) VALUES (?, ?, ?, now()) \
+             ON CONFLICT (sm_id, token, mechanism) DO UPDATE SET created_at = now()",
+            crate::db_params![
+                sm_id.to_string(),
+                issued.token.clone(),
+                issued.mechanism.clone()
+            ],
+        )
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(outcome)
     }
 
     async fn consume(
         &self,
-        sm_id: &str,
+        sm_id: &SmSessionId,
         presented_token: &[u8],
         mechanism: &str,
         fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
         let mut tx = self.db.begin().await.map_err(db_err)?;
+        lock_isr_stream(&mut tx, sm_id).await?;
 
         // Fencing check: identical shape to `assert_fenced` in
         // `sm_persistence_fenced.rs`/`muc_durable.rs` — one connection, one
@@ -350,7 +435,7 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         // correct option. Mirrors `lease.rs`'s own
         // `(? || ' milliseconds')::interval` TTL-comparison idiom.
         let conn = self.db.guard().await.map_err(db_err)?;
-        let deleted = conn
+        let deleted_tokens = conn
             .execute(
                 "DELETE FROM clustering_isr_tokens \
                  WHERE created_at < now() - (? || ' milliseconds')::interval",
@@ -358,7 +443,14 @@ impl IsrTokenStore for PostgresIsrTokenStore {
             )
             .await
             .map_err(db_err)?;
-        Ok(deleted)
+        conn.execute(
+            "DELETE FROM clustering_isr_revocation_fences \
+                 WHERE created_at < now() - (? || ' milliseconds')::interval",
+            crate::db_params![max_age.as_millis().to_string()],
+        )
+        .await
+        .map_err(db_err)?;
+        Ok(deleted_tokens)
     }
 }
 
@@ -401,7 +493,7 @@ mod tests {
     /// `consume` test can present a genuinely fenced `(me, epoch)` pair —
     /// mirrors how `sm_persistence_fenced.rs`'s own Postgres-gated tests
     /// establish a fenceable claim before exercising a fenced write.
-    async fn claim_sm_session(db: &Database, sm_id: &str, me: &NodeIdentity) -> ClaimEpoch {
+    async fn claim_sm_session(db: &Database, sm_id: &SmSessionId, me: &NodeIdentity) -> ClaimEpoch {
         let claim_store = PostgresClaimStore::new(db.clone());
         claim_store
             .ensure_schema()
@@ -423,7 +515,7 @@ mod tests {
         let store = PostgresIsrTokenStore::new(db.clone());
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
-        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let epoch = claim_sm_session(&db, &sm_id, &me).await;
 
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
@@ -452,18 +544,69 @@ mod tests {
         };
         let store = PostgresIsrTokenStore::new(db);
         store.ensure_schema().await.expect("ensure isr schema");
-        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let old = store.issue(&sm_id, "PLAIN").await.expect("old issue");
         let current = store.issue(&sm_id, "PLAIN").await.expect("new issue");
 
-        assert!(!store
-            .revoke_if_current(&sm_id, &old)
+        assert_eq!(
+            store
+                .revoke_if_current(&sm_id, &old)
+                .await
+                .expect("stale revoke"),
+            IsrRevokeOutcome::Superseded
+        );
+        store
+            .persist_issued(&sm_id, &old)
             .await
-            .expect("stale revoke"));
-        assert!(store
-            .revoke_if_current(&sm_id, &current)
-            .await
-            .expect("exact revoke"));
+            .expect("late old persistence is suppressed by its exact fence");
+        assert_eq!(
+            store
+                .revoke_if_current(&sm_id, &current)
+                .await
+                .expect("exact revoke"),
+            IsrRevokeOutcome::Revoked
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_consume_and_exact_revoke_preserve_the_serialized_winner() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = test_db().await else {
+            return;
+        };
+        let store = PostgresIsrTokenStore::new(db.clone());
+        store.ensure_schema().await.expect("ensure isr schema");
+        let me = node_identity();
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let epoch = claim_sm_session(&db, &sm_id, &me).await;
+        let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
+        let claim_fence = fence(&me, epoch);
+
+        let (consumed, revoked) = tokio::join!(
+            store.consume(&sm_id, issued.token.as_bytes(), "PLAIN", &claim_fence,),
+            store.revoke_if_current(&sm_id, &issued),
+        );
+        let consumed = consumed.expect("consume result");
+        let revoked = revoked.expect("revoke result");
+
+        match (consumed, revoked) {
+            (IsrConsumeOutcome::Matched { rotated }, IsrRevokeOutcome::Superseded) => {
+                assert!(matches!(
+                    store
+                        .consume(
+                            &sm_id,
+                            rotated.token.as_bytes(),
+                            "PLAIN",
+                            &fence(&me, epoch),
+                        )
+                        .await
+                        .expect("rotated token survives stale cleanup"),
+                    IsrConsumeOutcome::Matched { .. }
+                ));
+            }
+            (IsrConsumeOutcome::NoSuchToken, IsrRevokeOutcome::Revoked) => {}
+            outcome => panic!("consume/revoke did not serialize safely: {outcome:?}"),
+        }
     }
 
     #[tokio::test]
@@ -475,7 +618,7 @@ mod tests {
         let store = PostgresIsrTokenStore::new(db.clone());
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
-        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let epoch = claim_sm_session(&db, &sm_id, &me).await;
 
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
@@ -511,7 +654,7 @@ mod tests {
         let store = PostgresIsrTokenStore::new(db.clone());
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
-        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let epoch = claim_sm_session(&db, &sm_id, &me).await;
 
         let outcome = store
@@ -563,8 +706,8 @@ mod tests {
         let store = PostgresIsrTokenStore::new(db.clone());
         store.ensure_schema().await.expect("ensure isr schema");
 
-        let fresh_sm_id = format!("sm-{}", uuid::Uuid::new_v4());
-        let stale_sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let fresh_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         store
             .issue(&fresh_sm_id, "PLAIN")
             .await
@@ -581,7 +724,7 @@ mod tests {
         conn.execute(
             "UPDATE clustering_isr_tokens SET created_at = now() - interval '1 day' \
              WHERE sm_id = ?",
-            crate::db_params![stale_sm_id.clone()],
+            crate::db_params![stale_sm_id.to_string()],
         )
         .await
         .expect("backdate stale row");
@@ -628,7 +771,7 @@ mod tests {
         let store = PostgresIsrTokenStore::new(db.clone());
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
-        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let epoch = claim_sm_session(&db, &sm_id, &me).await;
 
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
@@ -661,7 +804,7 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
         let old = node_identity();
         let replacement = NodeIdentity::new(old.node_id.clone(), uuid::Uuid::new_v4().to_string());
-        let sm_id = format!("sm-incarnation-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-incarnation-{}", uuid::Uuid::new_v4()));
         let epoch = claim_sm_session(&db, &sm_id, &old).await;
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
         let entity_key = sm_session_entity_key(&sm_id);
@@ -731,7 +874,7 @@ mod tests {
         let store = std::sync::Arc::new(PostgresIsrTokenStore::new(db.clone()));
         store.ensure_schema().await.expect("ensure isr schema");
         let me = node_identity();
-        let sm_id = format!("sm-{}", uuid::Uuid::new_v4());
+        let sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let epoch = claim_sm_session(&db, &sm_id, &me).await;
         let issued = store.issue(&sm_id, "PLAIN").await.expect("issue");
 
@@ -744,7 +887,7 @@ mod tests {
         let mut locked_rows = winner_tx
             .query(
                 "SELECT token, mechanism FROM clustering_isr_tokens WHERE sm_id = ? FOR UPDATE",
-                crate::db_params![sm_id.clone()],
+                crate::db_params![sm_id.to_string()],
             )
             .await
             .expect("lock the token row");
@@ -790,7 +933,7 @@ mod tests {
         winner_tx
             .execute(
                 "DELETE FROM clustering_isr_tokens WHERE sm_id = ?",
-                crate::db_params![sm_id.clone()],
+                crate::db_params![sm_id.to_string()],
             )
             .await
             .expect("winner delete");
@@ -799,7 +942,11 @@ mod tests {
             .execute(
                 "INSERT INTO clustering_isr_tokens (sm_id, token, mechanism, created_at) \
                  VALUES (?, ?, ?, now())",
-                crate::db_params![sm_id.clone(), rotated_token.clone(), "PLAIN".to_string()],
+                crate::db_params![
+                    sm_id.to_string(),
+                    rotated_token.clone(),
+                    "PLAIN".to_string()
+                ],
             )
             .await
             .expect("winner rotate insert");
