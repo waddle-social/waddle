@@ -1716,6 +1716,9 @@ fn apply_channel_type(config: &mut RoomConfig, channel_type: ChannelType) {
     config.group_dm = matches!(channel_type, ChannelType::GroupDm);
     config.forum = matches!(channel_type, ChannelType::Forum);
     config.moderated = matches!(channel_type, ChannelType::Announcement);
+    if config.group_dm {
+        config.members_only = true;
+    }
 }
 
 async fn upsert_channel_catalog(
@@ -2009,7 +2012,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         topic: args.topic.clone(),
         channel_type: args.channel_type,
         is_public: args.is_public,
-        members_only,
+        members_only: config.members_only,
     })
 }
 
@@ -3084,25 +3087,26 @@ async fn run_update(
         None
     };
 
-    let members_only_enforcement_affiliations = if !existing.members_only && new_members_only {
-        let snapshot = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
-            .await
-            .map_err(send_err("room actor GetSnapshot"))?;
-        let occupant_jids: Vec<BareJid> = snapshot
-            .room
-            .occupants
-            .values()
-            .map(|occupant| occupant.real_jid.to_bare())
-            .collect();
-        Some(
-            explicit_channel_affiliations_for_jids(state, &channel_id, occupant_jids)
+    let members_only_enforcement_affiliations =
+        if !existing.requires_membership() && updated.requires_membership() {
+            let snapshot = actor
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
                 .await
-                .map_err(internal_err)?,
-        )
-    } else {
-        None
-    };
+                .map_err(send_err("room actor GetSnapshot"))?;
+            let occupant_jids: Vec<BareJid> = snapshot
+                .room
+                .occupants
+                .values()
+                .map(|occupant| occupant.real_jid.to_bare())
+                .collect();
+            Some(
+                explicit_channel_affiliations_for_jids(state, &channel_id, occupant_jids)
+                    .await
+                    .map_err(internal_err)?,
+            )
+        } else {
+            None
+        };
 
     let expected_revision = actor
         .ask(UpdateConfig {
@@ -3182,7 +3186,7 @@ async fn run_update(
         topic: new_topic,
         channel_type: new_channel_type,
         is_public: new_public_room,
-        members_only: new_members_only,
+        members_only: updated.members_only,
     })
 }
 
@@ -4357,6 +4361,19 @@ mod tests {
             channel_type_from_catalog_or_config(Some(&record), &config),
             ChannelType::Announcement
         );
+    }
+
+    #[test]
+    fn group_dm_channel_type_forces_members_only_config() {
+        let mut config = RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        };
+
+        apply_channel_type(&mut config, ChannelType::GroupDm);
+
+        assert!(config.group_dm);
+        assert!(config.members_only);
     }
 
     #[test]

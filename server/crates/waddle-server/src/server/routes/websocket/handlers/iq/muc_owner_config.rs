@@ -51,6 +51,7 @@ pub(super) fn project_channel_type_to_config(
         waddle_xmpp::ChannelType::GroupDm => {
             config.group_dm = true;
             config.forum = false;
+            config.members_only = true;
         }
     }
 }
@@ -382,5 +383,18 @@ mod channel_type_projection_tests {
         assert!(!config.group_dm);
         assert!(!config.forum);
         assert!(config.moderated);
+    }
+
+    #[test]
+    fn group_dm_projection_forces_members_only() {
+        let mut config = waddle_xmpp::muc::RoomConfig {
+            members_only: false,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        project_channel_type_to_config(&mut config, waddle_xmpp::ChannelType::GroupDm);
+
+        assert!(config.group_dm);
+        assert!(config.members_only);
     }
 }

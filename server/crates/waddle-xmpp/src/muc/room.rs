@@ -125,6 +125,24 @@ pub struct RoomConfig {
     pub federated_affiliation_config: FederatedAffiliationConfig,
 }
 
+impl RoomConfig {
+    /// Whether admission requires at least Member affiliation.
+    ///
+    /// Group DMs are always membership-scoped, even if an untrusted or
+    /// legacy config payload carries a false `members_only` flag.
+    pub const fn requires_membership(&self) -> bool {
+        self.members_only || self.group_dm
+    }
+
+    /// Restore the invariant that every group DM is members-only.
+    pub fn normalized(mut self) -> Self {
+        if self.group_dm {
+            self.members_only = true;
+        }
+        self
+    }
+}
+
 impl Default for RoomConfig {
     fn default() -> Self {
         Self {
@@ -262,7 +280,7 @@ impl MucRoom {
             room_jid,
             waddle_id,
             channel_id,
-            config,
+            config: config.normalized(),
             subject: None,
             occupants: HashMap::new(),
             occupant_sessions: HashMap::new(),

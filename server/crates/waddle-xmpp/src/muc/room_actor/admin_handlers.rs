@@ -75,7 +75,7 @@ fn removal_presence_updates(
         .collect()
 }
 
-fn apply_affiliation_change(
+pub(super) fn apply_affiliation_change(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
     target_jid: BareJid,
@@ -339,7 +339,7 @@ pub struct ApplyAdminItems {
 /// participation — Membership-scoped visibility says a call is only
 /// joinable (and stayable) by current occupants. Voluntary leaves and
 /// presence loss never appear here.
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AdminItemsApplied {
     pub presence_updates: Vec<(FullJid, Presence)>,
     pub removed_by_moderation: Vec<FullJid>,
@@ -358,6 +358,15 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         // are applied — a `NotOwner` here means NONE of this ask's items
         // were applied (the gate runs before the first mutation below).
         self.gate_mutation().await?;
+        if msg.items.iter().any(|item| {
+            item.affiliation.is_some()
+                && item
+                    .jid
+                    .as_ref()
+                    .is_some_and(|jid| self.invite_rollback_pending(jid))
+        }) {
+            return Err(AdminApplyError::InviteRollbackPending);
+        }
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
         let mut removed_by_moderation: Vec<FullJid> = Vec::new();
         // FIX 2: a persist failure partway through this batch must not
@@ -582,6 +591,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 {
                     return Err(AdminApplyError::CannotAdminModifyOwner);
                 }
+                self.invalidate_invite_grant(&target_jid);
                 let actor = msg.sender_jid.to_bare();
                 let applied = apply_affiliation_change(
                     &mut self.room,
@@ -640,7 +650,11 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
     ) -> Self::Reply {
         // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
         self.gate_mutation().await?;
+        if self.invite_rollback_pending(&msg.jid) {
+            return Err(AdminApplyError::InviteRollbackPending);
+        }
         let previous_affiliation = self.room.get_affiliation(&msg.jid);
+        self.invalidate_invite_grant(&msg.jid);
         let updates = apply_affiliation_change(
             &mut self.room,
             &self.occupant_id_secret,
@@ -680,7 +694,7 @@ pub struct EnforceMembersOnlyAffiliations {
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
-    type Reply = Result<Vec<(FullJid, Presence)>, super::RoomMutationError>;
+    type Reply = Result<Vec<(FullJid, Presence)>, super::AffiliationMutationError>;
 
     async fn handle(
         &mut self,
@@ -697,6 +711,12 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .values()
             .map(|occupant| occupant.real_jid.to_bare())
             .collect();
+        if occupied_jids
+            .iter()
+            .any(|jid| self.invite_rollback_pending(jid))
+        {
+            return Err(super::AffiliationMutationError::InviteRollbackPending);
+        }
         let mut needs_rehydration = false;
         // FIX 2: same batch-persist-failure handling as `ApplyAdminItems`
         // — don't abort mid-loop (earlier iterations already mutated
@@ -705,6 +725,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         let mut persist_failure: Option<super::DurablePersistError> = None;
         for jid in occupied_jids {
             let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
+            self.invalidate_invite_grant(&jid);
             needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
             if self
                 .room

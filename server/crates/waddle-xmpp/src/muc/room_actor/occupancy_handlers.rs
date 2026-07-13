@@ -57,6 +57,9 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         // unresolved (a genuine backend failure, not a legitimate brand
         // -new room) — see `RoomActor::ensure_restored_before_join`.
         self.ensure_restored_before_join().await?;
+        if self.invite_rollback_pending(&msg.sender_jid.to_bare()) {
+            return Err(RoomActorError::InviteRollbackPending);
+        }
         if msg.admission_revision != self.admission_revision {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
@@ -83,6 +86,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation)
                     .is_some()
                 {
+                    self.invalidate_invite_grant(&msg.sender_jid.to_bare());
                     self.admission_revision = self.admission_revision.saturating_add(1);
                 }
             }
@@ -96,6 +100,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 if !self.room.has_owner() {
                     self.room
                         .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
+                    self.invalidate_invite_grant(&msg.sender_jid.to_bare());
                 }
             }
         }
@@ -582,7 +587,7 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         }
         self.room.waddle_id = msg.waddle_id;
         self.room.channel_id = msg.channel_id;
-        self.room.config = desired_config;
+        self.replace_config(desired_config);
         self.persist_config().await?;
         Ok(())
     }
@@ -621,6 +626,9 @@ pub enum ResolverAffiliationSyncOutcome {
     StaleAdmissionRevision,
     /// The actor is sealed pending destruction (#1108); nothing to sync.
     RoomSealed,
+    /// An invite compensation owns the invitee affiliation until its
+    /// terminal result is acknowledged.
+    InviteRollbackPending,
 }
 
 impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
@@ -634,6 +642,9 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         if self.sealed {
             return ResolverAffiliationSyncOutcome::RoomSealed;
         }
+        if self.invite_rollback_pending(&msg.jid) {
+            return ResolverAffiliationSyncOutcome::InviteRollbackPending;
+        }
         if msg.expected_admission_revision != self.admission_revision {
             return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
         }
@@ -642,9 +653,10 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         // any join admitted against the pre-sync snapshot retries.
         if self
             .room
-            .update_affiliation_from_resolver(msg.jid, msg.affiliation)
+            .update_affiliation_from_resolver(msg.jid.clone(), msg.affiliation)
             .is_some()
         {
+            self.invalidate_invite_grant(&msg.jid);
             self.admission_revision = self.admission_revision.saturating_add(1);
         }
         ResolverAffiliationSyncOutcome::Applied
