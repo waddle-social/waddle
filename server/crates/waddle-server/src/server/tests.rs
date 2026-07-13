@@ -349,6 +349,7 @@ fn test_xmpp_config_rejects_malformed_public_websocket_url() {
         error.to_string().contains("is not a valid absolute URL"),
         "unexpected error: {error:#}"
     );
+    assert!(!error.to_string().contains("not a URL"));
 
     reset_xmpp_config_env();
 }
@@ -369,6 +370,11 @@ fn test_xmpp_config_rejects_sensitive_or_ambiguous_websocket_urls() {
             error.to_string().contains(expected),
             "unexpected error for {configured}: {error:#}"
         );
+        assert!(
+            !error.to_string().contains(configured),
+            "configuration diagnostics must redact the rejected URL"
+        );
+        assert!(!error.to_string().contains("secret"));
     }
 
     reset_xmpp_config_env();

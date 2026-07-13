@@ -33,7 +33,8 @@ pub use user_actor::delivery::{
 };
 pub use user_actor::GetResources;
 pub use user_registry::{
-    DemoteUserActor, GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers, ReapUserIfEmpty,
+    DemoteUserActor, DemoteUserActorIfOwner, DemotedUserActor, DemotedUserResource,
+    GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers, ListUsersOwnedBy, ReapUserIfEmpty,
     RegisterUserResource, RegisterUserResourceIfOwnerOrAbsent, RemoveUser, UnregisterUserResource,
     UserCount, UserRegistryActor, UserRegistryError, WireUserClusteringClaims,
 };

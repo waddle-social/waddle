@@ -214,27 +214,38 @@ impl IsrRevocationQueue {
         issued: IssuedIsrToken,
     ) -> Option<IsrRevocationReservation> {
         let runtime = tokio::runtime::Handle::try_current().ok()?;
-        let mut state = self.inner.state.lock().ok()?;
-        if state.entries.len() >= self.inner.capacity {
-            return None;
-        }
-        let id = self
-            .inner
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        state.entries.push_back(IsrRevocationEntry {
-            id,
-            sm_id,
-            store,
-            issued,
-            runtime,
-            state: IsrRevocationState::Reserved,
-        });
-        Some(IsrRevocationReservation {
-            queue: self.clone(),
-            id,
-            armed: true,
-        })
+        let reservation = {
+            let mut state = self.inner.state.lock().ok()?;
+            // A reservation can outlive the runtime on which it was created.
+            // Any later live caller lends its runtime to retained active work
+            // before capacity is checked, so a full queue can still recover.
+            for entry in &mut state.entries {
+                entry.runtime = runtime.clone();
+            }
+            if state.entries.len() >= self.inner.capacity {
+                None
+            } else {
+                let id = self
+                    .inner
+                    .next_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                state.entries.push_back(IsrRevocationEntry {
+                    id,
+                    sm_id,
+                    store,
+                    issued,
+                    runtime,
+                    state: IsrRevocationState::Reserved,
+                });
+                Some(IsrRevocationReservation {
+                    queue: self.clone(),
+                    id,
+                    armed: true,
+                })
+            }
+        };
+        self.start_worker();
+        reservation
     }
 
     pub fn pending_len(&self) -> usize {
@@ -282,7 +293,14 @@ impl IsrRevocationQueue {
             return;
         };
         let queue = self.clone();
-        runtime.spawn(async move { queue.run_worker().await });
+        // Construct the guard before task admission. If the captured runtime
+        // has already shut down, Tokio drops the never-polled future and this
+        // guard resets `worker_running` instead of permanently wedging it.
+        let guard = IsrRevocationWorkerGuard {
+            queue: self.clone(),
+            armed: true,
+        };
+        runtime.spawn(async move { queue.run_worker(guard).await });
     }
 
     fn schedule_worker_restart(&self) {
@@ -302,11 +320,7 @@ impl IsrRevocationQueue {
         });
     }
 
-    async fn run_worker(self) {
-        let mut guard = IsrRevocationWorkerGuard {
-            queue: self.clone(),
-            armed: true,
-        };
+    async fn run_worker(self, mut guard: IsrRevocationWorkerGuard) {
         loop {
             let work = self.inner.state.lock().ok().and_then(|mut state| {
                 let Some(entry) = state
@@ -641,6 +655,65 @@ mod tests {
         attempts: std::sync::atomic::AtomicUsize,
         observed_missing: tokio::sync::Notify,
         revoked: tokio::sync::Notify,
+    }
+
+    struct HangFirstRevokeStore {
+        inner: InMemoryIsrTokenStore,
+        attempts: std::sync::atomic::AtomicUsize,
+        first_attempt_entered: std::sync::Barrier,
+        revoked: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl IsrTokenStore for HangFirstRevokeStore {
+        async fn ensure_schema(&self) -> Result<(), IsrTokenStoreError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn persist_issued(
+            &self,
+            sm_id: &SmSessionId,
+            issued: &IssuedIsrToken,
+        ) -> Result<(), IsrTokenStoreError> {
+            self.inner.persist_issued(sm_id, issued).await
+        }
+
+        async fn revoke_if_current(
+            &self,
+            sm_id: &SmSessionId,
+            issued: &IssuedIsrToken,
+        ) -> Result<IsrRevokeOutcome, IsrTokenStoreError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                self.first_attempt_entered.wait();
+                return std::future::pending().await;
+            }
+            let revoked = self.inner.revoke_if_current(sm_id, issued).await?;
+            self.revoked.notify_one();
+            Ok(revoked)
+        }
+
+        async fn consume(
+            &self,
+            sm_id: &SmSessionId,
+            presented_token: &[u8],
+            mechanism: &str,
+            fence: &SmClaimFence,
+        ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
+            self.inner
+                .consume(sm_id, presented_token, mechanism, fence)
+                .await
+        }
+
+        async fn sweep_expired(
+            &self,
+            max_age: std::time::Duration,
+        ) -> Result<u64, IsrTokenStoreError> {
+            self.inner.sweep_expired(max_age).await
+        }
     }
 
     #[async_trait]
@@ -1088,6 +1161,121 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
                 .await
                 .expect("captured runtime completes exact revocation");
+        });
+        assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    #[test]
+    fn revocation_queue_recovers_when_the_captured_runtime_has_shut_down() {
+        let runtime_a = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build first runtime");
+        let store = Arc::new(FailFirstRevokeStore {
+            inner: InMemoryIsrTokenStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            revoked: tokio::sync::Notify::new(),
+        });
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let reservation = runtime_a.block_on(async {
+            let issued = IssuedIsrToken::new("PLAIN");
+            let stream_id = sid("sm-dead-runtime");
+            store
+                .persist_issued(&stream_id, &issued)
+                .await
+                .expect("persist provisional token");
+            let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+            queue
+                .reserve(stream_id, dyn_store, issued)
+                .expect("reserve cleanup capacity")
+        });
+        drop(runtime_a);
+
+        // Activating outside any runtime first tries the now-dead captured
+        // handle. Its never-polled worker must not leave `worker_running` set.
+        drop(reservation);
+        assert_eq!(queue.pending_len(), 1);
+
+        let runtime_b = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build recovery runtime");
+        runtime_b.block_on(async {
+            let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+            assert!(queue
+                .reserve(
+                    sid("sm-capacity-probe"),
+                    dyn_store,
+                    IssuedIsrToken::new("PLAIN"),
+                )
+                .is_none());
+            tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
+                .await
+                .expect("later live runtime recovers retained cleanup");
+            assert_eq!(queue.pending_len(), 0);
+
+            let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+            queue
+                .reserve(
+                    sid("sm-after-recovery"),
+                    dyn_store,
+                    IssuedIsrToken::new("PLAIN"),
+                )
+                .expect("recovered queue releases capacity")
+                .disarm();
+        });
+    }
+
+    #[test]
+    fn revocation_queue_lends_a_live_runtime_to_in_flight_cleanup() {
+        let runtime_a = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build first runtime");
+        let runtime_b = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build recovery runtime");
+        let store = Arc::new(HangFirstRevokeStore {
+            inner: InMemoryIsrTokenStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            first_attempt_entered: std::sync::Barrier::new(2),
+            revoked: tokio::sync::Notify::new(),
+        });
+        let queue = IsrRevocationQueue::with_capacity(1);
+        let reservation = runtime_a.block_on(async {
+            let issued = IssuedIsrToken::new("PLAIN");
+            let stream_id = sid("sm-in-flight-runtime-loss");
+            store
+                .persist_issued(&stream_id, &issued)
+                .await
+                .expect("persist provisional token");
+            let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+            queue
+                .reserve(stream_id, dyn_store, issued)
+                .expect("reserve cleanup capacity")
+        });
+        drop(reservation);
+        store.first_attempt_entered.wait();
+
+        runtime_b.block_on(async {
+            let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
+            assert!(queue
+                .reserve(
+                    sid("sm-in-flight-capacity-probe"),
+                    dyn_store,
+                    IssuedIsrToken::new("PLAIN"),
+                )
+                .is_none());
+        });
+        runtime_a.shutdown_timeout(std::time::Duration::from_secs(1));
+
+        runtime_b.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
+                .await
+                .expect("in-flight cleanup restarts on the lent live runtime");
         });
         assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);

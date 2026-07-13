@@ -1128,6 +1128,25 @@ async fn isr_resume_rejects_unsecured_transport_without_consuming_token() {
     assert!(success.get_child("inst-resumed", ISR_NS).is_some());
 }
 
+#[tokio::test]
+async fn isr_resume_rejects_an_overlong_wire_session_id_before_backend_work() {
+    let fixture = in_memory_isr_fixture().await;
+    let previd = "s".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
+    let frame = isr_authenticate_frame("alice@example.com", "unused-token", &previd, 0);
+    let mut conn = WsConnState::new();
+
+    let responses =
+        handle_xmpp_frame(&frame, "example.com", fixture.state.as_ref(), &mut conn).await;
+
+    assert_eq!(responses.len(), 1);
+    let failure = Element::from_str(&responses[0]).expect("failure XML");
+    assert_eq!(failure.name(), "failure");
+    assert!(failure
+        .get_child("not-authorized", waddle_xmpp::ns::SASL)
+        .is_some());
+    assert!(!conn.phase.is_ready());
+}
+
 // Sanity check that the module-level handler is reachable directly too
 // (mirrors how `stream_management.rs` tests call `handle_sm_stanza`
 // directly in a couple of places) — exercised via the SmCtx-taking

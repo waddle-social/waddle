@@ -6,6 +6,7 @@ const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duratio
 struct SmEnableClaimGuard {
     registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
     stream_id: waddle_xmpp::pending_delivery::SmSessionId,
+    _claim_publication: waddle_xmpp::ownership::CurrentNodeIdentityGuard,
     provisional_isr_token: Option<waddle_xmpp::isr::IsrRevocationReservation>,
     armed: bool,
 }
@@ -76,10 +77,12 @@ impl SmEnableClaimGuard {
     fn new(
         registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
+        claim_publication: waddle_xmpp::ownership::CurrentNodeIdentityGuard,
     ) -> Self {
         Self {
             registry,
             stream_id,
+            _claim_publication: claim_publication,
             provisional_isr_token: None,
             armed: true,
         }
@@ -219,17 +222,23 @@ mod enable_claim_guard_tests {
     async fn dropped_prepublication_guard_defers_and_releases_the_exact_claim() {
         let store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
         let identity = waddle_xmpp::ownership::NodeIdentity::new("sm-node", "incarnation");
-        let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
-            store.clone(),
-            waddle_xmpp::ownership::SharedNodeIdentity::new(identity),
-        ));
+        let shared_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity);
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_claim_store(store.clone(), shared_identity.clone()),
+        );
         let stream_id = "cancelled-before-enabled-publication";
-        assert!(registry.ensure_session_claim(stream_id).await.is_some());
+        let claim_publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("claim admission");
 
-        drop(SmEnableClaimGuard::new(
+        let guard = SmEnableClaimGuard::new(
             registry.clone(),
             waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
-        ));
+            claim_publication,
+        );
+        drop(guard);
 
         assert_eq!(registry.pending_claim_release_count(), 1);
         assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
@@ -239,6 +248,37 @@ mod enable_claim_guard_tests {
             .await
             .expect("claim lookup")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn prepublication_guard_blocks_self_fence_demotion_until_commit() {
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let stream_id = "enable-publication-vs-self-fence";
+        let claim_publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("claim admission");
+        let guard = SmEnableClaimGuard::new(
+            registry.clone(),
+            waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
+            claim_publication,
+        );
+        let demotion = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.forget_claim_locally(stream_id).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !demotion.is_finished(),
+            "pending transport publication must block self-fence demotion"
+        );
+
+        assert!(guard.commit(true).is_none());
+        demotion.await.expect("self-fence demotion");
+        assert!(registry
+            .locally_owned_claim_ids()
+            .expect("owned inventory")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -255,12 +295,15 @@ mod enable_claim_guard_tests {
         });
         let stream_id = "cancelled-isr-before-enabled-publication";
         let isr_stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
-        assert!(registry.ensure_session_claim(stream_id).await.is_some());
+        let claim_publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("claim admission");
         let issued = token_store
             .issue(&isr_stream_id, "PLAIN")
             .await
             .expect("issue");
-        let mut guard = SmEnableClaimGuard::new(registry, isr_stream_id.clone());
+        let mut guard = SmEnableClaimGuard::new(registry, isr_stream_id.clone(), claim_publication);
         let revocations = waddle_xmpp::isr::IsrRevocationQueue::default();
         assert!(guard.retain_provisional_isr_token(
             &revocations,
@@ -574,17 +617,17 @@ async fn handle_sm_enable(
     } else {
         None
     };
-    let mut claim_guard = enable.resume.then(|| {
+    let mut claim_guard = claim_publication.map(|publication| {
         SmEnableClaimGuard::new(
             state.deps.protocol.sm_session_registry.clone(),
             waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
+            publication,
         )
     });
-    // Publishing the armed pre-transport guard transfers exact cleanup
-    // responsibility into the pending commit. Keep identity authority until
-    // that synchronous hand-off is complete; later fallible work and the
-    // socket write must not hold the rotation gate.
-    drop(claim_publication);
+    // The pending commit retains both exact cleanup responsibility and the
+    // identity-publication guard through the `<enabled/>` transport write.
+    // Identity rotation therefore cannot demote the durable claim in the gap
+    // between admission and the state the peer has observed.
     // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR token issuance rides this same
     // `<enable/>`/`<enabled/>` exchange inline (`<isr-enable/>`/
     // `<isr-enabled/>`) — never a standalone IQ (the retired conformance

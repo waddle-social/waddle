@@ -1990,6 +1990,77 @@ impl kameo::message::Message<ListRooms> for RoomRegistryActor {
     }
 }
 
+/// List live or terminal-release room claims belonging to one exact owner.
+pub struct ListRoomsOwnedBy {
+    pub owner: NodeIdentity,
+}
+
+/// Hard-kill and forget a room only while its live entry still belongs to
+/// `owner`. The comparison and mutation share the registry mailbox turn, so
+/// a fresh same-JID replacement cannot be demoted by a stale owner sweep.
+pub struct DemoteRoomIfOwner {
+    pub room_jid: BareJid,
+    pub owner: NodeIdentity,
+}
+
+impl kameo::message::Message<DemoteRoomIfOwner> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: DemoteRoomIfOwner,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let matches = self
+            .rooms
+            .get(&msg.room_jid)
+            .is_some_and(|entry| entry.claim_fence.owner() == msg.owner);
+        if !matches {
+            return false;
+        }
+        let Some(entry) = self.rooms.remove(&msg.room_jid) else {
+            return false;
+        };
+        entry.actor_ref.kill();
+        if let Some(store) = &self.durable_store {
+            store.forget_claim_fence(&msg.room_jid, &entry.claim_fence);
+        }
+        true
+    }
+}
+
+impl kameo::message::Message<ListRoomsOwnedBy> for RoomRegistryActor {
+    type Reply = Result<Vec<BareJid>, RoomRegistryError>;
+
+    async fn handle(
+        &mut self,
+        msg: ListRoomsOwnedBy,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut room_jids = self
+            .rooms
+            .iter()
+            .filter(|(_, entry)| entry.claim_fence.owner() == msg.owner)
+            .map(|(jid, _)| jid.clone())
+            .collect::<Vec<_>>();
+        room_jids.extend(
+            self.pending_room_releases
+                .keys()
+                .filter(|(_, fence)| fence.owner() == msg.owner)
+                .map(|(jid, _)| jid.clone()),
+        );
+        room_jids.extend(
+            self.pending_reclaimed_rooms
+                .keys()
+                .filter(|(_, fence)| fence.owner() == msg.owner)
+                .map(|(jid, _)| jid.clone()),
+        );
+        room_jids.sort();
+        room_jids.dedup();
+        Ok(room_jids)
+    }
+}
+
 /// Return the number of active rooms.
 pub struct RoomCount;
 

@@ -331,6 +331,15 @@ impl SharedNodeIdentity {
         })
     }
 
+    /// Run a short synchronous demotion transition only after every current
+    /// publication guard has drained. This uses the exclusive side of the
+    /// same gate as identity rotation, so local claim removal cannot race a
+    /// caller publishing state under [`CurrentNodeIdentityGuard`].
+    pub async fn with_publications_blocked<R>(&self, demote: impl FnOnce() -> R) -> R {
+        let _publication_guard = self.rotation_gate.write().await;
+        demote()
+    }
+
     /// Whether `guard` holds the read side of this exact identity source's
     /// rotation gate, not merely an equal node-id/incarnation value.
     pub fn owns_guard(&self, guard: &CurrentNodeIdentityGuard) -> bool {

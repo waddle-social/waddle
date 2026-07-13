@@ -223,29 +223,22 @@ fn parse_public_websocket_url(raw: Option<&str>, xmpp_domain: &str) -> anyhow::R
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("ws://{xmpp_domain}/ws"));
-    let url = Url::parse(&configured).with_context(|| {
-        format!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL='{configured}' is not a valid absolute URL")
-    })?;
+    let url = Url::parse(&configured)
+        .context("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL is not a valid absolute URL")?;
     if !matches!(url.scheme(), "ws" | "wss") {
-        anyhow::bail!(
-            "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL='{configured}' must use the ws or wss scheme"
-        );
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must use the ws or wss scheme");
     }
     if url.host().is_none() {
-        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL='{configured}' must include a host");
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must include a host");
     }
     if !url.username().is_empty() || url.password().is_some() {
-        anyhow::bail!(
-            "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL='{configured}' must not include user information"
-        );
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must not include user information");
     }
     if url.query().is_some() {
-        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL='{configured}' must not include a query");
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must not include a query");
     }
     if url.fragment().is_some() {
-        anyhow::bail!(
-            "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL='{configured}' must not include a fragment"
-        );
+        anyhow::bail!("WADDLE_XMPP_PUBLIC_WEBSOCKET_URL must not include a fragment");
     }
     Ok(url)
 }

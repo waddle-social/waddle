@@ -192,8 +192,14 @@ pub struct UnregisterConnectionAndReportEmpty {
     pub owner: Option<Arc<AtomicBool>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub struct UnregisterConnectionOutcome {
+    pub removed: bool,
+    pub is_empty: bool,
+}
+
 impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
-    type Reply = bool;
+    type Reply = UnregisterConnectionOutcome;
 
     async fn handle(
         &mut self,
@@ -205,8 +211,11 @@ impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
             bare = %self.bare_jid,
             "Unregistering connection and checking emptiness"
         );
-        self.remove_resource_if_owner(&msg.jid, msg.owner.as_ref());
-        self.connections.is_empty()
+        let removed = self.remove_resource_if_owner(&msg.jid, msg.owner.as_ref());
+        UnregisterConnectionOutcome {
+            removed,
+            is_empty: self.connections.is_empty(),
+        }
     }
 }
 

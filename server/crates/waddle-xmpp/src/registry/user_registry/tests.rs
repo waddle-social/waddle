@@ -12,6 +12,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+struct WedgeUserActor {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+impl kameo::message::Message<WedgeUserActor> for UserActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: WedgeUserActor,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        msg.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
 /// A bounded outbound channel for a test registration. Returns the sender to
 /// register and the receiver, which the caller keeps alive so the channel
 /// does not report closed.
@@ -72,6 +89,9 @@ struct RecordingClaimStore {
     release_owners: Mutex<Vec<NodeIdentity>>,
     fence_errors: AtomicBool,
     steal_calls: AtomicUsize,
+    block_ensure: AtomicBool,
+    ensure_entered: tokio::sync::Notify,
+    continue_ensure: tokio::sync::Notify,
 }
 
 impl RecordingClaimStore {
@@ -81,6 +101,9 @@ impl RecordingClaimStore {
             release_owners: Mutex::new(Vec::new()),
             fence_errors: AtomicBool::new(false),
             steal_calls: AtomicUsize::new(0),
+            block_ensure: AtomicBool::new(false),
+            ensure_entered: tokio::sync::Notify::new(),
+            continue_ensure: tokio::sync::Notify::new(),
         }
     }
 
@@ -90,6 +113,9 @@ impl RecordingClaimStore {
             release_owners: Mutex::new(Vec::new()),
             fence_errors: AtomicBool::new(false),
             steal_calls: AtomicUsize::new(0),
+            block_ensure: AtomicBool::new(false),
+            ensure_entered: tokio::sync::Notify::new(),
+            continue_ensure: tokio::sync::Notify::new(),
         }
     }
 
@@ -107,6 +133,10 @@ impl RecordingClaimStore {
 
     fn set_fence_errors(&self, fence_errors: bool) {
         self.fence_errors.store(fence_errors, Ordering::SeqCst);
+    }
+
+    fn block_next_ensure(&self) {
+        self.block_ensure.store(true, Ordering::SeqCst);
     }
 }
 
@@ -131,11 +161,16 @@ impl ClaimStore for RecordingClaimStore {
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
         let existing = self.state.lock().expect("lock").clone();
-        match existing {
+        let result = match existing {
             None => self.acquire(entity, me).await,
             Some((owner, epoch, _)) if owner == *me => Ok(epoch),
             Some(_) => Err(ClaimError::AlreadyClaimed),
+        };
+        if self.block_ensure.swap(false, Ordering::SeqCst) {
+            self.ensure_entered.notify_one();
+            self.continue_ensure.notified().await;
         }
+        result
     }
 
     async fn steal_stale(
@@ -328,6 +363,186 @@ async fn test_get_or_create_acquires_user_actor_claim() {
         .expect("current_claim")
         .expect("user claim should be held after actor spawn");
     assert_eq!(snapshot.owner, this_identity());
+}
+
+#[tokio::test]
+async fn get_or_create_releases_a_claim_if_identity_rotates_after_the_cas() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::empty());
+    let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
+    let old = this_identity();
+    let fresh = NodeIdentity::new("node-this", "epoch-after-self-fence");
+    let shared_identity = SharedNodeIdentity::new(old);
+    wire_shared_claims(&registry, claim_store_trait, shared_identity.clone()).await;
+    claim_store.block_next_ensure();
+    let bare_jid = bare("post-cas-rotation");
+
+    let creating = tokio::spawn({
+        let registry = registry.clone();
+        let bare_jid = bare_jid.clone();
+        async move { registry.ask(GetOrCreateUser { bare_jid }).await }
+    });
+    claim_store.ensure_entered.notified().await;
+    shared_identity.rotate(fresh).await;
+    claim_store.continue_ensure.notify_one();
+
+    assert!(matches!(
+        creating.await.expect("creation task"),
+        Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(jid))) if jid == bare_jid
+    ));
+    assert!(registry
+        .ask(ListUsers)
+        .await
+        .expect("list users")
+        .is_empty());
+    assert!(claim_store
+        .current_claim(&user_entity(&bare_jid))
+        .await
+        .expect("claim lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn list_users_owned_by_excludes_fresh_post_rotation_users() {
+    let registry = spawn_registry().await;
+    let old = this_identity();
+    let fresh = NodeIdentity::new("node-this", "fresh-incarnation");
+    let shared_identity = SharedNodeIdentity::new(old.clone());
+    wire_shared_claims(
+        &registry,
+        Arc::new(InProcessClaimStore::new()),
+        shared_identity.clone(),
+    )
+    .await;
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare("old-owner-user"),
+        })
+        .await
+        .expect("old user");
+    shared_identity.rotate(fresh.clone()).await;
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare("fresh-owner-user"),
+        })
+        .await
+        .expect("fresh user");
+
+    assert_eq!(
+        registry
+            .ask(ListUsersOwnedBy { owner: old })
+            .await
+            .expect("old-owner users"),
+        vec![bare("old-owner-user")]
+    );
+    assert_eq!(
+        registry
+            .ask(ListUsersOwnedBy { owner: fresh })
+            .await
+            .expect("fresh-owner users"),
+        vec![bare("fresh-owner-user")]
+    );
+}
+
+#[tokio::test]
+async fn stale_exact_owner_demotion_preserves_a_fresh_same_jid_user() {
+    let registry = spawn_registry().await;
+    let old = this_identity();
+    let fresh = NodeIdentity::new("node-this", "fresh-incarnation");
+    let shared_identity = SharedNodeIdentity::new(old.clone());
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    wire_shared_claims(&registry, claim_store.clone(), shared_identity.clone()).await;
+    let bare_jid = bare("same-owner-jid");
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("old user");
+    assert!(registry
+        .ask(DemoteUserActorIfOwner {
+            bare_jid: bare_jid.clone(),
+            owner: old.clone(),
+        })
+        .await
+        .expect("demote old user")
+        .is_some());
+    claim_store
+        .release(&user_entity(&bare_jid), &old, ClaimEpoch(0))
+        .await
+        .expect("simulate authoritative old-claim retirement");
+
+    shared_identity.rotate(fresh).await;
+    registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("fresh user");
+    assert!(registry
+        .ask(DemoteUserActorIfOwner {
+            bare_jid: bare_jid.clone(),
+            owner: old,
+        })
+        .await
+        .expect("stale demotion")
+        .is_none());
+    assert_eq!(
+        registry.ask(ListUsers).await.expect("list users"),
+        vec![bare_jid]
+    );
+}
+
+#[tokio::test]
+async fn exact_owner_demotion_never_waits_on_a_wedged_multi_resource_actor() {
+    let registry = spawn_registry().await;
+    let owner = this_identity();
+    wire_claims(
+        &registry,
+        Arc::new(InProcessClaimStore::new()),
+        owner.clone(),
+    )
+    .await;
+    let bare_jid = bare("wedged-exact-demotion");
+    let mut receivers = Vec::new();
+    for resource in ["one", "two", "three"] {
+        let (sender, receiver) = outbound_channel();
+        receivers.push(receiver);
+        registry
+            .ask(RegisterUserResource {
+                jid: full("wedged-exact-demotion", resource),
+                entry: ConnectionEntry::new(sender),
+            })
+            .await
+            .expect("register resource");
+    }
+    let actor = registry
+        .ask(GetUserForLocalClaim {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get user")
+        .expect("live user");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let wedge = tokio::spawn({
+        let actor = actor.clone();
+        let entered = entered.clone();
+        async move { actor.ask(WedgeUserActor { entered }).await }
+    });
+    entered.notified().await;
+
+    let demoted = tokio::time::timeout(
+        Duration::from_millis(100),
+        registry.ask(DemoteUserActorIfOwner { bare_jid, owner }),
+    )
+    .await
+    .expect("exact demotion must not wait on the wedged child")
+    .expect("registry demotion")
+    .expect("matching owner");
+    assert_eq!(demoted.resources.len(), 3);
+    assert!(!actor.is_alive());
+    assert!(wedge.await.expect("wedge task").is_err());
+    drop(receivers);
 }
 
 #[tokio::test]

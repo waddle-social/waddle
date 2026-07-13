@@ -143,6 +143,14 @@ pub(super) async fn handle_isr_resume_authenticate(
         return vec![sasl2_failure("invalid-mechanism")];
     }
 
+    let isr_stream_id = match SmSessionId::try_from_wire(resume.previd.clone()) {
+        Ok(stream_id) => stream_id,
+        Err(error) => {
+            warn!(%error, "ISR resume rejected: invalid SM session id");
+            return vec![sasl2_failure("not-authorized")];
+        }
+    };
+
     let decoded = match BASE64_STANDARD.decode(initial_response.trim()) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -330,7 +338,6 @@ pub(super) async fn handle_isr_resume_authenticate(
     };
     let mut identity_guard = Some(identity_guard);
 
-    let isr_stream_id = SmSessionId::new(resume.previd.clone());
     let consume_result = isr_token_store
         .consume(
             &isr_stream_id,

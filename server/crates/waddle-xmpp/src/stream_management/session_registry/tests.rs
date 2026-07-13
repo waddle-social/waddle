@@ -740,6 +740,73 @@ async fn enable_claim_publication_guard_blocks_identity_rotation_until_caller_pu
 }
 
 #[tokio::test]
+async fn enable_claim_publication_guard_blocks_local_demotion_until_caller_publishes() {
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new());
+    let stream_id = "guarded-enable-demotion";
+    let publication = registry
+        .ensure_session_claim(stream_id)
+        .await
+        .expect("claim admission");
+    let demoting = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.forget_claim_locally(stream_id).await })
+    };
+
+    tokio::task::yield_now().await;
+    assert!(
+        !demoting.is_finished(),
+        "self-fence demotion must wait until transport publication completes"
+    );
+    assert_eq!(
+        registry.locally_owned_claim_ids().expect("owned inventory"),
+        vec![stream_id.to_string()]
+    );
+
+    drop(publication);
+    demoting.await.expect("demotion task");
+    assert!(registry
+        .locally_owned_claim_ids()
+        .expect("owned inventory")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn exact_owner_inventory_excludes_fresh_post_rotation_admissions() {
+    let old = crate::ownership::NodeIdentity::new("sm-node", "old-incarnation");
+    let fresh = crate::ownership::NodeIdentity::new("sm-node", "fresh-incarnation");
+    let shared = crate::ownership::SharedNodeIdentity::new(old.clone());
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new()),
+        shared.clone(),
+    );
+    let old_publication = registry
+        .ensure_session_claim("old-enable")
+        .await
+        .expect("old claim admission");
+    drop(old_publication);
+
+    shared.rotate(fresh.clone()).await;
+    let fresh_publication = registry
+        .ensure_session_claim("fresh-enable")
+        .await
+        .expect("fresh claim admission");
+    drop(fresh_publication);
+
+    assert_eq!(
+        registry
+            .locally_owned_claim_ids_for_owner(&old)
+            .expect("old-owner inventory"),
+        vec!["old-enable".to_string()]
+    );
+    assert_eq!(
+        registry
+            .locally_owned_claim_ids_for_owner(&fresh)
+            .expect("fresh-owner inventory"),
+        vec!["fresh-enable".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn pending_claim_retry_limit_is_shared_across_acquisitions_and_releases() {
     use crate::ownership::ClaimStore as _;
 
