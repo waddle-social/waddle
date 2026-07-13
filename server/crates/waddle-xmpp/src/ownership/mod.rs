@@ -218,6 +218,13 @@ pub struct ClaimEpoch(pub i64);
 pub struct NodeIdentity {
     pub node_id: String,
     pub node_epoch: String,
+    authority: NodeAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum NodeAuthority {
+    Active,
+    TerminallyDisabled,
 }
 
 impl NodeIdentity {
@@ -225,6 +232,7 @@ impl NodeIdentity {
         Self {
             node_id: node_id.into(),
             node_epoch: node_epoch.into(),
+            authority: NodeAuthority::Active,
         }
     }
 
@@ -233,6 +241,10 @@ impl NodeIdentity {
     /// node identity is not a meaningful concept (there is only one node).
     pub fn local() -> Self {
         Self::new("local", "local")
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.authority == NodeAuthority::Active
     }
 }
 
@@ -324,7 +336,7 @@ impl SharedNodeIdentity {
     ) -> Option<CurrentNodeIdentityGuard> {
         let rotation_guard = self.rotation_gate.clone().read_owned().await;
         let identity = self.current();
-        (identity == *expected).then_some(CurrentNodeIdentityGuard {
+        (identity.is_active() && identity == *expected).then_some(CurrentNodeIdentityGuard {
             identity,
             rotation_gate: self.rotation_gate.clone(),
             _rotation_guard: rotation_guard,
@@ -354,6 +366,18 @@ impl SharedNodeIdentity {
             .identity
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+    }
+
+    /// Permanently revoke publication authority for this clustering
+    /// lifetime after every in-flight guarded publication has drained.
+    /// The last identity remains inspectable for diagnostics, but compares
+    /// unequal to its former active value and cannot pass a claim acquire.
+    pub async fn disable(&self) {
+        let _rotation_guard = self.rotation_gate.write().await;
+        self.identity
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .authority = NodeAuthority::TerminallyDisabled;
     }
 }
 
@@ -436,6 +460,12 @@ pub enum ClaimError {
     /// refused.
     #[error("this node is draining and refuses to acquire a new claim")]
     Draining,
+
+    /// The process terminally revoked its shared node identity after a
+    /// fatal ownership ambiguity. No new or self-reacquired claim may be
+    /// published under that identity.
+    #[error("this node identity is terminally disabled")]
+    AuthorityDisabled,
 }
 
 /// Result of an ownership- and epoch-exact release attempt.
@@ -708,6 +738,25 @@ mod tests {
 
         assert_eq!(clone.current(), NodeIdentity::new("node-a", "epoch-1"));
         assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
+    }
+
+    #[tokio::test]
+    async fn terminally_disabled_identity_rejects_guards_and_claim_acquisition() {
+        let active = NodeIdentity::new("node-a", "epoch-0");
+        let shared = SharedNodeIdentity::new(active.clone());
+        shared.disable().await;
+
+        let disabled = shared.current();
+        assert!(!disabled.is_active());
+        assert_ne!(disabled, active);
+        assert!(shared.guard_if_current(&disabled).await.is_none());
+
+        let store = InProcessClaimStore::new();
+        let entity = Entity::new(EntityType::SmSession, "disabled-owner");
+        assert!(matches!(
+            store.acquire(&entity, &disabled).await,
+            Err(ClaimError::AuthorityDisabled)
+        ));
     }
 
     #[tokio::test]

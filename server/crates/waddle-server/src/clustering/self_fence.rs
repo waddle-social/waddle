@@ -28,7 +28,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, StalePredicate,
+    ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, SharedNodeIdentity,
 };
 
 use super::claims::NodeLeaseStore;
@@ -489,14 +489,10 @@ where
 /// FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated):
 /// reclaim `old_identity`'s own orphaned `sm_session` claims inline, under
 /// `fresh`, rather than waiting for the general orphan reaper's
-/// independent cadence to notice them. `list_orphaned_sm_session_claims`
-/// returns candidates cluster-wide (any node's dead claims); this function
-/// filters to exactly `old_identity` — this node's own just-superseded
-/// identity, provably dead because THIS loop is the one that just
-/// re-registered past it — so it never touches another node's genuinely
-/// dead claims (the general reaper remains the sole mechanism for those,
-/// preserving the "backstop for other nodes" carried-risk boundary FIX 4's
-/// own doc note names honestly).
+/// independent cadence to notice them. The scan is owner-indexed and capped
+/// to one raw page, so other nodes' orphan populations cannot inflate this
+/// re-registration critical path. The general reaper remains the backstop
+/// for overflow and every other dead owner.
 ///
 /// Caller bounds this whole call against `config.lease_ttl` (mirroring
 /// every other control-plane call in [`run_node_lease`]); this function
@@ -510,31 +506,27 @@ async fn reclaim_own_expired_claims<L>(
     old_identity: &NodeIdentity,
     fresh: &NodeIdentity,
     local_claims: &dyn LocallyClaimedEntities,
+    lease_ttl: Duration,
 ) where
     L: NodeLeaseStore + Send + Sync,
 {
-    let candidates = match lease.list_orphaned_sm_session_claims().await {
+    const INLINE_RECLAIM_LIMIT: usize = 64;
+    let candidates = match lease
+        .list_orphaned_sm_session_claims_for_owner(old_identity, INLINE_RECLAIM_LIMIT)
+        .await
+    {
         Ok(candidates) => candidates,
         Err(error) => {
             tracing::warn!(
                 %error,
                 node_id = %old_identity.node_id,
-                "clustering: inline post-fence reclaim: list_orphaned_sm_session_claims failed"
+                "clustering: inline post-fence owner-scoped SM scan failed"
             );
             return;
         }
     };
 
     for candidate in candidates {
-        if candidate.owner != *old_identity {
-            // Another node's genuinely dead claim — not this node's own
-            // just-superseded identity. Left for the general orphan
-            // reaper, exactly as element 9 describes; naming that
-            // boundary honestly (rather than silently widening this
-            // node's own inline reclaim to cover it) is the point of FIX
-            // 4's "residual window" carried-risk note.
-            continue;
-        }
         let Some(reservation_token) =
             local_claims.reserve_reclaimed_claim_capacity(&candidate.entity)
         else {
@@ -546,12 +538,13 @@ async fn reclaim_own_expired_claims<L>(
             fresh.clone(),
             reservation_token,
         );
-        match claim_store
-            .steal_stale(
+        match lease
+            .steal_own_expired_sm_session_claim(
+                claim_store,
                 &candidate.entity,
                 candidate.epoch,
-                StalePredicate::OwnerStale,
                 fresh,
+                lease_ttl,
             )
             .await
         {
@@ -809,6 +802,143 @@ pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
 /// callers only ever expire an identity this loop or the reaper has
 /// independently proven dead, never the identity a phantom-row retry would
 /// have minted.)
+struct TerminalFenceContext<'a, L> {
+    lease: &'a L,
+    live_identity: &'a SharedNodeIdentity,
+    local_claims: &'a Arc<dyn LocallyClaimedEntities>,
+    readiness: &'a ClusteringReadiness,
+    stop_token: &'a CancellationToken,
+    fatal_fence: &'a CancellationToken,
+    control_plane_budget: Duration,
+}
+
+impl<L> TerminalFenceContext<'_, L>
+where
+    L: NodeLeaseStore + Send + Sync,
+{
+    async fn shutdown(
+        &self,
+        claim_store: &Arc<dyn ClaimStore>,
+        identity: &NodeIdentity,
+        claim_release_budget: Duration,
+        lease_ttl: Duration,
+    ) {
+        // The clustering scope can be stopped independently of axum. Stop
+        // admitting traffic and NEW claims first, but keep the current
+        // identity authoritative while mailbox seal barriers complete the
+        // final fenced writes for already-owned rooms.
+        self.readiness.set_ready(false);
+        if self.fatal_fence.is_cancelled() {
+            self.finish(identity, identity).await;
+            return;
+        }
+
+        let mark_draining = std::pin::pin!(mark_draining_bounded(
+            self.lease,
+            identity,
+            self.control_plane_budget,
+        ));
+        tokio::select! {
+            biased;
+            _ = self.fatal_fence.cancelled() => {
+                self.finish(identity, identity).await;
+                return;
+            }
+            _ = mark_draining => {}
+        }
+
+        let drain = std::pin::pin!(run_shutdown_drain_with_heartbeat(
+            self.lease,
+            claim_store,
+            identity,
+            self.local_claims,
+            claim_release_budget,
+            lease_ttl,
+        ));
+        tokio::select! {
+            biased;
+            _ = self.fatal_fence.cancelled() => {
+                self.finish(identity, identity).await;
+                return;
+            }
+            _ = drain => {}
+        }
+
+        // Only after every successful seal has been released may the
+        // publication barrier reject the remaining identity. Exact demotion
+        // retires anything the bounded drain deliberately abandoned.
+        self.live_identity.disable().await;
+        self.local_claims.demote_owned_by(identity).await;
+        for entity in self.local_claims.owned().await {
+            self.local_claims.demote(&entity).await;
+        }
+    }
+
+    async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
+        self.readiness.set_ready(false);
+        self.stop_token.cancel();
+
+        // A registration call is deliberately allowed to finish instead of
+        // being cancellation-dropped: once it returns, rotate through a
+        // publication barrier and retire both identities that might own work.
+        // Disabled is a typed terminal state: publication guards and claim
+        // stores both reject it for the rest of this clustering lifetime.
+        self.live_identity.disable().await;
+        self.local_claims.demote_owned_by(prior_identity).await;
+        if registered_identity != prior_identity {
+            self.local_claims.demote_owned_by(registered_identity).await;
+        }
+        for entity in self.local_claims.owned().await {
+            self.local_claims.demote(&entity).await;
+        }
+        mark_draining_bounded(self.lease, prior_identity, self.control_plane_budget).await;
+        if registered_identity != prior_identity {
+            mark_draining_bounded(self.lease, registered_identity, self.control_plane_budget).await;
+        }
+    }
+}
+
+async fn run_pre_ready_heartbeat<L>(
+    lease: Arc<L>,
+    identity: NodeIdentity,
+    cancel: CancellationToken,
+    fatal_fence: CancellationToken,
+    heartbeat_interval: Duration,
+    lease_ttl: Duration,
+) where
+    L: NodeLeaseStore + Send + Sync + 'static,
+{
+    let mut timer = tokio::time::interval(heartbeat_interval);
+    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    timer.tick().await;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            _ = fatal_fence.cancelled() => return,
+            _ = timer.tick() => {
+                let renewal = std::pin::pin!(tokio::time::timeout(
+                    lease_ttl,
+                    lease.heartbeat(&identity, lease_ttl),
+                ));
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    _ = fatal_fence.cancelled() => return,
+                    result = renewal => result,
+                };
+                match result {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+                        fatal_fence.cancel();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn run_node_lease<L>(
     lease: L,
     mut identity: NodeIdentity,
@@ -829,6 +959,17 @@ pub async fn run_node_lease<L>(
         claim_store,
         claim_release_budget,
     } = run_config;
+    let lease = Arc::new(lease);
+    let fatal_fence = readiness.fatal_fence_token();
+    let terminal_fence_context = TerminalFenceContext {
+        lease: lease.as_ref(),
+        live_identity: &live_identity,
+        local_claims: &local_claims,
+        readiness: &readiness,
+        stop_token: &stop_token,
+        fatal_fence: &fatal_fence,
+        control_plane_budget: config.heartbeat_interval,
+    };
     // Seed the shared handle with the identity this loop starts under —
     // see `live_identity`'s doc comment and the `identity = fresh;`
     // reassignment below, which keeps it current across every
@@ -841,6 +982,7 @@ pub async fn run_node_lease<L>(
     );
 
     'registered: loop {
+        let mut terminal_fence = false;
         let mut timer = tokio::time::interval_at(
             tokio::time::Instant::now() + config.heartbeat_interval,
             config.heartbeat_interval,
@@ -861,8 +1003,12 @@ pub async fn run_node_lease<L>(
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                     return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence = true;
+                    break;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                     break;
@@ -877,8 +1023,12 @@ pub async fn run_node_lease<L>(
             let renewed = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                     return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence = true;
+                    break;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                     break;
@@ -920,8 +1070,12 @@ pub async fn run_node_lease<L>(
             let other_live_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                     return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence = true;
+                    break;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                     break;
@@ -946,13 +1100,32 @@ pub async fn run_node_lease<L>(
                 break;
             }
 
-            let owned = local_claims.owned().await;
+            let owned_future = std::pin::pin!(local_claims.owned());
+            let owned = tokio::select! {
+                biased;
+                _ = stop_token.cancelled() => {
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence = true;
+                    break;
+                }
+                _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
+                    break;
+                }
+                owned = owned_future => owned,
+            };
             let reconcile_future = std::pin::pin!(lease.reconcile(&identity, &owned));
             let reconcile_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                     return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence = true;
+                    break;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                     break;
@@ -986,8 +1159,12 @@ pub async fn run_node_lease<L>(
             let intents_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                     return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence = true;
+                    break;
                 }
                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                     break;
@@ -1009,8 +1186,12 @@ pub async fn run_node_lease<L>(
                         let healthy = tokio::select! {
                             biased;
                             _ = stop_token.cancelled() => {
-                                run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                                 return;
+                            }
+                            _ = fatal_fence.cancelled() => {
+                                terminal_fence = true;
+                                break 'tick;
                             }
                             _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                                 break 'tick;
@@ -1023,8 +1204,12 @@ pub async fn run_node_lease<L>(
                             let cleared = tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
-                                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                                     return;
+                                }
+                                _ = fatal_fence.cancelled() => {
+                                    terminal_fence = true;
+                                    break 'tick;
                                 }
                                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                                     break 'tick;
@@ -1057,8 +1242,12 @@ pub async fn run_node_lease<L>(
                                     tokio::select! {
                                         biased;
                                         _ = stop_token.cancelled() => {
-                                            run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                            terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                                             return;
+                                        }
+                                        _ = fatal_fence.cancelled() => {
+                                            terminal_fence = true;
+                                            break 'tick;
                                         }
                                         _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                                             break 'tick;
@@ -1091,8 +1280,12 @@ pub async fn run_node_lease<L>(
                             tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
-                                    run_shutdown_drain_with_heartbeat(&lease, &claim_store, &identity, &local_claims, claim_release_budget, config.lease_ttl).await;
+                                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
                                     return;
+                                }
+                                _ = fatal_fence.cancelled() => {
+                                    terminal_fence = true;
+                                    break 'tick;
                                 }
                                 _ = tokio::time::sleep_until(last_success + config.lease_ttl) => {
                                     break 'tick;
@@ -1108,6 +1301,21 @@ pub async fn run_node_lease<L>(
             }
         }
 
+        // Fatal recovery ambiguity is terminal for this clustering lifetime.
+        // Disable the shared identity before taking the final ownership
+        // snapshot: `rotate` waits for every old-identity publication guard,
+        // then rejects any later SM/RoomActor publication under that owner.
+        // This is the quiescence barrier that makes the following one-shot
+        // demotion sweep complete even while recovery workers are winding
+        // down.
+        if terminal_fence {
+            readiness.set_ready(false);
+            stop_token.cancel();
+            let superseded_identity = identity.clone();
+            live_identity.disable().await;
+            local_claims.demote_owned_by(&superseded_identity).await;
+        }
+
         // Self-fenced (either trigger): stop serving before the lease
         // becomes stealable, then flip client-facing readiness.
         for entity in local_claims.owned().await {
@@ -1120,7 +1328,11 @@ pub async fn run_node_lease<L>(
         // draining, bounded — narrows how long other nodes keep counting
         // it as live (FIX 1(c) already excludes draining rows regardless
         // of heartbeat freshness).
-        mark_draining_bounded(&lease, &identity, config.heartbeat_interval).await;
+        mark_draining_bounded(lease.as_ref(), &identity, config.heartbeat_interval).await;
+
+        if terminal_fence {
+            return;
+        }
 
         // FIX 1(a): mint the fresh re-registration identity ONCE per
         // fence — every retry below (including hysteresis-rejected ones)
@@ -1136,26 +1348,83 @@ pub async fn run_node_lease<L>(
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    // FIX 3: `fresh` may already be live in
-                    // `clustering_nodes` from an earlier hysteresis-rejected
-                    // retry in this same fence (or may not exist yet at
-                    // all, in which case this is a harmless no-op) — mark
-                    // it draining too before returning on ordinary
-                    // shutdown.
-                    mark_draining_bounded(&lease, &fresh, config.heartbeat_interval).await;
+                    terminal_fence_context.finish(&identity, &fresh).await;
+                    return;
+                }
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence_context.finish(&identity, &fresh).await;
                     return;
                 }
                 _ = tokio::time::sleep(backoff.next_delay()) => {}
             }
-            match lease
-                .register_with_peer_id(&fresh, pod_template_hash.clone(), peer_id.clone())
-                .await
-            {
+            let registration_lease = Arc::clone(&lease);
+            let registration_identity = fresh.clone();
+            let registration_fatal = fatal_fence.clone();
+            let registration_stop = stop_token.clone();
+            let registration_hash = pod_template_hash.clone();
+            let registration_peer_id = peer_id.clone();
+            let control_plane_budget = config.heartbeat_interval;
+            let mut registration = tokio::spawn(async move {
+                let result = registration_lease
+                    .register_with_peer_id(
+                        &registration_identity,
+                        registration_hash,
+                        registration_peer_id,
+                    )
+                    .await;
+                if registration_fatal.is_cancelled() || registration_stop.is_cancelled() {
+                    mark_draining_bounded(
+                        registration_lease.as_ref(),
+                        &registration_identity,
+                        control_plane_budget,
+                    )
+                    .await;
+                }
+                result
+            });
+            let registration_result = tokio::select! {
+                biased;
+                _ = fatal_fence.cancelled() => {
+                    terminal_fence_context.finish(&identity, &fresh).await;
+                    return;
+                }
+                _ = stop_token.cancelled() => {
+                    terminal_fence_context.finish(&identity, &fresh).await;
+                    return;
+                }
+                joined = &mut registration => match joined {
+                    Ok(result) => result,
+                    Err(error) => Err(ClaimError::Backend(format!(
+                        "node re-registration task failed: {error}"
+                    ))),
+                }
+            };
+            match registration_result {
                 Ok(()) => {
-                    let other_live = lease
-                        .count_other_live_nodes(&fresh, config.lease_ttl)
-                        .await
-                        .unwrap_or(usize::MAX);
+                    if fatal_fence.is_cancelled() {
+                        terminal_fence_context.finish(&identity, &fresh).await;
+                        return;
+                    }
+                    let count_identity = fresh.clone();
+                    let count_future = std::pin::pin!(
+                        lease.count_other_live_nodes(&count_identity, config.lease_ttl)
+                    );
+                    let other_live = tokio::select! {
+                        biased;
+                        _ = fatal_fence.cancelled() => {
+                            terminal_fence_context.finish(&identity, &fresh).await;
+                            return;
+                        }
+                        _ = stop_token.cancelled() => {
+                            terminal_fence_context.finish(&identity, &fresh).await;
+                            return;
+                        }
+                        result = count_future => result.unwrap_or(usize::MAX),
+                    };
+                    if fatal_fence.is_cancelled() {
+                        terminal_fence_context.finish(&identity, &fresh).await;
+                        return;
+                    }
                     let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
                     if can_reacquire_claims(other_live, reachable) {
                         // ADR-0017 Phase 3 Slice 5 (plan deviation #19,
@@ -1178,14 +1447,55 @@ pub async fn run_node_lease<L>(
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
-                        for entity in local_claims.owned().await {
+                        let owned_future = std::pin::pin!(local_claims.owned());
+                        let owned = tokio::select! {
+                            biased;
+                            _ = fatal_fence.cancelled() => {
+                                terminal_fence_context.finish(&identity, &fresh).await;
+                                return;
+                            }
+                            _ = stop_token.cancelled() => {
+                                terminal_fence_context.finish(&identity, &fresh).await;
+                                return;
+                            }
+                            owned = owned_future => owned,
+                        };
+                        for entity in owned {
                             local_claims.demote(&entity).await;
                         }
 
                         let superseded_identity = identity.clone();
                         identity = fresh;
                         live_identity.rotate(identity.clone()).await;
-                        local_claims.demote_owned_by(&superseded_identity).await;
+                        let recovery_heartbeat_cancel = CancellationToken::new();
+                        let mut recovery_heartbeat = tokio::spawn(run_pre_ready_heartbeat(
+                            Arc::clone(&lease),
+                            identity.clone(),
+                            recovery_heartbeat_cancel.clone(),
+                            fatal_fence.clone(),
+                            config.heartbeat_interval,
+                            config.lease_ttl,
+                        ));
+                        let exact_demote =
+                            std::pin::pin!(local_claims.demote_owned_by(&superseded_identity));
+                        tokio::select! {
+                            biased;
+                            _ = fatal_fence.cancelled() => {
+                                recovery_heartbeat_cancel.cancel();
+                                recovery_heartbeat.abort();
+                                let _ = (&mut recovery_heartbeat).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                return;
+                            }
+                            _ = stop_token.cancelled() => {
+                                recovery_heartbeat_cancel.cancel();
+                                recovery_heartbeat.abort();
+                                let _ = (&mut recovery_heartbeat).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                return;
+                            }
+                            _ = exact_demote => {}
+                        }
 
                         // What "claim re-acquisition" can mean AT THIS
                         // EXACT POINT: every entity this node owned before
@@ -1201,7 +1511,29 @@ pub async fn run_node_lease<L>(
                         // just-superseded identity is genuinely dead — so it
                         // commits that knowledge to Postgres immediately
                         // via `NodeLeaseStore::expire`.
-                        expire_bounded(&lease, &superseded_identity, config.lease_ttl).await;
+                        let expire_future = std::pin::pin!(expire_bounded(
+                            lease.as_ref(),
+                            &superseded_identity,
+                            config.lease_ttl,
+                        ));
+                        tokio::select! {
+                            biased;
+                            _ = fatal_fence.cancelled() => {
+                                recovery_heartbeat_cancel.cancel();
+                                recovery_heartbeat.abort();
+                                let _ = (&mut recovery_heartbeat).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                return;
+                            }
+                            _ = stop_token.cancelled() => {
+                                recovery_heartbeat_cancel.cancel();
+                                recovery_heartbeat.abort();
+                                let _ = (&mut recovery_heartbeat).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                return;
+                            }
+                            _ = expire_future => {}
+                        }
 
                         // FIX 4(b), council-adjudicated: rather than
                         // leaving every one of this node's own dropped
@@ -1216,15 +1548,35 @@ pub async fn run_node_lease<L>(
                         // `reclaim_own_expired_claims`'s owner filter).
                         let reclaim_timed_out = {
                             let reclaim_future = std::pin::pin!(reclaim_own_expired_claims(
-                                &lease,
+                                lease.as_ref(),
                                 claim_store.as_ref(),
                                 &superseded_identity,
                                 &identity,
                                 local_claims.as_ref(),
+                                config.lease_ttl,
                             ));
-                            tokio::time::timeout(config.lease_ttl, reclaim_future)
-                                .await
-                                .is_err()
+                            let reclaim = std::pin::pin!(tokio::time::timeout(
+                                config.lease_ttl,
+                                reclaim_future
+                            ));
+                            tokio::select! {
+                                biased;
+                                _ = fatal_fence.cancelled() => {
+                                    recovery_heartbeat_cancel.cancel();
+                                    recovery_heartbeat.abort();
+                                    let _ = (&mut recovery_heartbeat).await;
+                                    terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                    return;
+                                }
+                                _ = stop_token.cancelled() => {
+                                    recovery_heartbeat_cancel.cancel();
+                                    recovery_heartbeat.abort();
+                                    let _ = (&mut recovery_heartbeat).await;
+                                    terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                    return;
+                                }
+                                result = reclaim => result.is_err(),
+                            }
                         };
                         if reclaim_timed_out {
                             tracing::warn!(
@@ -1235,8 +1587,69 @@ pub async fn run_node_lease<L>(
                             );
                         }
 
+                        recovery_heartbeat_cancel.cancel();
+                        let _ = (&mut recovery_heartbeat).await;
+
+                        if fatal_fence.is_cancelled() {
+                            terminal_fence_context
+                                .finish(&superseded_identity, &identity)
+                                .await;
+                            return;
+                        }
+
+                        // The background heartbeat keeps the fresh row live
+                        // during recovery; prove it once more immediately
+                        // before readiness so no stale fresh identity can be
+                        // published as serving.
+                        let final_heartbeat = std::pin::pin!(tokio::time::timeout(
+                            config.lease_ttl,
+                            lease.heartbeat(&identity, config.lease_ttl),
+                        ));
+                        let heartbeat_is_fresh = tokio::select! {
+                            biased;
+                            _ = fatal_fence.cancelled() => false,
+                            _ = stop_token.cancelled() => false,
+                            result = final_heartbeat => matches!(result, Ok(Ok(true))),
+                        };
+                        if !heartbeat_is_fresh {
+                            fatal_fence.cancel();
+                            terminal_fence_context
+                                .finish(&superseded_identity, &identity)
+                                .await;
+                            return;
+                        }
+
                         backoff.reset();
+                        if stop_token.is_cancelled() {
+                            terminal_fence_context
+                                .shutdown(
+                                    &claim_store,
+                                    &identity,
+                                    claim_release_budget,
+                                    config.lease_ttl,
+                                )
+                                .await;
+                            return;
+                        }
                         readiness.set_ready(true);
+                        if fatal_fence.is_cancelled() {
+                            readiness.set_ready(false);
+                            terminal_fence_context
+                                .finish(&superseded_identity, &identity)
+                                .await;
+                            return;
+                        }
+                        if stop_token.is_cancelled() {
+                            terminal_fence_context
+                                .shutdown(
+                                    &claim_store,
+                                    &identity,
+                                    claim_release_budget,
+                                    config.lease_ttl,
+                                )
+                                .await;
+                            return;
+                        }
                         tracing::info!(
                             node_id = %identity.node_id,
                             "clustering node re-registered; readiness restored"
@@ -1401,6 +1814,8 @@ mod tests {
         clear_reports_zero_rows: Arc<AtomicBool>,
         orphaned_sm_claims:
             Arc<std::sync::Mutex<Vec<crate::clustering::claims::OrphanedSmSessionClaim>>>,
+        registration_entered: Option<Arc<tokio::sync::Notify>>,
+        registration_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl FakeLease {
@@ -1417,6 +1832,8 @@ mod tests {
                 cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 clear_reports_zero_rows: Arc::new(AtomicBool::new(false)),
                 orphaned_sm_claims: Arc::new(std::sync::Mutex::new(Vec::new())),
+                registration_entered: None,
+                registration_release: None,
             }
         }
     }
@@ -1433,6 +1850,12 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .insert(me.node_id.clone());
+            if let Some(entered) = &self.registration_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.registration_release {
+                release.notified().await;
+            }
             Ok(())
         }
         async fn heartbeat(
@@ -1650,7 +2073,8 @@ mod tests {
         let draining_calls = Arc::clone(&lease.draining_calls);
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
-        tokio::spawn(run_node_lease(
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity());
+        let task = tokio::spawn(run_node_lease(
             lease,
             identity(),
             stop_token.clone(),
@@ -1669,7 +2093,7 @@ mod tests {
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims: Arc::new(NoLocallyClaimedEntities),
                 readiness: readiness.clone(),
-                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                live_identity: live_identity.clone(),
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
@@ -1694,6 +2118,15 @@ mod tests {
             "the fenced identity must be marked draining before re-registration"
         );
         stop_token.cancel();
+        task.await.expect("node lease exits after shutdown drain");
+        assert!(
+            !readiness.is_ready(),
+            "clustering shutdown must revoke readiness even after re-registration"
+        );
+        assert!(
+            !live_identity.current().is_active(),
+            "clustering shutdown must revoke publication authority"
+        );
     }
 
     // FIX 1(a): the row-leak wedge regression test. With `other_live_nodes`
@@ -2147,6 +2580,39 @@ mod tests {
         deferred: std::sync::Mutex<Vec<Entity>>,
     }
 
+    struct BlockingSealLocalClaims {
+        entity: Entity,
+        seal_started: Arc<tokio::sync::Notify>,
+        seal_release: Arc<tokio::sync::Notify>,
+        exact_demoted_owners: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for BlockingSealLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            vec![self.entity.clone()]
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn demote_owned_by(&self, owner: &NodeIdentity) {
+            self.exact_demoted_owners
+                .lock()
+                .expect("lock")
+                .push(owner.clone());
+        }
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn seal_before_release(&self, _entity: &Entity) -> bool {
+            self.seal_started.notify_one();
+            self.seal_release.notified().await;
+            true
+        }
+    }
+
     #[async_trait]
     impl LocallyClaimedEntities for RejectingHydrationLocalClaims {
         async fn owned(&self) -> Vec<Entity> {
@@ -2545,6 +3011,304 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn fatal_orphan_recovery_fence_demotes_every_claim_before_clustering_stops() {
+        let interval = Duration::from_millis(50);
+        let lease_ttl = Duration::from_secs(10);
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let entities = vec![
+            user_actor_entity("fatal-fence-user"),
+            waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                "fatal-fence-room",
+            ),
+            waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::SmSession,
+                "fatal-fence-sm",
+            ),
+        ];
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: entities.clone(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::clone(&demoted),
+            exact_demoted_owners: Arc::clone(&exact_demoted_owners),
+            hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
+        });
+        let readiness = ClusteringReadiness::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let stop_token = CancellationToken::new();
+        let initial_identity = identity();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl,
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        fatal_fence.cancel();
+        task.await.expect("node lease exits after terminal fence");
+
+        let mut demoted_entities = demoted.lock().expect("lock").clone();
+        demoted_entities.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut expected = entities;
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(demoted_entities, expected);
+        assert!(!readiness.is_ready());
+        assert_ne!(
+            live_identity.current(),
+            initial_identity,
+            "fatal fencing must enter a terminally disabled publication state"
+        );
+        assert_eq!(
+            exact_demoted_owners.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&initial_identity),
+            "all work published under the superseded identity must be demoted"
+        );
+        assert!(
+            stop_token.is_cancelled(),
+            "sibling clustering tasks stop only after local authority is demoted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_fence_latched_during_reregistration_cannot_restore_readiness() {
+        let interval = Duration::from_millis(50);
+        let mut lease = FakeLease::new(Box::new(|| Ok(false)));
+        let registration_entered = Arc::new(tokio::sync::Notify::new());
+        let registration_release = Arc::new(tokio::sync::Notify::new());
+        lease.registration_entered = Some(Arc::clone(&registration_entered));
+        lease.registration_release = Some(Arc::clone(&registration_release));
+
+        let initial_identity = identity();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: Vec::new(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            exact_demoted_owners: Arc::clone(&exact_demoted_owners),
+            hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
+        });
+        let readiness = ClusteringReadiness::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval + Duration::from_millis(20)).await;
+        registration_entered.notified().await;
+        fatal_fence.cancel();
+        registration_release.notify_one();
+        task.await
+            .expect("terminal latch exits after registration returns");
+
+        assert!(!readiness.is_ready());
+        assert!(stop_token.is_cancelled());
+        let published = live_identity.current();
+        assert_ne!(published, initial_identity);
+        let exact = exact_demoted_owners.lock().expect("lock");
+        assert!(exact.contains(&initial_identity));
+        assert_eq!(
+            exact.len(),
+            2,
+            "both pre-fence and freshly registered owners retire"
+        );
+        assert!(
+            exact.iter().all(|owner| owner != &published),
+            "the live identity must be terminally disabled, not either retired owner"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_during_reregistration_disables_the_superseded_identity() {
+        let interval = Duration::from_millis(50);
+        let mut lease = FakeLease::new(Box::new(|| Ok(false)));
+        let registration_entered = Arc::new(tokio::sync::Notify::new());
+        let registration_release = Arc::new(tokio::sync::Notify::new());
+        lease.registration_entered = Some(Arc::clone(&registration_entered));
+        lease.registration_release = Some(Arc::clone(&registration_release));
+
+        let initial_identity = identity();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(FakeLocalClaims {
+            owned: Vec::new(),
+            healthy: Arc::new(AtomicBool::new(true)),
+            demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            exact_demoted_owners: Arc::clone(&exact_demoted_owners),
+            hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval + Duration::from_millis(20)).await;
+        registration_entered.notified().await;
+        stop_token.cancel();
+        registration_release.notify_one();
+        task.await
+            .expect("shutdown exits after terminally disabling publication");
+
+        assert!(!readiness.is_ready());
+        assert!(!live_identity.current().is_active());
+        let exact = exact_demoted_owners.lock().expect("lock");
+        assert!(exact.contains(&initial_identity));
+        assert_eq!(
+            exact.len(),
+            2,
+            "both pre-fence and potentially registered owners retire"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_fence_preempts_an_in_progress_graceful_drain() {
+        let interval = Duration::from_millis(50);
+        let initial_identity = identity();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let seal_started = Arc::new(tokio::sync::Notify::new());
+        let seal_release = Arc::new(tokio::sync::Notify::new());
+        let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims = Arc::new(BlockingSealLocalClaims {
+            entity: waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                "fatal-during-drain",
+            ),
+            seal_started: Arc::clone(&seal_started),
+            seal_release,
+            exact_demoted_owners: Arc::clone(&exact_demoted_owners),
+        });
+        let readiness = ClusteringReadiness::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            FakeLease::new(Box::new(|| Ok(true))),
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        stop_token.cancel();
+        seal_started.notified().await;
+        assert!(
+            live_identity.current().is_active(),
+            "ordinary drain keeps authority active through the seal barrier"
+        );
+
+        fatal_fence.cancel();
+        task.await
+            .expect("fatal ambiguity interrupts the blocked graceful drain");
+
+        assert!(!readiness.is_ready());
+        assert!(!live_identity.current().is_active());
+        assert_eq!(
+            exact_demoted_owners.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&initial_identity),
+            "fatal preemption exact-demotes the active identity once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn node_lease_post_rotation_sweeps_the_exact_superseded_owner() {
         let interval = Duration::from_millis(50);
         let initial_identity = identity();
@@ -2564,8 +3328,12 @@ mod tests {
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let stop_token = CancellationToken::new();
+        let mut heartbeat_calls = 0usize;
         tokio::spawn(run_node_lease(
-            FakeLease::new(Box::new(|| Ok(false))),
+            FakeLease::new(Box::new(move || {
+                heartbeat_calls += 1;
+                Ok(heartbeat_calls > 1)
+            })),
             initial_identity.clone(),
             stop_token.clone(),
             NodeLeaseRunConfig {
@@ -2647,7 +3415,15 @@ mod tests {
             hydrated: std::sync::Mutex::new(Vec::new()),
         };
 
-        reclaim_own_expired_claims(&lease, &store, &old, &fresh, &local).await;
+        reclaim_own_expired_claims(
+            &lease,
+            &store,
+            &old,
+            &fresh,
+            &local,
+            Duration::from_secs(10),
+        )
+        .await;
 
         assert_eq!(local.admission_attempts.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -2708,6 +3484,7 @@ mod tests {
                 &reclaim_old,
                 &reclaim_fresh,
                 reclaim_local.as_ref(),
+                Duration::from_secs(10),
             )
             .await;
         });
@@ -2752,7 +3529,15 @@ mod tests {
             deferred: std::sync::Mutex::new(Vec::new()),
         };
 
-        reclaim_own_expired_claims(&lease, &store, &old, &fresh, &local).await;
+        reclaim_own_expired_claims(
+            &lease,
+            &store,
+            &old,
+            &fresh,
+            &local,
+            Duration::from_secs(10),
+        )
+        .await;
 
         assert_eq!(
             store

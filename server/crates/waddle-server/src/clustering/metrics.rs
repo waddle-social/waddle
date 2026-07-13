@@ -307,9 +307,11 @@ pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
     );
 }
 
-/// Count work rejected by a bounded orphan-reaper queue. A nonzero value
-/// means ownership remains fenced-safe but recovery is deferred to a later
-/// sweep or node-incarnation expiry.
+/// Count work rejected by a bounded orphan-reaper queue or reservation gate.
+/// `queue` is one of the stable low-cardinality values `sm_hydration`,
+/// `room_release`, or `room_adoption`. A nonzero value means ownership
+/// remains fenced-safe but recovery is deferred to a later sweep or
+/// node-incarnation expiry.
 pub fn record_orphan_work_queue_backpressure(queue: &'static str) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {

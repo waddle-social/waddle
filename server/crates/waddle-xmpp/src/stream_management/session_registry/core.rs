@@ -1840,6 +1840,54 @@ impl InMemorySmSessionRegistry {
         self.clear_pending_reclaimed_hydration(entity, fence, reservation);
         Ok(outcome)
     }
+
+    /// Resolve an ownership CAS whose result was dropped without ever
+    /// hydrating the session locally. This is the terminal self-fence path:
+    /// a read-only claim lookup discovers whether `attempted_owner` won, and
+    /// an exact release retires only that observed generation. Lookup failure
+    /// cancels the local capacity reservation; the already self-fenced node's
+    /// lease expiry remains the durable recovery backstop.
+    pub async fn retire_uncertain_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        attempted_owner: &NodeIdentity,
+        reservation: ReclaimedClaimReservation,
+    ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
+        if entity.entity_type != EntityType::SmSession {
+            self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
+            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+        }
+        let snapshot = match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.current_claim(entity),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(error)) => {
+                self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
+                return Err(SmRegistryError::Internal(format!(
+                    "retire_uncertain_reclaimed_claim: exact owner lookup failed: {error}"
+                )));
+            }
+            Err(_) => {
+                self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
+                return Err(SmRegistryError::Internal(
+                    "retire_uncertain_reclaimed_claim: exact owner lookup timed out".to_string(),
+                ));
+            }
+        };
+        let Some(snapshot) = snapshot.filter(|snapshot| snapshot.owner == *attempted_owner) else {
+            self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
+            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+        };
+        let fence = super::super::persistence::SmClaimFence::new(
+            attempted_owner.clone(),
+            snapshot.claim_epoch,
+        );
+        self.release_reclaimed_claim(entity, &fence, reservation)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

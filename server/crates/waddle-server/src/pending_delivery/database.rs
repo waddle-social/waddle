@@ -133,9 +133,10 @@ fn claim_error_to_pending_storage_error(error: ClaimError, entity: Entity) -> Pe
         // `Draining`, will not become) the owner, so the caller should
         // treat it exactly like any other ownership loss, never a
         // transient backend error.
-        ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining => {
-            PendingStorageError::NotOwner { entity }
-        }
+        ClaimError::AlreadyClaimed
+        | ClaimError::Conflict
+        | ClaimError::Draining
+        | ClaimError::AuthorityDisabled => PendingStorageError::NotOwner { entity },
         ClaimError::Backend(_) | ClaimError::Poisoned => {
             PendingStorageError::Other(error.to_string())
         }

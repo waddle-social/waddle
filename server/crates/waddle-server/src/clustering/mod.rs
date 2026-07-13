@@ -168,27 +168,51 @@ pub(crate) fn keypair_slot_table_lock() -> &'static tokio::sync::Mutex<()> {
 /// `clustering.enabled = false`) never flips it, so it stays ready forever
 /// — today's behavior, unchanged.
 #[derive(Clone)]
-pub struct ClusteringReadiness(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub struct ClusteringReadiness {
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    fatal_fence: CancellationToken,
+}
 
 impl ClusteringReadiness {
     pub fn new() -> Self {
-        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            true,
-        )))
+        Self {
+            ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            fatal_fence: CancellationToken::new(),
+        }
     }
 
     pub fn is_ready(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Acquire)
+        self.ready.load(std::sync::atomic::Ordering::Acquire) && !self.fatal_fence.is_cancelled()
     }
 
     pub fn set_ready(&self, ready: bool) {
-        self.0.store(ready, std::sync::atomic::Ordering::Release);
+        self.ready
+            .store(ready, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn fatal_fence_token(&self) -> CancellationToken {
+        self.fatal_fence.clone()
     }
 }
 
 impl Default for ClusteringReadiness {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::ClusteringReadiness;
+
+    #[test]
+    fn fatal_latch_immediately_overrides_a_ready_flag() {
+        let readiness = ClusteringReadiness::new();
+        assert!(readiness.is_ready());
+        readiness.fatal_fence_token().cancel();
+        assert!(!readiness.is_ready());
+        readiness.set_ready(true);
+        assert!(!readiness.is_ready());
     }
 }
 
@@ -410,6 +434,12 @@ pub struct ClusteringHandles {
     /// Phase 3 Slice 6's `RelayHandle` cancellation-safety paydown).
     #[cfg(feature = "clustering")]
     pub stop_token: Option<CancellationToken>,
+    /// One-shot fatal fencing signal for clustering workers that discover
+    /// ambiguous post-CAS ownership state. Unlike `stop_token`, firing this
+    /// signal drives the node-lease loop through its demote/not-ready fence
+    /// path before clustering shuts down.
+    #[cfg(feature = "clustering")]
+    pub fatal_fence: Option<CancellationToken>,
     /// The resolved `ClusteringResumeHandshakeConfig::timeout` (ADR-0017
     /// Phase 3 Slice 6) — the cross-node resume path's held-response retry
     /// budget. Carried here (rather than threading `ServerConfig` itself)
@@ -588,6 +618,7 @@ pub async fn start_if_enabled(
         // node-lease/self-fence loop) is driven off this child, never the
         // raw process-wide `stop_token` — see `clustering_scope_token`.
         let clustering_stop = clustering_scope_token(stop_token);
+        let fatal_fence = readiness.fatal_fence_token();
         // ADR-0017 Phase 3 Slice 6: constructed empty (the `ConnectionRegistry`
         // doesn't exist yet at this point in startup) and wired to it later by
         // `server/http.rs::create_sm_session_registry` — the same
@@ -739,6 +770,7 @@ pub async fn start_if_enabled(
             resume_bridge: Some(resume_bridge),
             ordered_relay_delivery_bridge: Some(ordered_relay_delivery_bridge),
             stop_token: Some(clustering_stop.clone()),
+            fatal_fence: Some(fatal_fence.clone()),
             resume_handshake_timeout: Some(config.resume_handshake.timeout),
         };
 

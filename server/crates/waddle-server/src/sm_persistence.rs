@@ -512,9 +512,10 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
 /// (`clustering::ClusteringHandles::claim_pair`); it is `None` whenever
 /// clustering is disabled, this binary lacks the `clustering` feature, or
 /// (defensively) the subsystem started without producing handles. Any of
-/// those cases — or `clustering_enabled` being false, or the database URL
-/// not being a `postgres://`/`postgresql://` URL — falls back to the
-/// portable implementation, exactly today's behavior.
+/// those cases when clustering is disabled. When clustering is enabled,
+/// Postgres co-location and live claim handles are mandatory: falling back
+/// to portable persistence would make the claim reaper query a different
+/// (or nonexistent) `sm_sessions` table and violate ownership fencing.
 ///
 /// `global_db` is the same [`Database`] handle `clustering::start_if_enabled`
 /// itself received (`db_pool.global()`) — FIX 4: the fenced impl is
@@ -538,9 +539,14 @@ pub async fn open_for_cluster_mode(
 ) -> Result<Arc<dyn SmPersistenceStorage>, SmPersistenceError> {
     #[cfg(feature = "clustering")]
     {
-        let resolved_sm_url = database_url
-            .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"));
-        if let (true, Some(resolved_sm_url)) = (clustering_enabled, resolved_sm_url) {
+        if clustering_enabled {
+            let resolved_sm_url = database_url
+                .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
+                .ok_or_else(|| SmPersistenceError::ClusterRequiresPostgres {
+                    sm_database_url: database_url
+                        .map(crate::db::redact_database_url)
+                        .unwrap_or_else(|| "<unset>".to_string()),
+                })?;
             // FIX 4 — co-location invariant, checked before anything else
             // in this branch runs: clustered SM persistence and the
             // clustering claims tables must live in the same Postgres
@@ -554,27 +560,23 @@ pub async fn open_for_cluster_mode(
                     global_database_url: crate::db::redact_database_url(global_db.database_url()),
                 });
             }
-            if let Some((claim_store, node_identity)) = claim_pair {
-                let fenced = crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
-                    global_db.clone(),
-                    claim_store,
-                    node_identity,
-                )
-                .await?;
-                return Ok(Arc::new(fenced));
-            }
-            tracing::warn!(
-                "clustering.enabled with a Postgres SM database URL, but the clustering \
-                 subsystem produced no live ClaimStore/NodeIdentity handles; falling back to \
-                 the portable (unfenced) SmPersistenceStorage. This should only happen if \
-                 clustering startup itself failed before this point (which fails the server \
-                 boot), so seeing this warning indicates a wiring bug."
-            );
+            let (claim_store, node_identity) =
+                claim_pair.ok_or(SmPersistenceError::ClusterClaimHandlesUnavailable)?;
+            let fenced = crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
+                global_db.clone(),
+                claim_store,
+                node_identity,
+            )
+            .await?;
+            return Ok(Arc::new(fenced));
         }
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (clustering_enabled, claim_pair, global_db);
+        let _ = (claim_pair, global_db);
+        if clustering_enabled {
+            return Err(SmPersistenceError::ClusterClaimHandlesUnavailable);
+        }
     }
     Ok(Arc::new(DatabaseSmPersistence::open(database_url).await?))
 }
