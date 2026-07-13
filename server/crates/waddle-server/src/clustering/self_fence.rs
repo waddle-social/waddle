@@ -102,6 +102,12 @@ impl ConnectedPeerCount {
 /// Slice 4) starts calling `ClaimStore::acquire` at `<enable/>` time. Until
 /// then, [`start_if_enabled`](super::start_if_enabled) wires
 /// [`NoLocallyClaimedEntities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimedHydrationHandoff {
+    Accepted,
+    NotAccepted,
+}
+
 #[async_trait]
 pub trait LocallyClaimedEntities: Send + Sync {
     /// Every entity this process currently believes it owns, from local
@@ -177,8 +183,45 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// by the time it runs. Default no-op, mirroring [`Self::demote`]'s
     /// own no-op default: correct for [`NoLocallyClaimedEntities`], which
     /// owns nothing to hydrate.
-    async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
+    async fn hydrate_reclaimed(
+        &self,
+        entities: &[(
+            Entity,
+            NodeIdentity,
+            ClaimEpoch,
+            waddle_xmpp::stream_management::ReclaimedClaimReservation,
+        )],
+    ) -> ReclaimedHydrationHandoff {
         let _ = entities;
+        ReclaimedHydrationHandoff::NotAccepted
+    }
+
+    /// Reserve bounded local responsibility before inline self-fence reclaim
+    /// performs an ownership-changing CAS.
+    fn reserve_reclaimed_claim_capacity(
+        &self,
+        _entity: &Entity,
+    ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+        None
+    }
+
+    /// Cancel a reservation after an ownership CAS is known not to have won.
+    fn cancel_reclaimed_claim_capacity(
+        &self,
+        _entity: &Entity,
+        _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) {
+    }
+
+    /// Retain responsibility when cancellation makes the CAS outcome
+    /// ambiguous. The implementation reconciles with a read-only lookup;
+    /// the one-shot ownership mutation is never replayed.
+    fn defer_uncertain_reclaimed_claim(
+        &self,
+        _entity: &Entity,
+        _owner: &NodeIdentity,
+        _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) {
     }
 
     /// ADR-0017 Phase 3 Slice 10: complete `entity`'s final fenced write —
@@ -475,7 +518,6 @@ async fn reclaim_own_expired_claims<L>(
         }
     };
 
-    let mut reclaimed: Vec<(Entity, ClaimEpoch)> = Vec::new();
     for candidate in candidates {
         if candidate.owner != *old_identity {
             // Another node's genuinely dead claim — not this node's own
@@ -486,6 +528,17 @@ async fn reclaim_own_expired_claims<L>(
             // 4's "residual window" carried-risk note.
             continue;
         }
+        let Some(reservation_token) =
+            local_claims.reserve_reclaimed_claim_capacity(&candidate.entity)
+        else {
+            break;
+        };
+        let mut reservation = InlineReclaimReservation::new(
+            local_claims,
+            candidate.entity.clone(),
+            fresh.clone(),
+            reservation_token,
+        );
         match claim_store
             .steal_stale(
                 &candidate.entity,
@@ -495,12 +548,31 @@ async fn reclaim_own_expired_claims<L>(
             )
             .await
         {
-            Ok(new_epoch) => reclaimed.push((candidate.entity, new_epoch)),
+            Ok(new_epoch) => {
+                let handoff = local_claims
+                    .hydrate_reclaimed(&[(
+                        candidate.entity,
+                        fresh.clone(),
+                        new_epoch,
+                        reservation_token,
+                    )])
+                    .await;
+                // Hydration publishes exact retry responsibility before its
+                // first await. Keep the reservation armed until that handoff
+                // has returned; cancellation anywhere between the committed
+                // steal and publication then falls back to a read-only owner
+                // lookup instead of forgetting the fresh-owned claim.
+                if handoff == ReclaimedHydrationHandoff::Accepted {
+                    reservation.transfer();
+                }
+            }
             Err(ClaimError::Conflict) => {
+                reservation.cancel();
                 // The general orphan reaper (or another node) already
                 // reclaimed it first — safe, no-op.
             }
             Err(error) => {
+                reservation.cancel();
                 tracing::warn!(
                     entity_id = %candidate.entity.id,
                     %error,
@@ -509,9 +581,58 @@ async fn reclaim_own_expired_claims<L>(
             }
         }
     }
+}
 
-    if !reclaimed.is_empty() {
-        local_claims.hydrate_reclaimed(&reclaimed).await;
+/// Cancellation guard for the one-shot inline reclaim CAS. A timeout may
+/// drop the future after Postgres committed but before the result arrived;
+/// converting the reservation into a read-only lookup keeps that possibly
+/// won claim owned without replaying the stale observed epoch.
+struct InlineReclaimReservation<'a> {
+    local_claims: &'a dyn LocallyClaimedEntities,
+    entity: Entity,
+    owner: NodeIdentity,
+    reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    armed: bool,
+}
+
+impl<'a> InlineReclaimReservation<'a> {
+    fn new(
+        local_claims: &'a dyn LocallyClaimedEntities,
+        entity: Entity,
+        owner: NodeIdentity,
+        reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    ) -> Self {
+        Self {
+            local_claims,
+            entity,
+            owner,
+            reservation,
+            armed: true,
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.local_claims
+            .cancel_reclaimed_claim_capacity(&self.entity, self.reservation);
+        self.armed = false;
+    }
+
+    /// The exact returned epoch is about to be handed to hydration, which
+    /// consumes the existing reservation into exact-fence responsibility.
+    fn transfer(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InlineReclaimReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.local_claims.defer_uncertain_reclaimed_claim(
+                &self.entity,
+                &self.owner,
+                self.reservation,
+            );
+        }
     }
 }
 
@@ -1038,7 +1159,6 @@ pub async fn run_node_lease<L>(
                         // `local_claims::SmSessionLocalClaims`), so the
                         // conjunct must do real work here, not just be
                         // documented as a future TODO.
-                        //
                         // FIX 4(a): re-run the demote sweep ONE more time,
                         // right before flipping readiness. The self-fenced
                         // block's own sweep (above, at fence-entry) is a
@@ -1047,15 +1167,17 @@ pub async fn run_node_lease<L>(
                         // that detached (and self-claimed, via
                         // `acquire_claim_store_entry_for_detach`) during
                         // the retry window did so under `live_identity`'s
-                        // STALE, pre-fence value (this loop only calls
-                        // `live_identity.rotate(fresh)` a few lines below, once
-                        // re-registration itself succeeds), so that
+                        // STALE, pre-fence value, so that
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
                         for entity in local_claims.owned().await {
                             local_claims.demote(&entity).await;
                         }
+
+                        let superseded_identity = identity.clone();
+                        identity = fresh;
+                        live_identity.rotate(identity.clone()).await;
 
                         // What "claim re-acquisition" can mean AT THIS
                         // EXACT POINT: every entity this node owned before
@@ -1068,11 +1190,10 @@ pub async fn run_node_lease<L>(
                         // process's bookkeeping to "re-acquire" by name.
                         // What this node uniquely knows, that no other node
                         // can assert as confidently, is that its OWN
-                        // just-superseded identity (`identity`, before the
-                        // reassignment below) is genuinely dead — so it
+                        // just-superseded identity is genuinely dead — so it
                         // commits that knowledge to Postgres immediately
                         // via `NodeLeaseStore::expire`.
-                        expire_bounded(&lease, &identity, config.lease_ttl).await;
+                        expire_bounded(&lease, &superseded_identity, config.lease_ttl).await;
 
                         // FIX 4(b), council-adjudicated: rather than
                         // leaving every one of this node's own dropped
@@ -1085,18 +1206,12 @@ pub async fn run_node_lease<L>(
                         // OTHER node's genuinely dead claims (never
                         // touched by this inline step — see
                         // `reclaim_own_expired_claims`'s owner filter).
-                        // Scoped in its own block: `std::pin::pin!` binds a
-                        // local that lives to the end of its enclosing
-                        // block, not just this statement, and that local
-                        // borrows `identity`/`fresh` — the block ensures
-                        // those borrows end before `identity = fresh` below
-                        // reassigns `identity` (and moves `fresh`).
                         let reclaim_timed_out = {
                             let reclaim_future = std::pin::pin!(reclaim_own_expired_claims(
                                 &lease,
                                 claim_store.as_ref(),
+                                &superseded_identity,
                                 &identity,
-                                &fresh,
                                 local_claims.as_ref(),
                             ));
                             tokio::time::timeout(config.lease_ttl, reclaim_future)
@@ -1112,8 +1227,6 @@ pub async fn run_node_lease<L>(
                             );
                         }
 
-                        identity = fresh;
-                        live_identity.rotate(identity.clone()).await;
                         backoff.reset();
                         readiness.set_ready(true);
                         tracing::info!(
@@ -1278,6 +1391,8 @@ mod tests {
         /// consume-CTE design between this node's health check and its
         /// clear call.
         clear_reports_zero_rows: Arc<AtomicBool>,
+        orphaned_sm_claims:
+            Arc<std::sync::Mutex<Vec<crate::clustering::claims::OrphanedSmSessionClaim>>>,
     }
 
     impl FakeLease {
@@ -1293,6 +1408,7 @@ mod tests {
                 steal_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 clear_reports_zero_rows: Arc::new(AtomicBool::new(false)),
+                orphaned_sm_claims: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
     }
@@ -1382,11 +1498,7 @@ mod tests {
         async fn list_orphaned_sm_session_claims(
             &self,
         ) -> Result<Vec<crate::clustering::claims::OrphanedSmSessionClaim>, ClaimError> {
-            // Not exercised by this module's tests (the orphan reaper is
-            // tested against `PostgresClaimStore` directly, in
-            // `session_janitors.rs`/`claims.rs`); this fake never has
-            // orphaned candidates.
-            Ok(Vec::new())
+            Ok(self.orphaned_sm_claims.lock().expect("lock").clone())
         }
         async fn current_generation(&self) -> Result<Option<String>, ClaimError> {
             // Not exercised by this module's tests (the rollout-aware
@@ -1948,6 +2060,8 @@ mod tests {
         /// targeted-hydration hook actually fires. Defaults are wired via
         /// `FakeLocalClaims::unhydrated()` for tests that don't care.
         hydrated: Arc<std::sync::Mutex<Vec<Entity>>>,
+        live_identity_at_hydration: Option<waddle_xmpp::ownership::SharedNodeIdentity>,
+        stale_hydration_observed: Arc<AtomicBool>,
     }
 
     impl FakeLocalClaims {
@@ -1971,11 +2085,166 @@ mod tests {
             self.healthy.load(Ordering::SeqCst)
         }
 
-        async fn hydrate_reclaimed(&self, entities: &[(Entity, ClaimEpoch)]) {
+        async fn hydrate_reclaimed(
+            &self,
+            entities: &[(
+                Entity,
+                NodeIdentity,
+                ClaimEpoch,
+                waddle_xmpp::stream_management::ReclaimedClaimReservation,
+            )],
+        ) -> ReclaimedHydrationHandoff {
+            if let Some(live_identity) = &self.live_identity_at_hydration {
+                let current = live_identity.current();
+                if entities.iter().any(|(_, owner, _, _)| *owner != current) {
+                    self.stale_hydration_observed.store(true, Ordering::SeqCst);
+                }
+            }
+            self.hydrated.lock().expect("lock").extend(
+                entities
+                    .iter()
+                    .map(|(entity, _owner, _epoch, _reservation)| entity.clone()),
+            );
+            ReclaimedHydrationHandoff::Accepted
+        }
+
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            Some(waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1))
+        }
+    }
+
+    struct CapacityLocalClaims {
+        remaining: AtomicU32,
+        admission_attempts: AtomicU32,
+        hydrated: std::sync::Mutex<Vec<Entity>>,
+    }
+
+    struct CancelledHydrationLocalClaims {
+        hydration_started: tokio::sync::Notify,
+        deferred: std::sync::Mutex<Vec<Entity>>,
+    }
+
+    struct RejectingHydrationLocalClaims {
+        deferred: std::sync::Mutex<Vec<Entity>>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for RejectingHydrationLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            Some(waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1))
+        }
+
+        fn defer_uncertain_reclaimed_claim(
+            &self,
+            entity: &Entity,
+            _owner: &NodeIdentity,
+            _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+        ) {
+            self.deferred.lock().expect("lock").push(entity.clone());
+        }
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for CancelledHydrationLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn hydrate_reclaimed(
+            &self,
+            _entities: &[(
+                Entity,
+                NodeIdentity,
+                ClaimEpoch,
+                waddle_xmpp::stream_management::ReclaimedClaimReservation,
+            )],
+        ) -> ReclaimedHydrationHandoff {
+            self.hydration_started.notify_one();
+            std::future::pending().await
+        }
+
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            Some(waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1))
+        }
+
+        fn defer_uncertain_reclaimed_claim(
+            &self,
+            entity: &Entity,
+            _owner: &NodeIdentity,
+            _reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+        ) {
+            self.deferred.lock().expect("lock").push(entity.clone());
+        }
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for CapacityLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        fn reserve_reclaimed_claim_capacity(
+            &self,
+            _entity: &Entity,
+        ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
+            self.admission_attempts.fetch_add(1, Ordering::SeqCst);
+            self.remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .ok()
+                .map(|generation| {
+                    waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(
+                        u64::from(generation) + 1,
+                    )
+                })
+        }
+
+        async fn hydrate_reclaimed(
+            &self,
+            entities: &[(
+                Entity,
+                NodeIdentity,
+                ClaimEpoch,
+                waddle_xmpp::stream_management::ReclaimedClaimReservation,
+            )],
+        ) -> ReclaimedHydrationHandoff {
             self.hydrated
                 .lock()
                 .expect("lock")
-                .extend(entities.iter().map(|(entity, _epoch)| entity.clone()));
+                .extend(entities.iter().map(|(entity, _, _, _)| entity.clone()));
+            ReclaimedHydrationHandoff::Accepted
         }
     }
 
@@ -1997,6 +2266,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2063,6 +2334,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(false)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2130,6 +2403,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2200,6 +2475,8 @@ mod tests {
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::clone(&demoted),
             hydrated: FakeLocalClaims::unhydrated(),
+            live_identity_at_hydration: None,
+            stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
@@ -2253,6 +2530,163 @@ mod tests {
     // the real `PostgresClaimStore`/`NodeLeaseStore` CAS, not a fake
     // double, because the whole point is proving `steal_stale(OwnerStale)`
     // actually wins against a real `clustering_claims` row.
+
+    #[tokio::test]
+    async fn inline_reclaim_stops_before_a_cas_when_exact_fence_capacity_is_full() {
+        let old = identity();
+        let fresh = identity();
+        let first = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            "capacity-first",
+        );
+        let second = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            "capacity-second",
+        );
+        let store = waddle_xmpp::ownership::InProcessClaimStore::new();
+        let first_epoch = store.acquire(&first, &old).await.expect("first claim");
+        let second_epoch = store.acquire(&second, &old).await.expect("second claim");
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        *lease.orphaned_sm_claims.lock().expect("lock") = vec![
+            crate::clustering::claims::OrphanedSmSessionClaim {
+                entity: first.clone(),
+                epoch: first_epoch,
+                owner: old.clone(),
+            },
+            crate::clustering::claims::OrphanedSmSessionClaim {
+                entity: second.clone(),
+                epoch: second_epoch,
+                owner: old.clone(),
+            },
+        ];
+        let local = CapacityLocalClaims {
+            remaining: AtomicU32::new(1),
+            admission_attempts: AtomicU32::new(0),
+            hydrated: std::sync::Mutex::new(Vec::new()),
+        };
+
+        reclaim_own_expired_claims(&lease, &store, &old, &fresh, &local).await;
+
+        assert_eq!(local.admission_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            local.hydrated.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&first)
+        );
+        assert_eq!(
+            store
+                .current_claim(&first)
+                .await
+                .expect("first lookup")
+                .expect("first claim remains")
+                .owner,
+            fresh
+        );
+        assert_eq!(
+            store
+                .current_claim(&second)
+                .await
+                .expect("second lookup")
+                .expect("second claim remains")
+                .owner,
+            old,
+            "capacity rejection must happen before the second ownership CAS"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_inline_hydration_retains_fresh_claim_responsibility() {
+        let old = identity();
+        let fresh = identity();
+        let entity = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            "cancelled-inline-hydration",
+        );
+        let store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let old_epoch = store.acquire(&entity, &old).await.expect("old claim");
+        let lease = Arc::new(FakeLease::new(Box::new(|| Ok(true))));
+        *lease.orphaned_sm_claims.lock().expect("lock") =
+            vec![crate::clustering::claims::OrphanedSmSessionClaim {
+                entity: entity.clone(),
+                epoch: old_epoch,
+                owner: old.clone(),
+            }];
+        let local = Arc::new(CancelledHydrationLocalClaims {
+            hydration_started: tokio::sync::Notify::new(),
+            deferred: std::sync::Mutex::new(Vec::new()),
+        });
+        let reclaim_lease = lease.clone();
+        let reclaim_store = store.clone();
+        let reclaim_local = local.clone();
+        let reclaim_old = old.clone();
+        let reclaim_fresh = fresh.clone();
+        let reclaim = tokio::spawn(async move {
+            reclaim_own_expired_claims(
+                reclaim_lease.as_ref(),
+                reclaim_store.as_ref(),
+                &reclaim_old,
+                &reclaim_fresh,
+                reclaim_local.as_ref(),
+            )
+            .await;
+        });
+        local.hydration_started.notified().await;
+        reclaim.abort();
+        assert!(reclaim.await.unwrap_err().is_cancelled());
+
+        assert_eq!(
+            store
+                .current_claim(&entity)
+                .await
+                .unwrap()
+                .expect("fresh claim")
+                .owner,
+            fresh
+        );
+        assert_eq!(
+            local.deferred.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&entity),
+            "cancellation after CAS commit must transfer the armed reservation into read-only reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_inline_hydration_retains_fresh_claim_responsibility() {
+        let old = identity();
+        let fresh = identity();
+        let entity = Entity::new(
+            waddle_xmpp::ownership::EntityType::SmSession,
+            "rejected-inline-hydration",
+        );
+        let store = waddle_xmpp::ownership::InProcessClaimStore::new();
+        let old_epoch = store.acquire(&entity, &old).await.expect("old claim");
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        *lease.orphaned_sm_claims.lock().expect("lock") =
+            vec![crate::clustering::claims::OrphanedSmSessionClaim {
+                entity: entity.clone(),
+                epoch: old_epoch,
+                owner: old.clone(),
+            }];
+        let local = RejectingHydrationLocalClaims {
+            deferred: std::sync::Mutex::new(Vec::new()),
+        };
+
+        reclaim_own_expired_claims(&lease, &store, &old, &fresh, &local).await;
+
+        assert_eq!(
+            store
+                .current_claim(&entity)
+                .await
+                .unwrap()
+                .expect("fresh claim")
+                .owner,
+            fresh
+        );
+        assert_eq!(
+            local.deferred.lock().expect("lock").as_slice(),
+            std::slice::from_ref(&entity),
+            "a hydration hook that declines responsibility must leave the fallback reservation armed"
+        );
+    }
 
     #[tokio::test]
     async fn fix4_inline_post_fence_reclaim_hydrates_this_nodes_own_expired_sm_session_claims() {
@@ -2315,11 +2749,16 @@ mod tests {
         let readiness = ClusteringReadiness::new();
         let stop_token = CancellationToken::new();
         let hydrated = FakeLocalClaims::unhydrated();
+        let live_identity =
+            waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let stale_hydration_observed = Arc::new(AtomicBool::new(false));
         let local_claims = Arc::new(FakeLocalClaims {
             owned: Vec::new(),
             healthy: Arc::new(AtomicBool::new(true)),
             demoted: Arc::new(std::sync::Mutex::new(Vec::new())),
             hydrated: Arc::clone(&hydrated),
+            live_identity_at_hydration: Some(live_identity.clone()),
+            stale_hydration_observed: Arc::clone(&stale_hydration_observed),
         });
 
         let task_lease = PostgresClaimStore::new(db.clone());
@@ -2345,9 +2784,7 @@ mod tests {
                 connected_peers: connected_peers.clone(),
                 local_claims,
                 readiness: readiness.clone(),
-                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(
-                    initial_identity.clone(),
-                ),
+                live_identity,
                 peer_id: None,
                 claim_store: task_claim_store,
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
@@ -2387,6 +2824,10 @@ mod tests {
             std::slice::from_ref(&entity),
             "the inline post-fence reclaim must hydrate this node's own just-expired \
              identity's sm_session claim, not leave it for the general reaper's slower cadence"
+        );
+        assert!(
+            !stale_hydration_observed.load(Ordering::SeqCst),
+            "the fresh registered identity must be published before inline reclaimed hydration begins"
         );
 
         // The claims row must now show the FRESH re-registered identity as

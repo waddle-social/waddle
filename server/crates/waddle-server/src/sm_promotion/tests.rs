@@ -1327,6 +1327,117 @@ async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry
 }
 
 #[tokio::test]
+async fn cancelled_displaced_promotion_reinserts_current_and_unstarted_sessions() {
+    use async_trait::async_trait;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
+
+    struct HangingBlocking {
+        reached: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl BlockingStorage for HangingBlocking {
+        async fn list_blocked_jids(
+            &self,
+            _user: &BareJid,
+        ) -> Result<Vec<BareJid>, BlockingStorageError> {
+            self.reached.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = Arc::new(
+        InMemorySmSessionRegistry::with_capacity(3)
+            .with_persistence(Arc::clone(&storage) as Arc<dyn SmPersistenceStorage>),
+    );
+    let mut first = detached_session_with_unacked(
+        "cancelled-promotion-first",
+        full("alice@example.com/web"),
+        vec![dm_xml("bob@elsewhere/x", "alice@example.com", "held")],
+    );
+    first.max_resume_time = Some(0);
+    let mut second = detached_session_with_unacked(
+        "cancelled-promotion-second",
+        full("carol@example.com/web"),
+        vec![dm_xml("bob@elsewhere/x", "carol@example.com", "held too")],
+    );
+    second.max_resume_time = Some(0);
+    sm_registry.store_session(first).await.unwrap();
+    sm_registry.store_session(second).await.unwrap();
+    let displaced = sm_registry.drain_expired().await.unwrap();
+    assert_eq!(displaced.len(), 2);
+
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let connections = Arc::new(ConnectionRegistry::new());
+    let user_registry = test_user_registry();
+    let blocking = Arc::new(HangingBlocking {
+        reached: tokio::sync::Notify::new(),
+    });
+    let task_registry = sm_registry.clone();
+    let task_pending = pending.clone();
+    let task_connections = connections.clone();
+    let task_user_registry = user_registry.clone();
+    let task_blocking = blocking.clone();
+    let promotion = tokio::spawn(async move {
+        promote_displaced_sessions(
+            displaced,
+            DisplacedPromotionDeps {
+                sm_registry: &task_registry,
+                connection_registry: &task_connections,
+                user_registry: &task_user_registry,
+                pending_storage: &task_pending,
+                blocking_storage: task_blocking.as_ref(),
+                server_domain: "example.com",
+            },
+        )
+        .await;
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        blocking.reached.notified(),
+    )
+    .await
+    .expect("promotion should reach the cancellable blocklist read");
+    promotion.abort();
+    assert!(promotion
+        .await
+        .expect_err("promotion should be cancelled")
+        .is_cancelled());
+
+    let retried = sm_registry.drain_expired().await.expect("drain retry");
+    let retried_ids = retried
+        .iter()
+        .map(|session| session.stream_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        retried_ids,
+        std::collections::HashSet::from([
+            "cancelled-promotion-first",
+            "cancelled-promotion-second",
+        ])
+    );
+    for stream_id in ["cancelled-promotion-first", "cancelled-promotion-second"] {
+        assert!(sm_registry
+            .locally_owned_claim_ids()
+            .expect("local ownership")
+            .iter()
+            .any(|owned| owned == stream_id));
+        assert!(sm_registry.confirm_drained(stream_id).await);
+        assert!(storage
+            .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id))
+            .await
+            .expect("durable lookup")
+            .is_none());
+    }
+}
+
+#[tokio::test]
 async fn fresh_bind_invalidation_delivers_displaced_queue_to_new_session() {
     // Issue #1097 acceptance (fresh-bind path): the resource just
     // re-bound (registered in the ConnectionRegistry), so promoting

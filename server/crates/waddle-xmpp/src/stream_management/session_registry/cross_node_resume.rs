@@ -94,18 +94,19 @@
 //!   write: the CAS (or, for the FIX C branch, a plain `ensure_claimed`)
 //!   followed by `hydrate_reclaimed` and `claim_session`. It is called
 //!   un-raced, un-timeout-dropped — every internal step still carries its
-//!   own bound (a hung Postgres call must not hang this forever), but a
-//!   bound expiring is handled as a typed failure that feeds FIX B's
-//!   repair, never as a reason to abandon the future mid-sequence.
+//!   own bound (a hung Postgres call must not hang this forever). A bound
+//!   expiring before an ownership epoch is returned retains a bounded,
+//!   read-only `current_claim` reconciliation item; a post-win bound feeds
+//!   FIX B's exact repair. Neither path replays the one-shot CAS.
 //! - **FIX B — post-win repair**: once the CAS (or FIX C's direct acquire)
 //!   has won, any subsequent `hydrate_reclaimed`/`claim_session` failure —
 //!   error or bound expiry — triggers
 //!   [`InMemorySmSessionRegistry::repair_failed_local_claim`]: an
 //!   epoch-gated, best-effort `ClaimStore::release` of the claim this call
-//!   just won, retried a bounded few times, with a loud `error!` log if
-//!   every attempt fails (the release is the *only* path back to sanity
-//!   here — a live node's own fresh lease means the orphan reaper's
-//!   staleness predicate will never fire for it).
+//!   just won, retried a bounded few times. Exact terminal-release inventory
+//!   is published before the first attempt, so cancellation or exhaustion
+//!   leaves the janitor a durable retry owner even though a live node's own
+//!   fresh lease prevents the orphan reaper from stealing the claim.
 //! - **FIX C — the unclaimed-but-persisted branch** (this module's branch
 //!   4, above) is what makes a successful repair actually recoverable: a
 //!   client's very next resume retry must find a working path back in, not
@@ -118,7 +119,8 @@ use jid::BareJid;
 use tokio::time::Instant;
 
 use crate::ownership::{
-    verify_resume_identity, ClaimEpoch, ClaimError, Entity, EntityType, ResumeIdentityProof,
+    verify_resume_identity, ClaimEpoch, ClaimError, Entity, EntityType, NodeIdentity,
+    ResumeIdentityProof,
 };
 use crate::stream_management::persistence::PersistedSession;
 
@@ -164,13 +166,18 @@ const REPAIR_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How many times [`InMemorySmSessionRegistry::repair_failed_local_claim`]
 /// retries its `ClaimStore::release` call before giving up and surfacing a
 /// loud, named error (FIX B). The release is the PRIMARY path back to
-/// sanity for a post-win hydrate/claim failure — a live node's own fresh
-/// lease means the orphan reaper's staleness predicate can never fire for
-/// it, so there is no fallback if every release attempt fails.
+/// sanity for a post-win hydrate/claim failure. The normal exact-release
+/// inventory remains the fallback if every inline attempt fails.
 const REPAIR_RELEASE_MAX_ATTEMPTS: u32 = 3;
 
 /// Delay between [`REPAIR_RELEASE_MAX_ATTEMPTS`] repair-release retries.
 const REPAIR_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissingRepairSource {
+    Error,
+    NotFound,
+}
 
 /// Ask a remote node (identified by its `node_id`) to release a live SM
 /// session for cross-node resume (element 8's "live, owned elsewhere"
@@ -567,11 +574,9 @@ impl InMemorySmSessionRegistry {
     /// once. A loss is an immediate, clean `NotFound` — never retried
     /// (module doc's "one-shot CAS" discipline). A timeout here means the
     /// outcome is genuinely unknown (the CAS may have committed
-    /// server-side with the reply lost to `FINISH_STEAL_TIMEOUT`) —
-    /// surfaced as an internal error rather than guessed at, and never
-    /// retried (retrying would risk a second CAS attempt against an
-    /// already-stale `observed_epoch`, exactly what the one-shot
-    /// discipline forbids). On a win, hands off to
+    /// server-side with the reply lost to `FINISH_STEAL_TIMEOUT`) — it is
+    /// retained for a later read-only owner/epoch lookup, never replayed
+    /// against the already-consumed `observed_epoch`. On a win, hands off to
     /// [`Self::complete_local_claim`] — from this point FIX B's repair
     /// covers every subsequent failure.
     async fn finish_steal(
@@ -582,6 +587,11 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
+        let Some(reservation) = self.reserve_reclaimed_claim_capacity(entity) else {
+            return Err(SmRegistryError::Internal(
+                "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
+            ));
+        };
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
             self.claim_store
@@ -590,19 +600,25 @@ impl InMemorySmSessionRegistry {
         .await
         {
             Ok(Ok(new_epoch)) => {
-                self.complete_local_claim(entity, new_epoch, stream_id)
+                self.complete_local_claim(entity, me, new_epoch, stream_id, reservation)
                     .await
             }
-            Ok(Err(ClaimError::Conflict)) => Ok(CrossNodeResumeOutcome::NotFound),
-            Ok(Err(other)) => Err(SmRegistryError::Internal(format!(
-                "attempt_cross_node_resume: steal_for_resume failed: {other}"
-            ))),
-            Err(_timeout) => Err(SmRegistryError::Internal(
-                "attempt_cross_node_resume: steal_for_resume timed out; outcome unknown \
-                 (never retried — the one-shot CAS discipline forbids a second attempt \
-                 against a possibly-already-consumed observed epoch)"
-                    .to_string(),
-            )),
+            Ok(Err(ClaimError::Conflict)) => {
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
+                Ok(CrossNodeResumeOutcome::NotFound)
+            }
+            Ok(Err(other)) => {
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
+                Err(SmRegistryError::Internal(format!(
+                    "attempt_cross_node_resume: steal_for_resume failed: {other}"
+                )))
+            }
+            Err(_timeout) => {
+                self.defer_uncertain_reclaimed_claim(entity, &me, reservation);
+                Err(SmRegistryError::Internal(
+                    "attempt_cross_node_resume: steal_for_resume timed out; outcome retained for non-replaying reconciliation".to_string(),
+                ))
+            }
         }
     }
 
@@ -632,24 +648,37 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
+        let Some(reservation) = self.reserve_reclaimed_claim_capacity(entity) else {
+            return Err(SmRegistryError::Internal(
+                "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
+            ));
+        };
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
             self.claim_store.ensure_claimed(entity, &me),
         )
         .await
         {
-            Ok(Ok(epoch)) => self.complete_local_claim(entity, epoch, stream_id).await,
+            Ok(Ok(epoch)) => {
+                self.complete_local_claim(entity, me, epoch, stream_id, reservation)
+                    .await
+            }
             Ok(Err(ClaimError::AlreadyClaimed | ClaimError::Draining)) => {
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
                 Ok(CrossNodeResumeOutcome::NotFound)
             }
-            Ok(Err(other)) => Err(SmRegistryError::Internal(format!(
-                "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed failed: {other}"
-            ))),
-            Err(_timeout) => Err(SmRegistryError::Internal(
-                "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed timed out; \
-                 outcome unknown (never retried, same one-shot discipline as the steal path)"
-                    .to_string(),
-            )),
+            Ok(Err(other)) => {
+                self.cancel_reclaimed_claim_capacity(entity, reservation);
+                Err(SmRegistryError::Internal(format!(
+                    "attempt_cross_node_resume: FIX C direct-acquire ensure_claimed failed: {other}"
+                )))
+            }
+            Err(_timeout) => {
+                self.defer_uncertain_reclaimed_claim(entity, &me, reservation);
+                Err(SmRegistryError::Internal(
+                    "attempt_cross_node_resume: direct acquire timed out; outcome retained for non-replaying reconciliation".to_string(),
+                ))
+            }
         }
     }
 
@@ -662,22 +691,27 @@ impl InMemorySmSessionRegistry {
     async fn complete_local_claim(
         &self,
         entity: &Entity,
+        owner: NodeIdentity,
         epoch: ClaimEpoch,
         stream_id: &str,
+        reservation: super::ReclaimedClaimReservation,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
-        let hydrated = match tokio::time::timeout(
+        let fence = super::super::persistence::SmClaimFence::new(owner, epoch);
+        let hydration = match tokio::time::timeout(
             FINISH_HYDRATE_TIMEOUT,
-            self.hydrate_reclaimed(&[(entity.clone(), epoch)]),
+            self.hydrate_reclaimed_typed(entity, &fence, reservation),
         )
         .await
         {
-            Ok(Ok(count)) => count,
+            Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
                 return self
                     .repair_failed_local_claim(
                         entity,
-                        epoch,
+                        &fence,
                         stream_id,
+                        reservation,
+                        MissingRepairSource::Error,
                         format!("hydrate_reclaimed errored: {error}"),
                     )
                     .await;
@@ -686,35 +720,48 @@ impl InMemorySmSessionRegistry {
                 return self
                     .repair_failed_local_claim(
                         entity,
-                        epoch,
+                        &fence,
                         stream_id,
+                        reservation,
+                        MissingRepairSource::Error,
                         format!("hydrate_reclaimed timed out after {FINISH_HYDRATE_TIMEOUT:?}"),
                     )
                     .await;
             }
         };
-        if hydrated == 0 {
-            // `hydrate_reclaimed`'s own poison-pill path already released
-            // and evicted this claim itself (see its doc comment) — this
-            // repair call is then a harmless no-op re-release. Every OTHER
-            // skip reason it can return 0 for (already present in memory,
-            // no durable row, a storage read failure, a lost self
-            // -reacquire) leaves the claim this call just won un-repaired
-            // without this call.
-            return self
-                .repair_failed_local_claim(
-                    entity,
-                    epoch,
-                    stream_id,
-                    "hydrate_reclaimed hydrated nothing (already-present race, missing \
-                     durable row, or a storage read failure — see its own debug logs)"
-                        .to_string(),
-                )
-                .await;
+        match hydration {
+            super::ReclaimedHydrationOutcome::Hydrated => {}
+            super::ReclaimedHydrationOutcome::LostClaim => {
+                return self
+                    .repair_failed_local_claim(
+                        entity,
+                        &fence,
+                        stream_id,
+                        reservation,
+                        MissingRepairSource::NotFound,
+                        "hydrate_reclaimed definitively lost the claim".to_string(),
+                    )
+                    .await;
+            }
+            outcome => {
+                return self
+                    .repair_failed_local_claim(
+                        entity,
+                        &fence,
+                        stream_id,
+                        reservation,
+                        MissingRepairSource::Error,
+                        format!("hydrate_reclaimed returned {outcome:?}"),
+                    )
+                    .await;
+            }
         }
 
-        match tokio::time::timeout(FINISH_CLAIM_TIMEOUT, self.claim_session(stream_id)).await {
-            Ok(Ok(Some(session))) => Ok(CrossNodeResumeOutcome::Claimed(Box::new(session))),
+        match tokio::time::timeout(FINISH_CLAIM_TIMEOUT, self.claim_session_typed(stream_id)).await
+        {
+            Ok(Ok(super::claims::ClaimSessionOutcome::Claimed(session))) => {
+                Ok(CrossNodeResumeOutcome::Claimed(session))
+            }
             // Hydrated successfully but the session is now expired — a
             // legitimate race against its own resume window, matching
             // `claim_session`'s own semantics for this case. NOT a
@@ -722,12 +769,27 @@ impl InMemorySmSessionRegistry {
             // node, backing the in-memory copy `hydrate_reclaimed` just
             // inserted, for the janitor's ordinary drain/promote/confirm
             // chain to release in due course. No repair.
-            Ok(Ok(None)) => Ok(CrossNodeResumeOutcome::NotFound),
+            Ok(Ok(super::claims::ClaimSessionOutcome::MissingOrExpired)) => {
+                Ok(CrossNodeResumeOutcome::NotFound)
+            }
+            Ok(Ok(super::claims::ClaimSessionOutcome::LostClaim)) => {
+                self.repair_failed_local_claim(
+                    entity,
+                    &fence,
+                    stream_id,
+                    reservation,
+                    MissingRepairSource::NotFound,
+                    "claim_session definitively lost exact ownership post-hydrate".to_string(),
+                )
+                .await
+            }
             Ok(Err(error)) => {
                 self.repair_failed_local_claim(
                     entity,
-                    epoch,
+                    &fence,
                     stream_id,
+                    reservation,
+                    MissingRepairSource::Error,
                     format!("claim_session errored post-hydrate: {error}"),
                 )
                 .await
@@ -735,8 +797,10 @@ impl InMemorySmSessionRegistry {
             Err(_timeout) => {
                 self.repair_failed_local_claim(
                     entity,
-                    epoch,
+                    &fence,
                     stream_id,
+                    reservation,
+                    MissingRepairSource::Error,
                     format!("claim_session timed out after {FINISH_CLAIM_TIMEOUT:?} post-hydrate"),
                 )
                 .await
@@ -767,24 +831,54 @@ impl InMemorySmSessionRegistry {
     /// failure as an error: a repaired claim means the entity is once again
     /// unclaimed-but-persisted (branch 4/FIX C), which the client's very
     /// next resume retry can walk straight into.
+    async fn prepare_failed_local_claim_release(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+        stream_id: &str,
+        reservation: super::ReclaimedClaimReservation,
+    ) -> Result<bool, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+        if !self.transfer_reclaimed_claim_to_exact_release(entity, fence, reservation)? {
+            return Ok(false);
+        }
+        self.forget_claim_locally_locked(stream_id, Some(fence));
+        Ok(true)
+    }
+
     async fn repair_failed_local_claim(
         &self,
         entity: &Entity,
-        epoch: ClaimEpoch,
+        fence: &super::super::persistence::SmClaimFence,
         stream_id: &str,
+        reservation: super::ReclaimedClaimReservation,
+        missing_source: MissingRepairSource,
         reason: String,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
-        self.forget_claim_locally(stream_id).await;
+        if !self
+            .prepare_failed_local_claim_release(entity, fence, stream_id, reservation)
+            .await?
+        {
+            if missing_source == MissingRepairSource::NotFound {
+                return Ok(CrossNodeResumeOutcome::NotFound);
+            }
+            return Err(SmRegistryError::Internal(format!(
+                "attempt_cross_node_resume: post-win repair could not transfer {stream_id} \
+                 into exact-release inventory after {reason}; reclaimed responsibility retained"
+            )));
+        }
 
-        let me = self.node_identity.current();
         for attempt in 1..=REPAIR_RELEASE_MAX_ATTEMPTS {
             match tokio::time::timeout(
                 REPAIR_RELEASE_TIMEOUT,
-                self.claim_store.release(entity, &me, epoch),
+                self.claim_store
+                    .release(entity, fence.owner(), fence.epoch()),
             )
             .await
             {
                 Ok(Ok(())) => {
+                    self.complete_terminal_claim_release(stream_id, fence);
                     tracing::warn!(
                         stream_id = %stream_id,
                         entity = %entity,
@@ -825,10 +919,8 @@ impl InMemorySmSessionRegistry {
             reason = %reason,
             attempts = REPAIR_RELEASE_MAX_ATTEMPTS,
             "attempt_cross_node_resume: post-win repair release FAILED after every retry — \
-             this node now holds a self-owned, un-hydrated claim under a FRESH lease that the \
-             orphan reaper can never steal (steal_stale's OwnerStale predicate never fires for \
-             a live owner); the entity is wedged until this node's own lease naturally lapses \
-             or it self-fences and re-registers under a new epoch"
+             exact terminal-release inventory remains queued for janitor retry because the \
+             orphan reaper cannot steal a claim held under this live node's fresh lease"
         );
         Err(SmRegistryError::Internal(format!(
             "attempt_cross_node_resume: post-win repair failed for {stream_id} after {reason} \
@@ -893,8 +985,10 @@ mod tests {
     use super::*;
     use crate::ownership::{ClaimEpoch, ClaimStore, InProcessClaimStore, SharedNodeIdentity};
     use crate::stream_management::persistence::{
-        InMemorySmPersistence, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+        InMemorySmPersistence, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
+        SmPersistenceStorage,
     };
+    use crate::stream_management::session_registry::core::PendingClaimAcquisitionDisposition;
     use std::sync::Arc;
 
     /// Council-adjudicated FIX 1 test double: an asker that sleeps far
@@ -1176,6 +1270,7 @@ mod tests {
     struct DelayedGetSessionPersistence {
         inner: InMemorySmPersistence,
         delay: Duration,
+        corrupt_after_first: bool,
         calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -1193,6 +1288,12 @@ mod tests {
             stream_id: &crate::pending_delivery::SmSessionId,
         ) -> Result<Option<PersistedSession>, SmPersistenceError> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.corrupt_after_first && call >= 1 {
+                return Err(SmPersistenceError::Corrupt {
+                    stream_id: stream_id.clone(),
+                    detail: "injected cross-node poison row".to_string(),
+                });
+            }
             if call >= 1 {
                 tokio::time::sleep(self.delay).await;
             }
@@ -1333,6 +1434,7 @@ mod tests {
             // the paused clock this costs no real time, only virtual
             // time.
             delay: Duration::from_secs(5),
+            corrupt_after_first: false,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         persistence
@@ -1365,6 +1467,501 @@ mod tests {
             matches!(outcome, CrossNodeResumeOutcome::Claimed(_)),
             "expected Claimed despite the budget expiring mid-finish; got {outcome:?}"
         );
+    }
+
+    /// A post-win repair must publish exact terminal inventory before its
+    /// first backend release attempt. Leaving that inventory in place models
+    /// cancellation or exhaustion of every inline attempt; the janitor still
+    /// owns a bounded retry.
+    #[tokio::test]
+    async fn repair_transfer_retains_exact_release_until_backend_success() {
+        let registry = InMemorySmSessionRegistry::with_capacity(1);
+        let entity = Entity::new(EntityType::SmSession, "repair-release-retry".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed repair capacity");
+        let fence = SmClaimFence::new(
+            crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+            ClaimEpoch(7),
+        );
+
+        assert!(registry
+            .prepare_failed_local_claim_release(&entity, &fence, &entity.id, reservation,)
+            .await
+            .expect("prepare repair release"));
+        assert_eq!(registry.pending_claim_release_count(), 1);
+        assert_eq!(registry.claim_fence_capacity_used(), 1);
+        assert!(
+            registry
+                .reserve_reclaimed_claim_capacity(&Entity::new(
+                    EntityType::SmSession,
+                    "another-repair".to_string(),
+                ))
+                .is_none(),
+            "a failed inline release must remain capacity-counted for janitor retry"
+        );
+
+        registry.complete_terminal_claim_release(&entity.id, &fence);
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert_eq!(registry.claim_fence_capacity_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn definitive_lost_claim_returns_not_found_without_repair() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let entity = Entity::new(EntityType::SmSession, "definitive-lost-claim".to_string());
+        let foreign = crate::ownership::NodeIdentity::new("foreign-node", "foreign-incarnation");
+        claim_store
+            .acquire(&entity, &foreign)
+            .await
+            .expect("foreign claim");
+        let me = crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation");
+        let registry = InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+            Arc::clone(&claim_store),
+            SharedNodeIdentity::new(me.clone()),
+        );
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve attempted local claim");
+
+        let outcome = registry
+            .complete_local_claim(&entity, me, ClaimEpoch(999), &entity.id, reservation)
+            .await
+            .expect("definitive ownership loss is not an internal repair error");
+        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert_eq!(registry.claim_fence_capacity_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn post_verification_lost_claim_retires_its_active_fence() {
+        let registry = InMemorySmSessionRegistry::with_capacity(1);
+        let entity = Entity::new(EntityType::SmSession, "verified-lost-claim".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed claim");
+        let fence = SmClaimFence::new(crate::ownership::NodeIdentity::local(), ClaimEpoch(7));
+        assert!(registry.try_record_verified_reclaimed_fence(
+            &entity.id,
+            fence.clone(),
+            reservation,
+        ));
+
+        let outcome = registry
+            .repair_failed_local_claim(
+                &entity,
+                &fence,
+                &entity.id,
+                reservation,
+                MissingRepairSource::NotFound,
+                "claim lost after exact fence publication".to_string(),
+            )
+            .await
+            .expect("post-verification ownership loss cleanup");
+        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        assert!(!registry
+            .claim_fences
+            .read()
+            .expect("claim fences")
+            .contains_key(&entity.id));
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert_eq!(registry.claim_fence_capacity_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn lost_claim_bookkeeping_failure_never_collapses_to_not_found() {
+        let registry = InMemorySmSessionRegistry::with_capacity(1);
+        let entity = Entity::new(EntityType::SmSession, "poisoned-lost-claim".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed claim");
+        let fence = SmClaimFence::new(crate::ownership::NodeIdentity::local(), ClaimEpoch(7));
+        assert!(registry.try_record_verified_reclaimed_fence(
+            &entity.id,
+            fence.clone(),
+            reservation,
+        ));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _pending = registry
+                .pending_claim_releases
+                .write()
+                .expect("pending releases");
+            panic!("inject terminal inventory lock failure");
+        }));
+
+        let result = registry
+            .repair_failed_local_claim(
+                &entity,
+                &fence,
+                &entity.id,
+                reservation,
+                MissingRepairSource::NotFound,
+                "claim lost after exact fence publication".to_string(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(SmRegistryError::Internal(_))),
+            "bookkeeping failure is not proof that the exact repair source is absent"
+        );
+        assert_eq!(
+            registry
+                .claim_fences
+                .read()
+                .expect("claim fences")
+                .get(&entity.id),
+            Some(&fence)
+        );
+        assert_eq!(registry.claim_fence_capacity_used(), 1);
+    }
+
+    #[tokio::test]
+    async fn poison_quarantine_repairs_the_fresh_claim_and_capacity() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let entity = Entity::new(
+            EntityType::SmSession,
+            "poison-cross-node-repair".to_string(),
+        );
+        let foreign = crate::ownership::NodeIdentity::new("foreign-node", "foreign-incarnation");
+        claim_store
+            .acquire(&entity, &foreign)
+            .await
+            .expect("foreign claim");
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        let persistence = Arc::new(DelayedGetSessionPersistence {
+            inner: InMemorySmPersistence::new(),
+            delay: Duration::ZERO,
+            corrupt_after_first: true,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        persistence
+            .inner
+            .upsert_session(make_persisted_session(&entity.id, &jid))
+            .await
+            .expect("seed poison target");
+        let me = crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation");
+        let registry = InMemorySmSessionRegistry::with_capacity(1)
+            .with_persistence(Arc::clone(&persistence) as Arc<dyn SmPersistenceStorage>)
+            .with_claim_store(Arc::clone(&claim_store), SharedNodeIdentity::new(me));
+
+        let outcome = registry
+            .attempt_cross_node_resume(&entity.id, &jid.to_bare(), Duration::from_secs(2))
+            .await
+            .expect("poison quarantine must repair rather than strand its fresh claim");
+        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("current claim")
+            .is_none());
+        assert!(persistence
+            .inner
+            .get_session(&crate::pending_delivery::SmSessionId::new(
+                entity.id.clone()
+            ))
+            .await
+            .expect("quarantined session lookup")
+            .is_none());
+        assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert_eq!(registry.claim_fence_capacity_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn post_hydrate_claim_loss_forgets_the_stale_local_lifecycle() {
+        let store = Arc::new(CommitThenHangClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+            hang_steal_once: std::sync::atomic::AtomicBool::new(false),
+            ensure_calls: std::sync::atomic::AtomicUsize::new(0),
+            // `complete_local_claim` first verifies ownership while
+            // hydrating, then self-ensures once more while moving the
+            // detached session into the claimed map. Steal between those
+            // two operations.
+            steal_on_ensure_call: Some(2),
+            commit_then_error_on_ensure_call: None,
+        });
+        let entity = Entity::new(EntityType::SmSession, "post-hydrate-claim-loss");
+        let me = NodeIdentity::new("resume-node", "resume-incarnation");
+        let epoch = store
+            .acquire(&entity, &me)
+            .await
+            .expect("seed resume-node claim");
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session(&entity.id, &jid))
+            .await
+            .expect("seed durable session");
+        let registry = InMemorySmSessionRegistry::with_capacity(1)
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                Arc::clone(&store) as Arc<dyn ClaimStore>,
+                SharedNodeIdentity::new(me.clone()),
+            );
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed claim");
+
+        let outcome = registry
+            .complete_local_claim(&entity, me, epoch, &entity.id, reservation)
+            .await
+            .expect("definitive post-hydrate loss is repaired");
+
+        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        let current = store
+            .current_claim(&entity)
+            .await
+            .expect("current claim")
+            .expect("foreign claim survives stale exact release");
+        assert_eq!(current.owner.node_id, "post-hydrate-stealer");
+        assert!(!registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert!(!registry
+            .claimed_sessions
+            .read()
+            .expect("claimed sessions")
+            .contains_key(&entity.id));
+        assert!(!registry
+            .claim_fences
+            .read()
+            .expect("claim fences")
+            .contains_key(&entity.id));
+        assert_eq!(registry.pending_claim_release_count(), 0);
+        assert_eq!(registry.claim_fence_capacity_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn post_hydrate_commit_unknown_claim_retains_reconciliation_responsibility() {
+        let store = Arc::new(CommitThenHangClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+            hang_steal_once: std::sync::atomic::AtomicBool::new(false),
+            ensure_calls: std::sync::atomic::AtomicUsize::new(0),
+            steal_on_ensure_call: None,
+            commit_then_error_on_ensure_call: Some(2),
+        });
+        let entity = Entity::new(EntityType::SmSession, "post-hydrate-commit-unknown");
+        let me = NodeIdentity::new("resume-node", "resume-incarnation");
+        let original_epoch = store
+            .acquire(&entity, &me)
+            .await
+            .expect("seed resume-node claim");
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session(&entity.id, &jid))
+            .await
+            .expect("seed durable session");
+        let registry = InMemorySmSessionRegistry::with_capacity(2)
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                Arc::clone(&store) as Arc<dyn ClaimStore>,
+                SharedNodeIdentity::new(me.clone()),
+            );
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed claim");
+
+        registry
+            .complete_local_claim(&entity, me.clone(), original_epoch, &entity.id, reservation)
+            .await
+            .expect_err("commit-unknown tail must remain pending, not report clean loss");
+
+        assert!(registry.has_claim_fence_reservation(&entity.id));
+        assert!(registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions")
+            .contains(&(
+                entity.id.clone(),
+                me,
+                super::super::core::PendingClaimAcquisitionDisposition::RetainDetachedSession,
+            )));
+        let committed = store
+            .current_claim(&entity)
+            .await
+            .expect("current claim")
+            .expect("fresh claim committed before the lost response");
+        assert!(committed.claim_epoch > original_epoch);
+
+        registry.retry_pending_claim_releases(2).await;
+        assert!(!registry.has_claim_fence_reservation(&entity.id));
+        assert!(registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions")
+            .iter()
+            .all(|(stream_id, _, _)| stream_id != &entity.id));
+        assert_eq!(
+            registry
+                .claim_fences
+                .read()
+                .expect("claim fences")
+                .get(&entity.id)
+                .map(SmClaimFence::epoch),
+            Some(committed.claim_epoch)
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert!(registry
+            .claim_session(&entity.id)
+            .await
+            .expect("reconciled claim")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_repair_never_forgets_a_newer_active_lifecycle() {
+        let registry = InMemorySmSessionRegistry::with_capacity(2);
+        let entity = Entity::new(EntityType::SmSession, "stale-repair".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve old reclaimed generation");
+        let owner = crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation");
+        let old_fence = SmClaimFence::new(owner.clone(), ClaimEpoch(7));
+        assert!(registry
+            .transfer_reclaimed_claim_to_exact_release(&entity, &old_fence, reservation,)
+            .expect("transfer old repair fence"));
+
+        let newer_fence = SmClaimFence::new(owner, ClaimEpoch(8));
+        registry
+            .claim_fences
+            .write()
+            .expect("claim fences")
+            .insert(entity.id.clone(), newer_fence.clone());
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        registry.sessions.write().expect("sessions").insert(
+            entity.id.clone(),
+            make_test_placeholder_session(&entity.id, &jid),
+        );
+
+        assert!(
+            !registry
+                .prepare_failed_local_claim_release(&entity, &old_fence, &entity.id, reservation,)
+                .await
+                .expect("stale repair preparation"),
+            "an old pending release cannot authorize forgetting a newer lifecycle"
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert_eq!(
+            registry
+                .claim_fences
+                .read()
+                .expect("claim fences")
+                .get(&entity.id),
+            Some(&newer_fence)
+        );
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .contains(&(entity.id.clone(), old_fence)));
+    }
+
+    #[tokio::test]
+    async fn stale_repair_never_forgets_a_reserved_detach_lifecycle() {
+        let registry = InMemorySmSessionRegistry::with_capacity(2);
+        let entity = Entity::new(EntityType::SmSession, "reserved-stale-repair".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve old reclaimed generation");
+        let owner = crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation");
+        let old_fence = SmClaimFence::new(owner.clone(), ClaimEpoch(7));
+        assert!(registry
+            .transfer_reclaimed_claim_to_exact_release(&entity, &old_fence, reservation,)
+            .expect("transfer old repair fence"));
+        assert!(registry.reserve_claim_fence_capacity(&entity.id));
+        registry
+            .pending_claim_acquisitions
+            .write()
+            .expect("pending acquisitions")
+            .insert((
+                entity.id.clone(),
+                owner,
+                PendingClaimAcquisitionDisposition::RetainDetachedSession,
+            ));
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        registry.sessions.write().expect("sessions").insert(
+            entity.id.clone(),
+            make_test_placeholder_session(&entity.id, &jid),
+        );
+
+        assert!(
+            !registry
+                .prepare_failed_local_claim_release(&entity, &old_fence, &entity.id, reservation,)
+                .await
+                .expect("stale repair preparation"),
+            "an old pending release cannot consume a newer detach reservation"
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert!(registry.has_claim_fence_reservation(&entity.id));
+        assert!(registry
+            .pending_claim_acquisitions
+            .read()
+            .expect("pending acquisitions")
+            .contains(&(
+                entity.id.clone(),
+                crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+                PendingClaimAcquisitionDisposition::RetainDetachedSession,
+            )));
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .contains(&(entity.id.clone(), old_fence)));
+    }
+
+    #[tokio::test]
+    async fn stale_repair_never_forgets_a_claimless_live_replacement() {
+        let registry = InMemorySmSessionRegistry::with_capacity(2);
+        let entity = Entity::new(EntityType::SmSession, "claimless-stale-repair".to_string());
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve old reclaimed generation");
+        let old_fence = SmClaimFence::new(
+            crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+            ClaimEpoch(7),
+        );
+        assert!(registry
+            .transfer_reclaimed_claim_to_exact_release(&entity, &old_fence, reservation,)
+            .expect("transfer old repair fence"));
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        registry.sessions.write().expect("sessions").insert(
+            entity.id.clone(),
+            make_test_placeholder_session(&entity.id, &jid),
+        );
+
+        assert!(
+            !registry
+                .prepare_failed_local_claim_release(&entity, &old_fence, &entity.id, reservation,)
+                .await
+                .expect("stale repair preparation"),
+            "an old pending release cannot authorize forgetting a claimless live replacement"
+        );
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(&entity.id));
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .contains(&(entity.id.clone(), old_fence)));
     }
 
     /// FIX B/C regression guard: an ordinary (non-cancellation)
@@ -1443,6 +2040,11 @@ mod tests {
                 .is_none(),
             "the just-won claim must have been released by FIX B's repair"
         );
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            0,
+            "successful inline repair must retire its terminal retry inventory"
+        );
         // ...and the repair's `forget_claim_locally` must have cleared the
         // placeholder too, or the FIX C retry below would hit the same
         // "already present" skip forever.
@@ -1483,6 +2085,211 @@ mod tests {
     /// does not already own.
     struct DrainingClaimStore {
         inner: InProcessClaimStore,
+    }
+
+    struct CommitThenHangClaimStore {
+        inner: InProcessClaimStore,
+        hang_ensure_once: std::sync::atomic::AtomicBool,
+        hang_steal_once: std::sync::atomic::AtomicBool,
+        ensure_calls: std::sync::atomic::AtomicUsize,
+        steal_on_ensure_call: Option<usize>,
+        commit_then_error_on_ensure_call: Option<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClaimStore for CommitThenHangClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            let call = self
+                .ensure_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if self.commit_then_error_on_ensure_call == Some(call) {
+                let current = self
+                    .inner
+                    .current_claim(entity)
+                    .await?
+                    .ok_or(ClaimError::Conflict)?;
+                self.inner
+                    .release(entity, &current.owner, current.claim_epoch)
+                    .await?;
+                self.inner.ensure_claimed(entity, me).await?;
+                return Err(ClaimError::Backend(
+                    "injected lost response after fresh claim commit".to_string(),
+                ));
+            }
+            if self.steal_on_ensure_call == Some(call) {
+                let current = self
+                    .inner
+                    .current_claim(entity)
+                    .await?
+                    .ok_or(ClaimError::Conflict)?;
+                self.inner
+                    .release(entity, &current.owner, current.claim_epoch)
+                    .await?;
+                self.inner
+                    .acquire(
+                        entity,
+                        &NodeIdentity::new("post-hydrate-stealer", "foreign-incarnation"),
+                    )
+                    .await?;
+            }
+            let epoch = self.inner.ensure_claimed(entity, me).await?;
+            if self
+                .hang_ensure_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return std::future::pending().await;
+            }
+            Ok(epoch)
+        }
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: crate::ownership::StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: crate::ownership::ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            let epoch = self
+                .inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await?;
+            if self
+                .hang_steal_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return std::future::pending().await;
+            }
+            Ok(epoch)
+        }
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<crate::ownership::ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+        async fn release_many(
+            &self,
+            entities: &[Entity],
+            me: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_acquire_commit_before_timeout_is_reconciled_without_replay() {
+        let store = Arc::new(CommitThenHangClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_ensure_once: std::sync::atomic::AtomicBool::new(true),
+            hang_steal_once: std::sync::atomic::AtomicBool::new(false),
+            ensure_calls: std::sync::atomic::AtomicUsize::new(0),
+            steal_on_ensure_call: None,
+            commit_then_error_on_ensure_call: None,
+        });
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session("direct-timeout", &jid))
+            .await
+            .expect("persist");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                store,
+                SharedNodeIdentity::new(NodeIdentity::new("new-node", "incarnation")),
+            );
+
+        registry
+            .attempt_cross_node_resume("direct-timeout", &jid.to_bare(), Duration::from_secs(2))
+            .await
+            .expect_err("the first call times out after the committed acquire");
+        assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key("direct-timeout"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_steal_commit_before_timeout_is_reconciled_without_replay() {
+        let store = Arc::new(CommitThenHangClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_ensure_once: std::sync::atomic::AtomicBool::new(false),
+            hang_steal_once: std::sync::atomic::AtomicBool::new(true),
+            ensure_calls: std::sync::atomic::AtomicUsize::new(0),
+            steal_on_ensure_call: None,
+            commit_then_error_on_ensure_call: None,
+        });
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+        let persistence = InMemorySmPersistence::new();
+        persistence
+            .upsert_session(make_persisted_session("steal-timeout", &jid))
+            .await
+            .expect("persist");
+        let entity = Entity::new(EntityType::SmSession, "steal-timeout");
+        store
+            .acquire(&entity, &NodeIdentity::new("old-node", "incarnation"))
+            .await
+            .expect("old claim");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                store,
+                SharedNodeIdentity::new(NodeIdentity::new("new-node", "incarnation")),
+            );
+
+        registry
+            .attempt_cross_node_resume("steal-timeout", &jid.to_bare(), Duration::from_secs(2))
+            .await
+            .expect_err("the first call times out after the committed steal");
+        assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+        assert!(registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key("steal-timeout"));
     }
 
     #[async_trait::async_trait]

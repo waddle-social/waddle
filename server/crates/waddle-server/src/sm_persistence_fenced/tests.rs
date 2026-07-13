@@ -3,11 +3,31 @@
 //! unset, mirroring `clustering::claims`'s own test style exactly.
 
 use super::*;
-use crate::clustering::claims::PostgresClaimStore;
+
+#[test]
+fn stale_sm_cache_failure_does_not_evict_new_generation() {
+    let stream_id = SmSessionId::new("old-a-new-b".to_string());
+    let owner = NodeIdentity::new("node-a", "incarnation-a");
+    let fence_a = SmClaimFence::new(owner.clone(), ClaimEpoch(1));
+    let fence_b = SmClaimFence::new(owner, ClaimEpoch(2));
+    let cell_a = Arc::new(OnceCell::new());
+    cell_a.set(fence_a.clone()).expect("initialize A");
+    let cell_b = Arc::new(OnceCell::new());
+    cell_b.set(fence_b.clone()).expect("initialize B");
+    let cache = DashMap::new();
+    cache.insert(stream_id.clone(), cell_b.clone());
+
+    remove_sm_claim_cell_if(&cache, &stream_id, &cell_a);
+    remove_sm_claim_fence_if(&cache, &stream_id, &fence_a);
+
+    assert!(Arc::ptr_eq(cache.get(&stream_id).unwrap().value(), &cell_b));
+    assert_eq!(cache.get(&stream_id).unwrap().get(), Some(&fence_b));
+}
+use crate::clustering::claims::{NodeLeaseStore as _, PostgresClaimStore};
 use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
-use waddle_xmpp::ownership::{NodeIdentity, StalePredicate};
+use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, StalePredicate};
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
 
@@ -105,6 +125,7 @@ struct Fixture {
     claims: PostgresClaimStore,
     claims_db: Database,
     identity: NodeIdentity,
+    shared_identity: SharedNodeIdentity,
     /// Holds `clustering::claims::clustering_control_plane_table_lock()` for
     /// this fixture's — and thus the whole test's — lifetime. Every test in
     /// this module truncates the shared `sm_sessions`/`sm_unacked`/
@@ -149,7 +170,7 @@ async fn fixture() -> Option<Fixture> {
     let fenced = PostgresFencedSmPersistence::open(
         claims_db.clone(),
         claim_store_for_fenced,
-        shared_identity,
+        shared_identity.clone(),
     )
     .await
     .expect("open fenced SM persistence");
@@ -172,6 +193,7 @@ async fn fixture() -> Option<Fixture> {
         claims,
         claims_db,
         identity,
+        shared_identity,
         _table_lock: table_lock,
     })
 }
@@ -356,6 +378,79 @@ async fn delete_session_removes_session_and_unacked_queue() {
 }
 
 #[tokio::test]
+async fn authoritative_delete_reuses_the_guard_while_rotation_is_queued() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-authoritative-delete");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("upsert_session");
+    let authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .expect("current authority");
+    let rotating_identity = f.shared_identity.clone();
+    let rotation = tokio::spawn(async move {
+        rotating_identity
+            .rotate(NodeIdentity::new("node-a", "next-incarnation"))
+            .await;
+    });
+    tokio::task::yield_now().await;
+
+    tokio::time::timeout(
+        StdDuration::from_secs(1),
+        f.fenced
+            .delete_session_with_authority(&stream_id, &authority),
+    )
+    .await
+    .expect("authoritative delete must not reacquire the queued identity gate")
+    .expect("delete_session_with_authority");
+    drop(authority);
+    tokio::time::timeout(StdDuration::from_secs(1), rotation)
+        .await
+        .expect("rotation proceeds after delete")
+        .expect("rotation task");
+}
+
+#[tokio::test]
+async fn authoritative_delete_rejects_a_foreign_equal_identity_guard() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-foreign-authority");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("upsert_session");
+    let foreign_identity = SharedNodeIdentity::new(f.identity.clone());
+    let foreign_authority = foreign_identity
+        .guard_if_current(&f.identity)
+        .await
+        .expect("equal-valued foreign authority");
+
+    assert!(matches!(
+        f.fenced
+            .delete_session_with_authority(&stream_id, &foreign_authority)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("get_session")
+        .is_some());
+    let correct_authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .expect("correct authority");
+    f.fenced
+        .delete_session_with_authority(&stream_id, &correct_authority)
+        .await
+        .expect("foreign rejection must retain the legitimate fence cache");
+}
+
+#[tokio::test]
 async fn append_ack_through_and_delete_unacked_lifecycle() {
     let Some(f) = fixture().await else { return };
     let stream_id = SmSessionId::new("stream-unacked");
@@ -474,6 +569,123 @@ async fn delete_session_aborts_before_any_write_once_the_claim_is_stolen() {
     );
 }
 
+/// Recreating a claim under the same stable node id but a new process
+/// incarnation must not let an old exact fence mutate the replacement's
+/// durable state. Every fenced persistence transaction binds both the
+/// monotonic claim generation and `node_epoch`.
+#[tokio::test]
+async fn quarantine_rejects_same_node_id_new_incarnation_after_claim_recreation() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-incarnation-aba");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("old incarnation establishes a claim and durable row");
+
+    let old_epoch = f
+        .claims
+        .current_claim(&entity)
+        .await
+        .expect("read old claim")
+        .expect("old claim exists")
+        .claim_epoch;
+    assert_eq!(
+        f.claims
+            .release_exact(&entity, &f.identity, old_epoch)
+            .await
+            .expect("release old claim"),
+        waddle_xmpp::ownership::ExactReleaseOutcome::Released
+    );
+
+    let replacement =
+        NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    f.claims
+        .register(&replacement, None)
+        .await
+        .expect("same node id re-registers under a new incarnation");
+    let replacement_epoch = f
+        .claims
+        .acquire(&entity, &replacement)
+        .await
+        .expect("replacement recreates claim with a fresh generation");
+    assert!(
+        replacement_epoch > old_epoch,
+        "claim recreation must allocate a monotonic generation"
+    );
+
+    let old_fence = SmClaimFence::new(f.identity.clone(), old_epoch);
+    f.shared_identity.rotate(replacement.clone()).await;
+    let cached_write_error = f
+        .fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect_err("cached old-incarnation fence must not be rebound to the replacement");
+    assert!(matches!(
+        cached_write_error,
+        SmPersistenceError::NotOwner { .. }
+    ));
+    let error = f
+        .fenced
+        .quarantine_session(&stream_id, &old_fence)
+        .await
+        .expect_err("old-incarnation quarantine must fail exact fencing");
+    assert!(matches!(error, SmPersistenceError::NotOwner { .. }));
+    assert!(
+        f.fenced
+            .get_session(&stream_id)
+            .await
+            .expect("read durable row")
+            .is_some(),
+        "failed old-incarnation quarantine must preserve the new owner's durable row"
+    );
+}
+
+#[tokio::test]
+async fn identity_rotation_exactly_releases_the_cached_old_incarnation_before_retry() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-identity-rotation-cleanup");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("old incarnation establishes the cached claim fence");
+
+    let replacement =
+        NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    f.shared_identity.rotate(replacement.clone()).await;
+
+    let rotation_error = f
+        .fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect_err("the first post-rotation write performs cleanup and retries explicitly");
+    assert!(matches!(
+        rotation_error,
+        SmPersistenceError::NotOwner { .. }
+    ));
+    assert!(
+        f.claims
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup after exact cleanup")
+            .is_none(),
+        "the stale incarnation must not block the replacement identity"
+    );
+
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("the replacement identity acquires on the explicit retry");
+    let claim = f
+        .claims
+        .current_claim(&entity)
+        .await
+        .expect("replacement claim lookup")
+        .expect("replacement claim exists");
+    assert_eq!(claim.owner, replacement);
+}
+
 #[tokio::test]
 async fn record_promotion_failure_aborts_before_any_write_once_the_claim_is_stolen() {
     let Some(f) = fixture().await else { return };
@@ -537,6 +749,53 @@ async fn upsert_session_fails_closed_when_entity_already_claimed_by_another_node
             .is_none(),
         "a failed claim acquire must never write the session row"
     );
+}
+
+#[tokio::test]
+async fn fenced_transaction_guard_blocks_identity_rotation_until_commit_finishes() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-identity-commit-boundary");
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("seed session and claim");
+    let fence = f
+        .fenced
+        .claim_fence_for(&stream_id)
+        .await
+        .expect("claim fence");
+    let mut tx = f.fenced.db.begin().await.expect("transaction");
+    let identity_guard = f
+        .fenced
+        .assert_fenced(&mut tx, &stream_id, &fence)
+        .await
+        .expect("fenced transaction authority");
+
+    let rotating_identity = f.shared_identity.clone();
+    let replacement =
+        NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
+    let rotation = tokio::spawn(async move {
+        rotating_identity.rotate(replacement).await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !rotation.is_finished(),
+        "identity rotation must wait while a fenced transaction is authorized"
+    );
+
+    tx.execute(
+        "UPDATE sm_sessions SET inbound_count = inbound_count + 1 WHERE stream_id = ?",
+        crate::db_params![stream_id.as_str().to_string()],
+    )
+    .await
+    .expect("guarded mutation");
+    tx.commit().await.expect("guarded commit");
+    assert!(
+        !rotation.is_finished(),
+        "commit completion alone must not release identity authority early"
+    );
+    drop(identity_guard);
+    rotation.await.expect("rotation task");
 }
 
 /// Proves `delete_session`'s fencing check and its subsequent DELETEs are

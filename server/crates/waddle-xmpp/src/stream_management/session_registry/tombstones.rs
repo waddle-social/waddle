@@ -28,6 +28,12 @@ use crate::tombstone::TombstoneTarget;
 /// re-check. Promotion windows are seconds; ten minutes is generous.
 pub const RECENT_TOMBSTONE_TTL: Duration = Duration::from_secs(600);
 
+/// Cross-node wall-clock tolerance shared by durable scrubbing and
+/// promotion-time filtering. Receipt stamps within this interval after the
+/// tombstone clock still count as pre-retraction; the safety tradeoff favors
+/// suppressing retracted content over preserving immediate same-id reuse.
+pub const TOMBSTONE_CLOCK_SKEW_SLACK: chrono::Duration = chrono::Duration::seconds(60);
+
 /// Hard cap on retained tombstone records — the global backstop.
 /// Scrubs are rare (retraction / moderation only); when even the
 /// per-archive cap can't keep the list under this bound, the oldest

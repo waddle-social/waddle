@@ -1,9 +1,85 @@
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tracing::debug;
 
-use super::core::InMemorySmSessionRegistry;
+use super::core::{DetachClaimFenceReservation, InMemorySmSessionRegistry};
 use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
 use crate::tombstone::{matching_tombstone_sequences, TombstoneTarget};
+
+struct DetachReservationGuard<'a> {
+    registry: &'a InMemorySmSessionRegistry,
+    stream_id: &'a str,
+    reservation: DetachClaimFenceReservation,
+    armed: bool,
+}
+
+impl<'a> DetachReservationGuard<'a> {
+    fn new(
+        registry: &'a InMemorySmSessionRegistry,
+        stream_id: &'a str,
+        reservation: DetachClaimFenceReservation,
+    ) -> Self {
+        Self {
+            registry,
+            stream_id,
+            reservation,
+            armed: true,
+        }
+    }
+
+    fn transfer(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DetachReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.reservation
+                .cancel_if_owned(self.registry, self.stream_id);
+        }
+    }
+}
+
+struct DisplacedPromotionGuard<'a> {
+    registry: &'a InMemorySmSessionRegistry,
+    sessions: Vec<DetachedSession>,
+    armed: bool,
+}
+
+impl<'a> DisplacedPromotionGuard<'a> {
+    fn new(registry: &'a InMemorySmSessionRegistry, sessions: Vec<DetachedSession>) -> Self {
+        Self {
+            registry,
+            sessions,
+            armed: true,
+        }
+    }
+
+    fn transfer(mut self) -> Vec<DetachedSession> {
+        self.armed = false;
+        std::mem::take(&mut self.sessions)
+    }
+
+    fn rollback(&mut self) {
+        for session in self.sessions.drain(..) {
+            // Keep the pre-displacement payload off the resumable map until
+            // the async retry path has re-read its durable rows. A tombstone
+            // can scrub those rows while the replacement snapshot is
+            // suspended, so publishing this copy directly would resurrect
+            // the scrubbed stanza after the recent-tombstone window expires.
+            let _ = self.registry.retain_pending_promotion_for_retry(session);
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for DisplacedPromotionGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rollback();
+        }
+    }
+}
 
 #[async_trait]
 impl SmSessionRegistry for InMemorySmSessionRegistry {
@@ -15,6 +91,32 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         let jid = session.jid.clone();
         let stream_lock = self.stream_lock(&stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        {
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if claimed.contains_key(&stream_id) {
+                debug!(
+                    stream_id = %stream_id,
+                    "store_session skipped: resume claim in flight owns this stream"
+                );
+                return Ok(Vec::new());
+            }
+        }
+        // Reserve exact-fence/reconciliation capacity before publishing the
+        // detached session in memory or durable storage. Once either snapshot
+        // exists, a successful or ambiguous backend claim must have bounded
+        // local ownership bookkeeping; rejecting after publication would
+        // strand an unrecorded live-node claim.
+        let Some(detach_reservation) = self.reserve_detach_claim_fence_capacity(&stream_id) else {
+            return Err(SmRegistryError::Internal(
+                "store_session: exact claim-fence capacity exhausted before detach publication"
+                    .to_string(),
+            ));
+        };
+        let mut detach_reservation_guard =
+            DetachReservationGuard::new(self, &stream_id, detach_reservation);
         // Scope the RwLock guards in a block so they're definitively
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
@@ -24,13 +126,17 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // queues (issue #1097) — previously they were silently
         // dropped and their durable rows mirror-deleted.
         let mut displaced: Vec<DetachedSession> = Vec::new();
-        let count = {
+        let state_result = (|| -> Result<usize, SmRegistryError> {
             let mut sessions = self
                 .sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             let mut claimed = self
                 .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut displacement_pending = self
+                .pending_promotions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             // Issue #1139: if a resume claim for this EXACT stream id
@@ -45,13 +151,6 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             // handoff ends in complete_claim (durably erased) or
             // release_claim (session returned to the detached pool),
             // both of which supersede this stale copy.
-            if claimed.contains_key(&stream_id) {
-                debug!(
-                    stream_id = %stream_id,
-                    "store_session skipped: resume claim in flight owns this stream"
-                );
-                return Ok(displaced);
-            }
             // Capture jid-collision evictions in `sessions` before
             // retain mutates; same for `claimed`.
             for (id, existing) in sessions.iter() {
@@ -103,9 +202,20 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 }
             }
 
+            for displaced_session in &displaced {
+                displacement_pending.insert(displaced_session.stream_id.clone());
+            }
             sessions.insert(stream_id.clone(), session.clone());
-            sessions.len()
+            Ok(sessions.len())
+        })();
+        let count = match state_result {
+            Ok(count) => count,
+            Err(error) => {
+                detach_reservation.cancel_if_owned(self, &stream_id);
+                return Err(error);
+            }
         };
+        let displaced_guard = DisplacedPromotionGuard::new(self, displaced);
         // Durable rows for displaced sessions are deliberately NOT
         // deleted here. They follow the drain_expired/confirm_drained
         // persist-until-confirmed contract: the caller promotes each
@@ -142,24 +252,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // calls re-inserting each other's displaced sessions would
         // otherwise deadlock.
         if let Err(error) = self.persist_detached_session_snapshot(&session).await {
-            for displaced_session in displaced {
-                if displaced_session.stream_id == stream_id {
-                    // Already (re)inserted above as the new session's
-                    // map entry; taking it through the retry path would
-                    // clobber that entry.
-                    continue;
-                }
-                let displaced_stream_id = displaced_session.stream_id.clone();
-                if let Err(reinsert_error) = self.reinsert_for_retry_unlocked(displaced_session) {
-                    warn!(
-                        stream_id = %displaced_stream_id,
-                        error = %reinsert_error,
-                        "store_session: snapshot write failed and re-inserting a \
-                         displaced session for retry also failed; its durable rows \
-                         are stranded until restart"
-                    );
-                }
-            }
+            detach_reservation.cancel_if_owned(self, &stream_id);
             return Err(error);
         }
 
@@ -169,10 +262,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // `claims.rs::acquire_claim_store_entry_for_detach`'s doc comment
         // for the acquire-on-detach half of the acquire-then-hydrate
         // invariant this slice establishes.
-        self.acquire_claim_store_entry_for_detach(&stream_id).await;
+        detach_reservation_guard.transfer();
+        self.acquire_claim_store_entry_for_detach(&stream_id, detach_reservation)
+            .await;
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
-        Ok(displaced)
+        Ok(displaced_guard.transfer())
     }
 
     async fn take_session(
@@ -330,12 +425,15 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // drained copy of a session (off both maps, pending row not
         // yet inserted) re-checks it and drops matching stanzas
         // instead of delivering retracted content on the next login.
+        let scrub_recorded_at = chrono::Utc::now();
+        let scrub_horizon = scrub_recorded_at + super::TOMBSTONE_CLOCK_SKEW_SLACK;
         self.record_recent_tombstone(target)?;
         // Phase 1 (issue #1145 lock-scope fix): snapshot every queue
         // under READ locks only. XML parsing of every entry used to
         // run under the sessions write lock, stalling all detach /
         // resume traffic for the duration of a full-registry scan.
-        let mut snapshots: Vec<(String, Vec<(u32, String)>)> = Vec::new();
+        let mut snapshots: Vec<(String, Vec<(u32, String, chrono::DateTime<chrono::Utc>)>)> =
+            Vec::new();
         {
             let sessions = self
                 .sessions
@@ -347,7 +445,35 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     session
                         .unacked_stanzas
                         .iter()
-                        .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
+                        .map(|entry| {
+                            (
+                                entry.sequence,
+                                entry.stanza_xml.clone(),
+                                entry.original_receipt_at,
+                            )
+                        })
+                        .collect(),
+                ));
+            }
+        }
+        {
+            let retries = self
+                .pending_promotion_retries
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            for (stream_id, session) in retries.iter() {
+                snapshots.push((
+                    stream_id.clone(),
+                    session
+                        .unacked_stanzas
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.sequence,
+                                entry.stanza_xml.clone(),
+                                entry.original_receipt_at,
+                            )
+                        })
                         .collect(),
                 ));
             }
@@ -363,7 +489,13 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     session
                         .unacked_stanzas
                         .iter()
-                        .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
+                        .map(|entry| {
+                            (
+                                entry.sequence,
+                                entry.stanza_xml.clone(),
+                                entry.original_receipt_at,
+                            )
+                        })
                         .collect(),
                 ));
             }
@@ -374,7 +506,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // exact (stream_id, sequence) pairs below is safe regardless.
         let mut matched: Vec<(String, Vec<u32>)> = Vec::new();
         for (stream_id, entries) in snapshots {
-            let sequences = matching_tombstone_sequences(&entries, target);
+            let eligible = entries
+                .into_iter()
+                .filter(|(_, _, received_at)| *received_at <= scrub_horizon)
+                .map(|(sequence, xml, _)| (sequence, xml))
+                .collect::<Vec<_>>();
+            let sequences = matching_tombstone_sequences(&eligible, target);
             if !sequences.is_empty() {
                 matched.push((stream_id, sequences));
             }
@@ -420,16 +557,17 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 match sessions.get_mut(&stream_id) {
                     Some(session) => {
                         let before = session.unacked_stanzas.len();
-                        session
-                            .unacked_stanzas
-                            .retain(|entry| !sequences.contains(&entry.sequence));
+                        session.unacked_stanzas.retain(|entry| {
+                            entry.original_receipt_at > scrub_horizon
+                                || !sequences.contains(&entry.sequence)
+                        });
                         Some(before - session.unacked_stanzas.len())
                     }
                     None => None,
                 }
             };
             let removed_here = match removed_here {
-                Some(count) => count,
+                Some(count) => Some(count),
                 None => {
                     let mut claimed = self
                         .claimed_sessions
@@ -438,9 +576,30 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     match claimed.get_mut(&stream_id) {
                         Some(session) => {
                             let before = session.unacked_stanzas.len();
-                            session
-                                .unacked_stanzas
-                                .retain(|entry| !sequences.contains(&entry.sequence));
+                            session.unacked_stanzas.retain(|entry| {
+                                entry.original_receipt_at > scrub_horizon
+                                    || !sequences.contains(&entry.sequence)
+                            });
+                            Some(before - session.unacked_stanzas.len())
+                        }
+                        None => None,
+                    }
+                }
+            };
+            let removed_here = match removed_here {
+                Some(count) => count,
+                None => {
+                    let mut retries = self
+                        .pending_promotion_retries
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    match retries.get_mut(&stream_id) {
+                        Some(session) => {
+                            let before = session.unacked_stanzas.len();
+                            session.unacked_stanzas.retain(|entry| {
+                                entry.original_receipt_at > scrub_horizon
+                                    || !sequences.contains(&entry.sequence)
+                            });
                             before - session.unacked_stanzas.len()
                         }
                         None => 0,
@@ -468,28 +627,19 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             for (persisted, unacked) in stored {
                 let stream_id = persisted.stream_id.as_str().to_string();
                 // Stream lock first: serializes with store_session /
-                // reinsert_for_retry so the off-map check and the
-                // durable delete are atomic with respect to a stream
-                // re-entering the maps.
+                // reinsert_for_retry so the durable delete and the
+                // current local-inventory scrub are atomic with respect
+                // to a stream moving between retry, detached, and claimed
+                // ownership. Do not skip rows merely because the stream is
+                // currently in a map: it may have entered after phase 1.
                 let stream_lock = self.stream_lock(&stream_id)?;
                 let _stream_guard = stream_lock.lock().await;
-                let in_map = self
-                    .sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                    .contains_key(&stream_id)
-                    || self
-                        .claimed_sessions
-                        .read()
-                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                        .contains_key(&stream_id);
-                if in_map {
-                    // Already covered by the in-map phases above.
-                    continue;
-                }
                 let sequences: Vec<u32> = unacked
                     .iter()
-                    .filter(|entry| target.matches_message_element(&entry.stanza.to_element()))
+                    .filter(|entry| {
+                        entry.original_receipt_at <= scrub_horizon
+                            && target.matches_message_element(&entry.stanza.to_element())
+                    })
                     .map(|entry| entry.sequence)
                     .collect();
                 if sequences.is_empty() {
@@ -502,7 +652,27 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     )
                     .await
                 {
-                    Ok(deleted) => removed_total += deleted as usize,
+                    Ok(deleted) => {
+                        removed_total += deleted as usize;
+                        for inventory in [
+                            &self.sessions,
+                            &self.claimed_sessions,
+                            &self.pending_promotion_retries,
+                        ] {
+                            if let Some(session) = inventory
+                                .write()
+                                .map_err(|_| {
+                                    SmRegistryError::Internal("Lock poisoned".to_string())
+                                })?
+                                .get_mut(&stream_id)
+                            {
+                                session.unacked_stanzas.retain(|entry| {
+                                    entry.original_receipt_at > scrub_horizon
+                                        || !sequences.contains(&entry.sequence)
+                                });
+                            }
+                        }
+                    }
                     Err(error) => {
                         durable_failures += 1;
                         debug!(

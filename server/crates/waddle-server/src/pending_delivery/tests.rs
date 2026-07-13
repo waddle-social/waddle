@@ -2268,6 +2268,171 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
 // one succeed; the deposed node's attempt aborts fenced
 // (`PendingStorageError::NotOwner`) before writing anything.
 #[cfg(feature = "clustering")]
+struct RotateIncarnationAfterEnsureClaimStore {
+    inner: crate::clustering::claims::PostgresClaimStore,
+    db: crate::db::Database,
+    replacement: waddle_xmpp::ownership::NodeIdentity,
+    rotate_once: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "clustering")]
+#[async_trait::async_trait]
+impl waddle_xmpp::ownership::ClaimStore for RotateIncarnationAfterEnsureClaimStore {
+    async fn ensure_schema(&self) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.inner.ensure_schema().await
+    }
+
+    async fn acquire(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.inner.acquire(entity, me).await
+    }
+
+    async fn ensure_claimed(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        let epoch = self.inner.ensure_claimed(entity, me).await?;
+        if self
+            .rotate_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.db
+                .guard()
+                .await
+                .map_err(|error| waddle_xmpp::ownership::ClaimError::Backend(error.to_string()))?
+                .execute(
+                    "UPDATE clustering_claims SET node_epoch = ? WHERE entity = ?",
+                    crate::db_params![
+                        self.replacement.node_epoch.clone(),
+                        format!("{}:{}", entity.entity_type.as_db_str(), entity.id),
+                    ],
+                )
+                .await
+                .map_err(|error| waddle_xmpp::ownership::ClaimError::Backend(error.to_string()))?;
+        }
+        Ok(epoch)
+    }
+
+    async fn steal_stale(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        observed: waddle_xmpp::ownership::ClaimEpoch,
+        staleness: waddle_xmpp::ownership::StalePredicate,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.inner
+            .steal_stale(entity, observed, staleness, me)
+            .await
+    }
+
+    async fn steal_for_resume(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        observed: waddle_xmpp::ownership::ClaimEpoch,
+        witness: waddle_xmpp::ownership::ResumeIdentityProof,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.inner
+            .steal_for_resume(entity, observed, witness, me)
+            .await
+    }
+
+    async fn current_claim(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+    ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, waddle_xmpp::ownership::ClaimError>
+    {
+        self.inner.current_claim(entity).await
+    }
+
+    async fn fence(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+        mine: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
+        self.inner.fence(entity, me, mine).await
+    }
+
+    async fn release(
+        &self,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
+        mine: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.inner.release(entity, me, mine).await
+    }
+
+    async fn release_many(
+        &self,
+        entities: &[waddle_xmpp::ownership::Entity],
+        me: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.inner.release_many(entities, me).await
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn insert_fenced_rejects_same_node_id_new_incarnation_at_the_same_claim_epoch() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let db = Database::from_config(
+        "pending-delivery-incarnation-fence-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, database_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open test postgres");
+    let old = NodeIdentity::new(uuid::Uuid::new_v4().to_string(), "old-incarnation");
+    let replacement = NodeIdentity::new(old.node_id.clone(), "new-incarnation");
+    let stream_id = format!("stream-incarnation-{}", uuid::Uuid::new_v4());
+    let entity = Entity::new(EntityType::SmSession, stream_id.clone());
+    let schema_store = PostgresClaimStore::new(db.clone());
+    schema_store.ensure_schema().await.expect("claim schema");
+    schema_store
+        .acquire(&entity, &old)
+        .await
+        .expect("old claim");
+    let rotating_store: std::sync::Arc<dyn ClaimStore> =
+        std::sync::Arc::new(RotateIncarnationAfterEnsureClaimStore {
+            inner: PostgresClaimStore::new(db.clone()),
+            db: db.clone(),
+            replacement,
+            rotate_once: std::sync::atomic::AtomicBool::new(true),
+        });
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&database_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((rotating_store, SharedNodeIdentity::new(old))),
+        &db,
+    )
+    .await
+    .expect("open fenced storage");
+    let recipient_text = format!("incarnation-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_text);
+
+    let outcome = storage
+        .insert_fenced(transient_row(&recipient_text, "must not land"), &stream_id)
+        .await;
+    assert!(matches!(outcome, Err(PendingStorageError::NotOwner { .. })));
+    assert!(storage.list(&recipient).await.expect("list").is_empty());
+}
+
+#[cfg(feature = "clustering")]
 #[tokio::test]
 async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};

@@ -269,6 +269,7 @@ pub struct SharedNodeIdentity {
 /// boundary. Identity rotation takes the exclusive side of the same gate.
 pub struct CurrentNodeIdentityGuard {
     identity: NodeIdentity,
+    rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
     _rotation_guard: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
@@ -303,6 +304,17 @@ impl SharedNodeIdentity {
             .clone()
     }
 
+    /// Inspect the current incarnation while preventing `rotate` from changing
+    /// it. The closure must remain synchronous and short; this guard exists
+    /// for atomic in-memory lifecycle transitions, never backend I/O.
+    pub fn with_current<R>(&self, inspect: impl FnOnce(&NodeIdentity) -> R) -> R {
+        let identity = self
+            .identity
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inspect(&identity)
+    }
+
     /// Acquire authority to use `expected`. Once returned, rotation cannot
     /// complete until the guard is dropped. Writer preference also prevents
     /// a new stale guard from passing a rotation that has already started.
@@ -314,8 +326,15 @@ impl SharedNodeIdentity {
         let identity = self.current();
         (identity == *expected).then_some(CurrentNodeIdentityGuard {
             identity,
+            rotation_gate: self.rotation_gate.clone(),
             _rotation_guard: rotation_guard,
         })
+    }
+
+    /// Whether `guard` holds the read side of this exact identity source's
+    /// rotation gate, not merely an equal node-id/incarnation value.
+    pub fn owns_guard(&self, guard: &CurrentNodeIdentityGuard) -> bool {
+        std::sync::Arc::ptr_eq(&self.rotation_gate, &guard.rotation_gate)
     }
 
     /// Replace the current identity only after every in-flight guarded

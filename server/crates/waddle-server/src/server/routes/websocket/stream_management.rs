@@ -246,8 +246,6 @@ async fn handle_sm_enable(
         Some(m) => m,
         None => max_resume_secs,
     };
-    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
-
     // ADR-0017 Phase 3 Slice 6, element 8: ensure this node's `ClaimStore`
     // claim on this SM session at `<enable/>` time — not only at detach
     // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
@@ -259,12 +257,21 @@ async fn handle_sm_enable(
     // with the detach-time call for the same stream id later in this
     // session's lifetime. No-op in practice for single-node deployments
     // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
-    state
+    let Some(claim_publication) = state
         .deps
         .protocol
         .sm_session_registry
         .ensure_session_claim(&stream_id)
-        .await;
+        .await
+    else {
+        warn!(
+            stream_id = %stream_id,
+            "SM enable rejected because exact claim admission did not complete"
+        );
+        return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+    };
+    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
+    drop(claim_publication);
 
     // Publish the stream id onto the registry's ConnectionEntry so
     // the offline-flush path can claim `pending_delivery` rows under

@@ -21,7 +21,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use subtle::ConstantTimeEq;
 
-use crate::ownership::{ClaimEpoch, NodeIdentity};
+use crate::stream_management::persistence::SmClaimFence;
 
 /// A freshly issued or rotated ISR token (ADR-0017 Phase 3 Slice 8,
 /// XEP-0397). The token string itself is a secret credential — never
@@ -124,8 +124,7 @@ pub trait IsrTokenStore: Send + Sync {
         sm_id: &str,
         presented_token: &[u8],
         mechanism: &str,
-        me: &NodeIdentity,
-        mine: ClaimEpoch,
+        fence: &SmClaimFence,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError>;
 
     /// Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): reap token
@@ -190,8 +189,7 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
         // No node-liveness table exists for the single-node case (mirrors
         // `InProcessClaimStore`'s own module doc): there is only one node,
         // so fencing is a no-op here rather than a meaningful check.
-        _me: &NodeIdentity,
-        _mine: ClaimEpoch,
+        _fence: &SmClaimFence,
     ) -> Result<IsrConsumeOutcome, IsrTokenStoreError> {
         let mut tokens = self
             .tokens
@@ -237,8 +235,11 @@ impl IsrTokenStore for InMemoryIsrTokenStore {
 mod tests {
     use super::*;
 
-    fn identity() -> NodeIdentity {
-        NodeIdentity::local()
+    fn fence() -> SmClaimFence {
+        SmClaimFence::new(
+            crate::ownership::NodeIdentity::local(),
+            crate::ownership::ClaimEpoch(0),
+        )
     }
 
     #[tokio::test]
@@ -246,13 +247,7 @@ mod tests {
         let store = InMemoryIsrTokenStore::new();
         let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
         let outcome = store
-            .consume(
-                "sm-1",
-                issued.token.as_bytes(),
-                "PLAIN",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         let IsrConsumeOutcome::Matched { rotated } = outcome else {
@@ -266,13 +261,7 @@ mod tests {
         let store = InMemoryIsrTokenStore::new();
         let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
         let outcome = store
-            .consume(
-                "sm-1",
-                b"not-the-token",
-                "PLAIN",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("sm-1", b"not-the-token", "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);
@@ -281,13 +270,7 @@ mod tests {
         // (correct) token now finds no row at all (FIX 3: distinct from
         // the genuine-mismatch outcome above), proving destruction happened.
         let second = store
-            .consume(
-                "sm-1",
-                issued.token.as_bytes(),
-                "PLAIN",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(second, IsrConsumeOutcome::NoSuchToken);
@@ -298,13 +281,7 @@ mod tests {
         let store = InMemoryIsrTokenStore::new();
         let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
         let first = store
-            .consume(
-                "sm-1",
-                issued.token.as_bytes(),
-                "PLAIN",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         assert!(matches!(first, IsrConsumeOutcome::Matched { .. }));
@@ -313,13 +290,7 @@ mod tests {
         // exists under the same sm_id — a genuine mismatch (a row DOES
         // exist), not `NoSuchToken`.
         let replay = store
-            .consume(
-                "sm-1",
-                issued.token.as_bytes(),
-                "PLAIN",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("sm-1", issued.token.as_bytes(), "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(replay, IsrConsumeOutcome::Mismatched);
@@ -329,13 +300,7 @@ mod tests {
     async fn consume_with_no_issued_token_is_no_such_token() {
         let store = InMemoryIsrTokenStore::new();
         let outcome = store
-            .consume(
-                "no-such-sm-id",
-                b"anything",
-                "PLAIN",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("no-such-sm-id", b"anything", "PLAIN", &fence())
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::NoSuchToken);
@@ -346,13 +311,7 @@ mod tests {
         let store = InMemoryIsrTokenStore::new();
         let issued = store.issue("sm-1", "PLAIN").await.expect("issue");
         let outcome = store
-            .consume(
-                "sm-1",
-                issued.token.as_bytes(),
-                "SCRAM-SHA-256",
-                &identity(),
-                ClaimEpoch(0),
-            )
+            .consume("sm-1", issued.token.as_bytes(), "SCRAM-SHA-256", &fence())
             .await
             .expect("consume");
         assert_eq!(outcome, IsrConsumeOutcome::Mismatched);

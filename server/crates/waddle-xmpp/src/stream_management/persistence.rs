@@ -34,15 +34,51 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
-use crate::ownership::Entity;
+use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
+
+/// Immutable ownership context authorizing one clustered SM persistence write.
+///
+/// The claim epoch is meaningful only together with the exact process
+/// incarnation that obtained it. Keeping both values in one typed payload
+/// prevents a cached pre-self-fence epoch from being paired with a newer
+/// [`NodeIdentity`] after claim-epoch ABA.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmClaimFence {
+    owner: NodeIdentity,
+    epoch: ClaimEpoch,
+}
+
+impl SmClaimFence {
+    pub fn new(owner: NodeIdentity, epoch: ClaimEpoch) -> Self {
+        Self { owner, epoch }
+    }
+
+    pub fn owner(&self) -> &NodeIdentity {
+        &self.owner
+    }
+
+    pub fn epoch(&self) -> ClaimEpoch {
+        self.epoch
+    }
+}
 
 /// Errors returned by [`SmPersistenceStorage`] implementations.
 #[derive(Debug, Error)]
 pub enum SmPersistenceError {
     #[error("SM persistence error: {0}")]
     Other(String),
+
+    /// A row for an exact typed stream id exists but cannot be decoded into
+    /// the typed persistence model. Recovery may quarantine that stream's
+    /// durable session and unacked queue; ordinary backend errors must never
+    /// take that destructive path.
+    #[error("corrupt SM persistence for '{stream_id}': {detail}")]
+    Corrupt {
+        stream_id: SmSessionId,
+        detail: String,
+    },
 
     /// A fenced write's own fencing check (ADR-0017 Phase 3 Slice 4,
     /// element 4) observed that this node no longer holds — or never
@@ -183,6 +219,30 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// longer detached) and on session timeout.
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError>;
 
+    /// Delete a session while the caller already holds current-incarnation
+    /// authority. Clustered implementations reuse this guard instead of
+    /// reacquiring the writer-preferring identity gate; portable stores have
+    /// no identity fence and use their ordinary atomic delete.
+    async fn delete_session_with_authority(
+        &self,
+        stream_id: &SmSessionId,
+        _authority: &CurrentNodeIdentityGuard,
+    ) -> Result<(), SmPersistenceError> {
+        self.delete_session(stream_id).await
+    }
+
+    /// Delete an undecodable session and its unacked queue as one durable
+    /// quarantine operation. Clustered implementations bind the immutable
+    /// owner/epoch context into the same transaction; portable implementations
+    /// deliberately reuse their already-atomic `delete_session` path.
+    async fn quarantine_session(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.delete_session(stream_id).await
+    }
+
     /// Append an outbound stanza to the unacked queue for the named
     /// session.
     async fn append_unacked(
@@ -318,7 +378,7 @@ pub trait SmPersistenceStorage: Send + Sync {
         Ok(0)
     }
 
-    /// Evict any per-`stream_id` claim-epoch cache entry this implementation
+    /// Evict any per-`stream_id` claim-fence cache entry this implementation
     /// keeps as a fencing side channel (ADR-0017 Phase 3 Slice 4's "Epoch
     /// side channel" design note; Slice 5 debt (a)).
     ///
@@ -327,7 +387,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// `release_claim`/`complete_claim`/`complete_claim_if_resumable`'s
     /// terminal branches, and `invalidate_sessions_for_jid`'s removal of a
     /// claimed session — so a cache keyed by stream_id never outlives the
-    /// claim it caches the epoch for. Default no-op: the portable
+    /// claim it caches the owner/epoch pair for. Default no-op: the portable
     /// (single-node, in-memory) implementation has no such cache (its
     /// `ClaimStore` is always `InProcessClaimStore`, which is cheap to call
     /// directly on every write); only the Postgres-fenced implementation
@@ -335,8 +395,8 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// actually remove the cached cell, so a subsequent fenced write for the
     /// same stream_id after a fresh claim always re-derives its epoch rather
     /// than reusing one issued under a claim this node no longer holds.
-    fn evict_claim_cache(&self, stream_id: &SmSessionId) {
-        let _ = stream_id;
+    fn evict_claim_cache(&self, stream_id: &SmSessionId, expected_fence: &SmClaimFence) {
+        let _ = (stream_id, expected_fence);
     }
 }
 

@@ -26,6 +26,7 @@ mod stanza;
 mod tests;
 mod types;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -41,20 +42,13 @@ use waddle_xmpp::protocol::dm_routing::{
 };
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
-use waddle_xmpp::stream_management::DetachedSession;
+use waddle_xmpp::stream_management::{DetachedSession, TOMBSTONE_CLOCK_SKEW_SLACK};
 use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
 use pending::{insert_pending, promote_as_transient, DeliveryHandles};
 use stanza::{parse_stanza, promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionSummary};
-
-/// Tolerance for comparing a stanza's `original_receipt_at` against a
-/// tombstone's `recorded_at_utc` when the two stamps may come from
-/// different clocks (persistence restore across a restart, multi-node
-/// stamps under ADR-0017, NTP step-back). A receipt reading up to this
-/// much "after" the recording still counts as predating it.
-const TOMBSTONE_CLOCK_SKEW_SLACK: chrono::Duration = chrono::Duration::seconds(60);
 
 /// Walk a session's unacked queue, promoting each stanza per the
 /// locked Q6 = B priority chain. Each promoted `pending_delivery`
@@ -199,6 +193,84 @@ pub struct DisplacedPromotionDeps<'a> {
     pub server_domain: &'a str,
 }
 
+pub(crate) struct PromotionBatchGuard<'a> {
+    registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    sessions: VecDeque<DetachedSession>,
+}
+
+impl<'a> PromotionBatchGuard<'a> {
+    pub(crate) fn new(
+        registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+        sessions: Vec<DetachedSession>,
+    ) -> Self {
+        Self {
+            registry,
+            sessions: sessions.into(),
+        }
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<DetachedSession> {
+        self.sessions.pop_front()
+    }
+}
+
+impl Drop for PromotionBatchGuard<'_> {
+    fn drop(&mut self) {
+        for session in self.sessions.drain(..) {
+            if let Err(error) = self.registry.retain_pending_promotion_for_retry(session) {
+                tracing::warn!(
+                    %error,
+                    "cancelled displaced-promotion batch could not restore an unstarted session"
+                );
+            }
+        }
+    }
+}
+
+pub(crate) struct PromotionSessionGuard<'a> {
+    registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    session: DetachedSession,
+    armed: bool,
+}
+
+impl<'a> PromotionSessionGuard<'a> {
+    pub(crate) fn new(
+        registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+        session: DetachedSession,
+    ) -> Self {
+        Self {
+            registry,
+            session,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn session(&self) -> &DetachedSession {
+        &self.session
+    }
+
+    pub(crate) fn complete(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PromotionSessionGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self
+                .registry
+                .retain_pending_promotion_for_retry(self.session.clone())
+            {
+                tracing::warn!(
+                    stream_id = %self.session.stream_id,
+                    %error,
+                    "cancelled displaced promotion could not restore its session"
+                );
+            }
+        }
+    }
+}
+
 /// Run the XEP-0198 §5 promote → confirm chain on sessions the SM
 /// registry displaced (issue #1097): max_sessions overflow eviction
 /// and fresh-bind invalidation previously dropped these sessions'
@@ -218,7 +290,7 @@ pub struct DisplacedPromotionDeps<'a> {
 pub async fn reinsert_failed_session_for_retry(
     sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     session: DetachedSession,
-) {
+) -> bool {
     let stream_id = session.stream_id.clone();
     let jid = session.jid.clone();
     if let Err(error) = sm_registry.reinsert_for_retry(session).await {
@@ -229,7 +301,9 @@ pub async fn reinsert_failed_session_for_retry(
             "failed to re-insert SM session for promotion retry; durable rows \
              will only be retried after a restart"
         );
+        return false;
     }
+    true
 }
 
 /// After a PARTIAL promotion failure, durably erase the successfully
@@ -249,7 +323,7 @@ pub async fn prune_promoted_then_reinsert_for_retry(
     sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     mut session: DetachedSession,
     summary: &PromotionSummary,
-) {
+) -> bool {
     if !summary.promoted_sequences.is_empty() {
         match sm_registry
             .delete_unacked_sequences(&session.stream_id, &summary.promoted_sequences)
@@ -272,7 +346,7 @@ pub async fn prune_promoted_then_reinsert_for_retry(
             }
         }
     }
-    reinsert_failed_session_for_retry(sm_registry, session).await;
+    reinsert_failed_session_for_retry(sm_registry, session).await
 }
 
 /// Read the SM registry's recent-tombstone record immediately before a
@@ -372,7 +446,10 @@ pub async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
 ) {
-    for session in sessions {
+    let mut batch_guard = PromotionBatchGuard::new(deps.sm_registry, sessions);
+    while let Some(pending_session) = batch_guard.pop() {
+        let mut promotion_guard = PromotionSessionGuard::new(deps.sm_registry, pending_session);
+        let session = promotion_guard.session().clone();
         let blocklist = match deps
             .blocking_storage
             .list_blocked_jid_entries(&session.jid.to_bare())
@@ -393,7 +470,9 @@ pub async fn promote_displaced_sessions(
                         "displaced SM session: blocklist load and failure recording both \
                          failed; preserving durable rows and re-inserting for janitor retry"
                     );
-                    reinsert_failed_session_for_retry(deps.sm_registry, session).await;
+                    if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
+                        promotion_guard.complete();
+                    }
                     continue;
                 }
                 tracing::warn!(
@@ -404,7 +483,9 @@ pub async fn promote_displaced_sessions(
                      preserve fail-closed XEP-0191 policy. Re-inserted for retry on the \
                      SM-expiry janitor's next pass."
                 );
-                reinsert_failed_session_for_retry(deps.sm_registry, session).await;
+                if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
+                    promotion_guard.complete();
+                }
                 continue;
             }
         };
@@ -458,10 +539,17 @@ pub async fn promote_displaced_sessions(
                 "displaced SM session: promotion had storage failures; \
                  preserving durable rows and re-inserting for janitor retry"
             );
-            prune_promoted_then_reinsert_for_retry(deps.sm_registry, session, &summary).await;
+            if prune_promoted_then_reinsert_for_retry(deps.sm_registry, session.clone(), &summary)
+                .await
+            {
+                promotion_guard.complete();
+            }
             continue;
         }
-        deps.sm_registry.confirm_drained(&session.stream_id).await;
+        if !deps.sm_registry.confirm_drained(&session.stream_id).await {
+            continue;
+        }
+        promotion_guard.complete();
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
         if let Err(error) = deps.pending_storage.release_claim(&session_id).await {
             tracing::warn!(
