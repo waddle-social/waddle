@@ -428,18 +428,27 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         // SM session registry (`waddle-xmpp`, cross-node-generic) to know
         // about ISR (`waddle-server`-local, Postgres-only) at all — the
         // exact coupling `ClaimStore`/`IsrTokenStore`'s trait split
-        // deliberately avoids. `created_at` already exists on this table
-        // (the schema this module's own `ensure_schema` creates), so a
-        // bounded sweep over it, run at the same cadence as
-        // `session_janitors.rs`'s orphan-reaper sweep, is the smaller
-        // correct option. Mirrors `lease.rs`'s own
-        // `(? || ' milliseconds')::interval` TTL-comparison idiom.
+        // deliberately avoids. Age alone is not terminal authority: an SM
+        // stream can remain live for longer than this backstop and its ISR
+        // token must remain valid throughout that lifetime. Reap only an old
+        // token whose typed SM-session claim is absent. Mirrors
+        // `lease.rs`'s own `(? || ' milliseconds')::interval`
+        // TTL-comparison idiom.
         let conn = self.db.guard().await.map_err(db_err)?;
         let deleted_tokens = conn
             .execute(
-                "DELETE FROM clustering_isr_tokens \
-                 WHERE created_at < now() - (? || ' milliseconds')::interval",
-                crate::db_params![max_age.as_millis().to_string()],
+                "DELETE FROM clustering_isr_tokens AS token \
+                 WHERE token.created_at < now() - (? || ' milliseconds')::interval \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM clustering_claims AS claim \
+                     WHERE claim.entity = (? || ':' || token.sm_id) \
+                       AND claim.entity_type = ? \
+                   )",
+                crate::db_params![
+                    max_age.as_millis().to_string(),
+                    EntityType::SmSession.as_db_str().to_string(),
+                    EntityType::SmSession.as_db_str().to_string(),
+                ],
             )
             .await
             .map_err(db_err)?;
@@ -693,12 +702,12 @@ mod tests {
         assert!(!bool::from(stored.ct_eq(mismatch_at_last_byte)));
     }
 
-    /// Council-adjudicated FIX 4: `sweep_expired` reaps only rows whose
-    /// `created_at` predates the TTL — a token issued moments ago survives
-    /// a short-TTL sweep; a token backdated (via a direct UPDATE, standing
-    /// in for one that has genuinely aged past the TTL) is reaped.
+    /// Council-adjudicated FIX 4: `sweep_expired` reaps an old orphan but
+    /// preserves both a fresh token and an old token whose live/detached SM
+    /// ownership claim still exists. Token age starts at SM enable, not at
+    /// disconnect, so age alone must never invalidate a long-lived stream.
     #[tokio::test]
-    async fn sweep_expired_reaps_only_rows_older_than_max_age() {
+    async fn sweep_expired_reaps_only_old_tokens_without_an_sm_claim() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(db) = test_db().await else {
             return;
@@ -707,24 +716,34 @@ mod tests {
         store.ensure_schema().await.expect("ensure isr schema");
 
         let fresh_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
-        let stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let claimed_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let orphaned_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         store
             .issue(&fresh_sm_id, "PLAIN")
             .await
             .expect("issue fresh token");
         store
-            .issue(&stale_sm_id, "PLAIN")
+            .issue(&claimed_stale_sm_id, "PLAIN")
             .await
-            .expect("issue stale token");
+            .expect("issue claimed stale token");
+        store
+            .issue(&orphaned_stale_sm_id, "PLAIN")
+            .await
+            .expect("issue orphaned stale token");
 
-        // Backdate the "stale" row directly — standing in for a token that
-        // has genuinely aged past the TTL without needing the test to
-        // actually sleep.
+        let me = node_identity();
+        let claimed_stale_epoch = claim_sm_session(&db, &claimed_stale_sm_id, &me).await;
+
+        // Backdate both old rows directly. Only the unclaimed one is an
+        // orphan eligible for the TTL backstop.
         let conn = db.guard().await.expect("guard");
         conn.execute(
             "UPDATE clustering_isr_tokens SET created_at = now() - interval '1 day' \
-             WHERE sm_id = ?",
-            crate::db_params![stale_sm_id.to_string()],
+             WHERE sm_id IN (?, ?)",
+            crate::db_params![
+                claimed_stale_sm_id.to_string(),
+                orphaned_stale_sm_id.to_string()
+            ],
         )
         .await
         .expect("backdate stale row");
@@ -733,18 +752,39 @@ mod tests {
             .sweep_expired(std::time::Duration::from_secs(3600))
             .await
             .expect("sweep_expired");
-        assert_eq!(deleted, 1, "exactly the backdated row must be reaped");
+        assert!(
+            deleted >= 1,
+            "the backdated unclaimed row must be reaped (the shared test database may contain older orphans)"
+        );
 
-        // The fresh row survives; the stale one is gone (a subsequent
-        // consume for it finds no row at all).
-        let me = node_identity();
+        // The fresh row survives by age. The old claimed row survives by
+        // ownership. Only the old orphan is gone.
         let fresh_epoch = claim_sm_session(&db, &fresh_sm_id, &me).await;
-        let stale_epoch = claim_sm_session(&db, &stale_sm_id, &me).await;
-        let stale_outcome = store
-            .consume(&stale_sm_id, b"anything", "PLAIN", &fence(&me, stale_epoch))
+        let orphaned_stale_epoch = claim_sm_session(&db, &orphaned_stale_sm_id, &me).await;
+        let orphaned_stale_outcome = store
+            .consume(
+                &orphaned_stale_sm_id,
+                b"anything",
+                "PLAIN",
+                &fence(&me, orphaned_stale_epoch),
+            )
             .await
-            .expect("consume stale");
-        assert_eq!(stale_outcome, IsrConsumeOutcome::NoSuchToken);
+            .expect("consume orphaned stale");
+        assert_eq!(orphaned_stale_outcome, IsrConsumeOutcome::NoSuchToken);
+        let claimed_stale_outcome = store
+            .consume(
+                &claimed_stale_sm_id,
+                b"wrong-token-but-row-must-exist",
+                "PLAIN",
+                &fence(&me, claimed_stale_epoch),
+            )
+            .await
+            .expect("consume claimed stale");
+        assert_eq!(
+            claimed_stale_outcome,
+            IsrConsumeOutcome::Mismatched,
+            "an old token with a live SM claim must not be swept"
+        );
         let fresh_outcome = store
             .consume(
                 &fresh_sm_id,

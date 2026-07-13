@@ -689,8 +689,8 @@ pub async fn start_if_enabled(
         let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
             Arc::new(claims::PostgresClaimStore::new(db.clone()));
         // ADR-0017 Phase 3 Slice 7: the durable MUC room store. Built here
-        // (not deferred to `server/mod.rs`) because it only needs `db`/
-        // `live_identity`/`clustering_stop` — all already in scope — unlike
+        // (not deferred to `server/mod.rs`) because it only needs `db` and
+        // `clustering_stop` — both already in scope — unlike
         // `room_local_claims` above, which genuinely must wait for the room
         // registry to exist.
         //
