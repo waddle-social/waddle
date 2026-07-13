@@ -1100,6 +1100,55 @@ impl ClaimStore for PostgresClaimStore {
         }
     }
 
+    async fn current_claim_after_pending_writes(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, ClaimError> {
+        // Terminal orphan recovery can arrive here after its caller dropped
+        // a steal future. Locking the claim row makes this SELECT wait behind
+        // that detached UPDATE, so the returned version is post-commit (or
+        // post-rollback) rather than the unlocked pre-CAS snapshot. A stale
+        // room steal only updates an existing row, so the absent-row gap does
+        // not need predicate/range locking.
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                r#"
+                /* terminal_claim_reconciliation_lock */
+                SELECT
+                    c.node_id,
+                    c.node_epoch,
+                    c.claim_epoch,
+                    EXISTS (
+                        SELECT 1 FROM clustering_nodes n
+                        WHERE n.node_id = c.node_id
+                          AND NOT n.expired
+                          AND n.node_epoch = c.node_epoch
+                    ) AS owner_lease_fresh
+                FROM clustering_claims c
+                WHERE c.entity = ?
+                FOR UPDATE
+                "#,
+                crate::db_params![entity_key(entity)],
+            )
+            .await
+            .map_err(db_err)?;
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => {
+                let node_id: String = row.get(0).map_err(db_err)?;
+                let node_epoch: String = row.get(1).map_err(db_err)?;
+                let claim_epoch: i64 = row.get(2).map_err(db_err)?;
+                let owner_lease_fresh: bool = row.get(3).map_err(db_err)?;
+                Ok(Some(waddle_xmpp::ownership::ClaimSnapshot {
+                    owner: NodeIdentity::new(node_id, node_epoch),
+                    claim_epoch: ClaimEpoch(claim_epoch),
+                    owner_lease_fresh,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn fence(
         &self,
         entity: &Entity,
@@ -4109,6 +4158,100 @@ mod tests {
 
     fn room_entity(id: &str) -> Entity {
         Entity::new(EntityType::RoomActor, id.to_string())
+    }
+
+    #[tokio::test]
+    async fn terminal_claim_lookup_waits_for_an_in_flight_steal_update() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let previous_owner = node_identity();
+        let new_owner = node_identity();
+        seed_node(&store.db, &previous_owner, true).await;
+        seed_node(&store.db, &new_owner, false).await;
+        let entity = room_entity("terminal-barrier@muc.example.com");
+        store
+            .acquire(&entity, &previous_owner)
+            .await
+            .expect("seed previous claim");
+
+        let mut steal = store.db.begin().await.expect("begin detached steal");
+        let mut rows = steal
+            .query(
+                r#"
+                UPDATE clustering_claims
+                SET node_id = ?, node_epoch = ?,
+                    claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
+                WHERE entity = ?
+                RETURNING claim_epoch
+                "#,
+                crate::db_params![
+                    new_owner.node_id.clone(),
+                    new_owner.node_epoch.clone(),
+                    entity_key(&entity),
+                ],
+            )
+            .await
+            .expect("stage steal update");
+        let committed_epoch = ClaimEpoch(
+            rows.next()
+                .await
+                .expect("read staged update")
+                .expect("updated claim")
+                .get::<i64>(0)
+                .expect("claim epoch"),
+        );
+        drop(rows);
+
+        let barrier_store = PostgresClaimStore::new(store.db.clone());
+        let barrier_entity = entity.clone();
+        let barrier = tokio::spawn(async move {
+            barrier_store
+                .current_claim_after_pending_writes(&barrier_entity)
+                .await
+        });
+
+        let monitor = store.db.guard().await.expect("monitor guard");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut rows = monitor
+                    .query(
+                        r#"
+                        SELECT COUNT(*) FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND query LIKE '%terminal_claim_reconciliation_lock%'
+                          AND wait_event_type = 'Lock'
+                        "#,
+                        (),
+                    )
+                    .await
+                    .expect("inspect blocked terminal lookup");
+                let blocked = rows
+                    .next()
+                    .await
+                    .expect("read blocked lookup count")
+                    .expect("blocked lookup count row")
+                    .get::<i64>(0)
+                    .expect("blocked lookup count");
+                if blocked > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal lookup reached the claim-row barrier");
+        drop(monitor);
+
+        steal.commit().await.expect("commit detached steal");
+        let snapshot = barrier
+            .await
+            .expect("terminal lookup joined")
+            .expect("terminal lookup")
+            .expect("claim remains present");
+        assert_eq!(snapshot.owner, new_owner);
+        assert_eq!(snapshot.claim_epoch, committed_epoch);
     }
 
     // --- ADR-0017 Phase 3 Slice 10: the acquire-side draining gate -------

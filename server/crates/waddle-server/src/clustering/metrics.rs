@@ -291,7 +291,7 @@ pub fn record_room_orphan_pending_backlog(depth: usize, oldest_age_ms: u64) {
 }
 
 /// Report the bounded orphan-reaper work queues. `queue` is the stable
-/// low-cardinality value `sm_hydration` or `room_release`.
+/// low-cardinality value `sm_hydration`, `room_release`, or `room_handoff`.
 pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
     static G: OnceLock<Gauge<u64>> = OnceLock::new();
     G.get_or_init(|| {

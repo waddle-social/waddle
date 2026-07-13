@@ -246,6 +246,15 @@ impl NodeIdentity {
     pub fn is_active(&self) -> bool {
         self.authority == NodeAuthority::Active
     }
+
+    /// Whether both values identify the same process incarnation, regardless
+    /// of this process's current publication authority. Terminal cleanup may
+    /// still need to recognize and release rows written by the active form of
+    /// an identity after [`SharedNodeIdentity::disable`] has revoked any new
+    /// claim or publication authority.
+    pub fn same_incarnation(&self, other: &Self) -> bool {
+        self.node_id == other.node_id && self.node_epoch == other.node_epoch
+    }
 }
 
 /// A live, shared view of this process's current [`NodeIdentity`].
@@ -585,6 +594,22 @@ pub trait ClaimStore: Send + Sync {
     /// call.
     async fn current_claim(&self, entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError>;
 
+    /// Observe a claim only after any detached write already mutating that
+    /// claim row has committed or rolled back. Terminal recovery uses this
+    /// as an ordering barrier after cancellation may have dropped a steal
+    /// future while its backend statement remained in flight.
+    ///
+    /// In-process stores execute claim mutations synchronously and therefore
+    /// need no stronger operation than [`Self::current_claim`]. Stores that
+    /// can outlive a dropped future must override this method with a row-lock
+    /// or equivalent serialization barrier.
+    async fn current_claim_after_pending_writes(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+        self.current_claim(entity).await
+    }
+
     /// Advisory, own-transaction check: does `me` still hold `entity` under
     /// epoch `mine` right now? See the trait-level doc for why this is
     /// never the write-path fencing mechanism.
@@ -749,6 +774,8 @@ mod tests {
         let disabled = shared.current();
         assert!(!disabled.is_active());
         assert_ne!(disabled, active);
+        assert!(disabled.same_incarnation(&active));
+        assert!(!disabled.same_incarnation(&NodeIdentity::new("node-a", "epoch-1")));
         assert!(shared.guard_if_current(&disabled).await.is_none());
 
         let store = InProcessClaimStore::new();

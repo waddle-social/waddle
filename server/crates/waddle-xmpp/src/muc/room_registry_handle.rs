@@ -298,9 +298,11 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        drain_pending_reclaimed_rooms_for_shutdown() -> PendingReclaimedRoomDrainOutcome,
+        drain_pending_reclaimed_rooms_for_shutdown(
+            pending_handoffs: Vec<PendingReclaimedRoom>
+        ) -> PendingReclaimedRoomDrainOutcome,
         "drain_pending_reclaimed_rooms_for_shutdown",
-        DrainPendingReclaimedRoomsForShutdown
+        DrainPendingReclaimedRoomsForShutdown { pending_handoffs }
     );
 
     registry_method!(
