@@ -38,7 +38,7 @@ use waddle_xmpp::registry::{
 };
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
-use super::self_fence::LocallyClaimedEntities;
+use super::self_fence::{LocallyClaimedEntities, ReclaimedHydrationHandoff};
 
 /// Bound on the health-ask this impl issues against a locally-claimed
 /// room's `RoomActor` (ADR-0017 Phase 3 Slice 7's `RoomActor` counterpart
@@ -147,9 +147,9 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             waddle_xmpp::ownership::NodeIdentity,
             waddle_xmpp::ownership::ClaimEpoch,
         )],
-    ) {
+    ) -> ReclaimedHydrationHandoff {
         let Some(registry) = self.registry.get() else {
-            return;
+            return ReclaimedHydrationHandoff::NotAccepted;
         };
         for (entity, owner, epoch) in entities {
             let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
@@ -177,9 +177,11 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                         %error,
                         "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
                     );
+                    return ReclaimedHydrationHandoff::NotAccepted;
                 }
             }
         }
+        ReclaimedHydrationHandoff::Accepted
     }
 }
 
@@ -820,19 +822,25 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
             waddle_xmpp::ownership::NodeIdentity,
             waddle_xmpp::ownership::ClaimEpoch,
         )],
-    ) {
+    ) -> ReclaimedHydrationHandoff {
         let (sm_entities, rest): (Vec<_>, Vec<_>) = entities
             .iter()
             .cloned()
             .partition(|(entity, _, _)| entity.entity_type == EntityType::SmSession);
-        if !sm_entities.is_empty() {
-            self.sm.hydrate_reclaimed(&sm_entities).await;
-        }
+        let sm_handoff = if sm_entities.is_empty() {
+            ReclaimedHydrationHandoff::NotAccepted
+        } else {
+            self.sm.hydrate_reclaimed(&sm_entities).await
+        };
         // `RoomLocalClaims`/`UserLocalClaims` have no reclaim-hydration
         // consumer yet (they are created through their registries' own
         // `ensure_claimed`/`steal_stale` paths), so `rest` is intentionally
         // not forwarded anywhere.
-        let _ = rest;
+        if rest.is_empty() {
+            sm_handoff
+        } else {
+            ReclaimedHydrationHandoff::NotAccepted
+        }
     }
 
     /// ADR-0017 Phase 3 Slice 10 FIX 1: dispatch by `EntityType`, mirroring
