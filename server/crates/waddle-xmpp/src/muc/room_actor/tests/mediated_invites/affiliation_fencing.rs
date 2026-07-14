@@ -241,7 +241,7 @@ async fn accepted_same_value_member_reaffirmation_supersedes_invite_rollback_aut
 }
 
 #[tokio::test]
-async fn mediated_invite_rollback_restores_an_outcast_ban() {
+async fn mediated_invite_authorization_never_lifts_an_outcast_ban() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     actor
         .ask(ChangeAffiliation {
@@ -250,29 +250,24 @@ async fn mediated_invite_rollback_restores_an_outcast_ban() {
         })
         .await
         .expect("ban invitee");
-    let grant = authorize_invite_grant(&actor, inviter, invitee.clone()).await;
-    assert_eq!(grant.previous_affiliation(), Affiliation::Outcast);
-    actor
-        .ask(PrepareMediatedInviteGrantRollback {
-            grant: grant.clone(),
-        })
-        .await
-        .expect("prepare rollback");
+
     assert!(matches!(
         actor
-            .ask(CommitMediatedInviteGrantRollback { grant })
-            .await
-            .expect("commit rollback"),
-        MediatedInviteRollbackCommit::Applied {
-            previous_affiliation: Affiliation::Outcast,
-            ..
-        }
+            .ask(AuthorizeMediatedInvite {
+                operation_id: invite_operation_id(),
+                inviter,
+                invitee: invitee.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(
+            MediatedInviteGrantError::InviteeBanned
+        ))
     ));
     assert_eq!(
         actor
             .ask(GetAffiliation { jid: invitee })
             .await
-            .expect("restored ban"),
+            .expect("ban remains authoritative"),
         Affiliation::Outcast,
     );
 }

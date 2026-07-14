@@ -78,6 +78,8 @@ pub enum MediatedInviteGrantError {
     NotOccupant,
     #[error("the inviter may not invite users under this room's policy")]
     Forbidden,
+    #[error("the invitee is banned from this room")]
+    InviteeBanned,
     #[error("the invitee is already a member of this group DM")]
     InviteeAlreadyMember,
     #[error("another mediated invite owns a temporary membership grant for this invitee")]

@@ -49,6 +49,9 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
             return Err(MediatedInviteGrantError::GrantPending);
         }
         let previous_affiliation = self.room.get_affiliation(&msg.invitee);
+        if previous_affiliation == Affiliation::Outcast {
+            return Err(MediatedInviteGrantError::InviteeBanned);
+        }
         if self.room.config.group_dm && previous_affiliation >= Affiliation::Member {
             return Err(MediatedInviteGrantError::InviteeAlreadyMember);
         }

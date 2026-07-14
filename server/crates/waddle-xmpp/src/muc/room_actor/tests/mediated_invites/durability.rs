@@ -175,6 +175,54 @@ async fn invite_grant_persist_failure_leaves_memory_unchanged_and_creates_no_tok
 }
 
 #[tokio::test]
+async fn banned_invitee_rejection_performs_no_durable_member_write() {
+    let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
+    let store = FakeDurableStore::owned();
+    actor
+        .ask(RestoreDurableRoomState {
+            store: store.clone(),
+        })
+        .await
+        .expect("attach recording durable store");
+    actor
+        .ask(ChangeAffiliation {
+            jid: inviter.to_bare(),
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("persist inviter affiliation after restore");
+    actor
+        .ask(ChangeAffiliation {
+            jid: invitee.clone(),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("persist invitee ban");
+    let writes_before_invite = store.saved_affiliations();
+
+    assert!(matches!(
+        actor
+            .ask(AuthorizeMediatedInvite {
+                operation_id: invite_operation_id(),
+                inviter,
+                invitee: invitee.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(
+            MediatedInviteGrantError::InviteeBanned
+        ))
+    ));
+    assert_eq!(store.saved_affiliations(), writes_before_invite);
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid: invitee })
+            .await
+            .expect("ban remains authoritative"),
+        Affiliation::Outcast,
+    );
+}
+
+#[tokio::test]
 async fn invite_grant_and_rollback_persist_the_exact_room_invitee_and_affiliations() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     let store = FakeDurableStore::owned();

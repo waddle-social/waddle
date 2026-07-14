@@ -8,7 +8,7 @@ use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use waddle_xmpp::muc::presence::NS_MUC_USER;
 use waddle_xmpp::muc::room_actor::{
-    AuthorizeMediatedInvite, ChangeAffiliation, CommitMediatedInviteGrantRollback,
+    AuthorizeMediatedInvite, ChangeAffiliation, CommitMediatedInviteGrantRollback, GetAffiliation,
     InviteMembershipGrant, Join, MediatedInviteGrantError, MediatedInviteOperationId,
     MediatedInviteRollbackCommit, PrepareMediatedInviteGrantRollback, RoomActor,
 };
@@ -197,6 +197,66 @@ async fn group_dm_member_invite_reports_members_only_and_grants_membership() {
     assert!(authorized.grant.is_some());
     assert_eq!(authorized.invitee_affiliation, Affiliation::Member);
     assert!(authorized.members_only);
+}
+
+#[tokio::test]
+async fn mediated_invitation_cannot_replace_an_outcast_ban_with_membership() {
+    for (config, inviter_affiliation) in [
+        (
+            RoomConfig {
+                members_only: true,
+                ..RoomConfig::default()
+            },
+            Affiliation::Admin,
+        ),
+        (
+            RoomConfig {
+                group_dm: true,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+            Affiliation::Member,
+        ),
+    ] {
+        let actor = spawn_room(config);
+        let inviter = full_jid("web");
+        let invitee = invitee();
+        join(&actor, inviter.clone(), inviter_affiliation).await;
+        actor
+            .ask(ChangeAffiliation {
+                jid: inviter.to_bare(),
+                affiliation: inviter_affiliation,
+            })
+            .await
+            .expect("persist inviter affiliation");
+        actor
+            .ask(ChangeAffiliation {
+                jid: invitee.clone(),
+                affiliation: Affiliation::Outcast,
+            })
+            .await
+            .expect("ban invitee");
+
+        assert!(matches!(
+            actor
+                .ask(AuthorizeMediatedInvite {
+                    operation_id: MediatedInviteOperationId::generate(),
+                    inviter,
+                    invitee: invitee.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(
+                MediatedInviteGrantError::InviteeBanned
+            ))
+        ));
+        assert_eq!(
+            actor
+                .ask(GetAffiliation { jid: invitee })
+                .await
+                .expect("ban remains authoritative"),
+            Affiliation::Outcast,
+        );
+    }
 }
 
 #[tokio::test]
