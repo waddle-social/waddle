@@ -329,8 +329,10 @@ impl ResolverAffiliationSyncWorker {
         None
     }
 
-    /// Atomically adopt a pending update or close without preserving a
-    /// revision chain. A non-applied outcome cannot authorize later rebasing.
+    /// Atomically adopt a pending update or close with disposition-specific
+    /// revision handling. Non-mutating exhaustion retains only the exact
+    /// revision already authorized for this worker; invalidating outcomes
+    /// clear that chain.
     pub fn finish_terminal_or_take_update(
         &mut self,
         disposition: ResolverAffiliationSyncTerminalDisposition,
