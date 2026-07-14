@@ -17,13 +17,13 @@ use tracing::{debug, info, warn};
 use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{
-    HydrateDurableRecipients, IsSealed, RestoreDurableRoomState, RoomActor, SealGuard,
-    SealIfInactive,
+    GetRoomSealState, HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState,
+    SealGuard, SealIfInactive, SealIfInactiveOutcome,
 };
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
 use crate::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
+    ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
     InProcessClaimStore, NodeIdentity, RolloutBackoff, SharedNodeIdentity, StalePredicate,
 };
 use crate::xep::xep0421::OccupantIdSecret;
@@ -151,6 +151,11 @@ pub enum RoomRegistryError {
     Unavailable,
     #[error("room {0}'s ownership store is unavailable")]
     OwnershipUnavailable(BareJid),
+    /// A prior exact room-ownership generation is still converging. Unlike
+    /// [`RoomRegistryError::OwnershipUnavailable`], this is an expected,
+    /// bounded demand-side deferral rather than a claim-store failure.
+    #[error("room {0}'s prior ownership generation is still reconciling")]
+    OwnershipReconciliationPending(BareJid),
     /// ADR-0017 Phase 3 Slice 7: `entity`'s Postgres claim is held by
     /// another, currently-live node, and this slice does not wire
     /// cross-node MUC message/join proxying (the ADR's own text names it
@@ -196,6 +201,30 @@ impl RoomRegistryActor {
         self.pending_room_releases
             .contains_key(&(room_jid.clone(), claim_fence.clone()))
             || self.pending_room_releases.len() < MAX_PENDING_ROOM_RELEASES
+    }
+
+    /// Remove an actor after its own durable fence proved that this exact
+    /// incarnation no longer owns the room.
+    ///
+    /// A same-identity negative database fence is terminal, so releasing it
+    /// would only create a possible late-delete responsibility. A different
+    /// local identity is special: the durable gate rejects the cached old
+    /// fence before querying the claim store, so the old exact row can still
+    /// exist and must receive one safe best-effort release. That old owner can
+    /// never match a claim acquired by the current identity.
+    async fn retire_ownership_lost_entry(&mut self, room_jid: &BareJid, entry: RoomEntry) {
+        entry.actor_ref.kill();
+        if entry.claim_fence.owner() != self.node_identity.current() {
+            self.release_room_claim(room_jid, &entry.claim_fence).await;
+        } else if let Some(store) = &self.durable_store {
+            store.forget_claim_fence(room_jid, &entry.claim_fence);
+        }
+    }
+
+    async fn evict_ownership_lost_room(&mut self, room_jid: &BareJid, entry: RoomEntry) {
+        self.rooms.remove(room_jid);
+        self.poisoned_rooms.remove(room_jid);
+        self.retire_ownership_lost_entry(room_jid, entry).await;
     }
 
     fn remember_pending_room_release(
@@ -578,7 +607,9 @@ impl RoomRegistryActor {
                 .await
         {
             debug!(room = %room_jid, "room claim acquisition deferred until exact-release ambiguity converges");
-            return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
+            return Err(RoomRegistryError::OwnershipReconciliationPending(
+                room_jid.clone(),
+            ));
         }
         // A newly acquired generation can require an exact terminal-release
         // retry if identity rotates or actor preparation loses its final
@@ -623,7 +654,9 @@ impl RoomRegistryActor {
         if self.node_identity.current() != identity {
             let claim_fence = super::RoomClaimFenceContext::new(entity, identity, epoch);
             self.release_room_claim(room_jid, &claim_fence).await;
-            return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()));
+            return Err(RoomRegistryError::OwnershipReconciliationPending(
+                room_jid.clone(),
+            ));
         }
         Ok(super::RoomClaimFenceContext::new(entity, identity, epoch))
     }
@@ -644,9 +677,16 @@ impl RoomRegistryActor {
         .await
         {
             Ok(Ok(Some(snapshot))) => snapshot,
-            Ok(Ok(None)) | Ok(Err(_)) => {
+            Ok(Ok(None)) => {
                 self.clear_pending_room_acquisition(room_jid, identity);
-                return Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()));
+                return Err(RoomRegistryError::OwnershipReconciliationPending(
+                    room_jid.clone(),
+                ));
+            }
+            Ok(Err(error)) => {
+                self.clear_pending_room_acquisition(room_jid, identity);
+                warn!(room = %room_jid, %error, "room claim lookup failed during ownership steal");
+                return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
             }
             Err(_) => {
                 self.clear_pending_room_acquisition(room_jid, identity);
@@ -692,10 +732,64 @@ impl RoomRegistryActor {
             }
             Ok(Err(ClaimError::Conflict | ClaimError::AlreadyClaimed)) => {
                 self.clear_pending_room_acquisition(room_jid, identity);
-                Err(RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone()))
+                Err(self
+                    .classify_claim_after_steal_conflict(entity, room_jid, identity, &snapshot)
+                    .await)
             }
             Ok(Err(_)) => Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone())),
             Err(_) => Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone())),
+        }
+    }
+
+    /// Classify a lost stale-owner CAS from a fresh claim-store read. The CAS
+    /// contract folds several zero-row causes into `Conflict`: another owner
+    /// may have renewed, the claim may have disappeared or changed generation,
+    /// or this node's own lease may no longer authorize acquisition. Only the
+    /// same observed foreign owner/epoch becoming fresh proves remote
+    /// ownership; every other successful read is a retryable convergence race.
+    async fn classify_claim_after_steal_conflict(
+        &self,
+        entity: &Entity,
+        room_jid: &BareJid,
+        identity: &NodeIdentity,
+        observed: &ClaimSnapshot,
+    ) -> RoomRegistryError {
+        match tokio::time::timeout(
+            ROOM_OWNERSHIP_CALL_TIMEOUT,
+            self.claim_store.current_claim(entity),
+        )
+        .await
+        {
+            Ok(Ok(Some(current)))
+                if current.owner_lease_fresh
+                    && current.owner != *identity
+                    && current.owner == observed.owner
+                    && current.claim_epoch == observed.claim_epoch =>
+            {
+                RoomRegistryError::ClaimHeldByAnotherNode(room_jid.clone())
+            }
+            Ok(Ok(_)) => {
+                debug!(
+                    room = %room_jid,
+                    "room claim changed while stealing stale ownership; deferring acquisition"
+                );
+                RoomRegistryError::OwnershipReconciliationPending(room_jid.clone())
+            }
+            Ok(Err(error)) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "room claim lookup failed after stale-owner steal conflict"
+                );
+                RoomRegistryError::OwnershipUnavailable(room_jid.clone())
+            }
+            Err(_) => {
+                warn!(
+                    room = %room_jid,
+                    "room claim lookup timed out after stale-owner steal conflict"
+                );
+                RoomRegistryError::OwnershipUnavailable(room_jid.clone())
+            }
         }
     }
 
@@ -2085,10 +2179,11 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                 // to a RoomActor. A caller may still hold an ActorRef and the
                 // best-effort Demote notification may never arrive, so kill
                 // the deposed incarnation before dropping our last entry.
-                entry.actor_ref.kill();
+                self.retire_ownership_lost_entry(&msg.room_jid, entry).await;
+            } else {
+                self.release_room_claim(&msg.room_jid, &entry.claim_fence)
+                    .await;
             }
-            self.release_room_claim(&msg.room_jid, &entry.claim_fence)
-                .await;
         }
         if removed_room || removed_poison {
             info!(room = %msg.room_jid, "Destroyed room");
@@ -2137,8 +2232,31 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
             return false;
         };
         if !self.has_pending_release_capacity(&msg.room_jid, &entry.claim_fence) {
-            warn!(room = %msg.room_jid, "Skipping inactive-room seal because exact-release retry backlog is full");
-            return false;
+            // Ordinary inactivity must remain open when there is nowhere to
+            // retain an uncertain release. A previously deposed actor is
+            // different: its negative fence is already terminal, so evict it
+            // without issuing another release even under saturation.
+            let seal_state = entry
+                .actor_ref
+                .ask(GetRoomSealState)
+                .mailbox_timeout(SEAL_ASK_TIMEOUT)
+                .reply_timeout(SEAL_ASK_TIMEOUT)
+                .await;
+            return match seal_state {
+                Ok(RoomSealState::OwnershipLost) => {
+                    self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                    info!(room = %msg.room_jid, "Evicted deposed room during inactive-room cleanup");
+                    true
+                }
+                Ok(RoomSealState::Open | RoomSealState::Inactive) => {
+                    warn!(room = %msg.room_jid, "Skipping inactive-room seal because exact-release retry backlog is full");
+                    false
+                }
+                Err(error) => {
+                    warn!(room = %msg.room_jid, error = ?error, "Could not classify room seal while exact-release retry backlog is full");
+                    false
+                }
+            };
         }
         let sealed = entry
             .actor_ref
@@ -2150,7 +2268,12 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
             .reply_timeout(SEAL_ASK_TIMEOUT)
             .await;
         match sealed {
-            Ok(true) => {
+            Ok(SealIfInactiveOutcome::OwnershipLost) => {
+                self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                info!(room = %msg.room_jid, "Evicted deposed room during inactive-room cleanup");
+                true
+            }
+            Ok(SealIfInactiveOutcome::Inactive) => {
                 self.rooms.remove(&msg.room_jid);
                 self.poisoned_rooms.remove(&msg.room_jid);
                 // ADR-0017 Phase 3 Slice 7: this is a terminal removal from
@@ -2163,7 +2286,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                 info!(room = %msg.room_jid, "Destroyed inactive room (guarded)");
                 true
             }
-            Ok(false) => {
+            Ok(SealIfInactiveOutcome::Refused) => {
                 debug!(
                     room = %msg.room_jid,
                     "Guarded destroy refused: room no longer inactive at expected revision"
@@ -2224,14 +2347,27 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
             info!(room = %msg.room_jid, "Reaped dead room actor during sealed-room purge");
             return true;
         }
-        let sealed = entry
+        let seal_state = entry
             .actor_ref
-            .ask(IsSealed)
+            .ask(GetRoomSealState)
             .mailbox_timeout(SEAL_ASK_TIMEOUT)
             .reply_timeout(SEAL_ASK_TIMEOUT)
             .await;
-        match sealed {
-            Ok(true) => {
+        match seal_state {
+            Ok(RoomSealState::OwnershipLost) => {
+                // A definitive join fence proved this actor is deposed. Its
+                // local registration is no longer safe to serve. Remove and
+                // kill locally, preserve durable room state, and do not issue
+                // a redundant release that could become an untracked late
+                // delete while the retry inventory is saturated.
+                self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                info!(
+                    room = %msg.room_jid,
+                    "Evicted room actor after join fence proved ownership loss"
+                );
+                true
+            }
+            Ok(RoomSealState::Inactive) => {
                 if !self.has_pending_release_capacity(&msg.room_jid, &entry.claim_fence) {
                     return false;
                 }
@@ -2247,7 +2383,7 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 );
                 true
             }
-            Ok(false) => false,
+            Ok(RoomSealState::Open) => false,
             Err(error) => {
                 warn!(
                     room = %msg.room_jid,

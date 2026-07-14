@@ -1252,11 +1252,15 @@ pub(crate) async fn get_or_create_room_actor(
         .get_or_create_room(room_jid.clone(), waddle_id, channel_id, config)
         .await
         .inspect_err(|error| {
-            if matches!(error, RoomRegistryError::ClaimHeldByAnotherNode(_)) {
+            if matches!(
+                error,
+                RoomRegistryError::ClaimHeldByAnotherNode(_)
+                    | RoomRegistryError::OwnershipReconciliationPending(_)
+            ) {
                 debug!(
                     room = %room_jid,
                     %error,
-                    "Room actor is owned by another live node"
+                    "Room actor ownership is not locally available"
                 );
             } else {
                 warn!(room = %room_jid, %error, "Failed to get or create room actor");

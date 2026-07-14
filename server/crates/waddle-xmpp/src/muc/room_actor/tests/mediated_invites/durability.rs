@@ -67,14 +67,15 @@ async fn unacknowledged_rollback_blocks_dormancy_and_both_seal_guards() {
         "unacknowledged rollback output must block dormancy"
     );
     for guard in [SealGuard::Dormant, SealGuard::EmptyNonPersistent] {
-        assert!(
-            !actor
+        assert_eq!(
+            actor
                 .ask(SealIfInactive {
                     expected_occupancy_revision: probe.occupancy_revision,
                     guard,
                 })
                 .await
                 .expect("seal verdict"),
+            SealIfInactiveOutcome::Refused,
             "unacknowledged rollback output must block {guard:?} sealing",
         );
     }
@@ -320,14 +321,15 @@ async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_re
         .await
         .expect("leave while rollback remains prepared");
     let probe = actor.ask(IsDormant).await.expect("dormancy probe");
-    assert!(
-        !actor
+    assert_eq!(
+        actor
             .ask(SealIfInactive {
                 expected_occupancy_revision: probe.occupancy_revision,
                 guard: SealGuard::EmptyNonPersistent,
             })
             .await
             .expect("empty-room seal verdict"),
+        SealIfInactiveOutcome::Refused,
         "a prepared rollback must survive empty non-persistent room cleanup",
     );
     let expected_grant = grant.clone();

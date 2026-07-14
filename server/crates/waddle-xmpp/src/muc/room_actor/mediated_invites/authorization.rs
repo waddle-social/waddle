@@ -21,7 +21,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
                 Err(MediatedInviteGrantError::OperationMismatch)
             };
         }
-        if self.sealed {
+        if self.seal_state.is_sealed() {
             return Err(MediatedInviteGrantError::RoomSealed);
         }
         self.gate_mutation().await?;

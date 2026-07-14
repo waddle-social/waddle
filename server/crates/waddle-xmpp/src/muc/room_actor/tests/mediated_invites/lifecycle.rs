@@ -542,7 +542,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
 
     let probe = actor.ask(IsDormant).await.expect("dormancy probe");
     assert!(probe.dormant, "no-grant replay state must not pin the room");
-    assert!(
+    assert_eq!(
         actor
             .ask(SealIfInactive {
                 expected_occupancy_revision: probe.occupancy_revision,
@@ -550,6 +550,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
             })
             .await
             .expect("seal dormant room"),
+        SealIfInactiveOutcome::Inactive,
         "no-grant replay state must not block guarded sealing",
     );
 }
