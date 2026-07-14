@@ -26,12 +26,9 @@ use waddle_xmpp::protocol::{
     handlers::register_default_message_handlers, FixedIdGenerator, InboundEvent, InboundFrame,
     OutboundEvent, StanzaDispatcher, XmppStateMachine, HEADLESS_RECIPIENT_RESOURCE,
 };
-use waddle_xmpp::xep::{
-    build_receipt_received_element, build_receipt_request_element, extract_received_id,
-    has_receipt_received, has_receipt_request,
-};
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::receipts::{Received, Request};
 
 fn full(s: &str) -> FullJid {
     s.parse().expect("valid full jid")
@@ -39,6 +36,26 @@ fn full(s: &str) -> FullJid {
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("valid bare jid")
+}
+
+fn has_receipt_request(message: &Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .any(|payload| Request::try_from(payload.clone()).is_ok())
+}
+
+fn received_id(message: &Message) -> Option<String> {
+    message.payloads.iter().find_map(|payload| {
+        Received::try_from(payload.clone())
+            .ok()
+            .map(|receipt| receipt.id)
+            .filter(|id| !id.is_empty())
+    })
+}
+
+fn has_receipt_received(message: &Message) -> bool {
+    received_id(message).is_some()
 }
 
 fn build_dispatcher() -> StanzaDispatcher {
@@ -70,7 +87,7 @@ fn direct_message(
     message
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
-    message.payloads.push(build_receipt_request_element());
+    message.payloads.push(Request.into());
     message
 }
 
@@ -90,7 +107,25 @@ fn xep0184_server_does_not_advertise_receipts() {
     // The XEP-0184 disco feature announces "I will generate acks" —
     // the receiving client's job, not the server's (#1247).
     let features = server_features();
-    assert!(!features.contains(&Feature::receipts()));
+    assert!(!features.contains(&Feature::new(xmpp_parsers::ns::RECEIPTS)));
+}
+
+#[test]
+fn xep0184_empty_received_id_is_not_a_usable_receipt() {
+    let mut message = Message::new(None);
+    message.payloads.push(Received { id: String::new() }.into());
+
+    assert_eq!(received_id(&message), None);
+    assert!(!has_receipt_received(&message));
+
+    message.payloads.push(
+        Received {
+            id: "msg-after-empty".to_string(),
+        }
+        .into(),
+    );
+    assert_eq!(received_id(&message), Some("msg-after-empty".to_string()));
+    assert!(has_receipt_received(&message));
 }
 
 #[test]
@@ -164,7 +199,12 @@ fn xep0184_client_generated_ack_routes_to_the_requester_verbatim() {
     let mut ack = Message::new(Some(Jid::from(full("alice@example.com/web"))));
     ack.from = Some(Jid::from(bob.clone()));
     ack.type_ = MessageType::Chat;
-    ack.payloads.push(build_receipt_received_element("msg-1"));
+    ack.payloads.push(
+        Received {
+            id: "msg-1".to_string(),
+        }
+        .into(),
+    );
 
     let events = machine.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
         Stanza::Message(ack),
@@ -184,7 +224,7 @@ fn xep0184_client_generated_ack_routes_to_the_requester_verbatim() {
         })
         .collect();
     assert_eq!(routed.len(), 1, "exactly one ack routed, no duplicates");
-    assert_eq!(extract_received_id(routed[0]), Some("msg-1".to_string()));
+    assert_eq!(received_id(routed[0]), Some("msg-1".to_string()));
     assert!(
         !has_receipt_request(routed[0]),
         "XEP-0184 §4: an ack message must not itself request a receipt"

@@ -236,8 +236,8 @@ pub(super) async fn run_fanout_recipient_pass(
     // Deliberately NOT `set_has_live_transport(false)`: unlike the
     // offline headless pass, this pass acts for a recipient with live
     // resources, so delivery-only behaviour must match the old
-    // per-connection recipient pass (no XEP-0160 pending rows, one
-    // XEP-0184 receipt).
+    // per-connection recipient pass (no XEP-0160 pending rows and no
+    // server-fabricated XEP-0184 receipt).
     transient.transition_to_ready(synthetic_full, false);
     transient.set_blocklist(blocklist);
     transient.set_delivery_fanout(delivery_fanout);
@@ -248,9 +248,9 @@ pub(super) async fn run_fanout_recipient_pass(
     // - the final `SendStanza(Message)` is the recipient-stamped wire
     //   copy — captured for the caller to deliver per resource;
     // - `RouteToConnection` events are side stanzas addressed to other
-    //   parties (XEP-0184 receipt to the sender) — returned so the
-    //   caller can route them at the outer depth, matching the old
-    //   per-connection pass where they routed at interpret depth 0;
+    //   parties — returned so the caller can route them at the outer
+    //   depth, matching the old per-connection pass where they routed
+    //   at interpret depth 0;
     // - everything else (ArchiveDirect / ProjectInbox / SendCarbons /
     //   logs) is interpreted exactly once, depth-bumped.
     let mut processed: Option<Box<Stanza>> = None;

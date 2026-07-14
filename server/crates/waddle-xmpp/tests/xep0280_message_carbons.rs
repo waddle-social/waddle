@@ -3,8 +3,9 @@
 use jid::Jid;
 use minidom::Element;
 use waddle_xmpp::carbons::should_copy_message;
-use waddle_xmpp::xep::{NS_CHATSTATES, NS_CHAT_MARKERS, NS_RECEIPTS};
+use waddle_xmpp::xep::{NS_CHATSTATES, NS_CHAT_MARKERS};
 use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::receipts::Request;
 
 fn message_of_type(message_type: MessageType) -> Message {
     let to: Jid = "peer@localhost".parse().expect("valid jid");
@@ -44,8 +45,7 @@ fn xep0280_bodyless_chat_state_message_is_eligible_for_carbons() {
 #[test]
 fn xep0280_bodyless_receipt_request_is_eligible_for_carbons() {
     let mut msg = message_of_type(MessageType::Normal);
-    msg.payloads
-        .push(Element::builder("request", NS_RECEIPTS).build());
+    msg.payloads.push(Request.into());
     assert!(should_copy_message(&msg));
 }
 

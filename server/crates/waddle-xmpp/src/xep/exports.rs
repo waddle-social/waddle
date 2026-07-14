@@ -62,13 +62,6 @@ pub use super::xep0085::{
     NS_CHATSTATES,
 };
 
-pub use super::xep0184::{
-    build_receipt_received_element, build_receipt_request_element, extract_receipt_from_message,
-    extract_received_id, has_receipt_received, has_receipt_request, is_receipt_received_element,
-    is_receipt_request_element, is_standalone_receipt, set_receipt_received, set_receipt_request,
-    strip_receipts, ReceiptCarrier, ReceiptError, ReceiptKind, NS_RECEIPTS,
-};
-
 pub use super::xep0199::{build_ping_result, is_ping, NS_PING};
 
 pub use super::xep0092::{
