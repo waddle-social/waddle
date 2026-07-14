@@ -986,9 +986,18 @@ impl RoomRegistryActor {
                 return Err(RoomPreparationError::ActorUnavailable);
             }
         }
+        if self.durable_store.is_none() && self.membership_source.is_none() {
+            return Ok(actor_guard.disarm());
+        }
         // This ask is FIFO behind restore and membership hydration. Never
         // publish constructor defaults after a failed durable read: ungated
         // room operations could otherwise overwrite authoritative policy.
+        // The registry actor intentionally remains serialized during this
+        // bounded wait: publishing through a detached continuation would need
+        // a second pending-room state machine to order lookups, reclaims, and
+        // releases against the eventual result. The child ask is capped by
+        // `ROOM_OWNERSHIP_CALL_TIMEOUT`; the no-work hot path above pays no
+        // actor round-trip.
         match actor_ref
             .ask(GetDurableRestoreReadiness)
             .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)

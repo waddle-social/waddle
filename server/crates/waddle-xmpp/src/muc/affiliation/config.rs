@@ -110,7 +110,7 @@ impl FederatedPermissionPolicy {
 /// // Give users from a partner domain higher affiliation
 /// config.set_domain_affiliation("partner.example.org", Affiliation::Admin);
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FederatedAffiliationConfig {
     /// Default affiliation for federated users (typically Member or None).
     pub default_affiliation: Affiliation,

@@ -523,7 +523,7 @@ impl RoomActor {
         let previous_admission_state = (
             self.room.waddle_id.clone(),
             self.room.channel_id.clone(),
-            serde_json::to_value(&self.room.config).ok(),
+            self.room.config.clone(),
             self.room
                 .get_all_affiliations()
                 .into_iter()
@@ -538,7 +538,7 @@ impl RoomActor {
         let installed_admission_state = (
             self.room.waddle_id.clone(),
             self.room.channel_id.clone(),
-            serde_json::to_value(&self.room.config).ok(),
+            self.room.config.clone(),
             self.room
                 .get_all_affiliations()
                 .into_iter()
