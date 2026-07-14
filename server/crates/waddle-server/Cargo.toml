@@ -131,6 +131,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # A separate library crate so per-test-binary `dead_code` lints cannot
 # fire on helpers a given binary does not use.
 waddle-ws-test-support = { path = "../waddle-ws-test-support" }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tokio-test = "0.4"
 wiremock = "0.6"
 # `image` is already a regular dependency; integration tests reach
