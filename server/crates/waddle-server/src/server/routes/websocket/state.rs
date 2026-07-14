@@ -272,6 +272,23 @@ impl ResolverAffiliationSyncWorker {
         self.effective_admission_revision
     }
 
+    /// Close all repair state for an actor incarnation that can no longer
+    /// accept mutations. Pending verdicts and retained revision chains are
+    /// obsolete once the actor is sealed, so release global capacity before
+    /// any potentially slow registry cleanup.
+    pub fn close_actor_terminal(&mut self) {
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        state.workers.remove(&self.key);
+        state
+            .recent_completions
+            .retain(|completion| completion.key != self.key);
+        self.closed = true;
+    }
+
     /// Adopt the most recent verdict when one arrived while the current
     /// verdict was running. Leaves the worker registered when unchanged.
     pub fn take_update(&mut self) -> Option<ResolverAffiliationSyncWork> {
@@ -568,6 +585,51 @@ mod resolver_affiliation_sync_scheduler_tests {
             ),
             "atomic close must release the global worker slot"
         );
+    }
+
+    #[test]
+    fn scheduler_actor_terminal_close_discards_updates_and_releases_capacity() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let alice: BareJid = "alice@example.com".parse().expect("member JID");
+        let bob: BareJid = "bob@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let initial = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 0,
+        };
+        let queued = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Outcast,
+            expected_admission_revision: 1,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut worker) =
+            scheduler.schedule(&room, &alice, actor_id, initial)
+        else {
+            panic!("first repair starts a worker");
+        };
+        assert!(matches!(
+            scheduler.schedule(&room, &alice, actor_id, queued),
+            ResolverAffiliationSyncSchedule::Updated
+        ));
+
+        worker.close_actor_terminal();
+
+        let ResolverAffiliationSyncSchedule::Started(_bob_worker) =
+            scheduler.schedule(&room, &bob, actor_id, initial)
+        else {
+            panic!("actor-terminal close releases capacity for Bob");
+        };
+        let state = scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        assert_eq!(state.workers.len(), 1, "only Bob's worker remains");
+        assert!(
+            state.workers.keys().all(|key| key.jid == bob),
+            "queued work for the sealed actor/member was discarded"
+        );
+        assert!(state.recent_completions.is_empty());
     }
 
     #[test]

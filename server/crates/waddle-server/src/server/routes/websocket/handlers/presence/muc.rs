@@ -98,9 +98,30 @@ const RESOLVER_SYNC_MAX_ATTEMPTS: usize = 3;
 const RESOLVER_SYNC_MAILBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const RESOLVER_SYNC_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
 
+#[cfg(test)]
 fn sync_resolver_affiliation_on_rejection(
     existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
     scheduler: &std::sync::Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
+    room_jid: &BareJid,
+    jid: BareJid,
+    affiliation: Affiliation,
+    expected_admission_revision: u64,
+) {
+    sync_resolver_affiliation_on_rejection_with_registry(
+        existing_room_actor,
+        scheduler,
+        None,
+        room_jid,
+        jid,
+        affiliation,
+        expected_admission_revision,
+    );
+}
+
+fn sync_resolver_affiliation_on_rejection_with_registry(
+    existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
+    scheduler: &std::sync::Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
+    room_registry: Option<RoomRegistry>,
     room_jid: &BareJid,
     jid: BareJid,
     affiliation: Affiliation,
@@ -158,12 +179,17 @@ fn sync_resolver_affiliation_on_rejection(
     // Reusing the captured revision makes every delayed attempt harmless once
     // a newer admission or affiliation mutation has landed.
     tokio::spawn(run_resolver_affiliation_sync_worker(
-        actor, room_jid, jid, *worker,
+        actor,
+        room_registry,
+        room_jid,
+        jid,
+        *worker,
     ));
 }
 
 async fn run_resolver_affiliation_sync_worker(
     actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_registry: Option<RoomRegistry>,
     room_jid: BareJid,
     jid: BareJid,
     mut worker: crate::server::routes::websocket::state::ResolverAffiliationSyncWorker,
@@ -209,6 +235,33 @@ async fn run_resolver_affiliation_sync_worker(
                     outcome = ?outcome,
                     "Skipped resolver affiliation sync on rejected join"
                 );
+                if outcome
+                    == waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::RoomSealed
+                {
+                    // This actor incarnation is permanently unable to accept
+                    // any queued repair. Release the bounded scheduler slot
+                    // before the registry ask, whose mailbox/reply timeout is
+                    // intentionally much longer than the repair fast path.
+                    worker.close_actor_terminal();
+                    if let Some(registry) = room_registry.as_ref() {
+                        match registry.reap_sealed_room(room_jid.clone()).await {
+                            Ok(true) => debug!(
+                                room = %room_jid,
+                                "Reaped deposed room after rejected-join affiliation repair"
+                            ),
+                            Ok(false) => debug!(
+                                room = %room_jid,
+                                "Rejected-join repair observed a room already absent or replaced"
+                            ),
+                            Err(error) => warn!(
+                                room = %room_jid,
+                                %error,
+                                "Failed to reap deposed room after rejected-join affiliation repair"
+                            ),
+                        }
+                    }
+                    return;
+                }
                 let disposition = if outcome
                     == waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable
                 {
@@ -301,6 +354,7 @@ mod resolver_sync_retry_tests {
     use super::*;
 
     struct SequencedOwnershipStore {
+        ownership_held: bool,
         failures_remaining: AtomicUsize,
         blocks_remaining: AtomicUsize,
         block_at_check: AtomicUsize,
@@ -313,6 +367,7 @@ mod resolver_sync_retry_tests {
     impl SequencedOwnershipStore {
         fn new(failures: usize) -> Arc<Self> {
             Arc::new(Self {
+                ownership_held: true,
                 failures_remaining: AtomicUsize::new(failures),
                 blocks_remaining: AtomicUsize::new(0),
                 block_at_check: AtomicUsize::new(0),
@@ -325,6 +380,7 @@ mod resolver_sync_retry_tests {
 
         fn hanging() -> Arc<Self> {
             Arc::new(Self {
+                ownership_held: true,
                 failures_remaining: AtomicUsize::new(0),
                 blocks_remaining: AtomicUsize::new(1),
                 block_at_check: AtomicUsize::new(0),
@@ -337,6 +393,7 @@ mod resolver_sync_retry_tests {
 
         fn always_hanging() -> Arc<Self> {
             Arc::new(Self {
+                ownership_held: true,
                 failures_remaining: AtomicUsize::new(0),
                 blocks_remaining: AtomicUsize::new(0),
                 block_at_check: AtomicUsize::new(0),
@@ -345,6 +402,14 @@ mod resolver_sync_retry_tests {
                 check_started: tokio::sync::Notify::new(),
                 release_blocked_check: tokio::sync::Notify::new(),
             })
+        }
+
+        fn not_owner() -> Arc<Self> {
+            let mut store = Self::new(0);
+            Arc::get_mut(&mut store)
+                .expect("new ownership store is uniquely held")
+                .ownership_held = false;
+            store
         }
 
         fn checks(&self) -> usize {
@@ -420,7 +485,7 @@ mod resolver_sync_retry_tests {
                         "transient ownership check failure",
                     ))
                 } else {
-                    Ok(true)
+                    Ok(self.ownership_held)
                 }
             })
         }
@@ -485,6 +550,26 @@ mod resolver_sync_retry_tests {
         expected_admission_revision: u64,
         scheduler: Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
     ) -> tokio::task::JoinHandle<()> {
+        spawn_sync_worker_with_scheduler_and_registry(
+            actor,
+            room_jid,
+            member,
+            affiliation,
+            expected_admission_revision,
+            scheduler,
+            None,
+        )
+    }
+
+    fn spawn_sync_worker_with_scheduler_and_registry(
+        actor: kameo::actor::ActorRef<RoomActor>,
+        room_jid: BareJid,
+        member: BareJid,
+        affiliation: Affiliation,
+        expected_admission_revision: u64,
+        scheduler: Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
+        room_registry: Option<RoomRegistry>,
+    ) -> tokio::task::JoinHandle<()> {
         let work = crate::server::routes::websocket::ResolverAffiliationSyncWork {
             affiliation,
             expected_admission_revision,
@@ -495,7 +580,11 @@ mod resolver_sync_retry_tests {
             panic!("new scheduler starts one worker");
         };
         tokio::spawn(run_resolver_affiliation_sync_worker(
-            actor, room_jid, member, *worker,
+            actor,
+            room_registry,
+            room_jid,
+            member,
+            *worker,
         ))
     }
 
@@ -524,6 +613,55 @@ mod resolver_sync_retry_tests {
                 .await
                 .expect("affiliation"),
             Affiliation::Member,
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_sync_reaps_actor_after_ownership_loss() {
+        let room_jid: BareJid = "resolver-sync@muc.example.com".parse().expect("room JID");
+        let member: BareJid = "deposed@example.com".parse().expect("member JID");
+        let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+            .expect("occupant-id secret");
+        let registry = RoomRegistry::spawn("muc.example.com".to_string(), secret, None);
+        let actor = registry
+            .get_or_create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                RoomConfig::default(),
+            )
+            .await
+            .expect("create registered room")
+            .actor_ref;
+        let store = SequencedOwnershipStore::not_owner();
+        actor
+            .ask(RestoreDurableRoomState {
+                store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+            })
+            .await
+            .expect("install deposed ownership store");
+        let scheduler =
+            Arc::new(crate::server::routes::websocket::ResolverAffiliationSyncScheduler::default());
+
+        spawn_sync_worker_with_scheduler_and_registry(
+            actor,
+            room_jid.clone(),
+            member,
+            Affiliation::None,
+            0,
+            scheduler,
+            Some(registry.clone()),
+        )
+        .await
+        .expect("sealed repair worker");
+
+        assert!(
+            registry
+                .get_room(room_jid)
+                .await
+                .expect("inspect registry")
+                .is_none(),
+            "the rejected-join repair must evict the deposed actor"
         );
     }
 
@@ -1622,9 +1760,12 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     // otherwise linger on the room's affiliation list
                     // until eviction. Explicit bans are untouched by the
                     // provenance-aware sync.
-                    sync_resolver_affiliation_on_rejection(
+                    sync_resolver_affiliation_on_rejection_with_registry(
                         existing_room_actor.as_ref(),
                         &state.deps.protocol.resolver_affiliation_syncs,
+                        Some(RoomRegistry::wrap(
+                            state.deps.protocol.room_registry.clone(),
+                        )),
                         room_jid,
                         // Room affiliations are keyed by the joiner's
                         // bare JID (`JoinWithAffiliation` uses
@@ -1654,9 +1795,12 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         // `Resolver(None)` write never reaches a live
                         // actor — clear any stale resolver-derived
                         // affiliation from before the revocation here.
-                        sync_resolver_affiliation_on_rejection(
+                        sync_resolver_affiliation_on_rejection_with_registry(
                             existing_room_actor.as_ref(),
                             &state.deps.protocol.resolver_affiliation_syncs,
+                            Some(RoomRegistry::wrap(
+                                state.deps.protocol.room_registry.clone(),
+                            )),
                             room_jid,
                             // Same key as `JoinWithAffiliation`:
                             // `sender_jid.to_bare()`.
