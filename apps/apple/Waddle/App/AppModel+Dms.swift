@@ -81,12 +81,16 @@ extension AppModel {
             ? nil
             : WaddleSendOptions(
                 stanzaId: nil,
+                subject: nil,
                 reply: nil,
                 fallback: nil,
                 thread: nil,
+                markupSpans: [],
+                references: [],
                 sharedFiles: sharedFiles,
                 linkPreviewToken: nil,
-                requestDisplayedMarker: false
+                requestDisplayedMarker: false,
+                mucPm: false
             )
         await rustClient.sendDirectMessage(peerJID: targetPeerJID, body: wireBody, options: options)
         updateDmConversation(

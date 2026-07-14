@@ -21,7 +21,10 @@ extension AppModel {
             serverUrl: session.xmppWebsocketURL,
             jid: session.jid,
             accessToken: session.sessionID,
-            resource: session.xmppCredentials.resource
+            resource: session.xmppCredentials.resource,
+            // The Apple client does not persist XEP-0198 resume state yet;
+            // every connect starts a fresh stream.
+            resumeState: nil
         )
         rustClient = RustXmppClient(config: rustConfig)
 

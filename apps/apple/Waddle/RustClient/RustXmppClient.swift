@@ -101,18 +101,37 @@ final class RustXmppClient: ObservableObject {
 
     // Forum topics/replies are groupchat messages with a thread.
     func sendForumTopic(roomJID: String, body: String, title: String? = nil) async {
-        _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: nil)
+        let options = title.map { topicTitle in
+            WaddleSendOptions(
+                stanzaId: nil,
+                subject: topicTitle,
+                reply: nil,
+                fallback: nil,
+                thread: nil,
+                markupSpans: [],
+                references: [],
+                sharedFiles: [],
+                linkPreviewToken: nil,
+                requestDisplayedMarker: false,
+                mucPm: false
+            )
+        }
+        _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
 
     func sendForumReply(roomJID: String, body: String, threadID: String) async {
         let options = WaddleSendOptions(
             stanzaId: nil,
+            subject: nil,
             reply: nil,
             fallback: nil,
             thread: WaddleThreadTarget(id: threadID, parent: nil),
+            markupSpans: [],
+            references: [],
             sharedFiles: [],
             linkPreviewToken: nil,
-            requestDisplayedMarker: false
+            requestDisplayedMarker: false,
+            mucPm: false
         )
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
@@ -268,12 +287,16 @@ final class RustXmppClient: ObservableObject {
         )
         let options = WaddleSendOptions(
             stanzaId: nil,
+            subject: nil,
             reply: nil,
             fallback: nil,
             thread: nil,
+            markupSpans: [],
+            references: [],
             sharedFiles: [sharedFile],
             linkPreviewToken: nil,
-            requestDisplayedMarker: false
+            requestDisplayedMarker: false,
+            mucPm: false
         )
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: fileURL, options: options)
     }
@@ -309,7 +332,37 @@ private final class _EventListener: WaddleEventListener {
         self.discoveryErrors = discoveryErrors
     }
 
-    func onConnected() {
+    // Exhaustive by design: a new `WaddleClientEvent` variant upstream is a
+    // compile error here until the app decides how to surface it.
+    func onEvent(event: WaddleClientEvent) {
+        switch event {
+        case .connected:
+            onConnected()
+        case .disconnected:
+            onDisconnected()
+        case let .message(message):
+            onMessage(message: message)
+        case let .presence(presence):
+            onPresence(presence: presence)
+        case let .mamResult(message):
+            onMamResult(message: message)
+        case let .deliveryAcked(stanzaId):
+            continuation.yield(.messageDeliveryAcked(stanzaID: stanzaId))
+        case let .deliveryFailed(stanzaId):
+            continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
+        case let .call(callEvent):
+            onCall(event: callEvent)
+        case let .resumeStateChanged(state):
+            // The Apple client does not persist XEP-0198 resume state yet;
+            // it reconnects with a fresh stream (`WaddleConfig.resumeState`
+            // stays nil in `AppModel+Xmpp.swift`).
+            logger.debug("RustXmppClient: resume snapshot \(state == nil ? "cleared" : "updated")")
+        case let .error(description):
+            onError(description: description)
+        }
+    }
+
+    private func onConnected() {
         let owner = self.owner
         Task { @MainActor in
             owner?.connectionState = .ready
@@ -318,7 +371,7 @@ private final class _EventListener: WaddleEventListener {
         continuation.yield(.sessionReady)
     }
 
-    func onDisconnected() {
+    private func onDisconnected() {
         let owner = self.owner
         Task { @MainActor in
             owner?.connectionState = .disconnected
@@ -326,7 +379,7 @@ private final class _EventListener: WaddleEventListener {
         continuation.yield(.disconnected)
     }
 
-    func onError(description: String) {
+    private func onError(description: String) {
         print("[RustXmppClient] Rust FFI onError: \(description)")
         if discoveryErrors.record(description) {
             return
@@ -334,7 +387,7 @@ private final class _EventListener: WaddleEventListener {
         continuation.yield(.error(description))
     }
 
-    func onMessage(message: WaddleMessage) {
+    private func onMessage(message: WaddleMessage) {
         let timestamp = message.timestamp.flatMap { parseRFC3339($0) }
         let event = XMPPMessageEvent(
             from: message.from,
@@ -343,7 +396,7 @@ private final class _EventListener: WaddleEventListener {
             id: message.id,
             stanzaID: message.stanzaId,
             body: message.body,
-            subject: nil,
+            subject: message.subject,
             thread: message.thread,
             timestamp: timestamp,
             replacesID: message.replacesId,
@@ -368,7 +421,7 @@ private final class _EventListener: WaddleEventListener {
         continuation.yield(.message(event))
     }
 
-    func onPresence(presence: WaddlePresence) {
+    private func onPresence(presence: WaddlePresence) {
         let event = XMPPPresenceEvent(
             from: presence.from,
             to: presence.to,
@@ -382,21 +435,13 @@ private final class _EventListener: WaddleEventListener {
         continuation.yield(.presence(event))
     }
 
-    func onMamResult(message: WaddleArchivedMessage) {
+    private func onMamResult(message: WaddleArchivedMessage) {
         // MAM results are delivered via the fetchDmHistory / fetchRoomHistory return values;
         // individual callbacks here are informational only.
         logger.debug("RustXmppClient: MAM result id=\(message.mamId)")
     }
 
-    func onMessageDeliveryAcked(stanzaId: String) {
-        continuation.yield(.messageDeliveryAcked(stanzaID: stanzaId))
-    }
-
-    func onMessageDeliveryFailed(stanzaId: String) {
-        continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
-    }
-
-    func onCall(event: WaddleCallEvent) {
+    private func onCall(event: WaddleCallEvent) {
         // XEP-0353 JMI + XEP-0166 Jingle session control events come
         // through here pre-typed; the AppModel consumes them to drive
         // the ringing UI, the floating PIP window, and the hang-up
@@ -558,11 +603,11 @@ private extension WaddleMamPage {
                 id: eventID,
                 stanzaID: archived.stanzaId,
                 body: archived.body,
-                subject: nil,
+                subject: archived.subject,
                 thread: archived.thread,
                 timestamp: timestamp,
-                replacesID: nil,
-                retractsID: nil,
+                replacesID: archived.replacesId,
+                retractsID: archived.retractsId,
                 reactionTargetID: archived.reactionTargetId,
                 reactionEmojis: archived.reactionEmojis,
                 replyToID: archived.replyToId,
