@@ -59,7 +59,7 @@ pub use app_state::{
 pub use error::{
     generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
-pub use parser::{ns, StreamHeader};
+pub use parser::ns;
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
 pub use types::*;
 pub use waddle_xmpp_core::{
