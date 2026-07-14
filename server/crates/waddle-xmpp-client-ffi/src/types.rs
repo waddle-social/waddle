@@ -92,9 +92,9 @@ pub struct WaddleMessage {
     /// `<reference/>` with the required `type` and `uri`, regardless
     /// of type. `mention_uris`/`broadcast_mention` are derived views.
     pub references: Vec<WaddleReference>,
-    /// Forum channel classification: `topic` (thread + body + subject)
-    /// or `reply` (thread + body); `None` for plain chat.
-    pub forum_post_kind: Option<String>,
+    /// Forum channel classification; `None` for plain chat or when the
+    /// wire value is not a recognised kind.
+    pub forum_post_kind: Option<WaddleForumPostKind>,
     /// Forum topic title (the subject of a `topic` post).
     pub forum_title: Option<String>,
     /// XEP-0449: the message body is a sticker.
@@ -171,6 +171,28 @@ pub enum WaddleChatState {
     Paused,
     Inactive,
     Gone,
+}
+
+/// Waddle forum post classification: `Topic` (thread + body + subject)
+/// or `Reply` (thread + body). Wire values outside these two are
+/// dropped to `None` at the conversion boundary.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleForumPostKind {
+    Topic,
+    Reply,
+}
+
+/// RFC 6120 §8.3.2 stanza-error `type` attribute. Mirrors the client
+/// crate's `StanzaErrorType`; `Unknown` marks an unrecognised wire
+/// value so consumers can distinguish it from every defined type.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleStanzaErrorType {
+    Auth,
+    Cancel,
+    Continue,
+    Modify,
+    Wait,
+    Unknown,
 }
 
 /// XEP-0394 markup span kind. Mirrors the client crate's
@@ -366,8 +388,8 @@ pub struct WaddleArchivedMessage {
     pub mention_uris: Vec<String>,
     /// XEP-0372 references of the inner message.
     pub references: Vec<WaddleReference>,
-    /// Forum classification of the archived post (`topic`/`reply`).
-    pub forum_post_kind: Option<String>,
+    /// Forum classification of the archived post.
+    pub forum_post_kind: Option<WaddleForumPostKind>,
     /// Forum topic title (the subject of a `topic` post).
     pub forum_title: Option<String>,
     /// XEP-0449: the archived body is a sticker.
@@ -440,8 +462,8 @@ pub struct WaddlePresence {
     /// RFC 6120 §8.3 error condition element name (e.g. `not-found`)
     /// for `type="error"` presences; `None` otherwise.
     pub error_condition: Option<String>,
-    /// RFC 6120 §8.3 error `type` attribute (e.g. `cancel`).
-    pub error_type: Option<String>,
+    /// RFC 6120 §8.3 error `type` attribute.
+    pub error_type: Option<WaddleStanzaErrorType>,
     /// RFC 6120 §8.3 human-readable `<text/>` of an error presence.
     pub error_text: Option<String>,
     /// urn:waddle:in-call:0 raised-hand marker carried alongside

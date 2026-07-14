@@ -22,12 +22,12 @@ use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
     WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
     WaddleClientEvent, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage, WaddleLinkPreviewPlayer,
-    WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType,
-    WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation, WaddleMucRole,
-    WaddleMujiPresence, WaddlePinAction, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
-    WaddlePresenceHat, WaddleReference, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState,
-    WaddleStanzaId,
+    WaddleForumPostKind, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
+    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
+    WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
+    WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEvent, WaddlePinPreview,
+    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleSendOptions, WaddleSharedFile,
+    WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -52,9 +52,11 @@ pub(super) fn dispatch_event(
             });
         }
         ClientEvent::MamResult(archived) => {
-            listener.on_event(WaddleClientEvent::MamResult {
-                message: archived_to_ffi(*archived),
-            });
+            // `None` = the trusted parse rejected the row (e.g. spoofed
+            // moderation) and it carries no call event — drop, like wasm.
+            if let Some(message) = archived_to_ffi(*archived) {
+                listener.on_event(WaddleClientEvent::MamResult { message });
+            }
         }
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }) => {
             listener.on_event(WaddleClientEvent::DeliveryAcked {
@@ -226,7 +228,7 @@ fn presence_to_ffi(pres: InboundPresence) -> WaddlePresence {
         error_type: pres
             .error
             .as_ref()
-            .map(|err| err.error_type.as_str().to_string()),
+            .map(|err| stanza_error_type_to_ffi(err.error_type)),
         error_text: pres.error.and_then(|err| err.text),
         hand_raised: pres.hand_raised,
         muted: pres.muted,
@@ -245,6 +247,28 @@ fn chat_state_to_ffi(state: &str) -> Option<WaddleChatState> {
         "inactive" => Some(WaddleChatState::Inactive),
         "gone" => Some(WaddleChatState::Gone),
         _ => None,
+    }
+}
+
+fn forum_post_kind_to_ffi(kind: &str) -> Option<WaddleForumPostKind> {
+    match kind {
+        "topic" => Some(WaddleForumPostKind::Topic),
+        "reply" => Some(WaddleForumPostKind::Reply),
+        _ => None,
+    }
+}
+
+fn stanza_error_type_to_ffi(
+    error_type: waddle_xmpp_client::StanzaErrorType,
+) -> WaddleStanzaErrorType {
+    use waddle_xmpp_client::StanzaErrorType;
+    match error_type {
+        StanzaErrorType::Auth => WaddleStanzaErrorType::Auth,
+        StanzaErrorType::Cancel => WaddleStanzaErrorType::Cancel,
+        StanzaErrorType::Continue => WaddleStanzaErrorType::Continue,
+        StanzaErrorType::Modify => WaddleStanzaErrorType::Modify,
+        StanzaErrorType::Wait => WaddleStanzaErrorType::Wait,
+        StanzaErrorType::Unknown => WaddleStanzaErrorType::Unknown,
     }
 }
 
@@ -567,7 +591,10 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         broadcast_mention: msg.broadcast_mention,
         mention_uris: msg.mention_uris,
         references: references_to_ffi(msg.references),
-        forum_post_kind: msg.forum_post_kind,
+        forum_post_kind: msg
+            .forum_post_kind
+            .as_deref()
+            .and_then(forum_post_kind_to_ffi),
         forum_title: msg.forum_title,
         is_sticker: msg.is_sticker,
         link_previews: link_previews_to_ffi(msg.link_previews),
@@ -621,9 +648,17 @@ fn call_thread_to_ffi(
 /// (the client parser extracts it via `crate::xep::thread::parse_thread`)
 /// instead of being recovered from the re-parse - closes the parent-leak
 /// path when `inner` is unparseable downstream.
+/// Returns `None` for archive rows whose inner message failed the trusted
+/// parse and that carry no call event — mirroring the wasm client's
+/// drop-guard. Without it, a spoofed occupant "moderation" stanza whose
+/// payload parse was rejected would still surface its raw `<body>` as a
+/// normal, non-retracted chat message.
 pub(crate) fn archived_to_ffi(
     archived: waddle_xmpp_client::ArchivedMessage,
-) -> WaddleArchivedMessage {
+) -> Option<WaddleArchivedMessage> {
+    if archived.payload.message.is_none() && archived.payload.call.is_none() {
+        return None;
+    }
     let parsed = archived.payload.message.as_deref();
     let call_event = archived
         .payload
@@ -634,7 +669,7 @@ pub(crate) fn archived_to_ffi(
         .and_then(|m| m.reply_fallback)
         .map(|(s, e)| (Some(s), Some(e)))
         .unwrap_or((None, None));
-    WaddleArchivedMessage {
+    Some(WaddleArchivedMessage {
         mam_id: archived.mam_id,
         query_id: archived.query_id,
         id: archived.id.map(|id| id.to_string()),
@@ -680,7 +715,9 @@ pub(crate) fn archived_to_ffi(
         references: parsed
             .map(|m| references_to_ffi(m.references.clone()))
             .unwrap_or_default(),
-        forum_post_kind: parsed.and_then(|m| m.forum_post_kind.clone()),
+        forum_post_kind: parsed
+            .and_then(|m| m.forum_post_kind.as_deref())
+            .and_then(forum_post_kind_to_ffi),
         forum_title: parsed.and_then(|m| m.forum_title.clone()),
         is_sticker: parsed.is_some_and(|m| m.is_sticker),
         author_real_jid: archived.author_real_jid,
@@ -703,7 +740,7 @@ pub(crate) fn archived_to_ffi(
             .map(|m| link_previews_to_ffi(m.link_previews.clone()))
             .unwrap_or_default(),
         call_event,
-    }
+    })
 }
 
 /// Convert the FFI options record into the typed `SendMessageOptions`. JIDs
@@ -1034,7 +1071,7 @@ mod tests {
              </message>",
         );
 
-        let ffi = archived_to_ffi(archived);
+        let ffi = archived_to_ffi(archived).expect("parsed archive row must convert");
         let call_event = ffi.call_event.expect("call event should be present");
 
         assert_eq!(ffi.mam_id, "mam-call");
@@ -1072,7 +1109,7 @@ mod tests {
              </message>",
         );
 
-        let ffi = archived_to_ffi(archived);
+        let ffi = archived_to_ffi(archived).expect("parsed archive row must convert");
         let anchor = ffi
             .call_thread
             .expect("call-thread should survive archive conversion");
@@ -1506,7 +1543,7 @@ mod tests {
              </message>",
         ));
         assert_eq!(topic.subject.as_deref(), Some("Release planning"));
-        assert_eq!(topic.forum_post_kind.as_deref(), Some("topic"));
+        assert_eq!(topic.forum_post_kind, Some(WaddleForumPostKind::Topic));
         assert_eq!(topic.forum_title.as_deref(), Some("Release planning"));
         assert_eq!(topic.thread.as_deref(), Some("topic-thread-1"));
 
@@ -1516,7 +1553,7 @@ mod tests {
                <thread>topic-thread-1</thread>\
              </message>",
         ));
-        assert_eq!(reply.forum_post_kind.as_deref(), Some("reply"));
+        assert_eq!(reply.forum_post_kind, Some(WaddleForumPostKind::Reply));
         assert!(reply.forum_title.is_none());
 
         // Bare room-topic change: subject only, no forum classification.
@@ -1580,7 +1617,7 @@ mod tests {
             ffi.error_condition.as_deref(),
             Some("registration-required")
         );
-        assert_eq!(ffi.error_type.as_deref(), Some("auth"));
+        assert_eq!(ffi.error_type, Some(WaddleStanzaErrorType::Auth));
         assert_eq!(ffi.error_text.as_deref(), Some("Members only"));
     }
 
@@ -1614,7 +1651,7 @@ mod tests {
              </message>",
         );
 
-        let ffi = archived_to_ffi(archived);
+        let ffi = archived_to_ffi(archived).expect("parsed archive row must convert");
         assert_eq!(ffi.mam_id, "mam-ext");
         assert_eq!(ffi.subject.as_deref(), Some("Release planning"));
         assert_eq!(ffi.stanza_id.as_deref(), Some("sid-archive"));
@@ -1628,7 +1665,7 @@ mod tests {
         assert_eq!(ffi.mention_uris, vec!["xmpp:bob@waddle.test".to_string()]);
         assert_eq!(ffi.references.len(), 1);
         assert_eq!(ffi.references[0].ref_type, "mention");
-        assert_eq!(ffi.forum_post_kind.as_deref(), Some("topic"));
+        assert_eq!(ffi.forum_post_kind, Some(WaddleForumPostKind::Topic));
         assert_eq!(ffi.forum_title.as_deref(), Some("Release planning"));
         assert!(ffi.is_sticker);
         assert!(!ffi.is_retracted);
@@ -1654,7 +1691,8 @@ mod tests {
                  </forwarded>\
                </result>\
              </message>",
-        ));
+        ))
+        .expect("tombstone row must convert");
         assert!(tombstone.is_retracted);
         assert_eq!(
             tombstone.retraction_id.as_deref(),
@@ -1682,10 +1720,37 @@ mod tests {
                </result>\
              </message>",
         ))
+        .expect("ended row must convert")
         .call_thread_ended
         .expect("call-thread-ended survives archive conversion");
         assert_eq!(ended.anchor_id, "anchor-stanza-id");
         assert_eq!(ended.duration, "PT5M");
+    }
+
+    /// Wasm-parity drop-guard (XEP-0425 spoof): an occupant-authored
+    /// "moderation" carrying a `<body>` fails the trusted parse, so the
+    /// row converts to `None` instead of rendering the spoofed body as a
+    /// normal, non-retracted chat message.
+    #[test]
+    fn archived_to_ffi_discards_spoofed_moderation_with_body() {
+        let spoofed = archived_to_ffi(parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-spoof' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='spoof-1' \
+                            from='room@conf.waddle.test/alice'>\
+                     <body>this must not render as normal chat</body>\
+                     <retract xmlns='urn:xmpp:message-retract:1' id='target-id'>\
+                       <moderated xmlns='urn:xmpp:message-moderate:1' \
+                                  by='room@conf.waddle.test/alice'/>\
+                     </retract>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        ));
+        assert!(spoofed.is_none());
     }
 
     // ── Outbound send-options mapping ────────────────────────────────────────

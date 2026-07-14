@@ -1485,9 +1485,9 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      */
     public var references: [WaddleReference]
     /**
-     * Forum classification of the archived post (`topic`/`reply`).
+     * Forum classification of the archived post.
      */
-    public var forumPostKind: String?
+    public var forumPostKind: WaddleForumPostKind?
     /**
      * Forum topic title (the subject of a `topic` post).
      */
@@ -1563,8 +1563,8 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          * XEP-0372 references of the inner message.
          */references: [WaddleReference],
         /**
-         * Forum classification of the archived post (`topic`/`reply`).
-         */forumPostKind: String?,
+         * Forum classification of the archived post.
+         */forumPostKind: WaddleForumPostKind?,
         /**
          * Forum topic title (the subject of a `topic` post).
          */forumTitle: String?,
@@ -1675,7 +1675,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 broadcastMention: FfiConverterOptionString.read(from: &buf),
                 mentionUris: FfiConverterSequenceString.read(from: &buf),
                 references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
-                forumPostKind: FfiConverterOptionString.read(from: &buf),
+                forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
                 forumTitle: FfiConverterOptionString.read(from: &buf),
                 isSticker: FfiConverterBool.read(from: &buf),
                 authorRealJid: FfiConverterOptionString.read(from: &buf),
@@ -1720,7 +1720,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.broadcastMention, into: &buf)
         FfiConverterSequenceString.write(value.mentionUris, into: &buf)
         FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
-        FfiConverterOptionString.write(value.forumPostKind, into: &buf)
+        FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
         FfiConverterOptionString.write(value.forumTitle, into: &buf)
         FfiConverterBool.write(value.isSticker, into: &buf)
         FfiConverterOptionString.write(value.authorRealJid, into: &buf)
@@ -3203,10 +3203,10 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var references: [WaddleReference]
     /**
-     * Forum channel classification: `topic` (thread + body + subject)
-     * or `reply` (thread + body); `None` for plain chat.
+     * Forum channel classification; `None` for plain chat or when the
+     * wire value is not a recognised kind.
      */
-    public var forumPostKind: String?
+    public var forumPostKind: WaddleForumPostKind?
     /**
      * Forum topic title (the subject of a `topic` post).
      */
@@ -3328,9 +3328,9 @@ public struct WaddleMessage: Equatable, Hashable {
          * of type. `mention_uris`/`broadcast_mention` are derived views.
          */references: [WaddleReference],
         /**
-         * Forum channel classification: `topic` (thread + body + subject)
-         * or `reply` (thread + body); `None` for plain chat.
-         */forumPostKind: String?,
+         * Forum channel classification; `None` for plain chat or when the
+         * wire value is not a recognised kind.
+         */forumPostKind: WaddleForumPostKind?,
         /**
          * Forum topic title (the subject of a `topic` post).
          */forumTitle: String?,
@@ -3471,7 +3471,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 broadcastMention: FfiConverterOptionString.read(from: &buf),
                 mentionUris: FfiConverterSequenceString.read(from: &buf),
                 references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
-                forumPostKind: FfiConverterOptionString.read(from: &buf),
+                forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
                 forumTitle: FfiConverterOptionString.read(from: &buf),
                 isSticker: FfiConverterBool.read(from: &buf),
                 linkPreviews: FfiConverterSequenceTypeWaddleLinkPreview.read(from: &buf),
@@ -3519,7 +3519,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.broadcastMention, into: &buf)
         FfiConverterSequenceString.write(value.mentionUris, into: &buf)
         FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
-        FfiConverterOptionString.write(value.forumPostKind, into: &buf)
+        FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
         FfiConverterOptionString.write(value.forumTitle, into: &buf)
         FfiConverterBool.write(value.isSticker, into: &buf)
         FfiConverterSequenceTypeWaddleLinkPreview.write(value.linkPreviews, into: &buf)
@@ -3867,9 +3867,9 @@ public struct WaddlePresence: Equatable, Hashable {
      */
     public var errorCondition: String?
     /**
-     * RFC 6120 §8.3 error `type` attribute (e.g. `cancel`).
+     * RFC 6120 §8.3 error `type` attribute.
      */
-    public var errorType: String?
+    public var errorType: WaddleStanzaErrorType?
     /**
      * RFC 6120 §8.3 human-readable `<text/>` of an error presence.
      */
@@ -3917,8 +3917,8 @@ public struct WaddlePresence: Equatable, Hashable {
          * for `type="error"` presences; `None` otherwise.
          */errorCondition: String?,
         /**
-         * RFC 6120 §8.3 error `type` attribute (e.g. `cancel`).
-         */errorType: String?,
+         * RFC 6120 §8.3 error `type` attribute.
+         */errorType: WaddleStanzaErrorType?,
         /**
          * RFC 6120 §8.3 human-readable `<text/>` of an error presence.
          */errorText: String?,
@@ -3987,7 +3987,7 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
                 vcardAvatar: FfiConverterOptionString.read(from: &buf),
                 idleSince: FfiConverterOptionString.read(from: &buf),
                 errorCondition: FfiConverterOptionString.read(from: &buf),
-                errorType: FfiConverterOptionString.read(from: &buf),
+                errorType: FfiConverterOptionTypeWaddleStanzaErrorType.read(from: &buf),
                 errorText: FfiConverterOptionString.read(from: &buf),
                 handRaised: FfiConverterBool.read(from: &buf),
                 muted: FfiConverterBool.read(from: &buf),
@@ -4009,7 +4009,7 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.vcardAvatar, into: &buf)
         FfiConverterOptionString.write(value.idleSince, into: &buf)
         FfiConverterOptionString.write(value.errorCondition, into: &buf)
-        FfiConverterOptionString.write(value.errorType, into: &buf)
+        FfiConverterOptionTypeWaddleStanzaErrorType.write(value.errorType, into: &buf)
         FfiConverterOptionString.write(value.errorText, into: &buf)
         FfiConverterBool.write(value.handRaised, into: &buf)
         FfiConverterBool.write(value.muted, into: &buf)
@@ -5516,6 +5516,78 @@ public func FfiConverterTypeWaddleClientEvent_lower(_ value: WaddleClientEvent) 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Waddle forum post classification: `Topic` (thread + body + subject)
+ * or `Reply` (thread + body). Wire values outside these two are
+ * dropped to `None` at the conversion boundary.
+ */
+
+public enum WaddleForumPostKind: Equatable, Hashable {
+
+    case topic
+    case reply
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleForumPostKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleForumPostKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleForumPostKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleForumPostKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .topic
+
+        case 2: return .reply
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleForumPostKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .topic:
+            writeInt(&buf, Int32(1))
+
+
+        case .reply:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleForumPostKind_lift(_ buf: RustBuffer) throws -> WaddleForumPostKind {
+    return try FfiConverterTypeWaddleForumPostKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleForumPostKind_lower(_ value: WaddleForumPostKind) -> RustBuffer {
+    return FfiConverterTypeWaddleForumPostKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * XEP-0166 §7.4 session-terminate reason conditions. Mirrors the
  * 17 variants in `xmpp_parsers::jingle::Reason` so the wire
  * parser's enum is the single source of truth — outbound calls
@@ -6312,6 +6384,106 @@ public func FfiConverterTypeWaddleSendMessageOutcome_lower(_ value: WaddleSendMe
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * RFC 6120 §8.3.2 stanza-error `type` attribute. Mirrors the client
+ * crate's `StanzaErrorType`; `Unknown` marks an unrecognised wire
+ * value so consumers can distinguish it from every defined type.
+ */
+
+public enum WaddleStanzaErrorType: Equatable, Hashable {
+
+    case auth
+    case cancel
+    case `continue`
+    case modify
+    case wait
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStanzaErrorType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStanzaErrorType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStanzaErrorType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStanzaErrorType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .auth
+
+        case 2: return .cancel
+
+        case 3: return .`continue`
+
+        case 4: return .modify
+
+        case 5: return .wait
+
+        case 6: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleStanzaErrorType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .auth:
+            writeInt(&buf, Int32(1))
+
+
+        case .cancel:
+            writeInt(&buf, Int32(2))
+
+
+        case .`continue`:
+            writeInt(&buf, Int32(3))
+
+
+        case .modify:
+            writeInt(&buf, Int32(4))
+
+
+        case .wait:
+            writeInt(&buf, Int32(5))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStanzaErrorType_lift(_ buf: RustBuffer) throws -> WaddleStanzaErrorType {
+    return try FfiConverterTypeWaddleStanzaErrorType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStanzaErrorType_lower(_ value: WaddleStanzaErrorType) -> RustBuffer {
+    return FfiConverterTypeWaddleStanzaErrorType.lower(value)
+}
+
+
 
 
 
@@ -7026,6 +7198,30 @@ fileprivate struct FfiConverterOptionTypeWaddleChatState: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleForumPostKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleForumPostKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleForumPostKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleForumPostKind.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleJingleReason: FfiConverterRustBuffer {
     typealias SwiftType = WaddleJingleReason?
 
@@ -7090,6 +7286,30 @@ fileprivate struct FfiConverterOptionTypeWaddleMucRole: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleMucRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleStanzaErrorType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStanzaErrorType?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleStanzaErrorType.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleStanzaErrorType.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
