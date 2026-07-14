@@ -1,9 +1,9 @@
 //! Export contract for the stanza-handler wedge-backstop metric.
 //!
-//! The frame-backstop tests prove that an elapsed IQ/message/presence dispatch
-//! calls `record_stanza_handler_timeout`. This test pins what that production
-//! helper hands to the OpenTelemetry SDK before the OTLP collector translates
-//! the instrument into a Prometheus series.
+//! A narrow source-contract regression pins the timeout arm to the production
+//! `record_stanza_handler_timeout` helper. The exporter regression then pins
+//! what that helper hands to the OpenTelemetry SDK before the OTLP collector
+//! translates the instrument into a Prometheus series.
 
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::metrics::{
@@ -12,6 +12,20 @@ use opentelemetry_sdk::metrics::{
 };
 
 const INSTRUMENT_NAME: &str = "xmpp.stanza.handler.timeout";
+const FRAME_BACKSTOP_SOURCE: &str =
+    include_str!("../src/server/routes/websocket/frame_backstop.rs");
+
+#[test]
+fn frame_backstop_timeout_arm_records_the_production_metric_helper() {
+    let timeout_arm = FRAME_BACKSTOP_SOURCE
+        .split("fn on_timeout(self) -> StanzaTimeout {")
+        .nth(1)
+        .and_then(|source| source.split("self.span.record").next())
+        .expect("StanzaBackstop::on_timeout source before span recording");
+
+    assert!(timeout_arm
+        .contains("metrics::record_stanza_handler_timeout(self.kind, &self.payload_ns);"));
+}
 
 #[test]
 fn stanza_handler_timeout_exports_the_canonical_counter_and_attributes() {
@@ -21,7 +35,8 @@ fn stanza_handler_timeout_exports_the_canonical_counter_and_attributes() {
         .build();
     opentelemetry::global::set_meter_provider(provider.clone());
 
-    waddle_xmpp::metrics::record_stanza_handler_timeout("message", "urn:test:wedged");
+    waddle_xmpp::metrics::record_stanza_handler_timeout("iq", "urn:test:wedged");
+    waddle_xmpp::metrics::record_stanza_handler_timeout("message", "");
     provider
         .force_flush()
         .expect("timeout metric should flush to the configured exporter");
@@ -47,16 +62,28 @@ fn stanza_handler_timeout_exports_the_canonical_counter_and_attributes() {
     };
     assert!(sum.is_monotonic(), "timeout counter must be monotonic");
 
-    let points: Vec<_> = sum.data_points().collect();
-    assert_eq!(points.len(), 1, "one label set should produce one series");
-    assert_eq!(points[0].value(), 1);
-
-    let attributes: Vec<_> = points[0].attributes().cloned().collect();
     assert_eq!(
-        attributes.len(),
+        sum.data_points().count(),
         2,
-        "timeout cardinality must stay limited to the two documented axes"
+        "the two reachable label sets should produce distinct series"
     );
-    assert!(attributes.contains(&KeyValue::new("kind", "message")));
-    assert!(attributes.contains(&KeyValue::new("payload_ns", "urn:test:wedged")));
+    for (kind, payload_ns) in [("iq", "urn:test:wedged"), ("message", "")] {
+        let point = sum
+            .data_points()
+            .find(|point| {
+                point
+                    .attributes()
+                    .any(|attribute| attribute == &KeyValue::new("kind", kind))
+                    && point
+                        .attributes()
+                        .any(|attribute| attribute == &KeyValue::new("payload_ns", payload_ns))
+            })
+            .expect("reachable stanza timeout label set should be exported");
+        assert_eq!(point.value(), 1);
+        assert_eq!(
+            point.attributes().count(),
+            2,
+            "timeout attribute schema must stay limited to the documented axes"
+        );
+    }
 }
